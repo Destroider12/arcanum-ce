@@ -814,3 +814,76 @@ Client talk uses existing `dialog_ui` + per-node filter once the shared map/PCs 
   side effects stay local. The host-side proxy uses the generic PC art proto
   16066. Movement replicates by position, so it can look step-wise at
   100 ms.
+
+## 19. Playtest 5 fixes and network hardening
+
+### Movement and talk
+- **The "stop short" bug was in the host's movement code.** In
+  `AGUpdateAnimMove` (anim.c), the host-only desync check was missing its
+  `distance > path.curr` comparison. As a result, every critter that moved on
+  the host (PCs and NPCs) was interrupted and snapped after its first step.
+  This is what printed the stream of `AGUpdateAnimMove: ERROR ... are more
+  than` lines. The comparison is now restored.
+- **Each client moves its own PC.** Once the session is synced, the client
+  handles its own PC's ground-click moves (`anim_goal_move_to_tile`, `*_run_*`,
+  `*_near_tile`, `sub_433A00`). It also runs that PC's move/talk animation
+  goals (`AG_MOVE_*`, `AG_RUN_*`, `AG_TALK`). Both run inside
+  `tig_net_local_suspend_begin/end`, so the exact single-player code runs
+  locally: local pathing, camera follow, the NPC's dialog script, and the
+  per-node dialog filter. Nothing is sent from inside that block. The result
+  reaches the host as `PACKET_COOP_PC_POS` (client→host, 50 ms, only on change).
+- **The host relays positions without echoing them.** A PC's own pose is
+  relayed to everyone except its owner. If the host moves that PC itself
+  (knockback, follow teleport), it sends `COOP_PC_POS_FORCE` to the owner.
+  Clients ignore Packet9/Packet99 and unforced PC_POS for the PC they drive.
+- **Talking to an NPC works on the client.** The client's `AG_TALK` used to
+  wait forever for a host path, and scripts never run on clients. It now
+  walks over and opens the filtered dialog locally.
+- **Ambient animations already run on the client.** Comparing screen captures
+  shows the fires animating.
+
+### Duplicate PCs and the host's look
+- The host's PC on the client is created from the host's real premade proto
+  (`sub_49B290`). It gets the host's art from PC_POS.
+- After a sync, the client logs a PC census and destroys any PC that is not
+  bound to a slot. It also logs a census every 30 s. Packet70 never creates
+  PCs or unknown protos. Packet70s that arrive during sync are now queued and
+  replayed instead of dropped.
+
+### Network hardening (code review)
+- **WELCOME:** clients accept it only from the host, only once, and only with
+  `0 < slot < MAX`. The host ignores it.
+- **NAME:** applied on the host only, using the authenticated sender slot.
+- **ENet peers:** `peer->data` holds slot+1, so a rejected or unassigned peer
+  reads as -1 and can never clear slot 0. Packets from unknown peers are
+  dropped. The connect loop no longer leaks packets.
+- **Per-type checks:** `multiplayer_validate_message` checks each type's
+  minimum size and its direction (`coop_lite_packet_allowed`). The host drops
+  host→client types sent by clients, and clients drop client→host types.
+- **Object ownership:** host handlers (Packet4, Packet9, Packet57, attack
+  intent, PC_POS) require the object to be the sender's bound PC.
+- **CHAR_OFFER:** the host uses the sender slot, not the slot in the payload.
+  The proto must be a valid PC prototype. An OID that belongs to the host PC,
+  another slot's PC or a non-PC is rejected. The offer is cleared after the
+  spawn and on disconnect. CONNECT no longer triggers a spawn.
+- **SESSION_SYNC:** sent per slot. Clients drop a sync whose
+  `client_slot != local slot`. Names are NUL-terminated and the proto is
+  sanity-checked.
+- **Packet layout:** `_Static_assert` on the sizes and offsets of all coop
+  packets.
+- **Dialog filter:** barter nodes are filtered like any other node. `lf`/`lv`
+  are now blocked. Blocked options are blanked in place instead of being
+  compacted, so the engine's fixed-index reads (rumor, skill, spell and
+  directions use `[1]`) stay correct.
+- **MP_CTRL_UI:** party feedback is scheduled only in net play and only when a
+  handler is registered (`timeevent_type_has_handler`).
+
+### Known gaps
+- Custom (charedit) characters are still offered as proto + name only. Stats,
+  skills, inventory and portrait are not transferred; the host builds the
+  companion from the proto.
+- Remote PCs are shown by PC_POS snaps at 20 Hz (with art frames). There is
+  no client-side interpolation between snaps.
+- Dialog script side effects on a client stay local; the filter blocks
+  shared-state actions.
+- XP and score are per player.

@@ -426,6 +426,27 @@ if(WIN32)
 endif()
 add_test(NAME coop_lite_session_sync COMMAND coop_lite_session_sync_test)
 
+add_executable(coop_lite_net_hardening_test
+    "tests/coop_lite_net_hardening_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_net_hardening_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_net_hardening_test PRIVATE enet)
+target_compile_definitions(coop_lite_net_hardening_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_net_hardening_test PRIVATE ws2_32 winmm)
+endif()
+if(NOT WIN32)
+    add_test(NAME coop_lite_net_hardening COMMAND coop_lite_net_hardening_test)
+endif()
+
 
 # SDL HID on Android requires C++ linker.
 if(ANDROID)

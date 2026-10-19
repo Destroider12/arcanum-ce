@@ -337,24 +337,24 @@ static int test_pc_pos_helpers(void)
     }
 
     /* Rate limit: 100 ms, wrap-safe. */
-    if (coop_lite_interval_elapsed(1000u, 1050u, COOP_LITE_PC_POS_INTERVAL_MS)) {
-        fprintf(stderr, "rate: 50ms should not elapse\n");
+    if (coop_lite_interval_elapsed(1000u, 1000u + COOP_LITE_PC_POS_INTERVAL_MS - 1u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: interval-1 should not elapse\n");
         return 1;
     }
-    if (!coop_lite_interval_elapsed(1000u, 1100u, COOP_LITE_PC_POS_INTERVAL_MS)) {
-        fprintf(stderr, "rate: 100ms should elapse\n");
+    if (!coop_lite_interval_elapsed(1000u, 1000u + COOP_LITE_PC_POS_INTERVAL_MS, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: interval should elapse\n");
         return 1;
     }
     if (!coop_lite_interval_elapsed(0xFFFFFFF0u, 0x00000060u, COOP_LITE_PC_POS_INTERVAL_MS)) {
         fprintf(stderr, "rate: wraparound failed\n");
         return 1;
     }
-    if (coop_lite_interval_elapsed(0xFFFFFFF0u, 0x00000010u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+    if (coop_lite_interval_elapsed(0xFFFFFFF0u, 0x00000008u, COOP_LITE_PC_POS_INTERVAL_MS)) {
         fprintf(stderr, "rate: wraparound short interval elapsed\n");
         return 1;
     }
 
-    if (coop_lite_mp_packet_role(PACKET_COOP_PC_POS) != COOP_MP_PKT_CLIENT_APPLY
+    if (coop_lite_mp_packet_role(PACKET_COOP_PC_POS) != COOP_MP_PKT_BOTH
         || coop_lite_mp_packet_role(PACKET_COOP_CHAR_OFFER) != COOP_MP_PKT_HOST_RESOLVE) {
         fprintf(stderr, "pc_pos/char_offer role wrong\n");
         return 1;
@@ -369,6 +369,75 @@ static int test_pc_pos_helpers(void)
         return 1;
     }
     printf("pc_pos helpers / rate limit OK\n");
+    return 0;
+}
+
+static int test_packet_hardening(void)
+{
+    char name[8];
+
+    /* Direction matrix. */
+    if (coop_lite_packet_allowed(PACKET_COOP_SESSION_SYNC, true, 1)) {
+        fprintf(stderr, "host must drop SESSION_SYNC from a client\n");
+        return 1;
+    }
+    if (coop_lite_packet_allowed(PACKET_COOP_FOLLOW_HOST, true, 2)
+        || coop_lite_packet_allowed(2, true, 1) || coop_lite_packet_allowed(70, true, 1)
+        || coop_lite_packet_allowed(8, true, 1)) {
+        fprintf(stderr, "host must drop host->client state from clients\n");
+        return 1;
+    }
+    if (!coop_lite_packet_allowed(PACKET_COOP_CHAR_OFFER, true, 1)
+        || !coop_lite_packet_allowed(4, true, 3)
+        || !coop_lite_packet_allowed(PACKET_COOP_PC_POS, true, 1)) {
+        fprintf(stderr, "host must accept client intents\n");
+        return 1;
+    }
+    if (coop_lite_packet_allowed(PACKET_COOP_CHAR_OFFER, false, 0)
+        || coop_lite_packet_allowed(4, false, 0)
+        || coop_lite_packet_allowed(PACKET_COOP_ATTACK_INTENT, false, 0)) {
+        fprintf(stderr, "client must drop client->host intents\n");
+        return 1;
+    }
+    if (coop_lite_packet_allowed(PACKET_COOP_SESSION_SYNC, false, 2)) {
+        fprintf(stderr, "client must only listen to the host\n");
+        return 1;
+    }
+    if (!coop_lite_packet_allowed(PACKET_COOP_SESSION_SYNC, false, 0)
+        || !coop_lite_packet_allowed(PACKET_COOP_PC_POS, false, 0)) {
+        fprintf(stderr, "client must accept host state\n");
+        return 1;
+    }
+    if (coop_lite_packet_allowed(0, true, 0) || coop_lite_packet_allowed(-7, false, 0)
+        || coop_lite_packet_allowed(PACKET_COOP_TYPE_LIMIT, true, 0)
+        || coop_lite_packet_allowed(4, true, -1) || coop_lite_packet_allowed(4, true, 8)) {
+        fprintf(stderr, "bad type/slot must be dropped\n");
+        return 1;
+    }
+
+    /* Size table. */
+    if (coop_lite_coop_packet_min_size(PACKET_COOP_CHAR_OFFER) != sizeof(PacketCoopCharOffer)
+        || coop_lite_coop_packet_min_size(PACKET_COOP_SESSION_SYNC) != sizeof(PacketCoopSessionSync)
+        || coop_lite_coop_packet_min_size(PACKET_COOP_PC_POS) != sizeof(PacketCoopPcPos)
+        || coop_lite_coop_packet_min_size(4) != 0) {
+        fprintf(stderr, "coop min sizes wrong\n");
+        return 1;
+    }
+
+    /* Proto sanity (player_obj_create_player exit()s on garbage). */
+    if (coop_lite_pc_proto_plausible(0) || coop_lite_pc_proto_plausible(-16066)
+        || coop_lite_pc_proto_plausible(COOP_LITE_MAX_PROTO) || !coop_lite_pc_proto_plausible(16066)) {
+        fprintf(stderr, "proto plausibility wrong\n");
+        return 1;
+    }
+
+    memset(name, 'A', sizeof(name));
+    coop_lite_terminate_name(name, sizeof(name));
+    if (name[sizeof(name) - 1] != '\0' || strlen(name) != sizeof(name) - 1) {
+        fprintf(stderr, "terminate_name failed\n");
+        return 1;
+    }
+    printf("packet hardening (direction/size/proto/name) OK\n");
     return 0;
 }
 
@@ -389,6 +458,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_pc_pos_helpers() != 0) {
+        return 1;
+    }
+    if (test_packet_hardening() != 0) {
         return 1;
     }
 
