@@ -2593,7 +2593,8 @@ static void coop_lite_dev_items_log(int64_t pc, const char* step)
             n2[0] = '\0';
             object_examine(items[i], pc, n2);
             objid_id_to_str(ids, id);
-            tig_debug_printf("CoopLite: dev items:   %s @%d %s\n", n2, item_inventory_location_get(items[i]), ids);
+            tig_debug_printf("CoopLite: dev items:   %s @%d %s flags=0x%x iflags=0x%x\n", n2, item_inventory_location_get(items[i]), ids,
+                (unsigned int)obj_field_int32_get(items[i], OBJ_F_FLAGS), (unsigned int)obj_field_int32_get(items[i], OBJ_F_ITEM_FLAGS));
         }
         item_list_free(items);
     }
@@ -5213,6 +5214,11 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     multiplayer_unlock();
     tig_debug_printf("CoopLite: obj blob: %s '%s' (%d bytes)\n",
         item != OBJ_HANDLE_NULL ? "loaded" : "rejected", name, pkt->size);
+    if (item != OBJ_HANDLE_NULL) {
+        /* PT13: an open inventory window showed an empty grid for items
+           that arrived after it was drawn. */
+        ui_update_inven(owner);
+    }
 #else
     (void)pkt;
 #endif
@@ -5807,8 +5813,36 @@ static int64_t coop_lite_dev_pick_item(int64_t owner, int64_t seller, int64_t bu
     return pick;
 }
 
+/* Dev (ARCANUM_DEV_OPEN_INVEN=1, client): open our own inventory window
+   20 s into the session (for a screenshot of the synced grid). */
+static unsigned int coop_dev_open_inven_ms;
+static bool coop_dev_open_inven_done;
+
+static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_OPEN_INVEN");
+    int64_t pc = player_get_local_pc_obj();
+
+    if (coop_dev_open_inven_done || env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_dev_open_inven_ms == 0) {
+        coop_dev_open_inven_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_open_inven_ms, now_ms, 20000u) || coop_inven_open_hook == NULL) {
+        return;
+    }
+    coop_dev_open_inven_done = true;
+    tig_debug_printf("CoopLite: dev: opening own inventory (%d items)\n",
+        obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
+    coop_inven_open_hook(pc, OBJ_HANDLE_NULL, 0 /* INVEN_UI_MODE_INVENTORY */);
+}
+
 void coop_lite_client_dev_barter_tick(unsigned int now_ms)
 {
+    coop_lite_client_dev_open_inven_tick(now_ms);
+
     const char* env;
     int64_t pc = player_get_local_pc_obj();
     int64_t npc;

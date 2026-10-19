@@ -1587,6 +1587,14 @@ void mainmenu_ui_start(MainMenuType type)
             type = MM_TYPE_1;
         }
 
+        if (type == MM_TYPE_IN_PLAY && !coop_lite_can_save_world()) {
+            /* Coop client (PT13): the world is the host's, so no Save/Load
+               here (the locked menu: Options/Quit/Continue). The character
+               is exported instead, every time the menu opens. */
+            coop_lite_export_local_character();
+            type = MM_TYPE_IN_PLAY_LOCKED;
+        }
+
         mainmenu_ui_type = type;
 
         switch (type) {

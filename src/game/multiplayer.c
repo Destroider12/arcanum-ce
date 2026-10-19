@@ -1702,6 +1702,16 @@ void sub_4A3230(ObjectID oid, bool (*success_func)(void*), void* success_info, b
         sub_4F0690(oid, &item_obj);
         item_parent(item_obj, &parent_obj);
         sub_4F0640(parent_obj, &parent_oid);
+        if (tig_net_is_coop_enabled() && !tig_net_is_host()) {
+            /* Coop (PT13): the vanilla Packet80 item-lock round trip has no
+               host handler, so a client's drag never started. The host
+               resolves the transfer itself (Packet81/28, with a resync if
+               it refuses), so the local drag may start right away. */
+            if (success_func != NULL) {
+                success_func(success_info);
+            }
+            return;
+        }
         if (tig_net_is_host()) {
             if (sub_4A2EC0(oid, parent_oid, 0)) {
                 if (success_func != NULL) {
@@ -2612,7 +2622,8 @@ bool sub_4A50D0(int64_t pc_obj, int64_t item_obj)
 {
     unsigned int flags;
 
-    if (tig_net_is_active()) {
+    /* Coop: drag hide/show is local, as in SP (no Packet93 handler). */
+    if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
         int client_id;
         Packet93 pkt;
         int64_t parent_obj;
@@ -2651,7 +2662,7 @@ bool sub_4A51C0(int64_t pc_obj, int64_t item_obj)
 {
     unsigned int flags;
 
-    if (tig_net_is_active()) {
+    if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
         int client_id;
         Packet93 pkt;
 
@@ -2742,7 +2753,9 @@ void sub_4A53B0(int64_t a1, int64_t a2)
 {
     int client_id;
 
-    if (!multiplayer_is_locked()) {
+    if (!multiplayer_is_locked() && !tig_net_is_coop_enabled()) {
+        /* Coop: who-views-whose-inventory is not replicated (no handler;
+           barter is tracked by PACKET_COOP_BARTER). */
         Packet97 pkt;
 
         pkt.type = 97;
