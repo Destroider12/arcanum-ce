@@ -800,6 +800,12 @@ void mp_handle_packet70(Packet70* pkt)
                 proto_obj == OBJ_HANDLE_NULL ? "unknown" : "a PC");
             return;
         }
+        /* P1-2: a ground item keeps its state (HP, charges, names) when it
+           comes as the host's object blob. */
+        if (tig_net_is_active() && item_is_item(proto_obj)
+            && coop_lite_client_want_ground_blob((const unsigned char*)&pkt->s0.oid, pkt->s0.loc, pkt->s0.name)) {
+            return;
+        }
     }
 
     multiplayer_lock();

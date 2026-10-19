@@ -281,11 +281,15 @@ typedef struct PacketCoopObjBlob {
     /* 0008 */ uint8_t oid[24];
     /* 0020 */ uint8_t owner_oid[24];
     /* 0038 */ int inventory_location;
-    /* 003C */ unsigned int reserved;
+    /* 003C */ unsigned int flags; /* COOP_OBJ_BLOB_F_* */
     /* 0040 */ uint8_t data[COOP_OBJ_BLOB_MAX];
 } PacketCoopObjBlob;
 
 COOP_STATIC_ASSERT(offsetof(PacketCoopObjBlob, data) == 0x40, "PacketCoopObjBlob layout");
+
+/* "Not available" (picked up, destroyed, or not yours): size 0, no data.
+   The client forgets the request and does not fall back to the proto. */
+#define COOP_OBJ_BLOB_F_GONE 0x1
 
 /* Structure check before obj_read_mem: sizes, and the instance OID inside
    the blob ([u32 version][proto oid][oid]...) is the one announced. */
@@ -293,6 +297,9 @@ bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size);
 bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size);
 void coop_lite_handle_obj_req(PacketCoopObjReq* pkt);
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);
+/* Client, Packet70 of a ground item: true = asked the host for the full
+   object (created from the proto only if no blob comes in time). */
+bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc, int proto);
 /*
  * Which barter/inventory transfers a client may ask the host to perform
  * (Packet81 flags): plain moves between its PC and the merchant it is

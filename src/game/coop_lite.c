@@ -919,6 +919,7 @@ static unsigned int coop_host_left_menu_ms;
 static void (*coop_return_to_menu_hook)(void);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_obj_pending_reset(void);
+static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 #endif
 
 void coop_lite_session_reset(void)
@@ -3843,6 +3844,7 @@ void coop_lite_ping(unsigned int now_ms)
     }
 
     if (!tig_net_is_host()) {
+        coop_lite_obj_ground_fallback_tick(now_ms);
         /* Client: retry a SESSION_SYNC teleport that could not be queued. */
         if (coop_pending_sync_valid && !coop_pending_sync_teleport_queued
             && coop_lite_interval_elapsed(coop_pending_sync_retry_ms, now_ms, 250u)) {
@@ -4155,6 +4157,9 @@ bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size)
     if (pkt == NULL || pkt->type != PACKET_COOP_OBJ_BLOB
         || size < (int)offsetof(PacketCoopObjBlob, data)) {
         return false;
+    }
+    if ((pkt->flags & COOP_OBJ_BLOB_F_GONE) != 0) {
+        return pkt->size == 0;
     }
     /* version + proto oid + oid + type at least. */
     if (pkt->size < 4 + 24 + 24 + 4 || pkt->size > COOP_OBJ_BLOB_MAX) {
@@ -4854,6 +4859,9 @@ typedef struct CoopObjPending {
     unsigned int asked_ms;
     bool used;
     bool queued;
+    bool ground; /* a Packet70 ground item: create at ground_loc */
+    int64_t ground_loc;
+    int ground_proto;
 } CoopObjPending;
 
 static CoopObjPending coop_obj_pending[COOP_OBJ_PENDING_MAX];
@@ -4908,6 +4916,7 @@ static bool coop_lite_obj_blob_defer(const uint8_t* oid)
             coop_obj_pending[i].asked_ms = now != 0 ? now : 1;
             coop_obj_pending[i].used = true;
             coop_obj_pending[i].queued = true;
+            coop_obj_pending[i].ground = false;
             return true;
         }
     }
@@ -4930,6 +4939,57 @@ static void coop_lite_obj_req_flush(void)
             coop_obj_pending[i].queued = false;
             memcpy(pkt.oid[pkt.count++], coop_obj_pending[i].oid, 24);
         }
+    }
+}
+
+bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc, int proto)
+{
+    CoopObjPending* p;
+
+    if (tig_net_is_host() || !coop_lite_obj_blobs_enabled()) {
+        return false;
+    }
+    if (coop_lite_obj_pending_find(oid) != NULL) {
+        return true;
+    }
+    if (!coop_lite_obj_blob_defer(oid)) {
+        return false;
+    }
+    p = coop_lite_obj_pending_find(oid);
+    p->ground = true;
+    p->ground_loc = loc;
+    p->ground_proto = proto;
+    coop_lite_obj_req_flush();
+    return true;
+}
+
+/* Ground items whose blob never came: the old proto creation. */
+static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms)
+{
+    int i;
+
+    for (i = 0; i < COOP_OBJ_PENDING_MAX; i++) {
+        CoopObjPending* p = &coop_obj_pending[i];
+        int64_t proto_obj;
+        int64_t obj = OBJ_HANDLE_NULL;
+        ObjectID oid;
+
+        if (!p->used || !p->ground
+            || !coop_lite_interval_elapsed(p->asked_ms, now_ms, COOP_OBJ_BLOB_TIMEOUT_MS)) {
+            continue;
+        }
+        p->used = false;
+        memcpy(&oid, p->oid, sizeof(oid));
+        proto_obj = sub_4685A0(p->ground_proto);
+        if (proto_obj == OBJ_HANDLE_NULL || obj_pool_perm_lookup(oid) != OBJ_HANDLE_NULL) {
+            continue;
+        }
+        tig_debug_printf("CoopLite: obj blob: ground item timed out, using the proto\n");
+        multiplayer_lock();
+        tig_net_local_suspend_begin();
+        object_create_ex(proto_obj, p->ground_loc, oid, &obj);
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
     }
 }
 
@@ -4958,9 +5018,18 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
         if (item != OBJ_HANDLE_NULL && item == sub_4A2B60(slot)) {
             /* Rejoin: the sender's own (restored) PC. */
             parent = OBJ_HANDLE_NULL;
+        } else if (item != OBJ_HANDLE_NULL && item_is_item(item) && !coop_lite_is_stackable(item)
+            && (obj_field_int32_get(item, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED)) == 0) {
+            /* A ground item (Packet70 announcement). */
+            parent = OBJ_HANDLE_NULL;
         } else if (item == OBJ_HANDLE_NULL || !item_is_item(item) || coop_lite_is_stackable(item)
             || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0
             || !item_parent(item, &parent) || parent == OBJ_HANDLE_NULL) {
+            memset(out, 0, offsetof(PacketCoopObjBlob, data));
+            out->type = PACKET_COOP_OBJ_BLOB;
+            out->flags = COOP_OBJ_BLOB_F_GONE;
+            memcpy(out->oid, pkt->oid[i], 24);
+            tig_net_send_app(out, (int)offsetof(PacketCoopObjBlob, data), slot);
             continue;
         }
         sub_442050(&data, &size, item);
@@ -5054,6 +5123,8 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
     CoopObjPending* p;
+    bool ground;
+    int64_t ground_loc;
     int64_t owner;
     int64_t item = OBJ_HANDLE_NULL;
     int64_t local_pc = player_get_local_pc_obj();
@@ -5071,8 +5142,30 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         /* Unasked (or already timed out and created from the proto). */
         return;
     }
+    ground = p->ground;
+    ground_loc = p->ground_loc;
     p->used = false;
+    if ((pkt->flags & COOP_OBJ_BLOB_F_GONE) != 0) {
+        /* An inventory item is asked for again by the next sync that
+           lists it; a ground item just isn't there any more. */
+        return;
+    }
     if (!coop_lite_client_world_ready() || coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (ground) {
+        multiplayer_lock();
+        tig_net_local_suspend_begin();
+        if (!sub_4420D0(pkt->data, &item, ground_loc) || item == OBJ_HANDLE_NULL || !item_is_item(item)) {
+            if (item != OBJ_HANDLE_NULL) {
+                object_destroy(item);
+            }
+            item = OBJ_HANDLE_NULL;
+        }
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: obj blob: ground item %s (%d bytes)\n",
+            item != OBJ_HANDLE_NULL ? "loaded" : "rejected", pkt->size);
         return;
     }
     if (coop_rejoin_pc_wanted && memcmp(pkt->oid, coop_rejoin_pc_oid, 24) == 0) {

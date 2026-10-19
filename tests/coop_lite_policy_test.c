@@ -1065,7 +1065,18 @@ static int test_obj_blob(void)
         fprintf(stderr, "obj blob: negative size accepted\n");
         return 1;
     }
+    blob.size = 0;
+    blob.flags = COOP_OBJ_BLOB_F_GONE;
+    if (!coop_lite_obj_blob_valid(&blob, hdr)) {
+        fprintf(stderr, "obj blob: gone marker refused\n");
+        return 1;
+    }
     blob.size = 200;
+    if (coop_lite_obj_blob_valid(&blob, hdr + 200)) {
+        fprintf(stderr, "obj blob: gone marker with data accepted\n");
+        return 1;
+    }
+    blob.flags = 0;
     blob.type = PACKET_COOP_INVEN_SYNC;
     if (coop_lite_obj_blob_valid(&blob, hdr + 200)) {
         fprintf(stderr, "obj blob: wrong type accepted\n");
