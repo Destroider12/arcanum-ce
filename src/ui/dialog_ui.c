@@ -64,6 +64,7 @@ static bool dialog_ui_local_pc_dialog_active;
 // 0x567330
 bool dialog_ui_init(GameInitInfo* init_info)
 {
+    coop_lite_set_dialog_end_hook(dialog_ui_end_dialog);
     int index;
 
     (void)init_info;

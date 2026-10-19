@@ -314,6 +314,8 @@ void coop_lite_client_request_barter(int64_t pc_obj, int64_t npc_obj, int kind);
    broken: the host's phase-1 reply is ignored by clients). */
 bool coop_lite_client_opens_inven_locally(int mode, int64_t pc_obj);
 /* inven_ui_open, for the headless barter dev hook (game code can't call UI). */
+/* dialog_ui registers dialog_ui_end_dialog (game/ cannot include ui/). */
+void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2));
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and

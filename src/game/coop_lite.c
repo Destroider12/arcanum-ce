@@ -275,6 +275,7 @@ static int64_t coop_lite_host_pc_obj(void)
 void coop_lite_host_on_entered_world(void);
 
 static bool coop_lite_applying_follow;
+static void (*coop_dialog_end_hook)(int64_t pc_obj, int a2);
 /* Coop death (PT10), see coop_lite_host_watch_party. */
 #ifndef COOP_LITE_TEST_STUBS
 static CoopPartyWatch coop_party_watch;
@@ -1034,7 +1035,6 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 10: /* anim pose */
-    case 11: /* combat mode */
     case 58: /* cast spell */
     case 60:
     case 61:
@@ -1073,6 +1073,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 98: /* multiplayer flags change */
     case PACKET_COOP_PC_POS: /* owner PC pos: client→host, host→others */
         return COOP_MP_PKT_BOTH;
+    case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
     case 100: /* UI + vitals subtype 13 */
         return COOP_MP_PKT_BOTH;
@@ -2213,6 +2214,13 @@ static void coop_lite_dev_tick(unsigned int now_ms)
                 teleport_data.obj = player_get_local_pc_obj();
                 teleport_data.loc = LOCATION_MAKE((int64_t)x, (int64_t)y);
                 teleport_data.map = map_current_map();
+                /* PT12: Virgil's intro dialog was still open (invisible after
+                   the jump), leaving the UI in dialog mode, so Esc only showed
+                   the locked menu (no Save/Load). Close it before teleporting. */
+                if (coop_dialog_end_hook != NULL) {
+                    tig_debug_printf("CoopLite: dev start: closing any open dialog first\n");
+                    coop_dialog_end_hook(player_get_local_pc_obj(), 0);
+                }
                 tig_debug_printf("CoopLite: dev start: teleport host to %d,%d\n", x, y);
                 teleport_do(&teleport_data);
                 if (strcmp(env, "merchant") == 0) {
@@ -2316,6 +2324,41 @@ static bool coop_lite_dev_export_count_visit(void* ctx, int index, const uint8_t
     (void)size;
     (*(int*)ctx)++;
     return true;
+}
+
+/* PT12 dev check (ARCANUM_DEV_CLIENT_COMBAT=1, client): combat mode on at
+   10 s, off at 14 s; the host logs each mirrored change. */
+static unsigned int coop_dev_combat_ms;
+static int coop_dev_combat_stage;
+
+static void coop_lite_client_dev_combat_tick(unsigned int now_ms)
+{
+    const char* env;
+    int64_t pc = player_get_local_pc_obj();
+
+    if (coop_dev_combat_stage >= 2) {
+        return;
+    }
+    env = getenv("ARCANUM_DEV_CLIENT_COMBAT");
+    if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_dev_combat_ms == 0) {
+        coop_dev_combat_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_combat_ms, now_ms, coop_dev_combat_stage == 0 ? 10000u : 4000u)) {
+        return;
+    }
+    coop_dev_combat_ms = now_ms != 0 ? now_ms : 1;
+    if (coop_dev_combat_stage == 0) {
+        combat_critter_activate_combat_mode(pc);
+    } else {
+        combat_critter_deactivate_combat_mode(pc);
+    }
+    tig_debug_printf("CoopLite: dev combat: local combat mode %d\n",
+        combat_critter_is_combat_mode_active(pc) ? 1 : 0);
+    coop_dev_combat_stage++;
 }
 
 static void coop_lite_dev_export_tick(unsigned int now_ms)
@@ -3481,6 +3524,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_dev_grant_resurrect(sub_529520(), player_get_local_pc_obj());
             coop_lite_client_dev_barter_tick(now_ms);
             coop_lite_dev_export_tick(now_ms);
+            coop_lite_client_dev_combat_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -4508,6 +4552,11 @@ void coop_lite_handle_roster(PacketCoopRoster* pkt)
 }
 
 static bool (*coop_inven_open_hook)(int64_t pc_obj, int64_t target_obj, int mode);
+
+void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2))
+{
+    coop_dialog_end_hook = hook;
+}
 
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode))
 {

@@ -553,7 +553,7 @@ static int test_packet_hardening(void)
      */
     {
         static const int client_sends[] = {
-            4, 8, 9, 29, 57, 81, 98, 100,
+            4, 8, 9, 11, 29, 57, 81, 98, 100,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
             PACKET_COOP_BARTER,
         };

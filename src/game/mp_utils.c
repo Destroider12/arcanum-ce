@@ -662,12 +662,31 @@ void mp_handle_combat_mode_set(PacketCombatModeSet* pkt)
     int64_t obj;
     bool active;
 
-    if (pkt == NULL || tig_net_is_host()) {
+    if (pkt == NULL) {
         return;
     }
 
     sub_4F0690(pkt->oid, &obj);
     if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    if (tig_net_is_host()) {
+        /* Coop: a client toggles its own PC only; mirror it to everyone. */
+        if (sub_52A530() == 0 || !coop_lite_sender_owns_obj(obj)) {
+            return;
+        }
+        active = combat_critter_is_combat_mode_active(obj);
+        multiplayer_lock();
+        if (pkt->active && !active) {
+            combat_critter_activate_combat_mode(obj);
+        } else if (!pkt->active && active) {
+            combat_critter_deactivate_combat_mode(obj);
+        }
+        multiplayer_unlock();
+        pkt->active = combat_critter_is_combat_mode_active(obj);
+        tig_debug_printf("MP: slot %d combat mode -> %d\n", sub_52A530(), pkt->active ? 1 : 0);
+        tig_net_send_app_all(pkt, sizeof(*pkt));
         return;
     }
 

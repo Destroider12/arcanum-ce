@@ -1384,6 +1384,25 @@ void combat_critter_toggle_combat_mode(int64_t obj)
         pkt.active = combat_critter_is_combat_mode_active(obj);
         pkt.padding_24 = 0;
         tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else if (tig_net_is_coop_enabled()
+        && !multiplayer_is_locked()
+        && player_is_local_pc_obj(obj)) {
+        /* Coop client (PT12): the toggle used to stay local, so the host
+           copy of this PC kept its combat mode and re-sent it (client stuck
+           in combat mode). Tell the host; it applies and re-broadcasts. */
+        int depth = tig_net_local_suspend_pause();
+
+        if (tig_net_is_active() && !tig_net_is_host()) {
+            PacketCombatModeSet pkt;
+
+            pkt.type = 11;
+            pkt.padding_4 = 0;
+            pkt.oid = obj_get_id(obj);
+            pkt.active = combat_critter_is_combat_mode_active(obj);
+            pkt.padding_24 = 0;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
+        tig_net_local_suspend_resume(depth);
     }
 }
 
