@@ -1157,13 +1157,73 @@ void multiplayer_send_player_list(void)
     }
 }
 
+/* Minimum wire size per app packet type (sizeof the struct the handler reads). */
+static size_t multiplayer_packet_min_size(int type)
+{
+    size_t coop_size;
+
+    switch (type) {
+    case 2: return sizeof(PacketGamePlayerList);
+    case 3: return sizeof(PacketGameTime);
+    case 4: return sizeof(Packet4);
+    case 8: return sizeof(Packet8);
+    case 9: return sizeof(Packet9);
+    case 10: return sizeof(Packet10);
+    case 11: return sizeof(PacketCombatModeSet);
+    case 29: return sizeof(Packet29);
+    case 57: return sizeof(PacketPlayerRequestCastSpell);
+    case 58: return sizeof(PacketPlayerCastSpell);
+    case 60: return sizeof(PacketPlayerSpellMaintainAdd);
+    case 61: return sizeof(PacketPlayerSpellMaintainEnd);
+    case 68: return sizeof(PacketNotifyPlayerLagging);
+    case 69: return sizeof(PacketNotifyPlayerRecovered);
+    case 70: return sizeof(Packet70);
+    case 72: return sizeof(PacketObjectDestroy);
+    case 73: return sizeof(PacketSummon);
+    case 74: return sizeof(Packet74);
+    case 75: return sizeof(PacketMagicTechObjFlag);
+    case 76: return sizeof(Packet76);
+    case 77: return sizeof(PacketMagicTechEyeCandy);
+    case 92: return sizeof(Packet92);
+    case 94: return sizeof(PacketUpdateInven);
+    case 98: return sizeof(PacketMultiplayerFlagsChange);
+    case 99: return sizeof(Packet99);
+    case 100: return sizeof(Packet100);
+    case 106: return sizeof(PacketPlaySound);
+    case 118: return sizeof(Packet118);
+    case 121: return sizeof(Packet121);
+    default:
+        coop_size = coop_lite_coop_packet_min_size(type);
+        return coop_size != 0 ? coop_size : sizeof(int);
+    }
+}
+
 // 0x4A2020
 bool multiplayer_validate_message(void* msg)
 {
     int type;
+    int size;
+    size_t min_size;
 
     type = *(int*)msg;
-    return type > 0 && type < PACKET_COOP_TYPE_LIMIT;
+    if (type <= 0 || type >= PACKET_COOP_TYPE_LIMIT) {
+        return false;
+    }
+
+    /* Per-type size: handlers read the full struct. */
+    size = tig_net_last_message_size();
+    min_size = multiplayer_packet_min_size(type);
+    if (size > 0 && (size_t)size < min_size) {
+        tig_debug_printf("MP: drop type %d: size %d < %zu\n", type, size, min_size);
+        return false;
+    }
+
+    /* Direction: clients can't inject host state; hosts don't take orders. */
+    if (!coop_lite_packet_allowed(type, tig_net_is_host(), sub_52A530())) {
+        tig_debug_printf("MP: drop type %d from slot %d (wrong direction)\n", type, sub_52A530());
+        return false;
+    }
+    return true;
 }
 
 // 0x4A2040
@@ -1198,16 +1258,18 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
                 }
             }
             multiplayer_send_player_list();
-            /* Session sync: if host already in-world and client later offers a
-               character, CHAR_OFFER triggers spawn. Full sector xfer still TODO. */
-            tig_debug_printf("MP: client %d connected — waiting for CHAR_OFFER / SESSION_SYNC\n", client_id);
-            coop_lite_host_on_entered_world();
+            /* Session sync: CHAR_OFFER from this client triggers the spawn
+               (or the host entering the world, for queued offers). */
+            if (client_id != 0) {
+                tig_debug_printf("MP: client %d connected — waiting for CHAR_OFFER / SESSION_SYNC\n", client_id);
+            }
         }
         return true;
     case TIG_NET_EVENT_DISCONNECT:
         if (client_id > 0 && client_id < NUM_PLAYERS) {
             sub_4A2AE0(client_id);
             if (tig_net_is_host()) {
+                coop_lite_host_on_client_disconnect(client_id);
                 multiplayer_send_player_list();
             }
         }
