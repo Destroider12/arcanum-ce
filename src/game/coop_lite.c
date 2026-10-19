@@ -897,6 +897,8 @@ static void coop_lite_keep_sector(int slot, int64_t loc);
 static void coop_lite_barter_reset(void);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
+static void coop_lite_host_roster_tick(unsigned int now_ms);
+static void coop_lite_roster_reset(void);
 static void coop_lite_host_send_roster_entry(int slot, int64_t pc, bool present, int to_slot);
 static void coop_lite_remember_slot_pc(int slot, int64_t obj, int proto);
 static void coop_lite_host_raise_pc(int64_t pc);
@@ -910,6 +912,9 @@ void coop_lite_session_reset(void)
 
     coop_lite_follow_armed = false;
     coop_lite_pose_order_reset();
+#ifndef COOP_LITE_TEST_STUBS
+    coop_lite_roster_reset();
+#endif
     coop_lite_pending_follow_valid = false;
     memset(&coop_lite_pending_follow, 0, sizeof(coop_lite_pending_follow));
     coop_lite_waiting_sync = false;
@@ -1641,6 +1646,13 @@ typedef struct CoopSlotPc {
     char name[64];
 } CoopSlotPc;
 static CoopSlotPc coop_slot_pc[8];
+/* Client: last roster location per slot (deferred creation). */
+static int64_t coop_roster_loc[8];
+static unsigned int coop_roster_reconcile_ms;
+
+/* Client, once world-ready: create/bind every roster PC that is still
+   missing (entries that arrived while we were loading). */
+static void coop_lite_client_roster_reconcile(void);
 
 static void coop_lite_pc_census(bool destroy_unbound)
 {
@@ -3553,6 +3565,11 @@ void coop_lite_ping(unsigned int now_ms)
         coop_lite_client_follow_own_pc(coop_lite_camera_target());
         coop_lite_client_watch_vitals();
         coop_lite_keep_remote_sectors();
+        if (coop_lite_client_in_session
+            && coop_lite_interval_elapsed(coop_roster_reconcile_ms, now_ms, 1000u)) {
+            coop_roster_reconcile_ms = now_ms;
+            coop_lite_client_roster_reconcile();
+        }
         if (coop_lite_client_in_session) {
             coop_lite_dev_grant_resurrect(sub_529520(), player_get_local_pc_obj());
             coop_lite_client_dev_barter_tick(now_ms);
@@ -3603,6 +3620,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_dev_tick(now_ms);
     coop_lite_host_dev_far_tick(now_ms);
     coop_lite_dev_export_tick(now_ms);
+    coop_lite_host_roster_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -4503,6 +4521,31 @@ last:
 }
 
 /* ---- Roster (review H3: 3+ players) ---- */
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_client_roster_reconcile(void)
+{
+    int slot;
+    int64_t obj;
+
+    if (tig_net_is_host() || !coop_lite_client_world_ready()) {
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        if (slot == sub_529520() || !coop_slot_pc[slot].valid || coop_roster_loc[slot] == 0) {
+            continue;
+        }
+        obj = obj_pool_perm_lookup(coop_slot_pc[slot].oid);
+        if (obj != OBJ_HANDLE_NULL && sub_4A2B60(slot) == obj) {
+            continue;
+        }
+        obj = coop_lite_resolve_remote_pc(slot, &coop_slot_pc[slot].oid, coop_roster_loc[slot]);
+        if (obj != OBJ_HANDLE_NULL) {
+            multiplayer_bind_slot_pc(slot, obj);
+            tig_debug_printf("CoopLite: roster: slot %d PC bound after world-ready\n", slot);
+        }
+    }
+}
+#endif
 bool coop_lite_roster_slot_ok(int slot, int local_slot)
 {
     return slot > 0 && slot < 8 && slot != local_slot;
@@ -4529,6 +4572,57 @@ static void coop_lite_host_send_roster_entry(int slot, int64_t pc, bool present,
         tig_net_send_app_except(&pkt, sizeof(pkt), slot);
     } else {
         tig_net_send_app(&pkt, sizeof(pkt), to_slot);
+    }
+}
+
+/*
+ * P1-1: idempotent full roster. Every 5 s, and whenever the host map load
+ * generation changes, every client gets every slot: present ones with
+ * their PC, slots that left since with present=0. A missed one-shot entry
+ * (sent before the receiver was world-ready, or lost with a reload) heals
+ * on the next round.
+ */
+static unsigned char coop_roster_seen; /* bit per slot ever announced */
+static unsigned int coop_roster_ms;
+static uint16_t coop_roster_gen;
+
+static void coop_lite_roster_reset(void)
+{
+    coop_roster_seen = 0;
+    coop_roster_ms = 0;
+    coop_roster_gen = 0;
+    memset(coop_roster_loc, 0, sizeof(coop_roster_loc));
+}
+
+static void coop_lite_host_roster_tick(unsigned int now_ms)
+{
+    int slot;
+    int64_t pc;
+    PacketCoopRoster pkt;
+
+    if (!tig_net_is_host()) {
+        return;
+    }
+    if (coop_roster_gen == coop_map_gen
+        && !coop_lite_interval_elapsed(coop_roster_ms, now_ms, 5000u)) {
+        return;
+    }
+    coop_roster_gen = coop_map_gen;
+    coop_roster_ms = now_ms != 0 ? now_ms : 1;
+    for (slot = 1; slot < 8; slot++) {
+        pc = sub_4A2B60(slot);
+        if (pc != OBJ_HANDLE_NULL) {
+            coop_roster_seen |= (unsigned char)(1u << slot);
+            coop_lite_host_send_roster_entry(slot, pc, true, -1);
+        } else if ((coop_roster_seen & (1u << slot)) != 0 && coop_slot_pc[slot].valid) {
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = PACKET_COOP_ROSTER;
+            pkt.slot = slot;
+            memcpy(pkt.oid, &coop_slot_pc[slot].oid, sizeof(pkt.oid));
+            pkt.proto = coop_slot_pc[slot].proto;
+            pkt.present = 0;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
     }
 }
 
@@ -4590,6 +4684,25 @@ void coop_lite_handle_roster(PacketCoopRoster* pkt)
         return;
     }
     coop_lite_terminate_name(pkt->name, sizeof(pkt->name));
+    {
+        /* A different PC bound to this slot is a ghost of an earlier
+           occupant (rejoin with a new character): drop it. */
+        int64_t old = sub_4A2B60(pkt->slot);
+
+        if (old != OBJ_HANDLE_NULL && old != player_get_local_pc_obj()) {
+            ObjectID old_oid = obj_get_id(old);
+
+            if (memcmp(&old_oid, &oid, sizeof(oid)) != 0) {
+                multiplayer_lock();
+                tig_net_local_suspend_begin();
+                object_destroy(old);
+                tig_net_local_suspend_end();
+                multiplayer_unlock();
+                tig_debug_printf("CoopLite: roster: slot %d ghost PC removed\n", pkt->slot);
+            }
+        }
+    }
+    coop_roster_loc[pkt->slot] = pkt->loc;
     coop_slot_pc[pkt->slot].valid = true;
     coop_slot_pc[pkt->slot].oid = oid;
     coop_slot_pc[pkt->slot].proto = pkt->proto;
@@ -4598,6 +4711,11 @@ void coop_lite_handle_roster(PacketCoopRoster* pkt)
     if (!coop_lite_client_world_ready()) {
         /* Created on the first PC_POS once we are in the world. */
         tig_debug_printf("CoopLite: roster: slot %d noted (%s), not in world yet\n", pkt->slot, oid_str);
+        return;
+    }
+    if (sub_4A2B60(pkt->slot) != OBJ_HANDLE_NULL
+        && obj_pool_perm_lookup(oid) == sub_4A2B60(pkt->slot)) {
+        /* Periodic round: nothing to do (no log spam). */
         return;
     }
     obj = coop_lite_resolve_remote_pc(pkt->slot, &oid, pkt->loc);
