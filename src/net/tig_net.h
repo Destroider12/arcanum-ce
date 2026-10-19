@@ -83,7 +83,18 @@ void tig_net_xfer_send(const char* path, int client_id, void* unused);
 
 /* Opaque Troika helpers used by multiplayer.c / timeevent.c */
 int sub_529520(void); /* local client slot */
-int sub_52A530(void); /* last message sender slot */
+int sub_52A530(void); /* last message sender slot (local slot outside dispatch) */
+int tig_net_last_message_size(void); /* size of the app message being dispatched */
+bool tig_net_welcome_slot_valid(int slot);
+
+/*
+ * Coop: run a block of code as if single-player (tig_net_is_active() and
+ * tig_net_is_host() return false, sends are suppressed). Used for the
+ * client driving its own PC's movement/talk locally. Nestable.
+ */
+void tig_net_local_suspend_begin(void);
+void tig_net_local_suspend_end(void);
+bool tig_net_is_locally_suspended(void);
 int sub_52A900(void); /* non-zero blocks time advance */
 void sub_52A940(void);
 void sub_52A950(void);

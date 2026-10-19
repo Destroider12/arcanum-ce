@@ -122,6 +122,9 @@ static char server_name[64] = "Arcanum";
 static char server_description[128] = "Description";
 static char local_name[TIG_NET_MAX_NAME] = "Player";
 
+static int last_message_size;
+static int local_suspend_depth;
+
 static TigNetMessageFunc message_func;
 static TigNetMessageValidationFunc validation_func;
 static TigNetNetworkEventFunc network_event_func;
@@ -152,6 +155,33 @@ static int tig_net_alloc_slot(void)
     return -1;
 }
 
+/*
+ * ENet peer->data holds (slot + 1) so that NULL (a rejected / not yet
+ * assigned peer) decodes to -1 rather than to the host slot 0.
+ */
+static void tig_net_peer_set_slot(ENetPeer* peer, int slot)
+{
+    peer->data = (void*)(intptr_t)(slot + 1);
+}
+
+static int tig_net_peer_get_slot(const ENetPeer* peer)
+{
+    int slot;
+
+    if (peer == NULL) {
+        return -1;
+    }
+    slot = (int)(intptr_t)peer->data - 1;
+    if (slot < 0 || slot >= TIG_NET_MAX_PLAYERS) {
+        return -1;
+    }
+    /* Must be the peer we actually registered for that slot. */
+    if (clients[slot].peer != peer) {
+        return -1;
+    }
+    return slot;
+}
+
 static void tig_net_fire_event(int type, int client_id, void* data, int size)
 {
     if (network_event_func != NULL) {
@@ -170,15 +200,18 @@ static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
 
     memcpy(copy, data, size);
     last_sender_slot = sender_slot;
+    last_message_size = (int)size;
 
     if (validation_func != NULL && !validation_func(copy)) {
-        tig_debug_printf("tig_net: validation failed for packet type %d\n", *(int*)copy);
-        return;
-    }
-
-    if (message_func != NULL) {
+        tig_debug_printf("tig_net: validation failed for packet type %d (size %zu, from %d)\n",
+            *(int*)copy, size, sender_slot);
+    } else if (message_func != NULL) {
         message_func(copy);
     }
+
+    /* Outside dispatch, "sender" is the local peer. */
+    last_sender_slot = local_slot;
+    last_message_size = 0;
 }
 
 static void tig_net_send_ctrl_to_peer(ENetPeer* peer, const void* data, size_t size)
@@ -200,15 +233,31 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
 {
     int magic;
 
-    (void)from_slot;
-
     if (size < sizeof(int)) {
         return;
     }
 
-    magic = *(const int*)data;
-    if (magic == TIG_NET_CTRL_WELCOME && size >= sizeof(TigNetCtrlWelcome)) {
-        const TigNetCtrlWelcome* welcome = (const TigNetCtrlWelcome*)data;
+    memcpy(&magic, data, sizeof(magic));
+    if (magic == TIG_NET_CTRL_WELCOME) {
+        TigNetCtrlWelcome welcome_copy;
+        const TigNetCtrlWelcome* welcome = &welcome_copy;
+
+        /* Only a client accepts WELCOME, only from the host, only once,
+           and only with a sane client slot (never 0 = host). */
+        if (is_host || from_slot != 0 || size < sizeof(TigNetCtrlWelcome)) {
+            tig_debug_printf("tig_net: ignoring WELCOME (host=%d from=%d size=%zu)\n",
+                is_host ? 1 : 0, from_slot, size);
+            return;
+        }
+        memcpy(&welcome_copy, data, sizeof(welcome_copy));
+        if (!tig_net_welcome_slot_valid(welcome->slot)) {
+            tig_debug_printf("tig_net: ignoring WELCOME with bad slot %d\n", welcome->slot);
+            return;
+        }
+        if (local_slot != 0) {
+            tig_debug_printf("tig_net: ignoring duplicate WELCOME\n");
+            return;
+        }
         local_slot = welcome->slot;
         max_players = welcome->max_players;
         if (max_players < 1 || max_players > TIG_NET_MAX_PLAYERS) {
@@ -232,12 +281,22 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
     }
 
     if (magic == TIG_NET_CTRL_NAME && size >= sizeof(TigNetCtrlName)) {
-        const TigNetCtrlName* name_pkt = (const TigNetCtrlName*)data;
-        if (name_pkt->slot >= 0 && name_pkt->slot < TIG_NET_MAX_PLAYERS) {
-            strncpy(clients[name_pkt->slot].name, name_pkt->name, TIG_NET_MAX_NAME - 1);
-            clients[name_pkt->slot].name[TIG_NET_MAX_NAME - 1] = '\0';
+        TigNetCtrlName name_pkt;
+
+        /* Host only; the slot is the authenticated sender, not the payload. */
+        if (!is_host || from_slot <= 0 || from_slot >= TIG_NET_MAX_PLAYERS) {
+            return;
         }
+        memcpy(&name_pkt, data, sizeof(name_pkt));
+        name_pkt.name[TIG_NET_MAX_NAME - 1] = '\0';
+        strncpy(clients[from_slot].name, name_pkt.name, TIG_NET_MAX_NAME - 1);
+        clients[from_slot].name[TIG_NET_MAX_NAME - 1] = '\0';
     }
+}
+
+bool tig_net_welcome_slot_valid(int slot)
+{
+    return slot > 0 && slot < TIG_NET_MAX_PLAYERS;
 }
 
 void tig_net_set_coop_enabled(bool enabled)
@@ -386,10 +445,18 @@ int tig_net_connect_configured(void)
     active = false;
 
     for (waits = 0; waits < 50; waits++) {
-        if (enet_host_service(enet_host, &event, 100) > 0
-            && event.type == ENET_EVENT_TYPE_CONNECT) {
+        if (enet_host_service(enet_host, &event, 100) <= 0) {
+            continue;
+        }
+        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            /* Not expected before CONNECT; never leak the packet. */
+            enet_packet_destroy(event.packet);
+            continue;
+        }
+        if (event.type == ENET_EVENT_TYPE_CONNECT) {
             clients[0].peer = peer;
             clients[0].active = true;
+            tig_net_peer_set_slot(peer, 0);
             active = true;
             tig_debug_printf("tig_net: connected to %s:%d\n", join_host, join_port);
             /* Slot assignment arrives via WELCOME ctrl packet. */
@@ -455,12 +522,13 @@ void tig_net_pump(void)
 
                 if (slot < 0) {
                     tig_debug_printf("tig_net: rejecting client, no free slots\n");
+                    event.peer->data = NULL; /* decodes to -1 */
                     enet_peer_disconnect(event.peer, 0);
                     break;
                 }
 
-                event.peer->data = (void*)(intptr_t)slot;
                 clients[slot].peer = event.peer;
+                tig_net_peer_set_slot(event.peer, slot);
                 clients[slot].active = true;
                 clients[slot].waiting = false;
                 clients[slot].loading = false;
@@ -476,30 +544,34 @@ void tig_net_pump(void)
                 tig_debug_printf("tig_net: client connected -> slot %d\n", slot);
                 tig_net_fire_event(TIG_NET_EVENT_CONNECT, slot, NULL, 0);
             } else {
-                event.peer->data = (void*)(intptr_t)0;
                 clients[0].peer = event.peer;
+                tig_net_peer_set_slot(event.peer, 0);
             }
             break;
 
         case ENET_EVENT_TYPE_RECEIVE:
-            if (event.channelID == TIG_NET_CHANNEL_CTRL) {
-                int from = (int)(intptr_t)event.peer->data;
-                tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
-            } else {
-                int from = (int)(intptr_t)event.peer->data;
-                if (!is_host) {
-                    /* On clients, app traffic comes from host (slot 0). */
-                    from = 0;
+            {
+                int from = tig_net_peer_get_slot(event.peer);
+                if (from < 0) {
+                    /* Rejected / unassigned peer: drop everything it sends. */
+                } else if (event.channelID == TIG_NET_CHANNEL_CTRL) {
+                    tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
+                } else if (!is_host && from != 0) {
+                    /* Clients only accept app traffic from the host. */
+                } else if (is_host && from == 0) {
+                    /* Host never receives from itself over the wire. */
+                } else {
+                    tig_net_stat_count(tig_net_stat_recv, event.packet->data, event.packet->dataLength);
+                    tig_net_dispatch_app(event.packet->data, event.packet->dataLength, from);
                 }
-                tig_net_stat_count(tig_net_stat_recv, event.packet->data, event.packet->dataLength);
-                tig_net_dispatch_app(event.packet->data, event.packet->dataLength, from);
             }
             enet_packet_destroy(event.packet);
             break;
 
         case ENET_EVENT_TYPE_DISCONNECT: {
-            int slot = (int)(intptr_t)event.peer->data;
+            int slot = tig_net_peer_get_slot(event.peer);
             tig_debug_printf("tig_net: disconnect slot %d\n", slot);
+            /* Unassigned/rejected peers (slot -1) must not clear anything. */
             if (slot >= 0 && slot < TIG_NET_MAX_PLAYERS) {
                 clients[slot].peer = NULL;
                 clients[slot].active = false;
@@ -529,12 +601,34 @@ void tig_net_pump(void)
 
 bool tig_net_is_active(void)
 {
-    return coop_enabled && active;
+    return coop_enabled && active && local_suspend_depth == 0;
 }
 
 bool tig_net_is_host(void)
 {
-    return coop_enabled && active && is_host;
+    return coop_enabled && active && is_host && local_suspend_depth == 0;
+}
+
+void tig_net_local_suspend_begin(void)
+{
+    local_suspend_depth++;
+}
+
+void tig_net_local_suspend_end(void)
+{
+    if (local_suspend_depth > 0) {
+        local_suspend_depth--;
+    }
+}
+
+bool tig_net_is_locally_suspended(void)
+{
+    return local_suspend_depth > 0;
+}
+
+int tig_net_last_message_size(void)
+{
+    return last_message_size;
 }
 
 void tig_net_on_message(TigNetMessageFunc func)
