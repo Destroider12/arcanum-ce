@@ -385,7 +385,9 @@ static int test_pc_pos_helpers(void)
         return 1;
     }
     if (sizeof(PacketCoopPcPos) != 0x40 || offsetof(PacketCoopPcPos, map) != 0x38
-        || sizeof(PacketCoopCharOffer) != 0x68) {
+        || sizeof(PacketCoopCharOffer) != 0x78
+        || offsetof(PacketCoopCharOffer, token) != 0x68
+        || offsetof(PacketCoopSessionSync, flags) != 0xDC) {
         fprintf(stderr, "packet layout changed: pcpos=%zu offer=%zu\n",
             sizeof(PacketCoopPcPos), sizeof(PacketCoopCharOffer));
         return 1;
@@ -1072,6 +1074,77 @@ static int test_obj_blob(void)
     return 0;
 }
 
+/* Parked PCs and rejoin tokens. */
+static int test_parked(void)
+{
+    unsigned char zero[16] = { 0 };
+    unsigned char a[16];
+    unsigned char b[16];
+    unsigned char oid1[24];
+    unsigned char oid2[24];
+    unsigned char out[24];
+    uint64_t ha;
+    uint64_t hb;
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        a[i] = (unsigned char)(i + 1);
+        b[i] = (unsigned char)(i + 1);
+    }
+    b[15] ^= 0x80;
+    memset(oid1, 0x11, sizeof(oid1));
+    memset(oid2, 0x22, sizeof(oid2));
+    ha = coop_lite_token_hash(a);
+    hb = coop_lite_token_hash(b);
+    if (coop_lite_token_hash(zero) != 0 || ha == 0 || hb == 0 || ha == hb
+        || ha != coop_lite_token_hash(a)) {
+        fprintf(stderr, "parked: token hash wrong\n");
+        return 1;
+    }
+    coop_lite_parked_reset();
+    if (coop_lite_parked_put(0, oid1) || coop_lite_parked_take(0, out)) {
+        fprintf(stderr, "parked: no-token entry accepted\n");
+        return 1;
+    }
+    if (!coop_lite_parked_put(ha, oid1) || !coop_lite_parked_put(hb, oid2)
+        || coop_lite_parked_count() != 2) {
+        fprintf(stderr, "parked: put failed\n");
+        return 1;
+    }
+    /* Same token again: replaces, does not duplicate. */
+    if (!coop_lite_parked_put(ha, oid2) || coop_lite_parked_count() != 2) {
+        fprintf(stderr, "parked: same token duplicated\n");
+        return 1;
+    }
+    if (!coop_lite_parked_take(ha, out) || memcmp(out, oid2, 24) != 0
+        || coop_lite_parked_take(ha, out) || coop_lite_parked_count() != 1) {
+        fprintf(stderr, "parked: take wrong (must hand out once)\n");
+        return 1;
+    }
+    if (!coop_lite_parked_take(hb, out) || memcmp(out, oid2, 24) != 0) {
+        fprintf(stderr, "parked: other token lost\n");
+        return 1;
+    }
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        a[0] = (unsigned char)(0xA0 + i);
+        if (!coop_lite_parked_put(coop_lite_token_hash(a), oid1)) {
+            fprintf(stderr, "parked: table smaller than COOP_PARKED_MAX\n");
+            return 1;
+        }
+    }
+    a[0] = 0xFF;
+    if (coop_lite_parked_put(coop_lite_token_hash(a), oid1)) {
+        fprintf(stderr, "parked: overfull table accepted\n");
+        return 1;
+    }
+    coop_lite_parked_reset();
+    if (coop_lite_parked_count() != 0) {
+        fprintf(stderr, "parked: reset failed\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -1101,6 +1174,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_obj_blob() != 0) {
+        return 1;
+    }
+    if (test_parked() != 0) {
         return 1;
     }
     if (coop_lite_host_left_menu_due(false, 1, 99999)

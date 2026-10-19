@@ -61,6 +61,7 @@ typedef struct PacketCoopCharOffer {
     /* 000C */ char name[64];
     /* 004C */ int has_oid;
     /* 0050 */ unsigned char pc_oid[24]; /* client's own PC ObjectID — host adopts it */
+    /* 0068 */ unsigned char token[16]; /* rejoin token (Players/coop_token.txt); all zero = none */
 } PacketCoopCharOffer;
 
 /*
@@ -141,8 +142,12 @@ typedef struct PacketCoopSessionSync {
     /* 0094 */ char host_name[64];
     /* 00D4 */ int map_gen; /* P0-2: host map load generation (was padding) */
     /* 00D8 */ int pose_epoch; /* P0-2: the joining slot's pose epoch */
-    /* 00DC */ int reserved;
+    /* 00DC */ int flags; /* COOP_SYNC_F_* */
 } PacketCoopSessionSync;
+
+/* The host gave this client back its parked PC (client_pc_oid): replace
+   the local PC with the host's copy (requested as an object blob). */
+#define COOP_SYNC_F_REJOINED 0x1
 
 /* Wire layout must match across compilers (MSVC vs gcc/clang). */
 #if defined(__cplusplus)
@@ -154,9 +159,9 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopAttackIntent) == 0x38, "PacketCoopAttackInte
 COOP_STATIC_ASSERT(offsetof(PacketCoopAttackIntent, target_oid) == 0x20, "PacketCoopAttackIntent layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopFollowHost) == 0x18, "PacketCoopFollowHost size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopFollowHost, loc) == 0x08, "PacketCoopFollowHost layout");
-COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x68, "PacketCoopCharOffer size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, has_oid) == 0x4C, "PacketCoopCharOffer layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, pc_oid) == 0x50, "PacketCoopCharOffer layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x78, "PacketCoopCharOffer size");
 COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x40, "PacketCoopPcPos size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, map) == 0x38, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
@@ -369,6 +374,20 @@ void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2));
 void coop_lite_set_return_to_menu_hook(void (*hook)(void));
 /* Pure: should the deferred return-to-menu fire now? */
 bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms);
+
+/*
+ * Parked PCs (rejoin). A leaving client's PC is switched OF_OFF instead of
+ * destroyed and remembered under a hash of the client's rejoin token; a
+ * CHAR_OFFER with the same token gets that PC back. The token itself is
+ * never logged and never leaves the host's memory as anything but a hash.
+ */
+#define COOP_PARKED_MAX 16
+uint64_t coop_lite_token_hash(const unsigned char token[16]); /* 0: no token */
+void coop_lite_parked_reset(void);
+bool coop_lite_parked_put(uint64_t hash, const unsigned char oid[24]);
+/* Removes and returns the entry. */
+bool coop_lite_parked_take(uint64_t hash, unsigned char oid_out[24]);
+int coop_lite_parked_count(void);
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and

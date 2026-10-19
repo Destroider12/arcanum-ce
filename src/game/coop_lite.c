@@ -319,7 +319,11 @@ typedef struct CoopPendingOffer {
     char name[64];
     bool has_oid;
     unsigned char oid[24];
+    uint64_t token_hash;
 } CoopPendingOffer;
+
+/* Host: token hash of each bound slot's player (for parking on leave). */
+static uint64_t coop_slot_token_hash[8];
 
 static CoopPendingOffer coop_pending_offers[8];
 
@@ -1155,6 +1159,77 @@ bool coop_lite_should_skip_independent_new_game(void)
     return true;
 }
 
+#ifndef COOP_LITE_TEST_STUBS
+/* Players\coop_token.txt: 32 hex digits, random, created once. Never
+   logged. Returns false (token all zero) if it cannot be read or made. */
+static bool coop_lite_load_or_create_token(unsigned char token[16])
+{
+    static const char* path = "Players\\coop_token.txt";
+    char hex[40];
+    TigFile* stream;
+    int i;
+
+    memset(token, 0, 16);
+    stream = tig_file_fopen(path, "rb");
+    if (stream != NULL) {
+        memset(hex, 0, sizeof(hex));
+        if (tig_file_fread(hex, 32, 1, stream) == 1) {
+            bool ok = true;
+
+            for (i = 0; i < 16 && ok; i++) {
+                unsigned int b;
+
+                ok = sscanf(hex + i * 2, "%2x", &b) == 1;
+                token[i] = (unsigned char)b;
+            }
+            if (ok && coop_lite_token_hash(token) != 0) {
+                tig_file_fclose(stream);
+                return true;
+            }
+        }
+        tig_file_fclose(stream);
+        memset(token, 0, 16);
+    }
+
+    {
+        FILE* rnd = fopen("/dev/urandom", "rb");
+        bool got = false;
+
+        if (rnd != NULL) {
+            got = fread(token, 16, 1, rnd) == 1;
+            fclose(rnd);
+        }
+        if (!got) {
+            /* No /dev/urandom (Windows): mix clocks and addresses. */
+            uint64_t s = (uint64_t)SDL_GetPerformanceCounter() ^ ((uint64_t)time(NULL) << 32)
+                ^ (uint64_t)(uintptr_t)&s ^ (uint64_t)(uintptr_t)token;
+
+            for (i = 0; i < 16; i++) {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                token[i] = (unsigned char)(s >> 24);
+            }
+        }
+    }
+    if (!tig_file_is_directory("Players")) {
+        tig_file_mkdir("Players");
+    }
+    stream = tig_file_fopen(path, "wb");
+    if (stream == NULL) {
+        tig_debug_printf("CoopLite: rejoin token could not be saved\n");
+        return coop_lite_token_hash(token) != 0;
+    }
+    for (i = 0; i < 16; i++) {
+        snprintf(hex + i * 2, 3, "%02x", token[i]);
+    }
+    tig_file_fwrite(hex, 32, 1, stream);
+    tig_file_fclose(stream);
+    tig_debug_printf("CoopLite: new rejoin token created\n");
+    return true;
+}
+#endif
+
 bool coop_lite_client_offer_character(int basic_prototype, const char* name)
 {
     PacketCoopCharOffer pkt;
@@ -1179,6 +1254,7 @@ bool coop_lite_client_offer_character(int basic_prototype, const char* name)
             memcpy(pkt.pc_oid, &oid, sizeof(oid));
             pkt.has_oid = 1;
         }
+        coop_lite_load_or_create_token(pkt.token);
     }
 #endif
     tig_net_send_app_all(&pkt, sizeof(pkt));
@@ -1396,6 +1472,8 @@ bool coop_lite_client_reconnect(void)
 void coop_lite_on_game_reset(void)
 {
 #ifndef COOP_LITE_TEST_STUBS
+    /* Parked PCs belong to the world that was just left. */
+    coop_lite_parked_reset();
     if (!tig_net_is_coop_enabled()) {
         return;
     }
@@ -1438,11 +1516,26 @@ void coop_lite_host_remove_left_pc(int slot, int64_t pc_obj)
         || obj_field_int32_get(pc_obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return;
     }
-    /* A player who left takes their PC along: a rejoin offers a fresh
-       character (PT8: a stale dead PC lingered on the host). */
     objid_id_to_str(oid_str, obj_get_id(pc_obj));
-    tig_debug_printf("CoopLite: removing PC %s of the player who left\n", oid_str);
     coop_lite_host_send_roster_entry(slot, pc_obj, false, -1);
+    if (slot > 0 && slot < 8 && coop_slot_token_hash[slot] != 0) {
+        ObjectID oid = obj_get_id(pc_obj);
+
+        if (coop_lite_parked_put(coop_slot_token_hash[slot], (const unsigned char*)&oid)) {
+            /* Parked: out of the world until the same player comes back. */
+            object_flags_set(pc_obj, OF_OFF);
+            coop_slot_token_hash[slot] = 0;
+            tig_debug_printf("CoopLite: parking PC %s of the player who left (parked=%d)\n",
+                oid_str, coop_lite_parked_count());
+            return;
+        }
+    }
+    /* No token (or table full): a rejoin offers a fresh character (PT8: a
+       stale dead PC lingered on the host). */
+    tig_debug_printf("CoopLite: removing PC %s of the player who left\n", oid_str);
+    if (slot > 0 && slot < 8) {
+        coop_slot_token_hash[slot] = 0;
+    }
     object_destroy(pc_obj);
 #else
     (void)slot;
@@ -1767,6 +1860,7 @@ static bool coop_lite_host_spawn_client(int slot)
     ObjectID client_oid;
     int map;
     int owner;
+    bool rejoined;
 
     if (slot <= 0 || slot >= 8 || !coop_pending_offers[slot].valid) {
         return false;
@@ -1783,6 +1877,29 @@ static bool coop_lite_host_spawn_client(int slot)
     if (coop_pending_offers[slot].has_oid) {
         memcpy(&client_oid, coop_pending_offers[slot].oid, sizeof(client_oid));
     }
+    rejoined = false;
+    {
+        ObjectID parked_oid;
+        int64_t parked;
+
+        if (coop_lite_parked_take(coop_pending_offers[slot].token_hash, (unsigned char*)&parked_oid)) {
+            parked = obj_pool_perm_lookup(parked_oid);
+            if (parked != OBJ_HANDLE_NULL && parked != host_pc
+                && obj_field_int32_get(parked, OBJ_F_TYPE) == OBJ_TYPE_PC
+                && coop_lite_slot_of_obj(parked) < 0
+                && (obj_field_int32_get(parked, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
+                /* The same player is back: their parked PC, next to us. */
+                client_oid = parked_oid;
+                object_flags_unset(parked, OF_OFF);
+                sub_43E770(parked, spawn_loc, 0, 0);
+                rejoined = true;
+                tig_debug_printf("CoopLite: slot %d rejoined — parked PC restored\n", slot);
+            } else {
+                tig_debug_printf("CoopLite: slot %d parked PC is gone (other map?) — fresh PC\n", slot);
+            }
+        }
+    }
+    coop_slot_token_hash[slot] = coop_pending_offers[slot].token_hash;
 
     client_obj = sub_4A2B60(slot);
     if (client_obj != OBJ_HANDLE_NULL && client_obj != host_pc
@@ -1852,6 +1969,7 @@ static bool coop_lite_host_spawn_client(int slot)
     sync.type = PACKET_COOP_SESSION_SYNC;
     sync.map_gen = coop_map_gen;
     sync.pose_epoch = coop_pose_rx[slot].epoch;
+    sync.flags = rejoined ? COOP_SYNC_F_REJOINED : 0;
     sync.map = map;
     sync.host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
     sync.client_loc = spawn_loc;
@@ -1874,6 +1992,8 @@ static bool coop_lite_host_spawn_client(int slot)
     coop_lite_host_announce_roster(slot);
     return true;
 }
+
+static void coop_lite_client_request_own_pc(const unsigned char oid[24]);
 
 /* Client, after the map is loaded: bind PCs from a pending SESSION_SYNC. */
 static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
@@ -1926,6 +2046,15 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     /* Objects the host created while we were loading. */
     mp_flush_deferred_packet70();
     tig_debug_printf("CoopLite: SESSION_SYNC applied map=%d (after map load)\n", pkt->map);
+
+    if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0
+        && memcmp(&local_oid, pkt->client_pc_oid, sizeof(local_oid)) != 0) {
+        /* Rejoin: the host kept our PC. Take its copy (stats, level, XP)
+           instead of the character picked in the menu; the inventory
+           follows once it is in place. */
+        coop_lite_client_request_own_pc(pkt->client_pc_oid);
+        return;
+    }
 
     /* Our inventory as the host has it (review M4: the starting kit was
        generated on both sides with different item OIDs). */
@@ -3558,6 +3687,7 @@ void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt)
     coop_lite_terminate_name(coop_pending_offers[slot].name, sizeof(coop_pending_offers[slot].name));
     coop_pending_offers[slot].has_oid = pkt->has_oid != 0;
     memcpy(coop_pending_offers[slot].oid, pkt->pc_oid, sizeof(coop_pending_offers[slot].oid));
+    coop_pending_offers[slot].token_hash = coop_lite_token_hash(pkt->token);
     tig_debug_printf("CoopLite: CHAR_OFFER from slot=%d proto=%d name=%s has_oid=%d\n",
         slot, pkt->basic_prototype, coop_pending_offers[slot].name, pkt->has_oid);
 
@@ -4825,8 +4955,10 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
         uint8_t* data = NULL;
         int size = 0;
 
-        /* Only items in an inventory (what INVEN_SYNC lists). */
-        if (item == OBJ_HANDLE_NULL || !item_is_item(item) || coop_lite_is_stackable(item)
+        if (item != OBJ_HANDLE_NULL && item == sub_4A2B60(slot)) {
+            /* Rejoin: the sender's own (restored) PC. */
+            parent = OBJ_HANDLE_NULL;
+        } else if (item == OBJ_HANDLE_NULL || !item_is_item(item) || coop_lite_is_stackable(item)
             || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0
             || !item_parent(item, &parent) || parent == OBJ_HANDLE_NULL) {
             continue;
@@ -4837,8 +4969,10 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
             out->type = PACKET_COOP_OBJ_BLOB;
             out->size = size;
             coop_lite_put_oid(out->oid, item);
-            coop_lite_put_oid(out->owner_oid, parent);
-            out->inventory_location = item_inventory_location_get(item);
+            if (parent != OBJ_HANDLE_NULL) {
+                coop_lite_put_oid(out->owner_oid, parent);
+                out->inventory_location = item_inventory_location_get(item);
+            }
             memcpy(out->data, data, (size_t)size);
             tig_net_send_app(out, (int)(offsetof(PacketCoopObjBlob, data) + (size_t)size), slot);
             sent++;
@@ -4852,6 +4986,68 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
 #else
     (void)pkt;
 #endif
+}
+
+/* Client rejoin: the host's copy of our PC replaces the local one. */
+static bool coop_rejoin_pc_wanted;
+static unsigned char coop_rejoin_pc_oid[24];
+
+static void coop_lite_client_request_own_pc(const unsigned char oid[24])
+{
+    memcpy(coop_rejoin_pc_oid, oid, 24);
+    coop_rejoin_pc_wanted = true;
+    if (coop_lite_obj_pending_find(oid) == NULL) {
+        coop_lite_obj_blob_defer(oid);
+    }
+    coop_lite_obj_req_flush();
+    tig_debug_printf("CoopLite: rejoin: asking the host for our parked PC\n");
+}
+
+static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
+{
+    int64_t old_pc = player_get_local_pc_obj();
+    int64_t pc = OBJ_HANDLE_NULL;
+    int64_t loc;
+    int slot = sub_529520();
+    int t;
+
+    if (old_pc == OBJ_HANDLE_NULL || slot <= 0 || slot >= 8) {
+        return;
+    }
+    loc = obj_field_int64_get(old_pc, OBJ_F_LOCATION);
+    multiplayer_lock();
+    tig_net_local_suspend_begin();
+    if (!sub_4420D0(pkt->data, &pc, loc) || pc == OBJ_HANDLE_NULL
+        || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        if (pc != OBJ_HANDLE_NULL) {
+            object_destroy(pc);
+        }
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: rejoin: PC blob rejected — keeping the menu character\n");
+        coop_lite_client_request_barter(old_pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
+        return;
+    }
+    /* Its item handles did not resolve here (the items come with the next
+       INVEN_SYNC as blobs): start from an empty inventory. */
+    obj_field_int32_set(pc, OBJ_F_CRITTER_INVENTORY_NUM, 0);
+    obj_arrayfield_length_set(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, 0);
+    obj_field_handle_set(pc, OBJ_F_CRITTER_GOLD, OBJ_HANDLE_NULL);
+    for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
+        obj_field_handle_set(pc, coop_ammo_fld[t], OBJ_HANDLE_NULL);
+    }
+    object_flags_unset(pc, OF_OFF);
+    sub_40DAF0(pc);
+    multiplayer_bind_slot_pc(slot, pc);
+    object_destroy(old_pc);
+    tig_net_local_suspend_end();
+    multiplayer_unlock();
+
+    coop_client_pos_valid = false;
+    location_origin_set(obj_field_int64_get(pc, OBJ_F_LOCATION));
+    tig_debug_printf("CoopLite: rejoin: parked PC restored (level %d, %d bytes)\n",
+        stat_level_get(pc, STAT_LEVEL), pkt->size);
+    coop_lite_client_request_barter(pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
 }
 
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
@@ -4877,6 +5073,11 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     }
     p->used = false;
     if (!coop_lite_client_world_ready() || coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_rejoin_pc_wanted && memcmp(pkt->oid, coop_rejoin_pc_oid, 24) == 0) {
+        coop_rejoin_pc_wanted = false;
+        coop_lite_client_adopt_own_pc_blob(pkt);
         return;
     }
     owner = coop_lite_get_oid_obj(pkt->owner_oid);
@@ -5637,6 +5838,92 @@ bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned in
 {
     /* A few seconds so the notice can be read. */
     return armed && coop_lite_interval_elapsed(armed_ms, now_ms, 4000u);
+}
+
+/* ---- Parked PCs (pure table; unit-tested) ---- */
+typedef struct CoopParked {
+    bool used;
+    uint64_t hash;
+    unsigned char oid[24];
+} CoopParked;
+
+static CoopParked coop_parked[COOP_PARKED_MAX];
+
+uint64_t coop_lite_token_hash(const unsigned char token[16])
+{
+    uint64_t h = 1469598103934665603ull; /* FNV-1a 64 */
+    bool any = false;
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        any = any || token[i] != 0;
+        h ^= token[i];
+        h *= 1099511628211ull;
+    }
+    if (!any) {
+        return 0;
+    }
+    return h != 0 ? h : 1;
+}
+
+void coop_lite_parked_reset(void)
+{
+    memset(coop_parked, 0, sizeof(coop_parked));
+}
+
+bool coop_lite_parked_put(uint64_t hash, const unsigned char oid[24])
+{
+    int i;
+    int free_idx = -1;
+
+    if (hash == 0) {
+        return false;
+    }
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        if (coop_parked[i].used && coop_parked[i].hash == hash) {
+            /* One parked PC per token: the newest wins. */
+            memcpy(coop_parked[i].oid, oid, 24);
+            return true;
+        }
+        if (!coop_parked[i].used && free_idx < 0) {
+            free_idx = i;
+        }
+    }
+    if (free_idx < 0) {
+        return false;
+    }
+    coop_parked[free_idx].used = true;
+    coop_parked[free_idx].hash = hash;
+    memcpy(coop_parked[free_idx].oid, oid, 24);
+    return true;
+}
+
+bool coop_lite_parked_take(uint64_t hash, unsigned char oid_out[24])
+{
+    int i;
+
+    if (hash == 0) {
+        return false;
+    }
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        if (coop_parked[i].used && coop_parked[i].hash == hash) {
+            memcpy(oid_out, coop_parked[i].oid, 24);
+            coop_parked[i].used = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+int coop_lite_parked_count(void)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        n += coop_parked[i].used ? 1 : 0;
+    }
+    return n;
 }
 
 /* ---- Character bundle wire format (pure; unit-tested) ---- */
