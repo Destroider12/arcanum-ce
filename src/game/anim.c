@@ -11494,14 +11494,16 @@ bool sub_4305D0(AnimRunInfo* run_info)
     if (tig_net_is_active()
         && tig_net_is_host()) {
         /*
-         * Desync guard: only when the mover is farther from the path start
-         * than the number of steps taken. The decompiled check was missing
-         * the comparison and interrupted every move after its first step
-         * (host PCs/NPCs stopped short, walked in stutters).
+         * Desync guard: only when the mover is clearly farther from the path
+         * start than the number of steps taken. The decompiled check was
+         * missing the comparison and interrupted every move after its first
+         * step (host PCs/NPCs stopped short, walked in stutters). One tile of
+         * slack: wandering critters routinely start a new path one tile off
+         * field_E8 (logged as "2 tiles away ... curr(1)" every step).
          */
         if (run_info->path.field_E8 != 0
             && run_info->path.curr > 0
-            && location_dist(run_info->path.field_E8, loc) > run_info->path.curr) {
+            && location_dist(run_info->path.field_E8, loc) > (int64_t)run_info->path.curr + 1) {
             int64_t distance;
             char str[40];
             int64_t x;
