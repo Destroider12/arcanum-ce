@@ -11443,8 +11443,15 @@ bool sub_4305D0(AnimRunInfo* run_info)
 
     if (tig_net_is_active()
         && tig_net_is_host()) {
+        /*
+         * Desync guard: only when the mover is farther from the path start
+         * than the number of steps taken. The decompiled check was missing
+         * the comparison and interrupted every move after its first step
+         * (host PCs/NPCs stopped short, walked in stutters).
+         */
         if (run_info->path.field_E8 != 0
-            && run_info->path.curr > 0) {
+            && run_info->path.curr > 0
+            && location_dist(run_info->path.field_E8, loc) > run_info->path.curr) {
             int64_t distance;
             char str[40];
             int64_t x;
