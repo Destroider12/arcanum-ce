@@ -314,6 +314,9 @@ void coop_lite_handle_inven_sync(PacketCoopInvenSync* pkt);
 /* Host: a client's Packet81 inventory transfer (barter). */
 struct Packet81;
 void coop_lite_host_handle_inven_transfer(struct Packet81* pkt);
+/* P1-3: host side of the client item ops 26 drop, 27 drop-at, 28 transfer,
+   125 identify (owner, reach, container and merchant checks). */
+void coop_lite_host_handle_item_op(int type, void* msg);
 /* Client: ask the host to open a barter session (it answers with a sync). */
 void coop_lite_client_request_barter(int64_t pc_obj, int64_t npc_obj, int kind);
 /* Client: open barter / own inventory locally (vanilla MP round-trip is

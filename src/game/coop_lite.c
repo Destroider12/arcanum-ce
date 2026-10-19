@@ -898,6 +898,7 @@ static void coop_lite_barter_reset(void);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
+static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms);
 static void coop_lite_roster_reset(void);
 static void coop_lite_host_send_roster_entry(int slot, int64_t pc, bool present, int to_slot);
 static void coop_lite_remember_slot_pc(int slot, int64_t obj, int proto);
@@ -1060,6 +1061,10 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_ATTACK_INTENT: /* client attack → host AG_ATTACK */
     case PACKET_COOP_CHAR_OFFER: /* client char → host spawn */
     case 81: /* inventory/barter transfer → host validates + performs */
+    case 26: /* item drop (P1-3) */
+    case 27: /* item drop at location */
+    case 28: /* item transfer / pickup / equip */
+    case 125: /* identify service */
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 10: /* anim pose */
@@ -2402,6 +2407,132 @@ static void coop_lite_client_dev_combat_tick(unsigned int now_ms)
     coop_dev_combat_stage++;
 }
 
+/* P1-3 dev check (ARCANUM_DEV_CLIENT_ITEMS=1, client): 12 s in the world,
+   then every 4 s: drop a backpack item (26), pick it up again (28), unwield
+   the weapon (28 to backpack), wield it again (28 to the weapon slot). */
+static unsigned int coop_dev_items_ms;
+static int coop_dev_items_stage;
+static ObjectID coop_dev_items_oid;
+static ObjectID coop_dev_items_weapon;
+
+static void coop_lite_dev_items_log(int64_t pc, const char* step)
+{
+    int64_t w = item_wield_get(pc, ITEM_INV_LOC_WEAPON);
+    char name[256];
+
+    name[0] = '\0';
+    if (w != OBJ_HANDLE_NULL) {
+        object_examine(w, pc, name);
+    }
+    {
+        int64_t* items;
+        int cnt = item_list_get(pc, &items);
+        int i;
+
+        tig_debug_printf("CoopLite: dev items: %s: items %d (list %d), weapon '%s'\n", step,
+            obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM), cnt, name);
+        for (i = 0; i < cnt; i++) {
+            char n2[256];
+            ObjectID id = obj_get_id(items[i]);
+            char ids[80];
+
+            n2[0] = '\0';
+            object_examine(items[i], pc, n2);
+            objid_id_to_str(ids, id);
+            tig_debug_printf("CoopLite: dev items:   %s @%d %s\n", n2, item_inventory_location_get(items[i]), ids);
+        }
+        item_list_free(items);
+    }
+}
+
+static void coop_lite_client_dev_items_tick(unsigned int now_ms)
+{
+    const char* env;
+    int64_t pc = player_get_local_pc_obj();
+    int64_t item;
+    int depth;
+
+    if (coop_dev_items_stage >= 5) {
+        return;
+    }
+    env = getenv("ARCANUM_DEV_CLIENT_ITEMS");
+    if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
+        coop_dev_items_stage = env == NULL || env[0] != '1' ? 5 : coop_dev_items_stage;
+        return;
+    }
+    if (coop_dev_items_ms == 0) {
+        coop_dev_items_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_items_ms, now_ms, coop_dev_items_stage == 0 ? 12000u : 4000u)) {
+        return;
+    }
+    coop_dev_items_ms = now_ms != 0 ? now_ms : 1;
+    depth = tig_net_local_suspend_pause();
+    switch (coop_dev_items_stage) {
+    case 0: {
+        int64_t* items;
+        int cnt = item_list_get(pc, &items);
+        int i;
+
+        coop_lite_dev_items_log(pc, "start");
+        item = OBJ_HANDLE_NULL;
+        for (i = 0; i < cnt; i++) {
+            int t = obj_field_int32_get(items[i], OBJ_F_TYPE);
+
+            if (t != OBJ_TYPE_GOLD && t != OBJ_TYPE_AMMO
+                && !IS_WEAR_INV_LOC(item_inventory_location_get(items[i]))) {
+                item = items[i];
+                break;
+            }
+        }
+        item_list_free(items);
+        if (item != OBJ_HANDLE_NULL) {
+            coop_dev_items_oid = obj_get_id(item);
+            item_drop(item); /* client: Packet26 */
+        }
+        break;
+    }
+    case 1:
+        coop_lite_dev_items_log(pc, "after drop");
+        item = obj_pool_perm_lookup(coop_dev_items_oid);
+        tig_debug_printf("CoopLite: dev items: dropped item %s on the ground\n",
+            item != OBJ_HANDLE_NULL && !item_parent(item, NULL) ? "is" : "is NOT");
+        if (item != OBJ_HANDLE_NULL) {
+            item_transfer(item, pc); /* client: Packet28 */
+        }
+        break;
+    case 2:
+    case 3:
+        coop_lite_dev_items_log(pc, coop_dev_items_stage == 2 ? "after pickup" : "after first equip change");
+        item = item_wield_get(pc, ITEM_INV_LOC_WEAPON);
+        if (item == OBJ_HANDLE_NULL) {
+            int64_t* items;
+            int cnt = item_list_get(pc, &items);
+            int i;
+
+            for (i = 0; i < cnt; i++) {
+                if (obj_field_int32_get(items[i], OBJ_F_TYPE) == OBJ_TYPE_WEAPON) {
+                    item = items[i];
+                    break;
+                }
+            }
+            item_list_free(items);
+            if (item != OBJ_HANDLE_NULL) {
+                item_transfer_ex(item, pc, ITEM_INV_LOC_WEAPON); /* wield */
+            }
+        } else {
+            item_transfer_ex(item, pc, -1); /* unwield to the backpack */
+        }
+        break;
+    default:
+        coop_lite_dev_items_log(pc, "after second equip change");
+        break;
+    }
+    tig_net_local_suspend_resume(depth);
+    coop_dev_items_stage++;
+}
+
 static void coop_lite_dev_export_tick(unsigned int now_ms)
 {
     const char* env;
@@ -3575,6 +3706,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_barter_tick(now_ms);
             coop_lite_dev_export_tick(now_ms);
             coop_lite_client_dev_combat_tick(now_ms);
+            coop_lite_client_dev_items_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -3621,6 +3753,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_far_tick(now_ms);
     coop_lite_dev_export_tick(now_ms);
     coop_lite_host_roster_tick(now_ms);
+    coop_lite_host_dev_give_weapon_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -3863,7 +3996,11 @@ bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size)
 
 bool coop_lite_client_transfer_flags_allowed(unsigned int flags)
 {
-    /* 0x01 = move into the target, 0x20 = whole stack (no quantity box). */
+    /* 0x01 = move into the target, 0x20 = whole stack (no quantity box),
+       0x02 = drop on the ground (P1-3; host checks the item is the PC's). */
+    if ((flags & 0x02u) != 0) {
+        return (flags & ~0x22u) == 0;
+    }
     return (flags & 0x01u) != 0 && (flags & ~0x21u) == 0;
 }
 
@@ -4046,6 +4183,209 @@ static bool coop_lite_barter_partner_ok(int64_t pc, int64_t npc)
                obj_field_int64_get(npc, OBJ_F_LOCATION))
         <= 12;
 }
+
+/* ---- P1-3: host handlers for the client item ops 26/27/28/125 ---- */
+#define COOP_ITEM_REACH 3
+
+static bool coop_lite_item_near(int64_t pc, int64_t loc)
+{
+    return location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), loc) <= COOP_ITEM_REACH;
+}
+
+/* Everyone sees an item that just landed on the ground (the owner's own
+   inventory copy is removed by the INVEN_SYNC sent first). */
+static void coop_lite_host_announce_ground_item(int64_t item)
+{
+    Packet70 pkt;
+
+    if (item == OBJ_HANDLE_NULL || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_INVENTORY) != 0) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = 70;
+    pkt.subtype = 0;
+    pkt.s0.name = sub_49B290(item);
+    pkt.s0.oid = obj_get_id(item);
+    pkt.s0.loc = obj_field_int64_get(item, OBJ_F_LOCATION);
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+static void coop_lite_host_sync_slot_and(int slot, int64_t extra)
+{
+    int64_t owners[2];
+    int n = 0;
+
+    owners[n++] = sub_4A2B60(slot);
+    if (extra != OBJ_HANDLE_NULL && extra != owners[0]) {
+        owners[n++] = extra;
+    }
+    if (owners[0] != OBJ_HANDLE_NULL) {
+        coop_lite_host_send_inven_batch(slot, owners, n);
+    }
+}
+
+/* Dev (ARCANUM_DEV_CLIENT_ITEMS=1 on the host): 5 s after a client PC is
+   bound, give it a dagger so the client-side equip test has a weapon. */
+static unsigned int coop_dev_give_ms[8];
+static bool coop_dev_give_done[8];
+
+static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_CLIENT_ITEMS");
+    int slot;
+
+    if (env == NULL || env[0] != '1') {
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t dagger;
+
+        if (pc == OBJ_HANDLE_NULL || coop_dev_give_done[slot]) {
+            continue;
+        }
+        if (coop_dev_give_ms[slot] == 0) {
+            coop_dev_give_ms[slot] = now_ms != 0 ? now_ms : 1;
+            continue;
+        }
+        if (!coop_lite_interval_elapsed(coop_dev_give_ms[slot], now_ms, 5000u)) {
+            continue;
+        }
+        coop_dev_give_done[slot] = true;
+        multiplayer_lock();
+        if (object_create(sub_4685A0(BP_DAGGER), obj_field_int64_get(pc, OBJ_F_LOCATION), &dagger)) {
+            item_transfer(dagger, pc);
+        }
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: dev items: gave slot %d a dagger\n", slot);
+        coop_lite_host_sync_slot_inven(slot);
+    }
+}
+
+void coop_lite_host_handle_item_op(int type, void* msg)
+{
+    int slot;
+    int64_t pc;
+    int64_t item = OBJ_HANDLE_NULL;
+    int64_t parent = OBJ_HANDLE_NULL;
+    int64_t extra = OBJ_HANDLE_NULL;
+    bool ok = false;
+    bool was_on_ground = false;
+    const char* what = "?";
+
+    if (msg == NULL || !tig_net_is_host()) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+        return;
+    }
+
+    multiplayer_lock();
+    switch (type) {
+    case 26: {
+        Packet26* pkt = (Packet26*)msg;
+        int distance = pkt->field_20 < 0 ? 0 : (pkt->field_20 > 4 ? 4 : pkt->field_20);
+
+        what = "drop";
+        item = obj_pool_perm_lookup(pkt->oid);
+        if (item != OBJ_HANDLE_NULL && item_parent(item, &parent) && parent == pc) {
+            ok = item_drop_ex(item, distance);
+        }
+        break;
+    }
+    case 27: {
+        Packet27* pkt = (Packet27*)msg;
+
+        what = "drop at";
+        item = obj_pool_perm_lookup(pkt->oid);
+        if (item != OBJ_HANDLE_NULL && item_parent(item, &parent) && parent == pc
+            && coop_lite_item_near(pc, pkt->loc) && item_check_remove(item) == ITEM_CANNOT_OK) {
+            item_remove(item);
+            sub_466E50(item, pkt->loc);
+            ok = true;
+        }
+        break;
+    }
+    case 28: {
+        Packet28* pkt = (Packet28*)msg;
+
+        what = "transfer";
+        item = obj_pool_perm_lookup(pkt->item_oid);
+        if (item == OBJ_HANDLE_NULL || obj_pool_perm_lookup(pkt->critter_oid) != pc) {
+            break; /* only into the sender's own PC */
+        }
+        if (!item_parent(item, &parent)) {
+            /* From the ground: in reach, really on the ground. */
+            if ((obj_field_int32_get(item, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED)) != 0
+                || !coop_lite_item_near(pc, obj_field_int64_get(item, OBJ_F_LOCATION))) {
+                break;
+            }
+            was_on_ground = true;
+        } else if (parent != pc) {
+            /* Loot from an unlocked container in reach; never from critters. */
+            if (obj_field_int32_get(parent, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER
+                || object_locked_get(parent)
+                || !coop_lite_item_near(pc, obj_field_int64_get(parent, OBJ_F_LOCATION))) {
+                break;
+            }
+            extra = parent;
+        }
+        /* parent == pc: rearrange / equip (inventory_location). */
+        ok = item_transfer_ex(item, pc, pkt->inventory_location);
+        break;
+    }
+    case 125: {
+        PacketPerformIdentifyService* pkt = (PacketPerformIdentifyService*)msg;
+        int64_t npc = obj_pool_perm_lookup(pkt->npc_oid);
+
+        what = "identify";
+        item = obj_pool_perm_lookup(pkt->item_oid);
+        if (item != OBJ_HANDLE_NULL && obj_pool_perm_lookup(pkt->pc_oid) == pc
+            && item_parent(item, &parent) && parent == pc
+            && coop_lite_barter_partner_ok(pc, npc)
+            && pkt->cost >= 0 && pkt->cost <= item_gold_get(pc)) {
+            item_perform_identify_service(item, npc, pc, pkt->cost);
+            ok = true;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    multiplayer_unlock();
+
+    {
+        int64_t w = item_wield_get(pc, ITEM_INV_LOC_WEAPON);
+        char wname[256];
+
+        wname[0] = '\0';
+        if (w != OBJ_HANDLE_NULL) {
+            object_examine(w, pc, wname);
+        }
+        tig_debug_printf("CoopLite: item op: slot %d %s %s (weapon now '%s')\n", slot, what,
+            ok ? "done" : "refused", wname);
+    }
+    /* Ground first: the owner moves its own copy out of the inventory
+       (keeping its state), then the resync finds nothing to remove. */
+    if (ok && (type == 26 || type == 27)) {
+        coop_lite_host_announce_ground_item(item);
+    }
+    /* Always resync, so a refused op is undone on the client. */
+    coop_lite_host_sync_slot_and(slot, extra);
+    if (ok && was_on_ground) {
+        PacketObjectDestroy gone;
+
+        memset(&gone, 0, sizeof(gone));
+        gone.type = 72;
+        gone.oid = obj_get_id(item);
+        tig_net_send_app_except(&gone, sizeof(gone), slot);
+    }
+}
 #endif
 
 void coop_lite_handle_barter(PacketCoopBarter* pkt)
@@ -4151,6 +4491,26 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
     qty = pkt->field_60;
 
 #define COOP_SIDE_OK(o) ((o) == pc || ((o) != OBJ_HANDLE_NULL && ((o) == npc || (o) == store)))
+    if (((unsigned int)pkt->field_8 & 0x02u) != 0) {
+        /* Drop from the PC's own inventory onto the ground. */
+        bool ok = false;
+
+        if (coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
+            && item != OBJ_HANDLE_NULL && from == pc
+            && item_parent(item, &parent) && parent == pc
+            && obj_field_int32_get(item, OBJ_F_TYPE) != OBJ_TYPE_GOLD
+            && obj_field_int32_get(item, OBJ_F_TYPE) != OBJ_TYPE_AMMO) {
+            multiplayer_lock();
+            ok = item_drop(item);
+            multiplayer_unlock();
+        }
+        tig_debug_printf("CoopLite: inven: slot %d drop %s\n", slot, ok ? "done" : "refused");
+        if (ok) {
+            coop_lite_host_announce_ground_item(item);
+        }
+        coop_lite_host_sync_slot_inven(slot);
+        return;
+    }
     if (!coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
         || item == OBJ_HANDLE_NULL
         || !COOP_SIDE_OK(from) || !COOP_SIDE_OK(to)
@@ -4346,6 +4706,11 @@ static void coop_lite_client_apply_inven_batch(void)
             int loc = e->inventory_location;
             int free_loc;
 
+            if (item != OBJ_HANDLE_NULL && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+                /* Destroyed but not yet freed: never re-insert it (that left
+                   a parentless duplicate in the inventory list). */
+                continue;
+            }
             if (item == OBJ_HANDLE_NULL) {
                 ObjectID oid;
                 int64_t proto_obj;
@@ -4365,10 +4730,25 @@ static void coop_lite_client_apply_inven_batch(void)
                 }
                 created++;
             } else if (item_parent(item, &parent) && parent == owner) {
-                /* Already there; our own PC keeps its local arrangement. */
-                if (owner != local_pc && item_inventory_location_get(item) != loc) {
+                /* Already there; our own PC keeps its local backpack
+                   arrangement, but what is worn/wielded follows the host
+                   (P1-3: host-side combat uses the host's equipment). */
+                int cur = item_inventory_location_get(item);
+
+                if (owner != local_pc && cur != loc) {
                     item_remove(item);
                     item_insert(item, owner, loc);
+                } else if (owner == local_pc && cur != loc
+                    && (IS_WEAR_INV_LOC(loc) || IS_WEAR_INV_LOC(cur))) {
+                    item_remove(item);
+                    if (IS_WEAR_INV_LOC(loc) && item_wield_get(owner, loc) == OBJ_HANDLE_NULL) {
+                        item_insert(item, owner, loc);
+                    } else if (item_check_insert(item, owner, &free_loc) == ITEM_CANNOT_OK) {
+                        item_insert(item, owner, free_loc);
+                    } else {
+                        item_insert(item, owner, loc);
+                    }
+                    moved++;
                 }
                 goto flags;
             }

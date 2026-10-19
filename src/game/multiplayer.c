@@ -1136,6 +1136,12 @@ void multiplayer_handle_message(void* msg)
     case 81:
         coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
         break;
+    case 26:
+    case 27:
+    case 28:
+    case 125:
+        coop_lite_host_handle_item_op(type, msg);
+        break;
     case 54:
         /* Magictech end (review M5). Client spell run ids are allocated
            locally and need not match the host's, so freeing by the host's id
@@ -1215,6 +1221,10 @@ static size_t multiplayer_packet_min_size(int type)
     case 9: return sizeof(Packet9);
     case 10: return sizeof(Packet10);
     case 11: return sizeof(PacketCombatModeSet);
+    case 26: return sizeof(Packet26);
+    case 27: return sizeof(Packet27);
+    case 28: return sizeof(Packet28);
+    case 125: return sizeof(PacketPerformIdentifyService);
     case 29: return sizeof(Packet29);
     case 57: return sizeof(PacketPlayerRequestCastSpell);
     case 58: return sizeof(PacketPlayerCastSpell);

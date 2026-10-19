@@ -773,8 +773,20 @@ void mp_handle_packet70(Packet70* pkt)
         return;
     }
 
-    if (pkt->subtype == 0 && obj_pool_perm_lookup(pkt->s0.oid) != OBJ_HANDLE_NULL) {
-        /* Already have it (e.g. our own PC adopted by the host). */
+    if (pkt->subtype == 0 && (obj = obj_pool_perm_lookup(pkt->s0.oid)) != OBJ_HANDLE_NULL) {
+        /* Already have it (e.g. our own PC adopted by the host). An item of
+           ours the host just dropped (P1-3): move this very object to the
+           ground so it keeps its state. */
+        unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
+
+        if (item_is_item(obj) && (flags & OF_INVENTORY) != 0 && (flags & OF_DESTROYED) == 0) {
+            multiplayer_lock();
+            tig_net_local_suspend_begin();
+            item_remove(obj);
+            object_drop(obj, pkt->s0.loc);
+            tig_net_local_suspend_end();
+            multiplayer_unlock();
+        }
         return;
     }
     if (pkt->subtype == 0) {

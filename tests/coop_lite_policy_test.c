@@ -628,7 +628,7 @@ static int test_packet_hardening(void)
      */
     {
         static const int client_sends[] = {
-            4, 8, 9, 11, 29, 57, 81, 98, 100,
+            4, 8, 9, 11, 26, 27, 28, 29, 57, 81, 98, 100, 125,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
             PACKET_COOP_BARTER,
         };
@@ -658,7 +658,7 @@ static int test_packet_hardening(void)
     /* PT11 review H2: the host takes only whitelisted types from clients. */
     {
         static const int never_from_client[] = {
-            54, 71, 94, 106, 118, 121, 26, 27, 28, 125, 97, 6, 64,
+            54, 71, 94, 106, 118, 121, 97, 6, 64,
             PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_SESSION_SYNC,
         };
         size_t i;
@@ -725,7 +725,11 @@ static int test_packet_hardening(void)
         }
         if (!coop_lite_client_transfer_flags_allowed(0x01)
             || !coop_lite_client_transfer_flags_allowed(0x21)
-            || coop_lite_client_transfer_flags_allowed(0x02)
+            || !coop_lite_client_transfer_flags_allowed(0x02)
+            || !coop_lite_client_transfer_flags_allowed(0x22)
+            || coop_lite_client_transfer_flags_allowed(0x03)
+            || coop_lite_client_transfer_flags_allowed(0x06)
+            || coop_lite_client_transfer_flags_allowed(0x0A)
             || coop_lite_client_transfer_flags_allowed(0x04)
             || coop_lite_client_transfer_flags_allowed(0x24)
             || coop_lite_client_transfer_flags_allowed(0x08)
