@@ -1,5 +1,7 @@
 #include "game/timeevent.h"
 
+#include "game/coop_lite.h"
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -822,15 +824,9 @@ void timeevent_ping(tig_timestamp_t timestamp)
     timeevent_in_ping = true;
     datetime_add_milliseconds(&timeevent_real_time, delta);
 
-    if (tig_net_is_active()
-        && !tig_net_is_host()) {
-        if (!sub_45B300()) {
-            if (dword_5E8628 < 1000 * (sub_4A38A0() + 16)) {
-                datetime_add_milliseconds(&timeevent_game_time, 8 * delta);
-                datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
-                dword_5E8628 += 8 * delta;
-            }
-        }
+    if (!coop_lite_can_advance_game_time()) {
+        /* Coop clients: do not advance game/anim clocks; host PacketGameTime
+           (type 3) applies via timeevent_sync in multiplayer_handle_message. */
     } else {
         if (!sub_45B300()) {
             if (!combat_turn_based_is_active()) {

@@ -1,5 +1,7 @@
 #include "game/teleport.h"
 
+#include "game/coop_lite.h"
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -271,6 +273,11 @@ bool teleport_process(TeleportData* teleport_data)
         teleport_iso_window_draw();
         tig_window_display();
         gfade_run(&(teleport_data->fade_in));
+    }
+
+    /* Coop Lite: host PC travel forces remote players to the same destination. */
+    if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
+        coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
     }
 
     return true;

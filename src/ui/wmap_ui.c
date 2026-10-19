@@ -5,6 +5,7 @@
 #include "game/ai.h"
 #include "game/anim.h"
 #include "game/antiteleport.h"
+#include "game/coop_lite.h"
 #include "game/area.h"
 #include "game/critter.h"
 #include "game/gamelib.h"
@@ -1144,6 +1145,18 @@ void wmap_ui_open_internal(void)
 
     if (wmap_ui_created) {
         wmap_ui_close();
+        return;
+    }
+
+    if (!coop_lite_can_use_worldmap()) {
+        MesFileEntry blocked_mes;
+        UiMessage blocked_ui;
+
+        blocked_mes.num = 605; /* "The World Map is not available." */
+        mes_get_msg(wmap_ui_worldmap_mes_file, &blocked_mes);
+        blocked_ui.type = UI_MSG_TYPE_FEEDBACK;
+        blocked_ui.str = blocked_mes.str;
+        intgame_message_window_display_msg(&blocked_ui);
         return;
     }
 

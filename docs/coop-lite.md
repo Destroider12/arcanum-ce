@@ -5,10 +5,10 @@ Date: 2026-10-19
 Target: real-time co-op (up to 8 players) on arcanum-ce, campaign-compatible.
 Required compatibility: **Arcanum: ReForged** ([kurkijar/Arcanum-ReForged](https://github.com/kurkijar/Arcanum-ReForged)).
 
-**Status (coop-lite-net):** a real **ENet** transport now implements `tig_net_*`
-behind `-coop`. Single-player (no `-coop`) is unchanged. Message dispatch covers
-known packet types; many anim/combat apply paths remain incomplete (logged).
-Priority (1) world-map gate + teleport-all can proceed on this transport next.
+**Status (coop-lite-worldmap-follow):** ENet transport + **priority (1)** —
+host-only world map (`coop_lite_can_use_worldmap`), host teleport follow
+broadcast (`PACKET_COOP_FOLLOW_HOST` / 129), host-authoritative game/anim time.
+Single-player without `-coop` unchanged. Anim/combat receive apply still incomplete.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
 **Steam** install archive is expected soon; ReForged will be installed from that
@@ -99,11 +99,12 @@ always false → **SP path only**.
 
 ### 1.5 Verdict for priority (1)
 
-**Transport exists** (ENet). `multiplayer_handle_message` dispatches known
-types (player list, game time, inventory UI, flags, lag icons, packets
-99/100/106/118/121). Anim/combat/magictech apply on receive is still largely
-missing (logged as unhandled). Next: world-map host gate + follow-teleport
-broadcast (§5) on this stack.
+**Implemented** on ENet: `coop_lite_can_use_worldmap()` gates classic
+`wmap_ui_open_internal` (ReForged should call the same helper for
+`ModernWorldMap`); host `teleport_process` for local PC broadcasts
+`PACKET_COOP_FOLLOW_HOST`; clients apply via `teleport_do`. Clients no longer
+advance game/anim time locally (`coop_lite_can_advance_game_time`). Next:
+dialog restrictions (prio 2), saves (prio 3), anim receive handlers.
 
 ---
 
@@ -468,9 +469,9 @@ Strategies taken from that playbook (not invented) and how Coop Lite applies the
 | **Reliable for events, not for continuous motion** | networking.md §1.2 | **Partial** | All app sends currently reliable (CE packet model). Future: unreliable channel for high-rate pose if needed. |
 | **Entity ownership (NPC AI on host)** | how-coop-mods-work.md §1.2 | **Planned** | Host runs world AI; remote players are puppets. Stock MP slots support this; puppet spawn not done. |
 | **Quest/story flags: host owns, mirror writes** | networking.md §1.3; methods.md host-authority table | **Planned (prio 2)** | Aligns with user dialog restrictions. |
-| **Time / weather / RNG: host broadcasts** | networking.md §1.3 | **Started** | `PacketGameTime` (type 3) applied via `timeevent_sync` on clients; host already sends in `timeevent_ping`. |
+| **Time / weather / RNG: host broadcasts** | networking.md §1.3 | **Yes (time)** | Clients skip local clock advance; host sends type 3 ~1 Hz; clients `timeevent_sync`. Weather/RNG not specially handled. |
 | **Dialog/cutscenes: one driver, others watch** | networking.md §1.3; how-coop-mods-work.md §1.5 | **Planned (prio 2)** | User: non-hosts blocked from story/quest NPCs. |
-| **Follow-the-leader on map change** | networking.md §1.4 | **Planned (prio 1)** | User: only host opens world map; all teleported with host. |
+| **Follow-the-leader on map change** | networking.md §1.4 | **Yes** | Host-only wmap; `coop_lite_notify_host_teleported` → packet 129 → client `teleport_do`. |
 | **Host save is canonical; clients keep char only** | networking.md §1.4; how-coop-mods-work.md §1.4 | **Planned (prio 3)** | Matches user save split. |
 | **Late join = full snapshot then deltas** | networking.md §1.4; how-coop-mods-work.md §1.8 | **Not yet** | Needs xfer + world dump; `tig_net_xfer_*` still no-op. Documented gap. |
 | **Delta / snapshot compression, priority accumulator** | networking.md §1.2 | **Not yet** | Premature until entity sync volume exists; CE uses discrete event packets today. |
@@ -491,3 +492,24 @@ Strategies taken from that playbook (not invented) and how Coop Lite applies the
 - **ReForged:** still a separate Windows binary; must merge or rebase to pick up `tig_net`. Gate world-map at `teleport_do` so `ModernWorldMap` stays compatible.
 - **Endianness / struct layout:** packets are raw structs (LAN same-arch assumption).
 - **Pause / script spam:** no host-only script suppression yet (Coop Anything FNV lesson).
+
+---
+
+## 12. Priority 1 implementation (`coop-lite-worldmap-follow`)
+
+| API / hook | Role |
+| --- | --- |
+| `coop_lite_can_use_worldmap()` | Shared CE check: allow wmap iff SP or coop host. Call from ReForged modern wmap too. |
+| `coop_lite_can_advance_game_time()` | Host/SP only advance clocks |
+| `coop_lite_notify_host_teleported(map, loc)` | Host broadcast after local-PC `teleport_process` |
+| `PACKET_COOP_FOLLOW_HOST` (129) | Reliable follow payload `{type,map,loc}` |
+| `wmap_ui_open_internal` | Early reject + feedback mes 605 for non-hosts |
+| `teleport_process` | Notifies follow when `TELEPORT_IS_LOCAL_PC` |
+| `timeevent_ping` | Clients skip `datetime_add_milliseconds` for game/anim |
+
+Tests: `coop_lite_policy_test` (SP gates, host/client gates, follow round-trip);
+existing `tig_net_loopback_test`.
+
+Gaps: ReForged binary must link/call the helper; no in-game QA without Steam data;
+follow uses exact host loc (no per-slot offset); jumppoint/script teleports of
+non-PC objects do not trigger follow (only local PC teleports).

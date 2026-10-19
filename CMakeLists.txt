@@ -54,6 +54,8 @@ set(SRCS
     "src/game/ci.h"
     "src/game/combat.c"
     "src/game/combat.h"
+    "src/game/coop_lite.c"
+    "src/game/coop_lite.h"
     "src/game/context.h"
     "src/game/criticals.h"
     "src/game/critter.c"
@@ -363,6 +365,25 @@ endif()
 
 enable_testing()
 add_test(NAME tig_net_loopback COMMAND tig_net_loopback_test)
+
+add_executable(coop_lite_policy_test
+    "tests/coop_lite_policy_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_policy_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_policy_test PRIVATE enet)
+target_compile_definitions(coop_lite_policy_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_policy_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
 
 # SDL HID on Android requires C++ linker.
 if(ANDROID)
