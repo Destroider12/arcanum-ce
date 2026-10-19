@@ -304,6 +304,11 @@ void tig_net_set_coop_enabled(bool enabled)
     coop_enabled = enabled;
 }
 
+bool tig_net_join_configured(void)
+{
+    return want_join && join_host[0] != '\0';
+}
+
 bool tig_net_is_coop_enabled(void)
 {
     return coop_enabled;

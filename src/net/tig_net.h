@@ -40,6 +40,8 @@ typedef bool (*TigNetNetworkEventFunc)(int type, int client_id, void* data, int 
 /* --- lifecycle / mode (coop-gated; inactive unless coop enabled) --- */
 void tig_net_set_coop_enabled(bool enabled);
 bool tig_net_is_coop_enabled(void);
+/* -join host[:port] was given (client can reconnect). */
+bool tig_net_join_configured(void);
 
 void tig_net_configure_host(int port);
 void tig_net_configure_join(const char* host, int port);
