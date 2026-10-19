@@ -577,6 +577,7 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
     unsigned int module_index;
     bool have_mp;
     char path[TIG_MAX_PATH];
+    const char* modules_prefix = "Modules\\";
 
     module_list->count = 0;
     module_list->selected = 0;
@@ -588,6 +589,11 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
     }
 
     tig_file_list_create(&file_list, "Modules\\*.*");
+    if (file_list.count == 0) {
+        tig_file_list_destroy(&file_list);
+        tig_file_list_create(&file_list, "modules\\*.*");
+        modules_prefix = "modules\\";
+    }
 
     for (file_index = 0; file_index < file_list.count; file_index++) {
         cont = false;
@@ -616,7 +622,7 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
             }
 
             if (!found) {
-                strcpy(path, "Modules\\");
+                strcpy(path, modules_prefix);
                 strcat(path, file_list.entries[file_index].path);
                 if (is_file) {
                     strcat(path, ".dat");
@@ -1845,7 +1851,13 @@ bool gamelib_load_module_data(const char* module_name)
     if (module_name[0] == '\\' || module_name[0] == '.' || module_name[1] == ':') {
         path1[0] = '\0';
     } else {
-        strcpy(path1, ".\\Modules\\");
+        /* Linux Steam/archive extracts may use modules/ (lowercase). Prefer
+           classic Modules\\ then fall back so Coop Lite playtests work. */
+        if (tig_file_is_directory(".\\Modules") || tig_file_exists(".\\Modules", NULL)) {
+            strcpy(path1, ".\\Modules\\");
+        } else {
+            strcpy(path1, ".\\modules\\");
+        }
     }
 
     strcat(path1, module_name);

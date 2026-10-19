@@ -613,3 +613,101 @@ Damage/death still resolved on host (anim attack goals); clients mirror HP/fatig
 - Summon/create assumes OID pools stay aligned; desync if objects diverge.
 - Vitals may spam Packet100 on frequent fatigue ticks.
 - No automated in-game damage/anim soak without Steam data.
+
+---
+
+## 15. Linux Steam playtest (2026-10-19) — `coop-lite-playtest-fixes`
+
+### 15.1 Extraction inventory (Steam RAR → `/workspace/game/`)
+
+| Item | Path / note |
+| --- | --- |
+| Archive | `/workspace/game/Arcanum.rar` (~3.5 GB RAR) |
+| Extract tool | `/usr/bin/unar` (236 non-fatal extract warnings; mostly loose protos) |
+| Nested core | `/workspace/game/Arcanum/Arcanum/` (~3.7 GB tree) |
+| Exe (Windows) | `Arcanum.exe` / Sierra launcher bits present in archive |
+| DAT cores | `arcanum1.dat` … `arcanum4.dat`, `tig.dat` |
+| Modules | `modules/Arcanum.dat`, `Arcanum.PATCH0`, movies/sound under module dir |
+| Case issues | Archive used mixed case (`Arcanum4.dat`, `modules/` vs CE’s `Modules\\`). Staging renamed/normalized to `Modules/` + lowercase `modules` symlink; `arcanum4.dat` from `Arcanum4.dat`. |
+
+Staging trees (game data **never** committed):
+
+| Tree | Purpose | Size |
+| --- | --- | --- |
+| `Arcanum-CE/` | Vanilla CE data + Linux `arcanum-ce` | ~1.2 GB |
+| `Arcanum-ReForged/` | §4.3 copy + ReForged PE/shaders/HighRes + Linux CE binary as `arcanum-ce-linux` | ~1.2 GB |
+| `run-host/` / `run-client/` | Separate CWDs for local coop smoke | — |
+
+### 15.2 ReForged install result
+
+- Zip `Arcanum-ReForged-V1.0.0` applied via §4.3 file-copy into `Arcanum-ReForged/`.
+- Payload present: `arcanum-ce.exe`, `HighRes/config.ini`, `shaders/*.dxil`, legal notices.
+- **Linux playable binary** for Coop Lite is this fork’s Linux build (`arcanum-ce-linux`), not Wine ReForged PE.
+- Full ReForged modern UI (ModernWorldMap, DXIL, etc.) needs Wine or a future native ReForged port.
+
+### 15.3 ReForged source merge-check
+
+[kurkijar/Arcanum-ReForged](https://github.com/kurkijar/Arcanum-ReForged) ships **LICENSE + README + release zip only** — **no public CE source tree**. Therefore:
+
+- Cannot branch-merge ReForged UI (`ModernWorldMap`, modern dialog, HD map) with Coop Lite in this fork.
+- Documented shared hooks remain the integration path when ReForged rebases or opens source:
+  - `coop_lite_can_use_worldmap()` / `coop_lite_can_open_world_map` equivalent for ModernWorldMap
+  - `coop_lite_can_talk` for ModernDialog
+  - `coop_lite_can_save_world` for any modern save UI
+  - Prefer calling into CE core (`teleport_do` already notifies follow) so UI forks stay thin
+- Until then: run Coop Lite Linux/Windows CE binary against ReForged-staged **data**; ReForged-only features (modern UI, BalanceFixes compiled into their PE) are unavailable.
+
+### 15.4 Smoke results (this box)
+
+Display: `$DISPLAY=:2` (desktop available).
+
+| Test | Result |
+| --- | --- |
+| SP `-window` (no `-coop`) | Reached main menu; screenshot `shots/sp-menu.png` |
+| Host `-coop -host 7777` | Listened; accepted client |
+| Client `-coop -join 127.0.0.1` | Welcomed as **slot 1** |
+| In-game New Game / packet soak | Incomplete — main menu has no Multiplayer entry under `-coop`; xdotool New Game clicks often hit CREDITS/EXIT; host once quit via EXIT misclick (not a crash) |
+| Crashes in coop code | None observed in transport path |
+
+### 15.5 Code fix in this branch
+
+`gamelib.c`: case-insensitive-friendly `Modules` / `modules` fallback for `gamelib_load_module_data` and `gamelib_modlist_create` (Linux Steam/archive extracts).
+
+### 15.6 Human playtest (Windows) — exact commands
+
+Build or copy `arcanum-ce.exe` from this fork’s Windows release build of `coop-lite-playtest-fixes` (or build from source) into a **copy** of the ReForged-staged folder (not under `steamapps`):
+
+```bat
+:: Host (machine A)
+cd /d C:\Games\Arcanum-CoopLite
+arcanum-ce.exe -window -coop -host 7777
+
+:: Client (machine B — LAN IP of host)
+cd /d C:\Games\Arcanum-CoopLite
+arcanum-ce.exe -window -coop -join 192.168.x.y:7777
+```
+
+Same machine:
+
+```bat
+:: Terminal 1
+arcanum-ce.exe -window -coop -host 7777
+:: Terminal 2
+arcanum-ce.exe -window -coop -join 127.0.0.1:7777
+```
+
+Checklist for human:
+
+1. Both reach main menu; confirm log lines for listen / slot assign.
+2. Host: New Game → character create → enter world (start together; late-join xfer still missing).
+3. Client should follow host map changes; try merchant dialog as client; try story NPC (expect info-only).
+4. Host save; client cannot world-save but should export `.mpc`.
+5. Enter combat; confirm remote pose/HP updates.
+6. Do **not** expect ReForged ModernWorldMap until their binary links the coop helpers.
+
+Linux local equivalent (this box layout):
+
+```bash
+cd /workspace/game/run-host && ./arcanum-ce -window -coop -host 7777
+cd /workspace/game/run-client && ./arcanum-ce -window -coop -join 127.0.0.1:7777
+```
