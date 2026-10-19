@@ -21,6 +21,8 @@
 #include "game/map.h"
 #include "game/material.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/mt_item.h"
 #include "game/obj.h"
 #include "game/obj_private.h"
@@ -1371,6 +1373,16 @@ void combat_critter_toggle_combat_mode(int64_t obj)
 
     if ((critter_flags2 & OCF2_COMBAT_TOGGLE_FX) != 0) {
         magictech_fx_add(obj, MAGICTECH_FX_COMBAT_TOGGLE);
+    }
+
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        PacketCombatModeSet pkt;
+        pkt.type = 11;
+        pkt.padding_4 = 0;
+        pkt.oid = obj_get_id(obj);
+        pkt.active = combat_critter_is_combat_mode_active(obj);
+        pkt.padding_24 = 0;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
     }
 }
 

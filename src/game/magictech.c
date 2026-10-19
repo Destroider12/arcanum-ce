@@ -2636,6 +2636,7 @@ void MTComponentObjFlag_ProcFunc(void)
         && tig_net_is_host()) {
         PacketMagicTechObjFlag pkt;
 
+        pkt.type = 75;
         sub_4F0640(stru_5E6D28.target_obj, &(pkt.field_8));
         sub_4F0640(stru_5E6D28.self_obj, &(pkt.self_oid));
         pkt.fld = magictech_cur_component->data.obj_flag.flags_fld;
@@ -5263,13 +5264,13 @@ void magictech_fx_add(int64_t obj, int fx)
 // 0x456EC0
 void magictech_fx_remove(int64_t obj, int fx)
 {
-    if (tig_net_is_active() && !tig_net_is_host()) {
+    if (tig_net_is_active() && !tig_net_is_host() && !multiplayer_is_locked()) {
         return;
     }
 
     animfx_remove(&spell_eye_candies, obj, fx % 10 + 6 * (fx / 10), -1);
 
-    if (tig_net_is_active()) {
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
         PacketMagicTechEyeCandy pkt;
 
         pkt.type = 77;
@@ -5278,6 +5279,33 @@ void magictech_fx_remove(int64_t obj, int fx)
         pkt.fx_id = fx % 10 + 6 * (fx / 10);
         pkt.mt_id = -1;
         tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+}
+
+void mp_magictech_apply_invocation(MagicTechInvocation* mt_invocation)
+{
+    if (mt_invocation == NULL) {
+        return;
+    }
+    sub_455C30(mt_invocation);
+}
+
+void mp_magictech_apply_eye_candy_ex(int subtype, ObjectID oid, int fx_id, int mt_id)
+{
+    int64_t obj;
+    AnimFxNode node;
+
+    obj = obj_pool_perm_lookup(oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    if (subtype == 0) {
+        animfx_remove(&spell_eye_candies, obj, fx_id, mt_id);
+    } else {
+        sub_4CCD20(&spell_eye_candies, &node, obj, mt_id, fx_id);
+        node.animate = true;
+        animfx_add(&node);
     }
 }
 

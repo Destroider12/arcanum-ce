@@ -391,3 +391,35 @@ bool coop_lite_export_local_character(void)
     }
     return coop_lite_export_local_character_impl();
 }
+
+
+CoopMpPacketRole coop_lite_mp_packet_role(int type)
+{
+    switch (type) {
+    case 4: /* move intent */
+    case 29: /* open container */
+    case 57: /* request cast */
+        return COOP_MP_PKT_HOST_RESOLVE;
+    case 8: /* anim modify */
+    case 10: /* anim pose */
+    case 11: /* combat mode */
+    case 58: /* cast spell */
+    case 60:
+    case 61:
+    case 70:
+    case 72:
+    case 73:
+    case 74:
+    case 75:
+    case 76:
+    case 77:
+    case 92:
+    case 99: /* location */
+        return COOP_MP_PKT_CLIENT_APPLY;
+    case 9: /* interrupt — host resolves client intent, peers apply */
+    case 100: /* UI + vitals subtype 13 */
+        return COOP_MP_PKT_BOTH;
+    default:
+        return COOP_MP_PKT_UNKNOWN;
+    }
+}

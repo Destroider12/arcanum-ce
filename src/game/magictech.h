@@ -377,6 +377,8 @@ bool sub_456D20(int mt_id, tig_art_id_t* art_id_ptr, tig_art_id_t* light_art_id_
 void sub_456E00(int mt_id);
 void magictech_fx_add(int64_t obj, int fx);
 void magictech_fx_remove(int64_t obj, int fx);
+void mp_magictech_apply_invocation(MagicTechInvocation* mt_invocation);
+void mp_magictech_apply_eye_candy_ex(int subtype, ObjectID oid, int fx_id, int mt_id);
 void sub_456F70(int mt_id);
 void sub_456FA0(int mt_id, unsigned int flags);
 void sub_457000(int mt_id, int action);

@@ -1,10 +1,17 @@
 #include "game/mp_utils.h"
 
 #include "game/a_name.h"
+#include "game/anim.h"
+#include "game/anim_private.h"
+#include "game/animfx.h"
 #include "game/area.h"
+#include "game/combat.h"
 #include "game/critter.h"
+#include "game/descriptions.h"
 #include "game/gsound.h"
 #include "game/item.h"
+#include "game/location.h"
+#include "game/magictech.h"
 #include "game/map.h"
 #include "game/material.h"
 #include "game/multiplayer.h"
@@ -14,6 +21,7 @@
 #include "game/player.h"
 #include "game/portal.h"
 #include "game/proto.h"
+#include "game/ui.h"
 #include "game/random.h"
 #include "game/sector.h"
 #include "game/spell.h"
@@ -157,14 +165,23 @@ void sub_4EDFF0(Packet99* pkt)
 {
     int64_t obj;
 
+    /* Host already applied locally in sub_4EDF20 before broadcast.
+       Clients must apply the authoritative location. */
     if (tig_net_is_host()) {
-        obj = obj_pool_perm_lookup(pkt->oid);
-        sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
-
-        if (pkt->field_30 && player_is_local_pc_obj(obj)) {
-            location_origin_set(pkt->location);
-        }
+        return;
     }
+
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    multiplayer_lock();
+    sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
+    if (pkt->field_30 && player_is_local_pc_obj(obj)) {
+        location_origin_set(pkt->location);
+    }
+    multiplayer_unlock();
 }
 
 // 0x4EE060
@@ -399,6 +416,18 @@ void sub_4EE5E0(Packet100* pkt)
             break;
         }
         break;
+    case 13:
+        /* Coop Lite vitals sync: field_8=oid, field_38=hp_damage, field_3C=fatigue. */
+        sub_4F0690(pkt->d.z.field_8, &v1);
+        if (v1 != OBJ_HANDLE_NULL) {
+            multiplayer_lock();
+            object_hp_damage_set(v1, pkt->d.z.field_38);
+            if (obj_type_is_critter(obj_field_int32_get(v1, OBJ_F_TYPE))) {
+                critter_fatigue_damage_set(v1, pkt->d.z.field_3C);
+            }
+            multiplayer_unlock();
+        }
+        break;
     }
 }
 
@@ -491,23 +520,364 @@ void mp_handle_gsound_play_scheme(PacketPlaySound* pkt)
     }
 }
 
+// 0x4EF320 — Packet4: client move intent → host resolves into real anim goals.
+void mp_handle_packet4(Packet4* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    switch (pkt->subtype) {
+    case 0:
+        anim_goal_move_to_tile(obj, pkt->loc);
+        break;
+    case 1:
+        anim_goal_run_to_tile(obj, pkt->loc);
+        break;
+    case 2:
+        sub_433A00(obj, pkt->loc, false);
+        break;
+    default:
+        break;
+    }
+}
+
+// Packet8 receive is implemented as mp_anim_modify in anim.c.
+
+// Packet9: interrupt/clear goals (sub_424070) + optional loc snap for remotes.
+void mp_handle_packet9(Packet9* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL) {
+        return;
+    }
+
+    if (!sub_444110(&pkt->field_18)) {
+        return;
+    }
+    obj = pkt->field_18.obj;
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    if (tig_net_is_host()) {
+        /* Client interrupt intent: a4=true skips nested net send inside sub_424070. */
+        sub_424070(obj, pkt->priority_level, pkt->field_48 != 0, true);
+        /* Rebroadcast authoritative interrupt to peers. */
+        {
+            Packet9 out = *pkt;
+            out.loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+            out.art_id = obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
+            out.offset_x = obj_field_int32_get(obj, OBJ_F_OFFSET_X);
+            out.offset_y = obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
+            tig_net_send_app_all(&out, sizeof(out));
+        }
+        return;
+    }
+
+    multiplayer_lock();
+    if (pkt->loc != 0) {
+        sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+    }
+    if (pkt->art_id != (tig_art_id_t)-1) {
+        object_set_current_aid(obj, pkt->art_id);
+    }
+    sub_424070(obj, pkt->priority_level, pkt->field_48 != 0, true);
+    multiplayer_unlock();
+}
+
+// Packet10: authoritative anim pose snapshot from host.
+void mp_handle_packet10(Packet10* pkt)
+{
+    int64_t obj;
+    AnimRunInfo* run_info;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    multiplayer_lock();
+    if (pkt->loc != 0) {
+        sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+    }
+    if (pkt->art_id != TIG_ART_ID_INVALID) {
+        object_set_current_aid(obj, pkt->art_id);
+    }
+    if (anim_id_to_run_info(&pkt->anim_id, &run_info) && run_info != NULL) {
+        run_info->flags = pkt->flags;
+    }
+    multiplayer_unlock();
+}
+
+// Packet11: combat mode toggle mirror.
+void mp_handle_combat_mode_set(PacketCombatModeSet* pkt)
+{
+    int64_t obj;
+    bool active;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    active = combat_critter_is_combat_mode_active(obj);
+    multiplayer_lock();
+    if (pkt->active && !active) {
+        combat_critter_activate_combat_mode(obj);
+    } else if (!pkt->active && active) {
+        combat_critter_deactivate_combat_mode(obj);
+    }
+    multiplayer_unlock();
+}
+
+// Packet29: open container (client → host).
+void mp_handle_packet29(Packet29* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->oid, &obj);
+    if (obj != OBJ_HANDLE_NULL) {
+        sub_463540(obj);
+    }
+}
+
+// Packet70: object create / blood FX mirrors.
+void mp_handle_packet70(Packet70* pkt)
+{
+    int64_t obj;
+    int64_t blood_obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    multiplayer_lock();
+    switch (pkt->subtype) {
+    case 0:
+        object_create_ex(sub_4685A0(pkt->s0.name), pkt->s0.loc, pkt->s0.oid, &obj);
+        break;
+    case 5:
+        /* Blood pool FX at death location (art animate is best-effort). */
+        if (object_create(sub_4685A0(BP_POOL_OF_BLOOD), pkt->s5.loc, &blood_obj)) {
+            sub_43E770(blood_obj, pkt->s5.loc, pkt->s5.offset_x, pkt->s5.offset_y);
+        }
+        break;
+    default:
+        break;
+    }
+    multiplayer_unlock();
+}
+
+// Packet92: current art id mirror.
+void mp_handle_packet92(Packet92* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    object_set_current_aid(obj, pkt->art_id);
+    multiplayer_unlock();
+}
+
+// Packet57: client spell request → host runs (rebroadcasts 58).
+void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
+{
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+    magictech_invocation_run(&pkt->invocation);
+}
+
+// Packet58: host cast broadcast → clients apply under lock.
+void mp_handle_packet58(PacketPlayerCastSpell* pkt)
+{
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    multiplayer_lock();
+    mp_magictech_apply_invocation(&pkt->invocation);
+    multiplayer_unlock();
+}
+
+// Packet60 / 61: spell maintain UI for the owning player.
+void mp_handle_packet60(PacketPlayerSpellMaintainAdd* pkt)
+{
+    if (pkt == NULL) {
+        return;
+    }
+    if (pkt->player == sub_529520()) {
+        ui_spell_maintain_add(pkt->mt_id);
+    }
+}
+
+void mp_handle_packet61(PacketPlayerSpellMaintainEnd* pkt)
+{
+    if (pkt == NULL) {
+        return;
+    }
+    if (pkt->player == sub_529520()) {
+        ui_spell_maintain_end(pkt->mt_id);
+    }
+}
+
+// Packet72: destroy object.
+void mp_handle_packet72(PacketObjectDestroy* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    object_destroy(obj);
+    multiplayer_unlock();
+}
+
+// Packet73: summon mirror (create with host-assigned oid).
+void mp_handle_packet73(PacketSummon* pkt)
+{
+    int64_t proto_obj;
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    proto_obj = obj_pool_perm_lookup(pkt->summon_info.field_60);
+    if (proto_obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    multiplayer_lock();
+    if (object_create_ex(proto_obj, pkt->summon_info.loc, pkt->summon_info.field_88, &obj)) {
+        if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+            sub_424070(obj, 5, false, true);
+        }
+    }
+    multiplayer_unlock();
+}
+
+// Packet74: dispel / related MT component mirrors.
+void mp_handle_packet74(Packet74* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->oid, &obj);
+    multiplayer_lock();
+    switch (pkt->subtype) {
+    case 0:
+        /* End maintain / dispel variant — best-effort via maintain end. */
+        ui_spell_maintain_end(pkt->mt_id);
+        break;
+    case 1:
+        if (obj != OBJ_HANDLE_NULL) {
+            magictech_component_dispel(obj, pkt->mt_id);
+        }
+        break;
+    default:
+        break;
+    }
+    multiplayer_unlock();
+}
+
+// Packet75: MagicTech object-flag component.
+void mp_handle_packet75(PacketMagicTechObjFlag* pkt)
+{
+    int64_t target;
+    int64_t self_obj;
+    int64_t parent_obj;
+    int64_t source_obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->field_8, &target);
+    sub_4F0690(pkt->self_oid, &self_obj);
+    sub_4F0690(pkt->parent_oid, &parent_obj);
+    sub_4F0690(pkt->source_oid, &source_obj);
+    multiplayer_lock();
+    magictech_component_obj_flag(target, self_obj, pkt->fld, pkt->value, pkt->state,
+        parent_obj, source_obj);
+    multiplayer_unlock();
+}
+
+// Packet76: charge/cost mirror.
+void mp_handle_packet76(Packet76* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    sub_450420(obj, pkt->cost, pkt->field_24, pkt->magictech);
+    multiplayer_unlock();
+}
+
+// Packet77: eye candy add/remove.
+void mp_handle_packet77(PacketMagicTechEyeCandy* pkt)
+{
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    multiplayer_lock();
+    mp_magictech_apply_eye_candy_ex(pkt->subtype, pkt->oid, pkt->fx_id, pkt->mt_id);
+    multiplayer_unlock();
+}
+
 // 0x4EF320
 void sub_4EF320(void)
 {
-    // TODO: Incomplete.
+    /* Legacy stub slot — receive path lives in mp_handle_* above. */
 }
 
 // 0x4EF3D0
 void sub_4EF3D0(void)
 {
-    // TODO: Incomplete.
 }
 
 // 0x4EF540
 void sub_4EF540(void)
 {
-    // TODO: Incomplete.
 }
+
 
 // 0x4EF830
 void sub_4EF830(int64_t a1, int64_t a2)

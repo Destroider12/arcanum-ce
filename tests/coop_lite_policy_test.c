@@ -75,6 +75,45 @@ static bool on_validate(void* msg)
     return type > 0 && type < 131;
 }
 
+
+static int test_mp_packet_roles(void)
+{
+    if (coop_lite_mp_packet_role(4) != COOP_MP_PKT_HOST_RESOLVE) {
+        fprintf(stderr, "pkt4 should be host-resolve\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(8) != COOP_MP_PKT_CLIENT_APPLY) {
+        fprintf(stderr, "pkt8 should be client-apply\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(10) != COOP_MP_PKT_CLIENT_APPLY) {
+        fprintf(stderr, "pkt10 should be client-apply\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(11) != COOP_MP_PKT_CLIENT_APPLY) {
+        fprintf(stderr, "pkt11 combat mode should be client-apply\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(57) != COOP_MP_PKT_HOST_RESOLVE) {
+        fprintf(stderr, "pkt57 should be host-resolve\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(58) != COOP_MP_PKT_CLIENT_APPLY) {
+        fprintf(stderr, "pkt58 should be client-apply\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(99) != COOP_MP_PKT_CLIENT_APPLY) {
+        fprintf(stderr, "pkt99 should be client-apply\n");
+        return 1;
+    }
+    if (coop_lite_mp_packet_role(100) != COOP_MP_PKT_BOTH) {
+        fprintf(stderr, "pkt100 should be both\n");
+        return 1;
+    }
+    printf("mp packet roles: OK\n");
+    return 0;
+}
+
 static int test_classify_and_offsets(void)
 {
     int dx, dy;
@@ -268,6 +307,9 @@ int main(int argc, char** argv)
     printf("SP: worldmap/time/save allowed OK\n");
 
     if (test_classify_and_offsets() != 0) {
+        return 1;
+    }
+    if (test_mp_packet_roles() != 0) {
         return 1;
     }
 

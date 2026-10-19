@@ -73,6 +73,16 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt);
  */
 bool coop_lite_export_local_character(void);
 
+/* Packet routing roles for anim/combat/magictech receive (docs + tests). */
+typedef enum CoopMpPacketRole {
+    COOP_MP_PKT_UNKNOWN = 0,
+    COOP_MP_PKT_HOST_RESOLVE = 1, /* client intent → host applies/resolves */
+    COOP_MP_PKT_CLIENT_APPLY = 2, /* host broadcast → clients apply */
+    COOP_MP_PKT_BOTH = 3,
+} CoopMpPacketRole;
+
+CoopMpPacketRole coop_lite_mp_packet_role(int type);
+
 #ifdef __cplusplus
 }
 #endif

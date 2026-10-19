@@ -1000,6 +1000,36 @@ void multiplayer_handle_message(void* msg)
         anim_dt.value = game_time->anim_time;
         timeevent_sync(&game_dt, &anim_dt);
         break;
+    case 4:
+        mp_handle_packet4((Packet4*)msg);
+        break;
+    case 8:
+        mp_anim_modify((Packet8*)msg);
+        break;
+    case 9:
+        mp_handle_packet9((Packet9*)msg);
+        break;
+    case 10:
+        mp_handle_packet10((Packet10*)msg);
+        break;
+    case 11:
+        mp_handle_combat_mode_set((PacketCombatModeSet*)msg);
+        break;
+    case 29:
+        mp_handle_packet29((Packet29*)msg);
+        break;
+    case 57:
+        mp_handle_packet57((PacketPlayerRequestCastSpell*)msg);
+        break;
+    case 58:
+        mp_handle_packet58((PacketPlayerCastSpell*)msg);
+        break;
+    case 60:
+        mp_handle_packet60((PacketPlayerSpellMaintainAdd*)msg);
+        break;
+    case 61:
+        mp_handle_packet61((PacketPlayerSpellMaintainEnd*)msg);
+        break;
     case 68:
         lag_pkt = (PacketNotifyPlayerLagging*)msg;
         sub_444110(&lag_pkt->field_8);
@@ -1013,6 +1043,30 @@ void multiplayer_handle_message(void* msg)
         if (recover_pkt->field_8.obj != OBJ_HANDLE_NULL) {
             anim_lag_icon_remove(recover_pkt->field_8.obj);
         }
+        break;
+    case 70:
+        mp_handle_packet70((Packet70*)msg);
+        break;
+    case 72:
+        mp_handle_packet72((PacketObjectDestroy*)msg);
+        break;
+    case 73:
+        mp_handle_packet73((PacketSummon*)msg);
+        break;
+    case 74:
+        mp_handle_packet74((Packet74*)msg);
+        break;
+    case 75:
+        mp_handle_packet75((PacketMagicTechObjFlag*)msg);
+        break;
+    case 76:
+        mp_handle_packet76((Packet76*)msg);
+        break;
+    case 77:
+        mp_handle_packet77((PacketMagicTechEyeCandy*)msg);
+        break;
+    case 92:
+        mp_handle_packet92((Packet92*)msg);
         break;
     case 94:
         mp_handle_ui_update_inven((PacketUpdateInven*)msg);
@@ -1043,9 +1097,7 @@ void multiplayer_handle_message(void* msg)
         coop_lite_handle_follow_packet((PacketCoopFollowHost*)msg);
         break;
     default:
-        /* Anim/combat/magictech packet apply paths were never recovered in CE.
-           Delivered reliably; unhandled types are logged once transport works. */
-        tig_debug_printf("MP: unhandled packet type %d (size inferred by sender)\n", type);
+        tig_debug_printf("MP: unhandled packet type %d\n", type);
         break;
     }
 }
@@ -1127,6 +1179,9 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
                 }
             }
             multiplayer_send_player_list();
+            /* Late-join world snapshot (tig_net_xfer / sector dump) not implemented.
+               Joiners must start with the host or load the same save beforehand. */
+            tig_debug_printf("MP: client %d connected — no late-join world xfer yet\n", client_id);
         }
         return true;
     case TIG_NET_EVENT_DISCONNECT:

@@ -5,10 +5,10 @@ Date: 2026-10-19
 Target: real-time co-op (up to 8 players) on arcanum-ce, campaign-compatible.
 Required compatibility: **Arcanum: ReForged** ([kurkijar/Arcanum-ReForged](https://github.com/kurkijar/Arcanum-ReForged)).
 
-**Status (coop-lite-dialog-saves):** ENet + P1 worldmap/follow/time + **P2 dialogs**
-(`coop_lite_can_talk`, story scripts → host PC) + **P3 saves** (host world save,
-per-player `.mpc` chars). Follow uses per-slot nearest walkable offset. SP without
-`-coop` unchanged. Anim/combat receive / late-join xfer still incomplete.
+**Status (coop-lite-anim-combat):** ENet + P1–P3 + **anim/combat/magictech receive**.
+Host-authoritative: clients send intents (move/cast); host resolves and broadcasts;
+clients apply pose, combat mode, vitals, spells, FX. Late-join world xfer still missing.
+SP without `-coop` unchanged.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
 **Steam** install archive is expected soon; ReForged will be installed from that
@@ -486,8 +486,8 @@ Strategies taken from that playbook (not invented) and how Coop Lite applies the
 
 ## 11. Known gaps / risks (net)
 
-- **Unhandled packet types:** anim/combat/magictech receive apply incomplete — clients may not see remote animations until handlers are ported.
-- **File xfer:** map/module streaming for join-in-progress not implemented.
+- **Unhandled packet types (residual):** inventory/party/service packets (≈80–84, 93, 97, 122–125…) still unhandled; core anim/combat/MT receive is wired (§14).
+- **File xfer / late-join:** map/module streaming for join-in-progress not implemented (see §14).
 - **No Steam relay / NAT traversal** beyond what the user's VPN provides.
 - **ReForged:** still a separate Windows binary; must merge or rebase to pick up `tig_net`. Gate world-map at `teleport_do` so `ModernWorldMap` stays compatible.
 - **Endianness / struct layout:** packets are raw structs (LAN same-arch assumption).
@@ -560,3 +560,56 @@ per-slot offset ≠ host, follow packet applies offset dest.
 
 See report checklist (Steam data, ReForged link of helpers, anim/combat receive,
 late-join xfer, live merchant/quest NPC soak).
+
+---
+
+## 14. Anim / combat / magictech receive (`coop-lite-anim-combat`)
+
+Host-authoritative realtime sync on original CE packet types.
+
+### Animation / movement
+
+| Type | Direction | Handler |
+| --- | --- | --- |
+| 4 | Client → host | `mp_handle_packet4` → `anim_goal_move/run_to_tile` |
+| 8 | Host → clients | `mp_anim_modify` (was TODO) — flags, path, target tile, pose |
+| 9 | Both | `mp_handle_packet9` — interrupt/`sub_424070`; host rebroadcasts |
+| 10 | Host → clients | `mp_handle_packet10` — loc/offset/art/flags snapshot |
+| 99 | Host → clients | `sub_4EDFF0` **fixed** (was host-only; now clients apply) |
+| 92 | Host → clients | `mp_handle_packet92` — `object_set_current_aid` |
+| 70 | Host → clients | create / blood pool FX |
+
+### Combat
+
+| Type | Role |
+| --- | --- |
+| 11 `PacketCombatModeSet` | Host broadcasts on toggle; clients activate/deactivate |
+| 100 subtype 13 | Vitals: host `object_hp_damage_set` / `critter_fatigue_damage_set` broadcast HP+fatigue; clients apply under `multiplayer_lock` |
+
+Damage/death still resolved on host (anim attack goals); clients mirror HP/fatigue and pose.
+
+### Magictech
+
+| Type | Role |
+| --- | --- |
+| 57 | Client request → host `magictech_invocation_run` |
+| 58 | Host cast → clients `mp_magictech_apply_invocation` (`sub_455C30`) |
+| 60/61 | Maintain add/end for owning player UI |
+| 72/73 | Destroy / summon mirrors |
+| 74/75/76 | Dispel / obj-flag / charge cost |
+| 77 | Eye candy via `mp_magictech_apply_eye_candy_ex` |
+
+### Late join
+
+**Not implemented.** `tig_net_xfer_*` remains no-op. On connect the host logs that no world snapshot is sent. Peers must start together or load the same campaign save before joining. To finish late-join later: host sector/object dump over xfer, client `multiplayer_map_open_by_name` + object hydrate, then delta stream.
+
+### Tests
+
+`coop_lite_mp_packet_role` matrix in `coop_lite_policy_test`; loopback transport still covered.
+
+### Risks
+
+- Packet5/7 (full AnimGoalData sync) never sent in recovered CE — pose relies on 8/9/10/99.
+- Summon/create assumes OID pools stay aligned; desync if objects diverge.
+- Vitals may spam Packet100 on frequent fatigue ticks.
+- No automated in-game damage/anim soak without Steam data.

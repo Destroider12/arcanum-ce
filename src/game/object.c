@@ -14,6 +14,8 @@
 #include "game/light.h"
 #include "game/magictech.h"
 #include "game/map.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/mes.h"
 #include "game/obj.h"
 #include "game/obj_file.h"
@@ -1624,6 +1626,19 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     ui_refresh_health_bar(obj);
+
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        Packet100 pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 100;
+        pkt.subtype = 13;
+        pkt.d.z.field_8 = obj_get_id(obj);
+        pkt.d.z.field_38 = value;
+        if (obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE))) {
+            pkt.d.z.field_3C = critter_fatigue_damage_get(obj);
+        }
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
 
     return value;
 }

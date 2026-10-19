@@ -15267,9 +15267,53 @@ void sub_437460(AGModifyData* modify_data)
 }
 
 // 0x4374C0
-void mp_anim_modify(void)
+void mp_anim_modify(Packet8* pkt)
 {
-    // TODO: Incomplete.
+    AnimRunInfo* run_info;
+    int64_t obj;
+    char str[ANIM_ID_STR_SIZE];
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    if (!anim_id_to_run_info(&pkt->modify_data.id, &run_info)) {
+        anim_id_to_str(&pkt->modify_data.id, str);
+        tig_debug_printf("Anim: mp_anim_modify: unknown AnimID %s\n", str);
+        return;
+    }
+
+    multiplayer_lock();
+
+    run_info->flags = pkt->modify_data.flags;
+    run_info->path.flags = pkt->modify_data.path_flags;
+    if (pkt->modify_data.path_curr >= 0) {
+        run_info->path.curr = pkt->modify_data.path_curr;
+    }
+
+    if (pkt->modify_data.field_14 == 5) {
+        run_info->goals[0].params[AGDATA_TARGET_TILE].loc = pkt->modify_data.loc;
+        sub_44D0C0(run_info);
+    }
+
+    obj = run_info->goals[0].params[AGDATA_SELF_OBJ].obj;
+    if (obj == OBJ_HANDLE_NULL) {
+        obj = run_info->anim_obj;
+    }
+    if (obj != OBJ_HANDLE_NULL) {
+        if (pkt->modify_data.location != 0) {
+            sub_43E770(obj, pkt->modify_data.location, pkt->offset_x, pkt->offset_y);
+        }
+        if (pkt->modify_data.current_aid != TIG_ART_ID_INVALID) {
+            object_set_current_aid(obj, pkt->modify_data.current_aid);
+        }
+    }
+
+    if (pkt->field_40 != 0) {
+        run_info->extra_target_tile = pkt->field_40;
+    }
+
+    multiplayer_unlock();
 }
 
 // 0x4377C0
