@@ -794,6 +794,31 @@ bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos
         || memcmp(prev->oid, cur->oid, sizeof(prev->oid)) != 0;
 }
 
+bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
+    int64_t* out_x, int64_t* out_y)
+{
+    int64_t sx = 0;
+    int64_t sy = 0;
+
+    if (dx > zone_x) {
+        sx = dx - zone_x;
+    } else if (dx < -zone_x) {
+        sx = dx + zone_x;
+    }
+    if (dy > zone_y) {
+        sy = dy - zone_y;
+    } else if (dy < -zone_y) {
+        sy = dy + zone_y;
+    }
+    if (out_x != NULL) {
+        *out_x = sx;
+    }
+    if (out_y != NULL) {
+        *out_y = sy;
+    }
+    return sx != 0 || sy != 0;
+}
+
 bool coop_lite_interval_elapsed(unsigned int last_ms, unsigned int now_ms, unsigned int interval_ms)
 {
     return (unsigned int)(now_ms - last_ms) >= interval_ms;
@@ -1030,6 +1055,30 @@ static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
 }
 
 /* Same edge-follow rule AGUpdateAnimMove uses for the local PC. */
+#ifndef COOP_LITE_TEST_STUBS
+/* Client: keep our own PC inside a central dead zone while it walks. */
+static void coop_lite_client_follow_own_pc(int64_t obj)
+{
+    int64_t x;
+    int64_t y;
+    int64_t sx;
+    int64_t sy;
+
+    if (obj == OBJ_HANDLE_NULL || obj != player_get_local_pc_obj()) {
+        return;
+    }
+    location_calc_dist_from_screen_center(obj_field_int64_get(obj, OBJ_F_LOCATION), &x, &y);
+    if (llabs(x) > 1000 || llabs(y) > 700) {
+        /* Far off-screen (teleport, FORCE snap): jump. */
+        location_origin_set(obj_field_int64_get(obj, OBJ_F_LOCATION));
+        return;
+    }
+    if (coop_lite_follow_delta(x, y, COOP_LITE_FOLLOW_DEADZONE_X, COOP_LITE_FOLLOW_DEADZONE_Y, &sx, &sy)) {
+        scroll_view_by(sx, sy);
+    }
+}
+#endif
+
 static void coop_lite_camera_follow(int64_t obj)
 {
     int64_t x;
@@ -1456,6 +1505,7 @@ void coop_lite_ping(unsigned int now_ms)
                     coop_client_pos = pkt;
                     coop_client_pos_valid = true;
                     tig_net_send_app_all(&pkt, sizeof(pkt));
+                    coop_lite_client_follow_own_pc(obj);
                 }
             }
         }

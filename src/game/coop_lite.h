@@ -269,4 +269,15 @@ bool coop_lite_should_skip_independent_new_game(void);
 }
 #endif
 
+/*
+ * Camera dead zone follow (pure). dx/dy: pixels the view origin would have
+ * to move to centre the PC (location_calc_dist_from_screen_center). Returns
+ * true and the scroll needed to bring the PC back to the dead-zone edge when
+ * it is outside the zone.
+ */
+#define COOP_LITE_FOLLOW_DEADZONE_X 200
+#define COOP_LITE_FOLLOW_DEADZONE_Y 120
+bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
+    int64_t* out_x, int64_t* out_y);
+
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */
