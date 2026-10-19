@@ -8,7 +8,7 @@ Required compatibility: **Arcanum: ReForged** ([kurkijar/Arcanum-ReForged](https
 **Honest finding:** there is **no usable multiplayer transport** in this tree.
 Priority (1) world-map restrict + teleport-all cannot be made to work over the
 wire yet. This document records what exists, what is stubbed, ReForged install
-steps (for when GOG data arrives), and the intended implementation plan.
+steps (for when Steam game data arrives), and the intended implementation plan.
 Large speculative network code is intentionally **not** added here.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
@@ -173,7 +173,7 @@ sets `HDWorldMap=1` (Windows-only toolchain).
 5. **Shaders are DXIL / Windows.** Linux CE build here does not consume them.
    ReForged on Linux (if ever) needs Wine for the ReForged exe, or a native
    ReForged port.
-6. **No `.dat` / script patches in the zip.** Loading GOG data is unchanged;
+6. **No `.dat` / script patches in the zip.** Loading Steam/GOG data is unchanged;
    coop must not require exclusive module layouts that break that copy set.
 7. **BalanceFixes** are engine-side rule tweaks in the ReForged binary — not
    present in stock CE. Coop must not assume stock combat numbers when testing
@@ -199,7 +199,7 @@ Practical differences for CE / ReForged:
 | Core data layout | Same: `arcanum1–4.dat`, `tig.dat`, `modules/`, movies/music under `modules/Arcanum/` | Same | CE and the ReForged **file-copy** recipe work from either if those files exist |
 | Game version | Typically 1.0.7.4 English on Steam | Same English build commonly used for CE/UAP | Prefer English; UAP (if ever used) is English-only |
 | Extra launcher / DRM | Steam client / depot layout; may include legacy CD-launcher bits | DRM-free offline folder; `innoextract` friendly | For Coop Lite we only need the **data tree**, not Steamworks |
-| Path on disk | e.g. `…/Steam/steamapps/common/Arcanum` (verify locally) | e.g. `C:\GOG Games\Arcanum` | Point `-GamePath` / `$GOG` at the folder that contains the `.dat` files |
+| Path on disk | e.g. `…/Steam/steamapps/common/Arcanum` (verify locally) | e.g. `C:\GOG Games\Arcanum` | Point `-GamePath` / `$GAME` at the folder that contains the `.dat` files |
 | ReForged official support | **Not documented** by ReForged | Documented | Use the same required-file checklist; if the official `.ps1` rejects the path, use the Linux/manual copy recipe (§4.3) |
 | Filename case | Windows installs are case-insensitive; archives may ship `Arcanum4.dat` vs `arcanum4.dat` | Same caveat | On Linux, normalize/copy with the names CE expects (`arcanum1.dat` … `arcanum4.dat`, `tig.dat`) |
 | Optional folders | May or may not include loose `data/` | Same | ReForged installer does **not** require top-level `data/`; CE can use DAT repositories alone |
