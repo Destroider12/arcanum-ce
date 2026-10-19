@@ -913,6 +913,8 @@ static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
 static unsigned int coop_obj_now_ms; /* last coop_lite_ping time */
+/* Client: remote PC pose rings, by slot (never the local PC). */
+static CoopInterpRing coop_interp[8];
 /* Not cleared by session_reset: it fires after the session is gone. */
 static bool coop_host_left_menu_armed;
 static unsigned int coop_host_left_menu_ms;
@@ -920,11 +922,16 @@ static void (*coop_return_to_menu_hook)(void);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_obj_pending_reset(void);
 static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
+static void coop_lite_client_interp_tick(unsigned int now_ms);
 #endif
 
 void coop_lite_session_reset(void)
 {
     int i;
+
+    for (i = 0; i < 8; i++) {
+        coop_interp_reset(&coop_interp[i]);
+    }
 
     coop_lite_follow_armed = false;
     coop_lite_pose_order_reset();
@@ -1298,6 +1305,84 @@ bool coop_lite_pc_pos_plausible(int pkt_map, int cur_map, int64_t step_tiles,
         return false;
     }
     return pkt_art_type == cur_art_type;
+}
+
+void coop_interp_reset(CoopInterpRing* ring)
+{
+    memset(ring, 0, sizeof(*ring));
+}
+
+bool coop_interp_push(CoopInterpRing* ring, const CoopInterpSample* sample, int64_t step_tiles)
+{
+    if (ring->n > 0) {
+        const CoopInterpSample* last = &ring->s[ring->n - 1];
+
+        if (last->loc == sample->loc && last->offset_x == sample->offset_x
+            && last->offset_y == sample->offset_y && last->art_id == sample->art_id) {
+            /* Keyframe resend of the same pose: keep the original time. */
+            return true;
+        }
+    }
+    if (ring->n == 0 || step_tiles > 1 || step_tiles < 0) {
+        ring->s[0] = *sample;
+        ring->n = 1;
+        return false;
+    }
+    if (ring->n == COOP_INTERP_RING) {
+        memmove(&ring->s[0], &ring->s[1], sizeof(ring->s[0]) * (COOP_INTERP_RING - 1));
+        ring->n--;
+    }
+    ring->s[ring->n++] = *sample;
+    return true;
+}
+
+int coop_interp_pick(const CoopInterpRing* ring, unsigned int rt, int* ia, int* ib,
+    unsigned int* num, unsigned int* den)
+{
+    int i;
+
+    if (ring->n <= 0) {
+        return 0;
+    }
+    /* Before the oldest sample: hold it. */
+    if ((int)(rt - ring->s[0].t_ms) <= 0 || ring->n == 1) {
+        *ia = 0;
+        return 1;
+    }
+    for (i = 0; i + 1 < ring->n; i++) {
+        unsigned int ta = ring->s[i].t_ms;
+        unsigned int tb = ring->s[i + 1].t_ms;
+
+        if ((int)(rt - ta) >= 0 && (int)(rt - tb) < 0) {
+            *ia = i;
+            *ib = i + 1;
+            *num = rt - ta;
+            *den = tb - ta;
+            return *den == 0 ? (*ia = i + 1, 1) : 2;
+        }
+    }
+    /* Past the newest: show it. */
+    *ia = ring->n - 1;
+    return 1;
+}
+
+int coop_interp_offset(int oa, int ob, int64_t d, unsigned int num, unsigned int den, bool rel_b)
+{
+    int64_t span = d + (int64_t)ob - (int64_t)oa;
+    int64_t v;
+
+    if (den == 0) {
+        num = 1;
+        den = 1;
+    }
+    if (num > den) {
+        num = den;
+    }
+    v = (int64_t)oa + span * (int64_t)num / (int64_t)den;
+    if (rel_b) {
+        v -= d;
+    }
+    return (int)v;
 }
 
 bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
@@ -3846,6 +3931,7 @@ void coop_lite_ping(unsigned int now_ms)
 
     if (!tig_net_is_host()) {
         coop_lite_obj_ground_fallback_tick(now_ms);
+        coop_lite_client_interp_tick(now_ms);
         /* Client: retry a SESSION_SYNC teleport that could not be queued. */
         if (coop_pending_sync_valid && !coop_pending_sync_teleport_queued
             && coop_lite_interval_elapsed(coop_pending_sync_retry_ms, now_ms, 250u)) {
@@ -4103,6 +4189,23 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
             tig_debug_printf("CoopLite: host correction of own PC to %d,%d\n",
                 (int)LOCATION_GET_X(pkt->loc), (int)LOCATION_GET_Y(pkt->loc));
             sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+        }
+    } else if (pkt->slot >= 0 && pkt->slot < 8) {
+        CoopInterpSample smp;
+
+        smp.loc = pkt->loc;
+        smp.offset_x = pkt->offset_x;
+        smp.offset_y = pkt->offset_y;
+        smp.art_id = pkt->art_id;
+        smp.t_ms = coop_obj_now_ms;
+        CoopInterpRing* ring = &coop_interp[pkt->slot];
+
+        /* Step from the newest sample, not from where the (delayed) copy
+           is drawn right now. */
+        if (!coop_interp_push(ring, &smp,
+                ring->n > 0 ? location_dist(ring->s[ring->n - 1].loc, pkt->loc) : -1)) {
+            /* First pose or a jump (teleport, door): snap. */
+            coop_lite_apply_pc_pos(obj, pkt);
         }
     } else {
         coop_lite_apply_pc_pos(obj, pkt);
@@ -4962,6 +5065,78 @@ bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc,
     p->ground_proto = proto;
     coop_lite_obj_req_flush();
     return true;
+}
+
+/* Client: show each remote PC where it was COOP_INTERP_DELAY_MS ago. */
+static void coop_lite_client_interp_tick(unsigned int now_ms)
+{
+    int64_t local_pc = player_get_local_pc_obj();
+    int slot;
+
+    if (!coop_lite_client_world_ready() || coop_lite_waiting_sync || coop_pending_sync_valid) {
+        return;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        CoopInterpRing* ring = &coop_interp[slot];
+        int64_t obj;
+        int64_t loc;
+        int ox;
+        int oy;
+        unsigned int art;
+        int ia = 0;
+        int ib = 0;
+        unsigned int num = 0;
+        unsigned int den = 1;
+        int kind;
+
+        if (ring->n == 0) {
+            continue;
+        }
+        obj = sub_4A2B60(slot);
+        if (obj == OBJ_HANDLE_NULL || obj == local_pc || critter_is_dead(obj)) {
+            continue;
+        }
+        kind = coop_interp_pick(ring, now_ms - COOP_INTERP_DELAY_MS, &ia, &ib, &num, &den);
+        if (kind == 0) {
+            continue;
+        }
+        if (kind == 1) {
+            loc = ring->s[ia].loc;
+            ox = ring->s[ia].offset_x;
+            oy = ring->s[ia].offset_y;
+            art = ring->s[ia].art_id;
+        } else {
+            const CoopInterpSample* a = &ring->s[ia];
+            const CoopInterpSample* b = &ring->s[ib];
+            int64_t ax;
+            int64_t ay;
+            int64_t bx;
+            int64_t by;
+            bool rel_b = num * 2 >= den;
+
+            location_xy(a->loc, &ax, &ay);
+            location_xy(b->loc, &bx, &by);
+            loc = rel_b ? b->loc : a->loc;
+            ox = coop_interp_offset(a->offset_x, b->offset_x, bx - ax, num, den, rel_b);
+            oy = coop_interp_offset(a->offset_y, b->offset_y, by - ay, num, den, rel_b);
+            art = b->art_id; /* the newer sample's frame */
+        }
+        if (obj_field_int64_get(obj, OBJ_F_LOCATION) != loc
+            || obj_field_int32_get(obj, OBJ_F_OFFSET_X) != ox
+            || obj_field_int32_get(obj, OBJ_F_OFFSET_Y) != oy
+            || (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != art) {
+            multiplayer_lock();
+            if (obj_field_int64_get(obj, OBJ_F_LOCATION) != loc
+                || obj_field_int32_get(obj, OBJ_F_OFFSET_X) != ox
+                || obj_field_int32_get(obj, OBJ_F_OFFSET_Y) != oy) {
+                sub_43E770(obj, loc, ox, oy);
+            }
+            if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != art) {
+                object_set_current_aid(obj, (tig_art_id_t)art);
+            }
+            multiplayer_unlock();
+        }
+    }
 }
 
 /* Ground items whose blob never came: the old proto creation. */

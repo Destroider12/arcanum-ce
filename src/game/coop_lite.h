@@ -701,6 +701,40 @@ bool coop_lite_should_skip_independent_new_game(void);
 #define COOP_LITE_FOLLOW_JUMP_X 380
 #define COOP_LITE_FOLLOW_JUMP_Y 220
 #define COOP_LITE_FOLLOW_DEADZONE_Y 120
+/*
+ * Remote-PC snapshot interpolation (clients only; never the local PC, never
+ * on the host, whose positions are authoritative). Poses are shown
+ * COOP_INTERP_DELAY_MS late, lerped in screen space between adjacent tiles;
+ * a longer step snaps.
+ */
+#define COOP_INTERP_RING 3
+#define COOP_INTERP_DELAY_MS 100u
+
+typedef struct CoopInterpSample {
+    int64_t loc;
+    int offset_x;
+    int offset_y;
+    unsigned int art_id;
+    unsigned int t_ms;
+} CoopInterpSample;
+
+typedef struct CoopInterpRing {
+    CoopInterpSample s[COOP_INTERP_RING]; /* oldest first */
+    int n;
+} CoopInterpRing;
+
+void coop_interp_reset(CoopInterpRing* ring);
+/* false: snap now (first sample, or a step over 1 tile); the ring then
+   holds only this sample. Repeats of the newest pose are ignored. */
+bool coop_interp_push(CoopInterpRing* ring, const CoopInterpSample* sample, int64_t step_tiles);
+/* For render time rt: 0 nothing, 1 show sample *ia, 2 lerp *ia -> *ib by
+   num/den. */
+int coop_interp_pick(const CoopInterpRing* ring, unsigned int rt, int* ia, int* ib,
+    unsigned int* num, unsigned int* den);
+/* Offset at num/den from (oa) to (ob + d), where d is the pixel distance
+   from tile a to tile b. rel_b expresses it relative to tile b. */
+int coop_interp_offset(int oa, int ob, int64_t d, unsigned int num, unsigned int den, bool rel_b);
+
 bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
     int64_t* out_x, int64_t* out_y);
 

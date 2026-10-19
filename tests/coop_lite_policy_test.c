@@ -1156,6 +1156,87 @@ static int test_parked(void)
     return 0;
 }
 
+/* Remote-PC interpolation helpers. */
+static int test_interp(void)
+{
+    CoopInterpRing ring;
+    CoopInterpSample a = { 100, 0, 0, 7, 1000 };
+    CoopInterpSample b = { 101, 0, 0, 8, 1050 };
+    CoopInterpSample c = { 102, 4, 0, 9, 1100 };
+    CoopInterpSample far = { 500, 0, 0, 9, 1150 };
+    int ia = -1;
+    int ib = -1;
+    unsigned int num = 0;
+    unsigned int den = 0;
+
+    coop_interp_reset(&ring);
+    if (coop_interp_pick(&ring, 5000, &ia, &ib, &num, &den) != 0) {
+        fprintf(stderr, "interp: empty ring picked something\n");
+        return 1;
+    }
+    if (coop_interp_push(&ring, &a, -1) || ring.n != 1) {
+        fprintf(stderr, "interp: first sample must snap\n");
+        return 1;
+    }
+    if (!coop_interp_push(&ring, &b, 1) || !coop_interp_push(&ring, &c, 1) || ring.n != 3) {
+        fprintf(stderr, "interp: adjacent samples refused\n");
+        return 1;
+    }
+    /* Same pose again (keyframe): ignored, time kept. */
+    c.t_ms = 2000;
+    if (!coop_interp_push(&ring, &c, 0) || ring.n != 3 || ring.s[2].t_ms != 1100) {
+        fprintf(stderr, "interp: keyframe repeat changed the ring\n");
+        return 1;
+    }
+    if (coop_interp_pick(&ring, 900, &ia, &ib, &num, &den) != 1 || ia != 0) {
+        fprintf(stderr, "interp: before oldest must hold it\n");
+        return 1;
+    }
+    if (coop_interp_pick(&ring, 1025, &ia, &ib, &num, &den) != 2 || ia != 0 || ib != 1
+        || num != 25 || den != 50) {
+        fprintf(stderr, "interp: mid a-b wrong\n");
+        return 1;
+    }
+    if (coop_interp_pick(&ring, 1075, &ia, &ib, &num, &den) != 2 || ia != 1 || ib != 2) {
+        fprintf(stderr, "interp: mid b-c wrong\n");
+        return 1;
+    }
+    if (coop_interp_pick(&ring, 1500, &ia, &ib, &num, &den) != 1 || ia != 2) {
+        fprintf(stderr, "interp: past newest must show it\n");
+        return 1;
+    }
+    /* Wrap of the ms clock. */
+    {
+        CoopInterpRing w;
+        CoopInterpSample p = { 1, 0, 0, 1, 0xFFFFFFF0u };
+        CoopInterpSample q = { 2, 0, 0, 1, 0x00000010u };
+
+        coop_interp_reset(&w);
+        coop_interp_push(&w, &p, -1);
+        coop_interp_push(&w, &q, 1);
+        if (coop_interp_pick(&w, 0, &ia, &ib, &num, &den) != 2 || num != 16 || den != 32) {
+            fprintf(stderr, "interp: clock wrap wrong\n");
+            return 1;
+        }
+    }
+    /* Jump: snap and restart. */
+    if (coop_interp_push(&ring, &far, 40) || ring.n != 1 || ring.s[0].loc != 500) {
+        fprintf(stderr, "interp: jump did not snap\n");
+        return 1;
+    }
+    /* Offsets: tile b is 40 px right of a; halfway = 20 px from a, -20 from b. */
+    if (coop_interp_offset(0, 0, 40, 1, 2, false) != 20
+        || coop_interp_offset(0, 0, 40, 1, 2, true) != -20
+        || coop_interp_offset(0, 0, 40, 0, 4, false) != 0
+        || coop_interp_offset(0, 0, 40, 4, 4, true) != 0
+        || coop_interp_offset(5, -5, 40, 9, 4, true) != -5 /* clamped to b */
+        || coop_interp_offset(3, 3, 0, 1, 0, false) != 3) {
+        fprintf(stderr, "interp: offset math wrong\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -1188,6 +1269,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_parked() != 0) {
+        return 1;
+    }
+    if (test_interp() != 0) {
         return 1;
     }
     if (coop_lite_host_left_menu_due(false, 1, 99999)
