@@ -174,6 +174,12 @@ bool party_add(int64_t leader_obj, int64_t target_obj, int* id_ptr)
     int64_t party_member_obj;
 
     if (tig_net_is_active()) {
+        /* Parties are host-authoritative (replicated via Packet71). A client
+           must never add/disband locally (e.g. adopt the host's PC). */
+        if (!tig_net_is_host()) {
+            return false;
+        }
+
         player1 = multiplayer_find_slot_from_obj(leader_obj);
         if (player1 == -1) {
             sub_4BA320(leader_obj, target_obj, 1);
@@ -226,6 +232,12 @@ bool party_remove(int64_t obj)
     int index;
 
     if (tig_net_is_active()) {
+        /* Host-authoritative; on clients this is reached from
+           object_destroy (sub_45E180) for proxies/stale PCs. */
+        if (!tig_net_is_host()) {
+            return false;
+        }
+
         index = multiplayer_find_slot_from_obj(obj);
         if (index == -1) {
             sub_4BA320(obj, obj, 5);
