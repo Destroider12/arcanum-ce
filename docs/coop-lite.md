@@ -12,7 +12,8 @@ steps (for when GOG data arrives), and the intended implementation plan.
 Large speculative network code is intentionally **not** added here.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
-GOG install archive is expected soon; ReForged will be installed from that.
+**Steam** install archive is expected soon; ReForged will be installed from that
+(see §4.0 Steam vs GOG).
 
 ---
 
@@ -135,9 +136,10 @@ UAP. UAP compatibility is explicitly untested by ReForged.
 
 ### 3.2 Installer behaviour (from `Install-ShareableBuild.ps1`)
 
-Creates a **separate** destination folder; never mutates the GOG source.
+Creates a **separate** destination folder; never mutates the source install
+(GOG or Steam).
 
-**Copied from GOG (`GamePath`):**
+**Copied from game root (`GamePath`):**
 
 - Files: `arcanum1.dat` … `arcanum4.dat`, `tig.dat`,
   `modules/Arcanum.dat`, `modules/Arcanum.PATCH0`, `modules/Vormantown.dat`
@@ -179,22 +181,48 @@ sets `HDWorldMap=1` (Windows-only toolchain).
 
 ---
 
-## 4. Exact ReForged install procedure (for when GOG data arrives)
+## 4. Exact ReForged install procedure (for when game data arrives)
 
 Official package:
 https://github.com/kurkijar/Arcanum-ReForged/releases/download/v.1.0.0/Arcanum-ReForged-V1.0.0.zip
 
 Do **not** use the GitHub “Source code” archives (README + LICENSE only).
 
+### 4.0 Steam vs GOG (user has Steam)
+
+ReForged’s published docs and installer examples assume an **English GOG**
+folder (`-GamePath 'C:\GOG Games\Arcanum'`). The user’s copy is **Steam**.
+Practical differences for CE / ReForged:
+
+| Topic | Steam | GOG | Impact |
+| --- | --- | --- | --- |
+| Core data layout | Same: `arcanum1–4.dat`, `tig.dat`, `modules/`, movies/music under `modules/Arcanum/` | Same | CE and the ReForged **file-copy** recipe work from either if those files exist |
+| Game version | Typically 1.0.7.4 English on Steam | Same English build commonly used for CE/UAP | Prefer English; UAP (if ever used) is English-only |
+| Extra launcher / DRM | Steam client / depot layout; may include legacy CD-launcher bits | DRM-free offline folder; `innoextract` friendly | For Coop Lite we only need the **data tree**, not Steamworks |
+| Path on disk | e.g. `…/Steam/steamapps/common/Arcanum` (verify locally) | e.g. `C:\GOG Games\Arcanum` | Point `-GamePath` / `$GOG` at the folder that contains the `.dat` files |
+| ReForged official support | **Not documented** by ReForged | Documented | Use the same required-file checklist; if the official `.ps1` rejects the path, use the Linux/manual copy recipe (§4.3) |
+| Filename case | Windows installs are case-insensitive; archives may ship `Arcanum4.dat` vs `arcanum4.dat` | Same caveat | On Linux, normalize/copy with the names CE expects (`arcanum1.dat` … `arcanum4.dat`, `tig.dat`) |
+| Optional folders | May or may not include loose `data/` | Same | ReForged installer does **not** require top-level `data/`; CE can use DAT repositories alone |
+| UAP | Same English constraint | Same | ReForged does **not** ship or test UAP; leave UAP off for first Coop Lite bring-up |
+
+**Checklist before install:** confirm the Steam folder (or extracted archive) contains
+every path in §4.1. If movies/music live only inside DATs on some Steam layouts,
+copy what exists and note missing folders — CE README’s “minimum installation”
+still wants loose `modules/Arcanum/movies` and `…/sound/music` for BIK/MP3; if
+absent, extract from the user’s archive or from `modules/Arcanum.dat` later.
+Do **not** run Steam while testing a copied tree; keep the ReForged destination
+outside `steamapps/common` so Steam cannot overwrite it.
+
 ### 4.1 Prerequisites
 
-- English **GOG** Arcanum install (Steam not documented by ReForged).
-- Required under GOG root:
+- English Arcanum install (**Steam** for this user; GOG also fine).
+- Required under the game root (`$GAME` / `-GamePath`):
   - `arcanum1.dat` … `arcanum4.dat`, `tig.dat`
   - `modules/Arcanum.dat`, `modules/Arcanum.PATCH0`, `modules/Vormantown.dat`
   - `modules/Arcanum/movies/`, `modules/Arcanum/sound/music/`
-- Destination folder must be **empty** and **separate** from GOG and from the
-  unpacked zip.
+- Destination folder must be **empty** and **separate** from the Steam/GOG
+  source and from the unpacked ReForged zip (never install into
+  `steamapps/common/Arcanum`).
 - Optional: standalone `ffplay.exe` for BIK movies.
 - Optional HD map: Windows + PowerShell; Vulkan Real-ESRGAN optional.
 
@@ -204,7 +232,7 @@ Do **not** use the GitHub “Source code” archives (README + LICENSE only).
 # 1. Extract Arcanum-ReForged-V1.0.0.zip to e.g. C:\Temp\ReForgedPkg
 # 2. From that folder:
 .\Install-ShareableBuild.ps1 `
-  -GamePath 'C:\GOG Games\Arcanum' `
+  -GamePath 'C:\Program Files (x86)\Steam\steamapps\common\Arcanum' `  # adjust to actual Steam path
   -DestinationPath 'C:\Games\Arcanum-ReForged' `
   -Width 1920 -Height 1080 -Windowed 0
 
@@ -226,26 +254,29 @@ ReForged’s playable bits are mostly **file copies**. The official installer is
 PowerShell + a **Windows PE** `arcanum-ce.exe`. On Linux we can stage the same
 tree for data/config validation; **running** the ReForged UI requires Wine
 (or waiting for a native ReForged build). Stock Linux `arcanum-ce` from this
-repo can run against the **copied GOG data** (classic UI; ignores modern
+repo can run against the **copied Steam/GOG data** (classic UI; ignores modern
 config keys / DXIL shaders).
 
-Suggested layout once the GOG archive is unpacked to `$GOG`:
+Suggested layout once the Steam (or GOG) archive is unpacked to `$GAME`:
 
 ```bash
 PKG=/path/to/unpacked/Arcanum-ReForged-V1.0.0   # zip contents
-GOG=/path/to/clean/gog/Arcanum
-DST=/path/to/Arcanum-ReForged                    # empty directory
+GAME=/path/to/clean/steam/Arcanum               # folder that contains *.dat
+DST=/path/to/Arcanum-ReForged                    # empty directory (not under steamapps)
 
 mkdir -p "$DST/modules/Arcanum" "$DST/shaders" "$DST/HighRes" "$DST/legal"
 
 # --- game data (same set as Install-ShareableBuild.ps1) ---
+# Normalize case if the archive used Arcanum4.dat etc.
 for f in arcanum1.dat arcanum2.dat arcanum3.dat arcanum4.dat tig.dat; do
-  cp -a "$GOG/$f" "$DST/$f"
+  src=$(find "$GAME" -maxdepth 1 -iname "$f" | head -1)
+  test -n "$src" || { echo "MISSING $f"; exit 1; }
+  cp -a "$src" "$DST/$f"
 done
-cp -a "$GOG/modules/Arcanum.dat" "$GOG/modules/Arcanum.PATCH0" \
-      "$GOG/modules/Vormantown.dat" "$DST/modules/"
-cp -a "$GOG/modules/Arcanum/movies" "$DST/modules/Arcanum/"
-cp -a "$GOG/modules/Arcanum/sound" "$DST/modules/Arcanum/"   # includes music/
+cp -a "$GAME/modules/Arcanum.dat" "$GAME/modules/Arcanum.PATCH0" \
+      "$GAME/modules/Vormantown.dat" "$DST/modules/"
+cp -a "$GAME/modules/Arcanum/movies" "$DST/modules/Arcanum/"
+cp -a "$GAME/modules/Arcanum/sound" "$DST/modules/Arcanum/"   # includes music/
 
 # --- ReForged payload ---
 cp -a "$PKG/payload/arcanum-ce.exe" "$DST/arcanum-ce.exe"
@@ -368,8 +399,9 @@ slot. Do not diverge save version from ReForged/CE without a migration note.
 
 ## 7. Recommended next steps
 
-1. When GOG archive arrives: unpack → apply §4.3 copy recipe → confirm stock
-   Linux CE boots; optionally try Wine for ReForged exe.
+1. When Steam archive arrives: unpack → verify §4.1 files (§4.0) → apply §4.3
+   copy recipe → confirm stock Linux CE boots; optionally try Wine for
+   ReForged exe.
 2. Decide transport: revive Troika-shaped `tig_net` vs new thin UDP/TCP layer
    that still feeds `multiplayer_handle_message`.
 3. Implement §5 gates behind `CoopLite`, with forced-role SP tests for wmap
