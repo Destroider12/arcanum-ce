@@ -532,6 +532,7 @@ void mp_handle_packet4(Packet4* pkt)
 
     sub_4F0690(pkt->oid, &obj);
     if (obj == OBJ_HANDLE_NULL) {
+        tig_debug_printf("MP: Packet4 move intent for unknown OID (client PC not adopted?)\n");
         return;
     }
 
@@ -681,6 +682,11 @@ void mp_handle_packet70(Packet70* pkt)
     if (tig_net_is_active() && coop_lite_should_skip_independent_new_game()
         && coop_lite_client_waiting_for_sync()) {
         tig_debug_printf("MP: Packet70 deferred (client waiting for session sync)\n");
+        return;
+    }
+
+    if (pkt->subtype == 0 && obj_pool_perm_lookup(pkt->s0.oid) != OBJ_HANDLE_NULL) {
+        /* Already have it (e.g. our own PC adopted by the host). */
         return;
     }
 

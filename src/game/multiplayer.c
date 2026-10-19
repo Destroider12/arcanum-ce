@@ -1105,6 +1105,13 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_SESSION_SYNC:
         coop_lite_handle_session_sync((PacketCoopSessionSync*)msg);
         break;
+    case PACKET_COOP_PC_POS:
+        coop_lite_handle_pc_pos((PacketCoopPcPos*)msg);
+        break;
+    case 122:
+        /* Client→host notification with no host-side handler; drop quietly
+           (was logging "unhandled" on every send). */
+        break;
     default:
         tig_debug_printf("MP: unhandled packet type %d\n", type);
         break;
@@ -2616,8 +2623,8 @@ int sub_4A5460(int64_t a1)
 // 0x4A5490
 void multiplayer_ping(tig_timestamp_t timestamp)
 {
-    (void)timestamp;
     tig_net_pump();
+    coop_lite_ping((unsigned int)timestamp);
 }
 
 // 0x4A54A0

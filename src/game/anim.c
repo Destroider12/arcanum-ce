@@ -13338,15 +13338,15 @@ bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
         && !tig_net_is_host()) {
         Packet4 pkt;
 
-        if (!anim_is_current_goal_type(obj, AG_RUN_TO_TILE, &anim_id)) {
-            return false;
-        }
-
-        if (anim_id_to_run_info(&anim_id, &run_info)) {
-            return false;
-        }
-
-        if (run_info->goals[run_info->current_goal].params[AGDATA_TARGET_TILE].loc == loc) {
+        /*
+         * Client: send a move intent to the host (authoritative) unless we're
+         * already running toward this exact tile. The original checks were
+         * inverted (returned early when *not* running), so a client ground
+         * click never reached the host. Mirrors sub_433A00.
+         */
+        if (anim_is_current_goal_type(obj, AG_RUN_TO_TILE, &anim_id)
+            && anim_id_to_run_info(&anim_id, &run_info)
+            && run_info->goals[run_info->current_goal].params[AGDATA_TARGET_TILE].loc == loc) {
             return false;
         }
 

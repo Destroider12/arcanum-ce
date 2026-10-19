@@ -784,3 +784,33 @@ Client talk uses existing `dialog_ui` + per-node filter once the shared map/PCs 
 - Orphan ShopMap PC on client after OID recreate not destroyed.
 - Client-created (charedit) path should also call `coop_lite_client_offer_character` (premade path does).
 
+
+## 18. Playtest 4 fixes (session ordering, movement, talk, lag)
+
+- **Session start order.** `CHAR_OFFER` now carries the client's own PC ObjectID.
+  The host creates the companion with **that OID**, clears `OF_OFF`, and binds
+  it to the slot. Watch for `CoopLite: created PC ... flags=` and
+  `SESSION_SYNC sent ... (companion spawned on host)` in the host log.
+  On `SESSION_SYNC` the client only teleports its **existing** local PC (the
+  same PC, so camera and UI stay intact) to the host map. Once the teleport
+  finishes (hook in `teleport.c`), `coop_lite_client_on_teleport_done()`
+  creates or binds the host proxy and binds the slots. A busy teleport retries
+  every 250 ms. Packet70 skips OIDs that already exist.
+- **Movement.** `anim_goal_move_to_tile` had its client checks inverted, so it
+  never sent Packet4. That is fixed. The host is authoritative: it moves the
+  PC and broadcasts `PACKET_COOP_PC_POS` (132) for every slot PC. Broadcasts
+  go out at most every 100 ms and only when something changed. Clients apply
+  them with `sub_43E770` and `object_set_current_aid`.
+- **Talk.** On a coop client, clicking an NPC calls
+  `coop_lite_client_talk`. If the NPC is in range, it opens a local dialog
+  with the per-node filter. If not, it sends a move intent toward the NPC;
+  click again to talk.
+- **Lag.** The per-packet `enet_host_flush` was replaced with a single flush
+  per pump. Packet 122 is dropped quietly instead of being logged as
+  unhandled. A `tig_net: 10s stats` line shows the packet types sent or
+  received ≥50 times in 10 s. The run dirs use the RelWithDebInfo build
+  (`out/build/linux-x64-relwithdebinfo`).
+- **Gaps.** Dialog runs on the client, not routed through the host, so script
+  side effects stay local. The host-side proxy uses the generic PC art proto
+  16066. Movement replicates by position, so it can look step-wise at
+  100 ms.

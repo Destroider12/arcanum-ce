@@ -13,9 +13,13 @@ extern "C" {
 #define PACKET_COOP_FOLLOW_HOST 129
 #define PACKET_COOP_CHAR_OFFER 130
 #define PACKET_COOP_SESSION_SYNC 131
+#define PACKET_COOP_PC_POS 132
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 132
+#define PACKET_COOP_TYPE_LIMIT 133
+
+/* Host PC position broadcast interval (ms). */
+#define COOP_LITE_PC_POS_INTERVAL_MS 100u
 
 
 typedef struct PacketCoopAttackIntent {
@@ -37,7 +41,21 @@ typedef struct PacketCoopCharOffer {
     /* 0004 */ int slot;
     /* 0008 */ int basic_prototype;
     /* 000C */ char name[64];
+    /* 004C */ int has_oid;
+    /* 0050 */ unsigned char pc_oid[24]; /* client's own PC ObjectID — host adopts it */
 } PacketCoopCharOffer;
+
+/* Host → clients: authoritative PC position/art (rate limited). */
+typedef struct PacketCoopPcPos {
+    /* 0000 */ int type;
+    /* 0004 */ int slot;
+    /* 0008 */ unsigned char oid[24];
+    /* 0020 */ int64_t loc;
+    /* 0028 */ int offset_x;
+    /* 002C */ int offset_y;
+    /* 0030 */ unsigned int art_id;
+    /* 0034 */ int pad;
+} PacketCoopPcPos;
 
 /*
  * Host → client: join the host's session. Client loads map, creates both PCs
@@ -139,6 +157,28 @@ typedef enum CoopMpPacketRole {
 } CoopMpPacketRole;
 
 CoopMpPacketRole coop_lite_mp_packet_role(int type);
+
+/* True if two PC_POS samples differ (loc/offset/art). Pure; used by tests. */
+bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
+
+/* True if at least interval_ms elapsed (wrap-safe). Pure; used by tests. */
+bool coop_lite_interval_elapsed(unsigned int last_ms, unsigned int now_ms, unsigned int interval_ms);
+
+/* Per-frame coop tick (host: PC_POS broadcast). now_ms = monotonic ms. */
+void coop_lite_ping(unsigned int now_ms);
+
+/* Client: apply host PC_POS. */
+void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt);
+
+/* Client: local PC teleport finished — complete a pending SESSION_SYNC. */
+void coop_lite_client_on_teleport_done(void);
+
+/*
+ * Client: clicked an NPC to talk. In range → start local dialog (per-node
+ * filter); else send move intent toward NPC. Returns true if handled.
+ */
+bool coop_lite_client_talk(int64_t pc_obj, int64_t npc_obj);
+
 
 /* Client: send CHAR_OFFER from local premade/created PC; return true if sent. */
 bool coop_lite_client_offer_character(int basic_prototype, const char* name);

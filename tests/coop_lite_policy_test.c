@@ -303,6 +303,75 @@ static int run_host(void)
     return 0;
 }
 
+static int test_pc_pos_helpers(void)
+{
+    PacketCoopPcPos a;
+    PacketCoopPcPos b;
+
+    memset(&a, 0, sizeof(a));
+    a.type = PACKET_COOP_PC_POS;
+    a.loc = 0x0000001200000034LL;
+    a.offset_x = 3;
+    a.art_id = 0x1234u;
+    b = a;
+    if (coop_lite_pc_pos_changed(&a, &b)) {
+        fprintf(stderr, "pc_pos: identical samples flagged changed\n");
+        return 1;
+    }
+    b.offset_y = 1;
+    if (!coop_lite_pc_pos_changed(&a, &b)) {
+        fprintf(stderr, "pc_pos: offset change missed\n");
+        return 1;
+    }
+    b = a;
+    b.art_id = 0x1235u;
+    if (!coop_lite_pc_pos_changed(&a, &b)) {
+        fprintf(stderr, "pc_pos: art change missed\n");
+        return 1;
+    }
+    b = a;
+    b.loc += 1;
+    if (!coop_lite_pc_pos_changed(&a, &b) || !coop_lite_pc_pos_changed(NULL, &a)) {
+        fprintf(stderr, "pc_pos: loc/NULL change missed\n");
+        return 1;
+    }
+
+    /* Rate limit: 100 ms, wrap-safe. */
+    if (coop_lite_interval_elapsed(1000u, 1050u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: 50ms should not elapse\n");
+        return 1;
+    }
+    if (!coop_lite_interval_elapsed(1000u, 1100u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: 100ms should elapse\n");
+        return 1;
+    }
+    if (!coop_lite_interval_elapsed(0xFFFFFFF0u, 0x00000060u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: wraparound failed\n");
+        return 1;
+    }
+    if (coop_lite_interval_elapsed(0xFFFFFFF0u, 0x00000010u, COOP_LITE_PC_POS_INTERVAL_MS)) {
+        fprintf(stderr, "rate: wraparound short interval elapsed\n");
+        return 1;
+    }
+
+    if (coop_lite_mp_packet_role(PACKET_COOP_PC_POS) != COOP_MP_PKT_CLIENT_APPLY
+        || coop_lite_mp_packet_role(PACKET_COOP_CHAR_OFFER) != COOP_MP_PKT_HOST_RESOLVE) {
+        fprintf(stderr, "pc_pos/char_offer role wrong\n");
+        return 1;
+    }
+    if (PACKET_COOP_PC_POS >= PACKET_COOP_TYPE_LIMIT) {
+        fprintf(stderr, "PC_POS not under validate limit\n");
+        return 1;
+    }
+    if (sizeof(PacketCoopPcPos) != 0x38 || sizeof(PacketCoopCharOffer) != 0x68) {
+        fprintf(stderr, "packet layout changed: pcpos=%zu offer=%zu\n",
+            sizeof(PacketCoopPcPos), sizeof(PacketCoopCharOffer));
+        return 1;
+    }
+    printf("pc_pos helpers / rate limit OK\n");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -317,6 +386,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_mp_packet_roles() != 0) {
+        return 1;
+    }
+    if (test_pc_pos_helpers() != 0) {
         return 1;
     }
 

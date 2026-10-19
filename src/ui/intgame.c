@@ -1,5 +1,7 @@
 #include "ui/intgame.h"
 
+#include "game/coop_lite.h"
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -3474,6 +3476,12 @@ void sub_54ED30(TargetDescriptor* td)
                     obj_field_int32_get(td->obj, OBJ_F_CURRENT_AID);
 
                     if (player_is_pc_obj(td->obj)) {
+                        return;
+                    }
+
+                    /* Coop client: AG_TALK only opens dialog on host, so
+                       start it here (filtered) or walk closer. */
+                    if (coop_lite_client_talk(pc_obj, td->obj)) {
                         return;
                     }
 

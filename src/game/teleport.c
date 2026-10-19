@@ -280,6 +280,8 @@ bool teleport_process(TeleportData* teleport_data)
         coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
         /* Client may have queued a follow while still on ShopMap / main menu. */
         coop_lite_flush_pending_follow();
+        /* Client: host map now loaded — bind PCs from pending SESSION_SYNC. */
+        coop_lite_client_on_teleport_done();
     }
 
     return true;

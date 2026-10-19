@@ -137,16 +137,33 @@ static int run_client(void)
     sync.client_proto = 16067;
     sync.host_proto = 16066;
     strncpy(sync.client_name, "TestCompanion", sizeof(sync.client_name) - 1);
-    coop_lite_handle_session_sync(&sync);
-
-    if (!coop_lite_client_session_ready()) {
-        fprintf(stderr, "client: expected session_ready\n");
+    /* A teleport-done with no pending sync must not mark the session ready. */
+    coop_lite_client_on_teleport_done();
+    if (coop_lite_client_session_ready()) {
+        fprintf(stderr, "client: ready without SESSION_SYNC\n");
         return 1;
     }
+
+    coop_lite_handle_session_sync(&sync);
+
+    /* Ordering: map load (teleport) is requested first; PCs are bound only
+       once the teleport completes. */
     if (g_teleport_calls < 1 || g_applied_map != 7) {
         fprintf(stderr, "client: teleport map=%d calls=%d\n", g_applied_map, g_teleport_calls);
         return 1;
     }
+    if (coop_lite_client_session_ready() || !coop_lite_client_waiting_for_sync()) {
+        fprintf(stderr, "client: session bound before map load finished\n");
+        return 1;
+    }
+
+    coop_lite_client_on_teleport_done(); /* teleport.c hook */
+    if (!coop_lite_client_session_ready() || coop_lite_client_waiting_for_sync()) {
+        fprintf(stderr, "client: expected session_ready after teleport done\n");
+        return 1;
+    }
+    /* Second teleport-done (later travel) is a no-op. */
+    coop_lite_client_on_teleport_done();
     coop_lite_acknowledge_session_ready();
     if (coop_lite_client_session_ready()) {
         fprintf(stderr, "client: ack failed\n");
