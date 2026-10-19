@@ -781,6 +781,7 @@ static int test_packet_hardening(void)
         || coop_lite_batch_size(3, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)) != 8 + 3 * 0x38
         || coop_lite_batch_size(COOP_NPC_POS_MAX + 1, COOP_NPC_POS_MAX, 0x38) != 0
         || coop_lite_batch_size(-1, COOP_NPC_POS_MAX, 0x38) != 0
+        || sizeof(PacketCoopNpcPos) > 1200 /* ENet fragments bigger unreliable datagrams */
         || coop_lite_batch_size(COOP_NPC_POS_MAX, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)) > TIG_NET_MAX_PACKET
         || coop_lite_batch_size(COOP_FOLLOWERS_MAX, COOP_FOLLOWERS_MAX, sizeof(PacketCoopFollowerEntry)) != sizeof(PacketCoopFollowers)) {
         fprintf(stderr, "batch sizes wrong\n");
@@ -1100,6 +1101,13 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_obj_blob() != 0) {
+        return 1;
+    }
+    if (coop_lite_host_left_menu_due(false, 1, 99999)
+        || coop_lite_host_left_menu_due(true, 1000, 4999)
+        || !coop_lite_host_left_menu_due(true, 1000, 5000)
+        || !coop_lite_host_left_menu_due(true, 0xFFFFF000u, 3000u)) {
+        fprintf(stderr, "host-left menu timing wrong\n");
         return 1;
     }
 

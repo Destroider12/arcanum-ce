@@ -98,7 +98,7 @@ typedef struct PacketCoopFollowers {
 } PacketCoopFollowers;
 
 /* Host → clients: NPC poses (variable length: count entries). */
-#define COOP_NPC_POS_MAX 24
+#define COOP_NPC_POS_MAX 16 /* 8 + 16 * 0x38 = 904 B: one unfragmented datagram */
 #define COOP_NPC_POS_DEAD 0x1
 typedef struct PacketCoopNpcPosEntry {
     /* 0000 */ unsigned char oid[24];
@@ -365,6 +365,10 @@ bool coop_lite_client_opens_inven_locally(int mode, int64_t pc_obj);
 /* inven_ui_open, for the headless barter dev hook (game code can't call UI). */
 /* dialog_ui registers dialog_ui_end_dialog (game/ cannot include ui/). */
 void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2));
+/* UI side of "the host left": reset the game and show the main menu. */
+void coop_lite_set_return_to_menu_hook(void (*hook)(void));
+/* Pure: should the deferred return-to-menu fire now? */
+bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms);
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and

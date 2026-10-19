@@ -909,6 +909,10 @@ static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
 static unsigned int coop_obj_now_ms; /* last coop_lite_ping time */
+/* Not cleared by session_reset: it fires after the session is gone. */
+static bool coop_host_left_menu_armed;
+static unsigned int coop_host_left_menu_ms;
+static void (*coop_return_to_menu_hook)(void);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_obj_pending_reset(void);
 #endif
@@ -3696,6 +3700,14 @@ void coop_lite_ping(unsigned int now_ms)
     int64_t obj;
     PacketCoopPcPos pkt;
 
+    if (coop_lite_host_left_menu_due(coop_host_left_menu_armed, coop_host_left_menu_ms, now_ms)) {
+        coop_host_left_menu_armed = false;
+        if (coop_return_to_menu_hook != NULL) {
+            tig_debug_printf("CoopLite: host gone — back to the main menu\n");
+            coop_return_to_menu_hook();
+        }
+        return;
+    }
     if (!tig_net_is_active()) {
         return;
     }
@@ -5427,6 +5439,11 @@ void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2))
     coop_dialog_end_hook = hook;
 }
 
+void coop_lite_set_return_to_menu_hook(void (*hook)(void))
+{
+    coop_return_to_menu_hook = hook;
+}
+
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode))
 {
     coop_inven_open_hook = hook;
@@ -5605,8 +5622,21 @@ void coop_lite_client_host_left(void)
         return;
     }
     tig_debug_printf("CoopLite: the host left the session\n");
-    coop_lite_show_notice("The host left the game. Quit to the main menu to join again.", TF_TYPE_RED);
+    /* Keep the player's progress: the session's state of this PC goes to
+       its character bundle before anything is reset. */
+    if (player_get_local_pc_obj() != OBJ_HANDLE_NULL && coop_lite_client_world_ready()) {
+        coop_lite_export_local_character_impl();
+    }
+    coop_lite_show_notice("The host left the game. Your character was saved; returning to the main menu.", TF_TYPE_RED);
+    coop_host_left_menu_armed = true;
+    coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
 #endif
+}
+
+bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms)
+{
+    /* A few seconds so the notice can be read. */
+    return armed && coop_lite_interval_elapsed(armed_ms, now_ms, 4000u);
 }
 
 /* ---- Character bundle wire format (pure; unit-tested) ---- */

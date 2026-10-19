@@ -1394,6 +1394,20 @@ static int64_t qword_64C460;
 static int dword_64C468;
 
 // 0x540930
+/* Coop: the host left (review M1). Same reset as death / end game. */
+static void mainmenu_ui_coop_return_to_menu(void)
+{
+    if (mainmenu_ui_is_active()) {
+        return;
+    }
+    if (inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
+        sub_575770();
+    }
+    gamelib_reset();
+    gameuilib_reset();
+    mainmenu_ui_start(MM_TYPE_DEFAULT);
+}
+
 bool mainmenu_ui_init(GameInitInfo* init_info)
 {
     int index;
@@ -1487,6 +1501,7 @@ bool mainmenu_ui_init(GameInitInfo* init_info)
 
     mainmenu_ui_initialized = true;
     mainmenu_ui_window_type = MM_WINDOW_0;
+    coop_lite_set_return_to_menu_hook(mainmenu_ui_coop_return_to_menu);
 
     dword_64C388 = true;
     mainmenu_ui_start(MM_TYPE_DEFAULT);
