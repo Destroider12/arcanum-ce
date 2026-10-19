@@ -126,15 +126,29 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     char str[2000];
     CoopTalkPolicy talk_policy;
 
-    /* Coop Lite: clients open dialog; story nodes filtered in display/process. */
+    /*
+     * Coop Lite: clients only talk to merchants (reduced dialog, story nodes
+     * filtered in display/process). Everyone else — quest givers, story NPCs,
+     * other players' followers, citizens — just barks.
+     */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
     if (talk_policy == COOP_TALK_BLOCK) {
         return;
     }
+    if (talk_policy == COOP_TALK_BARK || talk_policy == COOP_TALK_BARK_FOLLOWER) {
+        int speech_id = -1;
 
-    if (!coop_lite_client_may_open_dialog(npc_obj, pc_obj)) {
-        dialog_ui_float_line(npc_obj, pc_obj,
-            "(Following the party leader. Speak with them.)", -1);
+        str[0] = '\0';
+        if (talk_policy == COOP_TALK_BARK) {
+            /* The NPC's own generic farewell (race/gender aware). */
+            dialog_copy_npc_farewell_msg(npc_obj, pc_obj, str, &speech_id);
+        }
+        if (str[0] == '\0') {
+            snprintf(str, sizeof(str), "%s", coop_lite_bark_text(talk_policy));
+            speech_id = -1;
+        }
+        tig_debug_printf("DialogUI: coop client bark (policy %d)\n", (int)talk_policy);
+        dialog_ui_float_line(npc_obj, pc_obj, str, speech_id);
         return;
     }
 
@@ -388,6 +402,16 @@ bool dialog_ui_message_filter(TigMessage* msg)
     int player;
 
     entry = sub_567420(player_get_local_pc_obj());
+
+    /* Coop client: Esc always leaves the (reduced) dialog, so a dialog whose
+       options are all host-only can never trap the player (PT8). */
+    if (coop_lite_is_client_role()
+        && msg->type == TIG_MESSAGE_KEYBOARD
+        && msg->data.keyboard.pressed
+        && msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE) {
+        dialog_ui_end_dialog(entry->state.pc_obj, 0);
+        return true;
+    }
 
     option = intgame_dialog_get_option(msg);
     if (option == -1) {

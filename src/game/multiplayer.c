@@ -1108,6 +1108,12 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_PC_POS:
         coop_lite_handle_pc_pos((PacketCoopPcPos*)msg);
         break;
+    case PACKET_COOP_FOLLOWERS:
+        coop_lite_handle_followers((PacketCoopFollowers*)msg);
+        break;
+    case PACKET_COOP_NPC_POS:
+        coop_lite_handle_npc_pos((PacketCoopNpcPos*)msg);
+        break;
     case 122:
         /* Client→host notification with no host-side handler; drop quietly
            (was logging "unhandled" on every send). */
@@ -1267,9 +1273,11 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
         return true;
     case TIG_NET_EVENT_DISCONNECT:
         if (client_id > 0 && client_id < NUM_PLAYERS) {
+            int64_t left_pc = sub_4A2B60(client_id);
             sub_4A2AE0(client_id);
             if (tig_net_is_host()) {
                 coop_lite_host_on_client_disconnect(client_id);
+                coop_lite_host_remove_left_pc(left_pc);
                 multiplayer_send_player_list();
             }
         }

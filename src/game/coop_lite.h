@@ -15,9 +15,11 @@ extern "C" {
 #define PACKET_COOP_CHAR_OFFER 130
 #define PACKET_COOP_SESSION_SYNC 131
 #define PACKET_COOP_PC_POS 132
+#define PACKET_COOP_FOLLOWERS 133 /* host → clients: who follows which slot PC */
+#define PACKET_COOP_NPC_POS 134 /* host → clients: NPC pose batch near PCs */
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 133
+#define PACKET_COOP_TYPE_LIMIT 135
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -69,6 +71,46 @@ typedef struct PacketCoopPcPos {
     /* 0034 */ int flags;
 } PacketCoopPcPos;
 
+/* Host → clients: follower/leader table (variable length: count entries). */
+#define COOP_FOLLOWERS_MAX 16
+typedef struct PacketCoopFollowerEntry {
+    /* 0000 */ unsigned char npc_oid[24];
+    /* 0018 */ int leader_slot;
+    /* 001C */ int reserved;
+} PacketCoopFollowerEntry;
+
+typedef struct PacketCoopFollowers {
+    /* 0000 */ int type;
+    /* 0004 */ int count;
+    /* 0008 */ PacketCoopFollowerEntry entries[COOP_FOLLOWERS_MAX];
+} PacketCoopFollowers;
+
+/* Host → clients: NPC poses (variable length: count entries). */
+#define COOP_NPC_POS_MAX 24
+#define COOP_NPC_POS_DEAD 0x1
+typedef struct PacketCoopNpcPosEntry {
+    /* 0000 */ unsigned char oid[24];
+    /* 0018 */ int64_t loc;
+    /* 0020 */ int offset_x;
+    /* 0024 */ int offset_y;
+    /* 0028 */ unsigned int art_id;
+    /* 002C */ unsigned int flags;
+    /* 0030 */ int hp_damage;
+    /* 0034 */ int reserved;
+} PacketCoopNpcPosEntry;
+
+typedef struct PacketCoopNpcPos {
+    /* 0000 */ int type;
+    /* 0004 */ int count;
+    /* 0008 */ PacketCoopNpcPosEntry entries[COOP_NPC_POS_MAX];
+} PacketCoopNpcPos;
+
+/* Bytes needed for `count` entries of `entry_size` after an 8-byte header;
+   0 when count is out of range. */
+size_t coop_lite_batch_size(int count, int max_count, size_t entry_size);
+/* Received batch is consistent with the received byte size. */
+bool coop_lite_batch_valid(int count, int max_count, size_t entry_size, int msg_size);
+
 /*
  * Host → client: join the host's session. Client loads map, creates both PCs
  * with matching OIDs (host PC as NETWORK proxy, local PC as player_pc_obj).
@@ -104,6 +146,10 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x38, "PacketCoopPcPos size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, flags) == 0x34, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopSessionSync) == 0xD8, "PacketCoopSessionSync size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopFollowerEntry) == 0x20, "PacketCoopFollowerEntry size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopFollowers, entries) == 0x08, "PacketCoopFollowers layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopNpcPosEntry) == 0x38, "PacketCoopNpcPosEntry size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopNpcPos, entries) == 0x08, "PacketCoopNpcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_loc) == 0x08, "PacketCoopSessionSync layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, client_slot) == 0x48, "PacketCoopSessionSync layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_name) == 0x94, "PacketCoopSessionSync layout");
@@ -112,6 +158,10 @@ typedef enum CoopTalkPolicy {
     COOP_TALK_ALLOW = 0,
     COOP_TALK_INFO_ONLY = 1,
     COOP_TALK_BLOCK = 2,
+    /* Coop client, non-merchant: no dialog window, a short bark instead. */
+    COOP_TALK_BARK = 3,
+    /* Coop client, another player's follower: "talk to the leader" bark. */
+    COOP_TALK_BARK_FOLLOWER = 4,
 } CoopTalkPolicy;
 
 /* True when world map may be opened/used: always in SP; host-only in coop. */
@@ -136,6 +186,35 @@ CoopTalkPolicy coop_lite_can_talk(int64_t npc_obj, int64_t pc_obj);
  */
 CoopTalkPolicy coop_lite_classify_talk(bool coop_active, bool is_host,
     bool is_merchant, bool dialog_has_story_effects);
+/*
+ * Client talk rule (PT8 design): clients only open dialog with merchants
+ * (barter + neutral lines; story options still filtered per node); another
+ * player's follower and every other NPC answer with a bark.
+ */
+CoopTalkPolicy coop_lite_classify_client_talk(bool is_merchant, bool follows_other_player);
+/* Fallback bark text when the NPC has no generic line. */
+const char* coop_lite_bark_text(CoopTalkPolicy policy);
+
+/* Follower table handlers. */
+void coop_lite_handle_followers(PacketCoopFollowers* pkt);
+void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt);
+
+/* Client camera: true when the target is off the visible area (recentre). */
+bool coop_lite_follow_needs_jump(int64_t dx, int64_t dy, int64_t half_w, int64_t half_h);
+
+/* Host: seconds a fallen client PC stays down before it is revived. */
+#define COOP_LITE_REVIVE_DELAY_MS 8000u
+/* Host: revive is due (pure, for tests). */
+bool coop_lite_revive_due(unsigned int dead_since_ms, unsigned int now_ms);
+
+/* Starting kit for a coop-created/offered PC, generated locally (suspended). */
+void coop_lite_generate_start_inventory(int64_t pc_obj);
+
+/* Host: a client disconnected — remove the PC it left behind. */
+void coop_lite_host_remove_left_pc(int64_t pc_obj);
+
+/* Client: re-establish the configured -join connection after quit-to-menu. */
+bool coop_lite_client_reconnect(void);
 
 /* True if non-host may pick this response (barter / harmless actions). */
 bool coop_lite_dialog_option_allowed(const char* actions, int response_code);
@@ -285,6 +364,9 @@ bool coop_lite_should_skip_independent_new_game(void);
  * it is outside the zone.
  */
 #define COOP_LITE_FOLLOW_DEADZONE_X 200
+/* Beyond this the PC is (nearly) off screen at 800x600: recentre. */
+#define COOP_LITE_FOLLOW_JUMP_X 380
+#define COOP_LITE_FOLLOW_JUMP_Y 220
 #define COOP_LITE_FOLLOW_DEADZONE_Y 120
 bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
     int64_t* out_x, int64_t* out_y);

@@ -1654,6 +1654,9 @@ void sub_5412E0(bool a1)
                 if (coop_lite_should_skip_independent_new_game()) {
                     char* offer_name = NULL;
                     int proto = 16066;
+                    if (!coop_lite_client_waiting_for_sync()) {
+                        coop_lite_generate_start_inventory(pc_obj);
+                    }
                     obj_field_string_get(pc_obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
                     /* Prototype unknown here; CHAR_OFFER should already have been sent. */
                     if (!coop_lite_client_waiting_for_sync()) {
@@ -3740,6 +3743,9 @@ void mainmenu_ui_create_single_player(void)
 // 0x5446D0
 void mainmenu_ui_pick_new_or_pregen_create(void)
 {
+    /* Coop client back in the menu after Quit Game: rejoin before New Game. */
+    coop_lite_client_reconnect();
+
     dword_64C454 = CHAREDIT_MODE_CREATE;
     mainmenu_ui_window_type = MM_WINDOW_PICK_NEW_OR_PREGEN;
     mainmenu_ui_create_window();
@@ -4450,6 +4456,9 @@ bool mainmenu_ui_pregen_char_execute(int btn)
 
     if (coop_lite_should_skip_independent_new_game()) {
         char* offer_name = NULL;
+        /* No shop map on a coop client: give the premade its starting kit
+           here (SP does it in mainmenu_ui_shop_refresh). */
+        coop_lite_generate_start_inventory(player_create_info.obj);
         obj_field_string_get(player_create_info.obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
         coop_lite_client_offer_character(player_create_info.basic_prototype,
             offer_name != NULL ? offer_name : "Companion");

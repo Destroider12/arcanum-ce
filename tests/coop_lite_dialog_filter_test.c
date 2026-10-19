@@ -314,9 +314,11 @@ int main(void)
         return 1;
     }
 
-    /* classify always ALLOW now */
-    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_ALLOW) {
-        fprintf(stderr, "story NPC should ALLOW (filtered)\n");
+    /* PT8: clients open dialog only with merchants (Ristezze-style shops,
+       story nodes still filtered); everyone else barks. */
+    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_BARK
+        || coop_lite_classify_talk(true, false, true, true) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "client classify: story NPC must bark, merchant opens\n");
         return 1;
     }
 

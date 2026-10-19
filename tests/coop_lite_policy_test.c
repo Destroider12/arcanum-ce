@@ -137,12 +137,27 @@ static int test_classify_and_offsets(void)
         fprintf(stderr, "merchant should ALLOW even with story\n");
         return 1;
     }
-    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_ALLOW) {
-        fprintf(stderr, "story NPC should ALLOW (per-node filter) for companion\n");
+    /* PT8 design: clients only talk to merchants; everyone else barks. */
+    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_BARK) {
+        fprintf(stderr, "story NPC should BARK for a client\n");
         return 1;
     }
-    if (coop_lite_classify_talk(true, false, false, false) != COOP_TALK_ALLOW) {
-        fprintf(stderr, "ordinary NPC should ALLOW\n");
+    if (coop_lite_classify_talk(true, false, false, false) != COOP_TALK_BARK) {
+        fprintf(stderr, "ordinary NPC should BARK for a client\n");
+        return 1;
+    }
+    /* Another player's follower (Virgil) barks even if it could trade. */
+    if (coop_lite_classify_client_talk(true, true) != COOP_TALK_BARK_FOLLOWER
+        || coop_lite_classify_client_talk(false, true) != COOP_TALK_BARK_FOLLOWER
+        || coop_lite_classify_client_talk(true, false) != COOP_TALK_ALLOW
+        || coop_lite_classify_client_talk(false, false) != COOP_TALK_BARK) {
+        fprintf(stderr, "classify_client_talk wrong\n");
+        return 1;
+    }
+    if (coop_lite_bark_text(COOP_TALK_BARK) == NULL
+        || coop_lite_bark_text(COOP_TALK_BARK_FOLLOWER) == NULL
+        || coop_lite_bark_text(COOP_TALK_ALLOW) != NULL) {
+        fprintf(stderr, "bark text wrong\n");
         return 1;
     }
     printf("classify: OK\n");
@@ -217,8 +232,12 @@ static int run_client(void)
 
     g_coop_lite_test_merchant = 0;
     g_coop_lite_test_story = 1;
-    if (coop_lite_can_talk(99, 1) != COOP_TALK_ALLOW) {
-        fprintf(stderr, "client: story NPC should ALLOW (filtered)\n");
+    if (coop_lite_can_talk(99, 1) != COOP_TALK_BARK) {
+        fprintf(stderr, "client: story NPC should BARK\n");
+        return 1;
+    }
+    if (coop_lite_client_may_open_dialog(99, 1)) {
+        fprintf(stderr, "client: non-merchant must not open dialog\n");
         return 1;
     }
     g_coop_lite_test_merchant = 1;
@@ -451,6 +470,7 @@ static int test_packet_hardening(void)
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
             77, 92, 94, 98, 99, 100, 106, 118, 121,
             PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
+            PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS,
         };
         size_t i;
 
@@ -467,6 +487,55 @@ static int test_packet_hardening(void)
             }
         }
     }
+
+    /* PT8 world replication: host-only state, clients may not inject it. */
+    if (coop_lite_packet_allowed(PACKET_COOP_FOLLOWERS, true, 1)
+        || coop_lite_packet_allowed(PACKET_COOP_NPC_POS, true, 1)
+        || coop_lite_packet_allowed(PACKET_COOP_NPC_POS, false, 2)) {
+        fprintf(stderr, "FOLLOWERS/NPC_POS direction wrong\n");
+        return 1;
+    }
+    if (coop_lite_coop_packet_min_size(PACKET_COOP_FOLLOWERS) != 8
+        || coop_lite_coop_packet_min_size(PACKET_COOP_NPC_POS) != 8
+        || coop_lite_batch_size(0, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)) != 8
+        || coop_lite_batch_size(3, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)) != 8 + 3 * 0x38
+        || coop_lite_batch_size(COOP_NPC_POS_MAX + 1, COOP_NPC_POS_MAX, 0x38) != 0
+        || coop_lite_batch_size(-1, COOP_NPC_POS_MAX, 0x38) != 0
+        || coop_lite_batch_size(COOP_NPC_POS_MAX, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)) > TIG_NET_MAX_PACKET
+        || coop_lite_batch_size(COOP_FOLLOWERS_MAX, COOP_FOLLOWERS_MAX, sizeof(PacketCoopFollowerEntry)) != sizeof(PacketCoopFollowers)) {
+        fprintf(stderr, "batch sizes wrong\n");
+        return 1;
+    }
+    /* A short datagram claiming many entries is rejected. */
+    if (coop_lite_batch_valid(5, COOP_NPC_POS_MAX, 0x38, 8 + 4 * 0x38)
+        || !coop_lite_batch_valid(5, COOP_NPC_POS_MAX, 0x38, 8 + 5 * 0x38)
+        || coop_lite_batch_valid(COOP_NPC_POS_MAX + 1, COOP_NPC_POS_MAX, 0x38, 4096)
+        || coop_lite_batch_valid(-2, COOP_NPC_POS_MAX, 0x38, 4096)) {
+        fprintf(stderr, "batch_valid wrong\n");
+        return 1;
+    }
+    /* Fallen client PC revive timer. */
+    if (coop_lite_revive_due(0, 100000u)
+        || coop_lite_revive_due(1000u, 1000u + COOP_LITE_REVIVE_DELAY_MS - 1)
+        || !coop_lite_revive_due(1000u, 1000u + COOP_LITE_REVIVE_DELAY_MS)
+        || !coop_lite_revive_due(0xFFFFF000u, 0xFFFFF000u + COOP_LITE_REVIVE_DELAY_MS + 5)) {
+        fprintf(stderr, "revive_due wrong\n");
+        return 1;
+    }
+    /* Camera: recentre only when the PC leaves the visible area. */
+    if (coop_lite_follow_needs_jump(0, 0, COOP_LITE_FOLLOW_JUMP_X, COOP_LITE_FOLLOW_JUMP_Y)
+        || coop_lite_follow_needs_jump(COOP_LITE_FOLLOW_JUMP_X, -COOP_LITE_FOLLOW_JUMP_Y,
+            COOP_LITE_FOLLOW_JUMP_X, COOP_LITE_FOLLOW_JUMP_Y)
+        || !coop_lite_follow_needs_jump(COOP_LITE_FOLLOW_JUMP_X + 1, 0,
+            COOP_LITE_FOLLOW_JUMP_X, COOP_LITE_FOLLOW_JUMP_Y)
+        || !coop_lite_follow_needs_jump(0, -(COOP_LITE_FOLLOW_JUMP_Y + 1),
+            COOP_LITE_FOLLOW_JUMP_X, COOP_LITE_FOLLOW_JUMP_Y)
+        || COOP_LITE_FOLLOW_JUMP_X <= COOP_LITE_FOLLOW_DEADZONE_X
+        || COOP_LITE_FOLLOW_JUMP_Y <= COOP_LITE_FOLLOW_DEADZONE_Y) {
+        fprintf(stderr, "follow_needs_jump wrong\n");
+        return 1;
+    }
+    printf("PT8 world replication helpers: OK\n");
 
     /* Camera dead zone follow. */
     {
