@@ -2,6 +2,7 @@
 #define ARCANUM_GAME_COOP_LITE_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,8 +19,14 @@ extern "C" {
 /* multiplayer_validate_message must allow up to this (exclusive). */
 #define PACKET_COOP_TYPE_LIMIT 133
 
-/* Host PC position broadcast interval (ms). */
-#define COOP_LITE_PC_POS_INTERVAL_MS 100u
+/* PC position broadcast interval (ms). */
+#define COOP_LITE_PC_POS_INTERVAL_MS 50u
+
+/* PacketCoopPcPos.flags */
+#define COOP_PC_POS_FORCE 0x1 /* host moved an owner-driven PC; owner must apply */
+
+/* Upper bound for a plausible basic prototype number on the wire. */
+#define COOP_LITE_MAX_PROTO 100000
 
 
 typedef struct PacketCoopAttackIntent {
@@ -45,7 +52,12 @@ typedef struct PacketCoopCharOffer {
     /* 0050 */ unsigned char pc_oid[24]; /* client's own PC ObjectID — host adopts it */
 } PacketCoopCharOffer;
 
-/* Host → clients: authoritative PC position/art (rate limited). */
+/*
+ * PC position/art (rate limited, only on change).
+ *  client → host: the client's own PC (client drives its own movement).
+ *  host → clients: every slot PC; a slot's own PC is not echoed back to its
+ *  owner unless the host moved it (COOP_PC_POS_FORCE).
+ */
 typedef struct PacketCoopPcPos {
     /* 0000 */ int type;
     /* 0004 */ int slot;
@@ -54,7 +66,7 @@ typedef struct PacketCoopPcPos {
     /* 0028 */ int offset_x;
     /* 002C */ int offset_y;
     /* 0030 */ unsigned int art_id;
-    /* 0034 */ int pad;
+    /* 0034 */ int flags;
 } PacketCoopPcPos;
 
 /*
@@ -74,6 +86,27 @@ typedef struct PacketCoopSessionSync {
     /* 0054 */ char client_name[64];
     /* 0094 */ char host_name[64];
 } PacketCoopSessionSync;
+
+/* Wire layout must match across compilers (MSVC vs gcc/clang). */
+#if defined(__cplusplus)
+#define COOP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define COOP_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+COOP_STATIC_ASSERT(sizeof(PacketCoopAttackIntent) == 0x38, "PacketCoopAttackIntent size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopAttackIntent, target_oid) == 0x20, "PacketCoopAttackIntent layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopFollowHost) == 0x10, "PacketCoopFollowHost size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopFollowHost, loc) == 0x08, "PacketCoopFollowHost layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x68, "PacketCoopCharOffer size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, has_oid) == 0x4C, "PacketCoopCharOffer layout");
+COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, pc_oid) == 0x50, "PacketCoopCharOffer layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x38, "PacketCoopPcPos size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
+COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, flags) == 0x34, "PacketCoopPcPos layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopSessionSync) == 0xD8, "PacketCoopSessionSync size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_loc) == 0x08, "PacketCoopSessionSync layout");
+COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, client_slot) == 0x48, "PacketCoopSessionSync layout");
+COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_name) == 0x94, "PacketCoopSessionSync layout");
 
 typedef enum CoopTalkPolicy {
     COOP_TALK_ALLOW = 0,
@@ -158,6 +191,36 @@ typedef enum CoopMpPacketRole {
 
 CoopMpPacketRole coop_lite_mp_packet_role(int type);
 
+/*
+ * Network hardening (pure; used by multiplayer_validate_message and tests).
+ * coop_lite_packet_allowed: may a packet of this type be accepted by this
+ * receiver from sender_slot? (Host drops host→client-only types from clients,
+ * clients drop client→host-only types and anything not from the host.)
+ */
+bool coop_lite_packet_allowed(int type, bool receiver_is_host, int sender_slot);
+
+/* Minimum wire size for coop packet types (0 if not a coop type). */
+size_t coop_lite_coop_packet_min_size(int type);
+
+/* Basic sanity for a basic_prototype number received from the network. */
+bool coop_lite_pc_proto_plausible(int proto);
+
+/* Force NUL termination of a fixed-size network string. */
+void coop_lite_terminate_name(char* name, size_t size);
+
+/*
+ * Client-side: true when obj is our own PC and the session is synced, i.e.
+ * movement/talk for it run locally (single-player code path) and the result
+ * is replicated with PC_POS.
+ */
+bool coop_lite_client_drives_obj(int64_t obj);
+
+/* Host: a client disconnected — clear its offer / replication state. */
+void coop_lite_host_on_client_disconnect(int slot);
+
+/* Host: is obj the PC bound to the sender of the message being handled? */
+bool coop_lite_sender_owns_obj(int64_t obj);
+
 /* True if two PC_POS samples differ (loc/offset/art). Pure; used by tests. */
 bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
 
@@ -173,11 +236,8 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt);
 /* Client: local PC teleport finished — complete a pending SESSION_SYNC. */
 void coop_lite_client_on_teleport_done(void);
 
-/*
- * Client: clicked an NPC to talk. In range → start local dialog (per-node
- * filter); else send move intent toward NPC. Returns true if handled.
- */
-bool coop_lite_client_talk(int64_t pc_obj, int64_t npc_obj);
+/* Test helper: host has an unconsumed CHAR_OFFER for this slot. */
+bool coop_lite_test_pending_offer(int slot);
 
 
 /* Client: send CHAR_OFFER from local premade/created PC; return true if sent. */

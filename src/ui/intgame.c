@@ -3479,12 +3479,6 @@ void sub_54ED30(TargetDescriptor* td)
                         return;
                     }
 
-                    /* Coop client: AG_TALK only opens dialog on host, so
-                       start it here (filtered) or walk closer. */
-                    if (coop_lite_client_talk(pc_obj, td->obj)) {
-                        return;
-                    }
-
                     anim = AG_TALK;
                 } else {
                     if ((spell_flags & OSF_POLYMORPHED) != 0) {

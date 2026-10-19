@@ -6,6 +6,7 @@
 #include "game/ai.h"
 #include "game/animfx.h"
 #include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
@@ -3568,7 +3569,7 @@ void sub_423550(AnimRunInfo* run_info, int a2)
 }
 
 // 0x423560
-bool anim_timeevent_process(TimeEvent* timeevent)
+static bool anim_timeevent_process_impl(TimeEvent* timeevent)
 {
     int run_index;
     AnimRunInfo* run_info;
@@ -3856,6 +3857,55 @@ bool anim_timeevent_process(TimeEvent* timeevent)
     }
 
     return true;
+}
+
+/* Root goals the owning coop client simulates locally for its own PC. */
+static bool anim_goal_type_is_client_local(int goal_type)
+{
+    switch (goal_type) {
+    case AG_MOVE_TO_TILE:
+    case AG_RUN_TO_TILE:
+    case AG_ATTEMPT_MOVE:
+    case AG_MOVE_TO_PAUSE:
+    case AG_MOVE_NEAR_TILE:
+    case AG_MOVE_NEAR_OBJ:
+    case AG_RUN_NEAR_TILE:
+    case AG_RUN_NEAR_OBJ:
+    case AG_ATTEMPT_MOVE_NEAR:
+    case AG_TALK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool anim_timeevent_process(TimeEvent* timeevent)
+{
+    int run_index;
+    AnimRunInfo* run_info;
+    bool rc;
+
+    run_index = timeevent->params[0].integer_value;
+    if (run_index >= 0 && run_index < 216
+        && tig_net_is_active() && !tig_net_is_host()) {
+        run_info = &(anim_run_info[run_index]);
+        if (run_info->id.slot_num == run_index
+            && (run_info->flags & 0x01) != 0
+            && anim_goal_type_is_client_local(run_info->goals[0].type)
+            && coop_lite_client_drives_obj(run_info->anim_obj)) {
+            /*
+             * Our own PC walking/talking: run exactly the single-player
+             * code (local pathing, camera follow, dialog + its script);
+             * nothing is sent — PC_POS replicates the result.
+             */
+            tig_net_local_suspend_begin();
+            rc = anim_timeevent_process_impl(timeevent);
+            tig_net_local_suspend_end();
+            return rc;
+        }
+    }
+
+    return anim_timeevent_process_impl(timeevent);
 }
 
 // 0x423C80
@@ -13335,7 +13385,7 @@ bool anim_goal_animate_loop(int64_t obj)
 }
 
 // 0x433640
-bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
+static bool anim_goal_move_to_tile_impl(int64_t obj, int64_t loc)
 {
     AnimID anim_id;
     AnimRunInfo* run_info;
@@ -13437,6 +13487,21 @@ bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_move_to_tile_impl(obj, loc);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_move_to_tile_impl(obj, loc);
+}
+
 // 0x4339A0
 bool sub_4339A0(int64_t obj)
 {
@@ -13447,7 +13512,7 @@ bool sub_4339A0(int64_t obj)
 }
 
 // 0x433A00
-bool sub_433A00(int64_t obj, int64_t loc, bool a3)
+static bool sub_433A00_impl(int64_t obj, int64_t loc, bool a3)
 {
     AnimID anim_id;
     AnimGoalData goal_data;
@@ -13512,8 +13577,23 @@ bool sub_433A00(int64_t obj, int64_t loc, bool a3)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool sub_433A00(int64_t obj, int64_t loc, bool a3)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = sub_433A00_impl(obj, loc, a3);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return sub_433A00_impl(obj, loc, a3);
+}
+
 // 0x433C80
-bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
+static bool anim_goal_run_to_tile_impl(int64_t obj, int64_t loc)
 {
     AnimID anim_id;
     AnimRunInfo* run_info;
@@ -13625,6 +13705,21 @@ bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_run_to_tile_impl(obj, loc);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_run_to_tile_impl(obj, loc);
+}
+
 // 0x434030
 bool sub_434030(int64_t obj, int64_t loc)
 {
@@ -13665,7 +13760,7 @@ bool sub_434030(int64_t obj, int64_t loc)
 }
 
 // 0x4341C0
-bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
+static bool anim_goal_move_near_tile_impl(int64_t source_obj, int64_t target_loc, int range)
 {
     AnimRunInfo* run_info;
     AnimGoalData goal_data;
@@ -13735,8 +13830,23 @@ bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(source_obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_move_near_tile_impl(source_obj, target_loc, range);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_move_near_tile_impl(source_obj, target_loc, range);
+}
+
 // 0x434400
-bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
+static bool anim_goal_run_near_tile_impl(int64_t source_obj, int64_t target_loc, int range)
 {
     AnimRunInfo* run_info;
     AnimGoalData goal_data;
@@ -13812,6 +13922,21 @@ bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
     run_info->path.flags |= 0x04;
 
     return true;
+}
+
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(source_obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_run_near_tile_impl(source_obj, target_loc, range);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_run_near_tile_impl(source_obj, target_loc, range);
 }
 
 // 0x4346A0

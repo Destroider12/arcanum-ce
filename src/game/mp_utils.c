@@ -176,6 +176,10 @@ void sub_4EDFF0(Packet99* pkt)
     if (obj == OBJ_HANDLE_NULL) {
         return;
     }
+    /* Our own locally driven PC is authoritative here. */
+    if (coop_lite_client_drives_obj(obj)) {
+        return;
+    }
 
     multiplayer_lock();
     sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
@@ -535,6 +539,10 @@ void mp_handle_packet4(Packet4* pkt)
         tig_debug_printf("MP: Packet4 move intent for unknown OID (client PC not adopted?)\n");
         return;
     }
+    if (!coop_lite_sender_owns_obj(obj)) {
+        tig_debug_printf("MP: Packet4 from slot %d for an object it does not own — dropped\n", sub_52A530());
+        return;
+    }
 
     switch (pkt->subtype) {
     case 0:
@@ -577,17 +585,31 @@ void mp_handle_packet9(Packet9* pkt)
     }
 
     if (tig_net_is_host()) {
+        if (!coop_lite_sender_owns_obj(obj)) {
+            tig_debug_printf("MP: Packet9 from slot %d for an object it does not own — dropped\n", sub_52A530());
+            return;
+        }
         /* Client interrupt intent: a4=true skips nested net send inside sub_424070. */
         sub_424070(obj, pkt->priority_level, pkt->field_48 != 0, true);
-        /* Rebroadcast authoritative interrupt to peers. */
+        /* Rebroadcast to the other peers (not back to the owner, which
+           drives its own PC and already interrupted locally). */
         {
             Packet9 out = *pkt;
             out.loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
             out.art_id = obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
             out.offset_x = obj_field_int32_get(obj, OBJ_F_OFFSET_X);
             out.offset_y = obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
-            tig_net_send_app_all(&out, sizeof(out));
+            if (sub_52A530() != 0) {
+                tig_net_send_app_except(&out, sizeof(out), sub_52A530());
+            } else {
+                tig_net_send_app_all(&out, sizeof(out));
+            }
         }
+        return;
+    }
+
+    /* Our own locally driven PC: never snap/interrupt it from the wire. */
+    if (coop_lite_client_drives_obj(obj)) {
         return;
     }
 
@@ -669,6 +691,26 @@ void mp_handle_packet29(Packet29* pkt)
     }
 }
 
+/* Packet70s that arrived while the client was still loading the host map. */
+#define MP_DEFERRED_PACKET70_MAX 64
+static Packet70 mp_deferred_packet70[MP_DEFERRED_PACKET70_MAX];
+static int mp_deferred_packet70_count;
+
+void mp_flush_deferred_packet70(void)
+{
+    int index;
+    int count;
+
+    count = mp_deferred_packet70_count;
+    mp_deferred_packet70_count = 0;
+    if (count > 0) {
+        tig_debug_printf("MP: replaying %d deferred Packet70\n", count);
+    }
+    for (index = 0; index < count; index++) {
+        mp_handle_packet70(&(mp_deferred_packet70[index]));
+    }
+}
+
 // Packet70: object create / blood FX mirrors.
 void mp_handle_packet70(Packet70* pkt)
 {
@@ -681,13 +723,31 @@ void mp_handle_packet70(Packet70* pkt)
     /* Avoid creating world objects onto ShopMap before SESSION_SYNC. */
     if (tig_net_is_active() && coop_lite_should_skip_independent_new_game()
         && coop_lite_client_waiting_for_sync()) {
-        tig_debug_printf("MP: Packet70 deferred (client waiting for session sync)\n");
+        if (mp_deferred_packet70_count < MP_DEFERRED_PACKET70_MAX) {
+            mp_deferred_packet70[mp_deferred_packet70_count++] = *pkt;
+            tig_debug_printf("MP: Packet70 deferred (client waiting for session sync) subtype=%d name=%d\n",
+                pkt->subtype, pkt->subtype == 0 ? pkt->s0.name : -1);
+        } else {
+            tig_debug_printf("MP: Packet70 dropped — deferred queue full\n");
+        }
         return;
     }
 
     if (pkt->subtype == 0 && obj_pool_perm_lookup(pkt->s0.oid) != OBJ_HANDLE_NULL) {
         /* Already have it (e.g. our own PC adopted by the host). */
         return;
+    }
+    if (pkt->subtype == 0) {
+        int64_t proto_obj = sub_4685A0(pkt->s0.name);
+
+        /* Unknown proto, or a PC: PCs only come from SESSION_SYNC (a
+           Packet70 PC would be a bare, unbound duplicate). */
+        if (proto_obj == OBJ_HANDLE_NULL
+            || obj_field_int32_get(proto_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+            tig_debug_printf("MP: Packet70 ignored (proto %d is %s)\n", pkt->s0.name,
+                proto_obj == OBJ_HANDLE_NULL ? "unknown" : "a PC");
+            return;
+        }
     }
 
     multiplayer_lock();
@@ -729,6 +789,21 @@ void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
 {
     if (pkt == NULL || !tig_net_is_host()) {
         return;
+    }
+    if (sub_52A530() != 0) {
+        /* The caster (or parent, for item casts) must be the sender's PC. */
+        int64_t pc = sub_4A2B60(sub_52A530());
+        ObjectID pc_oid;
+
+        if (pc == OBJ_HANDLE_NULL) {
+            return;
+        }
+        pc_oid = obj_get_id(pc);
+        if (!objid_is_equal(pkt->invocation.source_obj.field_8.objid, pc_oid)
+            && !objid_is_equal(pkt->invocation.parent_obj.field_8.objid, pc_oid)) {
+            tig_debug_printf("MP: Packet57 cast from slot %d not by its PC — dropped\n", sub_52A530());
+            return;
+        }
     }
     magictech_invocation_run(&pkt->invocation);
 }
