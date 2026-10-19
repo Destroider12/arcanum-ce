@@ -1135,6 +1135,10 @@ static void coop_lite_client_follow_own_pc(int64_t obj)
         return;
     }
     location_calc_dist_from_screen_center(obj_field_int64_get(obj, OBJ_F_LOCATION), &x, &y);
+    /* Sprite position = tile centre + sub-tile offset. Without the offset
+       the target jumps a whole tile at a time (jerky scrolling). */
+    x -= obj_field_int32_get(obj, OBJ_F_OFFSET_X);
+    y -= obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
     if (llabs(x) > 1000 || llabs(y) > 700) {
         /* Far off-screen (teleport, FORCE snap): jump. */
         location_origin_set(obj_field_int64_get(obj, OBJ_F_LOCATION));
@@ -1561,6 +1565,12 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_request_sync_teleport();
         }
 
+        /* Client camera: every frame (not the 50 ms pose tick) so the
+           scroll follows the PC smoothly. */
+        if (coop_lite_client_in_session) {
+            coop_lite_client_follow_own_pc(player_get_local_pc_obj());
+        }
+
         /* Client: we drive our own PC — report its pose to the host. */
         if (coop_lite_client_in_session
             && coop_lite_interval_elapsed(coop_last_pc_pos_ms, now_ms, COOP_LITE_PC_POS_INTERVAL_MS)) {
@@ -1572,7 +1582,6 @@ void coop_lite_ping(unsigned int now_ms)
                     coop_client_pos = pkt;
                     coop_client_pos_valid = true;
                     tig_net_send_app_all(&pkt, sizeof(pkt));
-                    coop_lite_client_follow_own_pc(obj);
                 }
             }
         }
