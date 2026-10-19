@@ -782,6 +782,7 @@ bool map_open(const char* base_path, const char* save_path, bool a3)
 
     duration = tig_timer_elapsed(start_timestamp);
     tig_debug_printf("map_open(): Done.  Total time: %d ms.\n", duration);
+    coop_lite_on_map_opened();
 
     dword_5D11E8 = false;
     map_valid = true;

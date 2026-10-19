@@ -405,6 +405,81 @@ static bool bundle_visit(void* ctx, int index, const uint8_t* blob, size_t size)
     return true;
 }
 
+/* P0-2: stale poses cannot undo a correction. */
+static int test_pose_order(void)
+{
+    CoopPoseOrder host;
+    CoopPoseOrder peer;
+    uint16_t e;
+
+    memset(&host, 0, sizeof(host));
+    memset(&peer, 0, sizeof(peer));
+    if (offsetof(PacketCoopPcPos, epoch) != 0x3C || offsetof(PacketCoopPcPos, seq) != 0x3E
+        || sizeof(PacketCoopPcPos) != 0x40 || sizeof(PacketCoopFollowHost) != 0x18
+        || offsetof(PacketCoopSessionSync, map_gen) != 0xD4
+        || offsetof(PacketCoopSessionSync, pose_epoch) != 0xD8) {
+        fprintf(stderr, "pose ordering fields misplaced\n");
+        return 1;
+    }
+    /* Host side (owner link): join bumps to epoch 1. */
+    e = coop_lite_pose_order_bump(&host);
+    if (e != 1 || coop_lite_pose_order_accept(&host, 0, 1, false, true)) {
+        fprintf(stderr, "pre-join epoch accepted\n");
+        return 1;
+    }
+    if (!coop_lite_pose_order_accept(&host, 1, 5, false, true)
+        || !coop_lite_pose_order_accept(&host, 1, 6, false, true)
+        || coop_lite_pose_order_accept(&host, 1, 6, false, true)
+        || coop_lite_pose_order_accept(&host, 1, 4, false, true)) {
+        fprintf(stderr, "seq ordering wrong\n");
+        return 1;
+    }
+    /* The host corrects: epoch 2. The in-flight pose (epoch 1, seq 7) that
+       arrives after the FORCE must not be applied (the PT race). */
+    e = coop_lite_pose_order_bump(&host);
+    if (e != 2 || coop_lite_pose_order_accept(&host, 1, 7, false, true)) {
+        fprintf(stderr, "stale pose undid a correction\n");
+        return 1;
+    }
+    /* A client may not invent a newer epoch. */
+    if (coop_lite_pose_order_accept(&host, 3, 8, false, true)) {
+        fprintf(stderr, "client-minted epoch accepted\n");
+        return 1;
+    }
+    /* After adopting epoch 2 the owner's poses (any seq) flow again. */
+    if (!coop_lite_pose_order_accept(&host, 2, 8, false, true)
+        || !coop_lite_pose_order_accept(&host, 2, 9, false, true)) {
+        fprintf(stderr, "post-correction pose refused\n");
+        return 1;
+    }
+    /* Wrap-safe seq. */
+    if (!coop_lite_pose_order_accept(&host, 2, 0x7000, false, true)
+        || !coop_lite_pose_order_accept(&host, 2, 0xE000, false, true)
+        || !coop_lite_pose_order_accept(&host, 2, 0x0001, false, true)
+        || coop_lite_pose_order_accept(&host, 2, 0xE001, false, true)) {
+        fprintf(stderr, "seq wrap refused\n");
+        return 1;
+    }
+    /* Peer side (from host): newer epoch adopted (e.g. relayed pose overtakes
+       the reliable FORCE), older dropped, FORCE in same epoch accepted. */
+    if (!coop_lite_pose_order_accept(&peer, 4, 10, false, false)
+        || !coop_lite_pose_order_accept(&peer, 5, 2, false, false)
+        || coop_lite_pose_order_accept(&peer, 4, 11, false, false)
+        || !coop_lite_pose_order_accept(&peer, 5, 2, true, false)) {
+        fprintf(stderr, "peer epoch handling wrong\n");
+        return 1;
+    }
+    /* Map identity: same index, new load generation = different map. */
+    if (coop_lite_pose_map_key(7, 1) == coop_lite_pose_map_key(7, 2)
+        || coop_lite_pose_map_key(7, 1) == coop_lite_pose_map_key(8, 1)
+        || coop_lite_pose_map_key(7, 3) != coop_lite_pose_map_key(7, 3)) {
+        fprintf(stderr, "map key wrong\n");
+        return 1;
+    }
+    printf("pose epoch/seq + map generation OK\n");
+    return 0;
+}
+
 /* P0-1: the .coopchar character bundle round-trips and rejects damage. */
 static int test_char_bundle(void)
 {
@@ -928,6 +1003,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_char_bundle() != 0) {
+        return 1;
+    }
+    if (test_pose_order() != 0) {
         return 1;
     }
 

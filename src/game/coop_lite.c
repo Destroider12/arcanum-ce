@@ -275,6 +275,25 @@ static int64_t coop_lite_host_pc_obj(void)
 void coop_lite_host_on_entered_world(void);
 
 static bool coop_lite_applying_follow;
+/* P0-2: host map load generation (clients adopt it from FOLLOW/SYNC). */
+static uint16_t coop_map_gen;
+/* Host: per-slot owner pose order (epoch = the slot's correction epoch).
+   Client: per-slot order of poses received from the host. */
+static CoopPoseOrder coop_pose_rx[8];
+static uint16_t coop_pose_tx_seq[8];
+static bool coop_pose_force_active[8];
+/* Client: epoch of the last correction of our own PC, and our pose seq. */
+static uint16_t coop_own_pose_epoch;
+static uint16_t coop_own_pose_seq;
+
+static void coop_lite_pose_order_reset(void)
+{
+    memset(coop_pose_rx, 0, sizeof(coop_pose_rx));
+    memset(coop_pose_tx_seq, 0, sizeof(coop_pose_tx_seq));
+    memset(coop_pose_force_active, 0, sizeof(coop_pose_force_active));
+    coop_own_pose_epoch = 0;
+    coop_own_pose_seq = 0;
+}
 static void (*coop_dialog_end_hook)(int64_t pc_obj, int a2);
 /* Coop death (PT10), see coop_lite_host_watch_party. */
 #ifndef COOP_LITE_TEST_STUBS
@@ -786,6 +805,8 @@ void coop_lite_notify_host_teleported(int map, int64_t loc)
     pkt.type = PACKET_COOP_FOLLOW_HOST;
     pkt.map = map;
     pkt.loc = loc;
+    pkt.map_gen = coop_map_gen;
+    pkt.reserved = 0;
     tig_net_send_app_all(&pkt, sizeof(pkt));
     tig_debug_printf("CoopLite: host follow broadcast map=%d loc=%lld\n",
         map, (long long)loc);
@@ -859,6 +880,7 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     coop_follow_carry_pending = true;
     coop_follow_host_loc = pkt->loc;
     coop_lite_applying_follow = true;
+    coop_map_gen = (uint16_t)pkt->map_gen;
     teleport_do(&teleport_data);
     coop_lite_applying_follow = false;
 
@@ -887,6 +909,7 @@ void coop_lite_session_reset(void)
     int i;
 
     coop_lite_follow_armed = false;
+    coop_lite_pose_order_reset();
     coop_lite_pending_follow_valid = false;
     memset(&coop_lite_pending_follow, 0, sizeof(coop_lite_pending_follow));
     coop_lite_waiting_sync = false;
@@ -1533,7 +1556,7 @@ static void coop_lite_fill_pc_pos(PacketCoopPcPos* pkt, int slot, int64_t obj)
     pkt->offset_x = obj_field_int32_get(obj, OBJ_F_OFFSET_X);
     pkt->offset_y = obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
     pkt->art_id = (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
-    pkt->map = map_current_map();
+    pkt->map = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
 }
 
 static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
@@ -1776,12 +1799,18 @@ static bool coop_lite_host_spawn_client(int slot)
     coop_last_pc_pos_valid[slot] = false;
     coop_last_pc_pos_valid[0] = false;
     coop_client_applied_valid[slot] = false;
+    /* P0-2: a (re)joining slot starts a fresh epoch, above anything the
+       previous occupant or an older session of this slot used. */
+    coop_lite_pose_order_bump(&coop_pose_rx[slot]);
+    coop_pose_force_active[slot] = false;
 
     host_oid = obj_get_id(host_pc);
     client_oid = obj_get_id(client_obj);
 
     memset(&sync, 0, sizeof(sync));
     sync.type = PACKET_COOP_SESSION_SYNC;
+    sync.map_gen = coop_map_gen;
+    sync.pose_epoch = coop_pose_rx[slot].epoch;
     sync.map = map;
     sync.host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
     sync.client_loc = spawn_loc;
@@ -3432,6 +3461,10 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
      * coop_lite_client_on_teleport_done once the map is current.
      */
     coop_pending_sync = *pkt;
+    coop_map_gen = (uint16_t)pkt->map_gen;
+    /* P0-2: fresh order state; our poses carry the host's epoch for us. */
+    coop_lite_pose_order_reset();
+    coop_own_pose_epoch = (uint16_t)pkt->pose_epoch;
     coop_pending_sync_valid = true;
     /* A queued follow from before sync is superseded. */
     coop_lite_pending_follow_valid = false;
@@ -3542,6 +3575,8 @@ void coop_lite_ping(unsigned int now_ms)
                     coop_client_pos = pkt;
                     coop_client_pos_valid = true;
                     coop_client_pos_key_ms = now_ms;
+                    pkt.epoch = coop_own_pose_epoch;
+                    pkt.seq = ++coop_own_pose_seq;
                     tig_net_send_pose_all(&pkt, sizeof(pkt));
                 }
             }
@@ -3599,6 +3634,7 @@ void coop_lite_ping(unsigned int now_ms)
         coop_pc_pos_key_ms[slot] = now_ms;
         coop_last_pc_pos[slot] = pkt;
         coop_last_pc_pos_valid[slot] = true;
+        pkt.seq = ++coop_pose_tx_seq[slot];
 
         if (slot > 0
             && coop_client_applied_valid[slot]
@@ -3607,13 +3643,22 @@ void coop_lite_ping(unsigned int now_ms)
                host-side stand frame is not a correction): relay, no echo,
                never FORCE. */
             /* Pose came from its owner: relay to everyone else, no echo. */
+            pkt.epoch = coop_pose_rx[slot].epoch;
             tig_net_send_pose_except(&pkt, sizeof(pkt), slot);
         } else if (slot > 0) {
             /* Host moved an owner-driven PC (knockback, follow teleport,
                refused jump …) — the owner must apply this one: reliable. */
             pkt.flags |= COOP_PC_POS_FORCE;
+            if (!coop_pose_force_active[slot]) {
+                /* One epoch per correction, not per resend: repeated FORCEs
+                   while the owner catches up share it (no livelock). */
+                coop_lite_pose_order_bump(&coop_pose_rx[slot]);
+                coop_pose_force_active[slot] = true;
+            }
+            pkt.epoch = coop_pose_rx[slot].epoch;
             tig_net_send_app_all(&pkt, sizeof(pkt));
         } else {
+            pkt.epoch = 0;
             tig_net_send_pose_all(&pkt, sizeof(pkt));
         }
     }
@@ -3648,7 +3693,7 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
     }
     /* Review M2: a pose from another map (in flight across a party
        teleport) is meaningless here. */
-    if (map_is_valid() && pkt->map != map_current_map()) {
+    if (map_is_valid() && pkt->map != coop_lite_pose_map_key(map_current_map(), coop_map_gen)) {
         return;
     }
     memcpy(&oid, pkt->oid, sizeof(oid));
@@ -3689,7 +3734,11 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
             /* Fallen: the host owns it until the revive. */
             return;
         }
-        if (!coop_lite_pc_pos_plausible(pkt->map, map_current_map(),
+        if (!coop_lite_pose_order_accept(&coop_pose_rx[sender], pkt->epoch, pkt->seq, false, true)) {
+            /* In flight from before the last correction (or out of order). */
+            return;
+        }
+        if (!coop_lite_pc_pos_plausible(pkt->map, coop_lite_pose_map_key(map_current_map(), coop_map_gen),
                 location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), pkt->loc),
                 tig_art_type((tig_art_id_t)pkt->art_id),
                 tig_art_type(obj_field_int32_get(obj, OBJ_F_CURRENT_AID)))) {
@@ -3704,11 +3753,22 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
         coop_lite_apply_pc_pos(obj, pkt);
         coop_client_applied[sender] = *pkt;
         coop_client_applied_valid[sender] = true;
+        coop_pose_force_active[sender] = false;
         return;
     }
 
     if (coop_lite_waiting_sync || coop_pending_sync_valid) {
         return;
+    }
+    if (pkt->slot >= 0 && pkt->slot < 8
+        && !coop_lite_pose_order_accept(&coop_pose_rx[pkt->slot], pkt->epoch, pkt->seq,
+            (pkt->flags & COOP_PC_POS_FORCE) != 0, false)) {
+        return;
+    }
+    if (obj == player_get_local_pc_obj() && (pkt->flags & COOP_PC_POS_FORCE) != 0) {
+        /* Adopt the correction's epoch: our older in-flight poses are now
+           dropped by the host instead of rubber-banding us back. */
+        coop_own_pose_epoch = pkt->epoch;
     }
     if (obj == player_get_local_pc_obj() && (pkt->flags & COOP_PC_POS_FORCE) == 0) {
         /* Our own movement echoed back — we are authoritative for it. */
@@ -4912,4 +4972,71 @@ bool coop_char_bundle_parse(const uint8_t* data, size_t size, CoopCharBundleVisi
         return false;
     }
     return coop_char_bundle_walk(data, size, visit, ctx, count_out, rule_out, name_out);
+}
+
+/* ---- P0-2 pose ordering / map identity (pure; unit-tested) ---- */
+
+bool coop_lite_pose_order_accept(CoopPoseOrder* st, uint16_t epoch, uint16_t seq,
+    bool force, bool owner_link)
+{
+    int16_t d;
+
+    if (st == NULL) {
+        return true;
+    }
+    if (!st->valid) {
+        st->valid = true;
+        st->epoch = epoch;
+        st->seq = seq;
+        st->seq_valid = true;
+        return true;
+    }
+    d = (int16_t)(uint16_t)(epoch - st->epoch);
+    if (d < 0) {
+        return false;
+    }
+    if (d > 0) {
+        if (owner_link) {
+            /* Only the host mints epochs. */
+            return false;
+        }
+        st->epoch = epoch;
+        st->seq = seq;
+        st->seq_valid = true;
+        return true;
+    }
+    if (st->seq_valid && !force && (int16_t)(uint16_t)(seq - st->seq) <= 0) {
+        return false;
+    }
+    st->seq = seq;
+    st->seq_valid = true;
+    return true;
+}
+
+uint16_t coop_lite_pose_order_bump(CoopPoseOrder* st)
+{
+    st->epoch = (uint16_t)(st->epoch + 1);
+    st->valid = true;
+    st->seq_valid = false;
+    return st->epoch;
+}
+
+int coop_lite_pose_map_key(int map, uint16_t gen)
+{
+    return (int)(((uint32_t)gen << 16) | ((uint32_t)map & 0xFFFFu));
+}
+
+void coop_lite_on_map_opened(void)
+{
+    if (tig_net_is_host()) {
+        coop_map_gen = (uint16_t)(coop_map_gen + 1);
+        if (coop_map_gen == 0) {
+            coop_map_gen = 1;
+        }
+    }
+}
+
+uint16_t coop_lite_map_gen(void)
+{
+    return coop_map_gen;
 }

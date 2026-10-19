@@ -46,6 +46,8 @@ typedef struct PacketCoopFollowHost {
     /* 0000 */ int type;
     /* 0004 */ int map;
     /* 0008 */ int64_t loc;
+    /* 0010 */ int map_gen; /* P0-2: host map load generation */
+    /* 0014 */ int reserved;
 } PacketCoopFollowHost;
 
 /* Client → host: character chosen in menu (do not start an independent world). */
@@ -73,8 +75,9 @@ typedef struct PacketCoopPcPos {
     /* 002C */ int offset_y;
     /* 0030 */ unsigned int art_id;
     /* 0034 */ int flags;
-    /* 0038 */ int map; /* review M2: a pose is only valid on its own map */
-    /* 003C */ int reserved;
+    /* 0038 */ int map; /* coop_lite_pose_map_key: map index + load generation */
+    /* 003C */ uint16_t epoch; /* P0-2: bumped by the host on every correction */
+    /* 003E */ uint16_t seq; /* P0-2: per-sender order inside an epoch */
 } PacketCoopPcPos;
 
 /* Host → clients: follower/leader table (variable length: count entries). */
@@ -133,6 +136,9 @@ typedef struct PacketCoopSessionSync {
     /* 0050 */ int host_proto;
     /* 0054 */ char client_name[64];
     /* 0094 */ char host_name[64];
+    /* 00D4 */ int map_gen; /* P0-2: host map load generation (was padding) */
+    /* 00D8 */ int pose_epoch; /* P0-2: the joining slot's pose epoch */
+    /* 00DC */ int reserved;
 } PacketCoopSessionSync;
 
 /* Wire layout must match across compilers (MSVC vs gcc/clang). */
@@ -143,7 +149,7 @@ typedef struct PacketCoopSessionSync {
 #endif
 COOP_STATIC_ASSERT(sizeof(PacketCoopAttackIntent) == 0x38, "PacketCoopAttackIntent size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopAttackIntent, target_oid) == 0x20, "PacketCoopAttackIntent layout");
-COOP_STATIC_ASSERT(sizeof(PacketCoopFollowHost) == 0x10, "PacketCoopFollowHost size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopFollowHost) == 0x18, "PacketCoopFollowHost size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopFollowHost, loc) == 0x08, "PacketCoopFollowHost layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x68, "PacketCoopCharOffer size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, has_oid) == 0x4C, "PacketCoopCharOffer layout");
@@ -152,7 +158,7 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x40, "PacketCoopPcPos size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, map) == 0x38, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, flags) == 0x34, "PacketCoopPcPos layout");
-COOP_STATIC_ASSERT(sizeof(PacketCoopSessionSync) == 0xD8, "PacketCoopSessionSync size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopSessionSync) == 0xE0, "PacketCoopSessionSync size");
 COOP_STATIC_ASSERT(sizeof(PacketCoopFollowerEntry) == 0x20, "PacketCoopFollowerEntry size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopFollowers, entries) == 0x08, "PacketCoopFollowers layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopNpcPosEntry) == 0x38, "PacketCoopNpcPosEntry size");
@@ -537,6 +543,32 @@ bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos
 /* Host-side plausibility of a client's own PC_POS: same map, a walkable-size
    step from where the host has it, and the same art type (no swapping the
    PC for some other art). */
+/*
+ * P0-2 pose ordering. Unreliable poses (channel 2) and reliable FORCE
+ * corrections (channel 0) are not ordered against each other, so a stale
+ * pose could undo a correction. The host bumps a slot's epoch when it starts
+ * a correction; the owner adopts it from the FORCE and stamps it on every
+ * pose. Older epochs, and seq <= last within an epoch, are dropped.
+ * owner_link: the host receiving from the owner (a newer epoch is invalid).
+ */
+typedef struct CoopPoseOrder {
+    uint16_t epoch;
+    uint16_t seq;
+    bool valid;
+    bool seq_valid;
+} CoopPoseOrder;
+
+bool coop_lite_pose_order_accept(CoopPoseOrder* st, uint16_t epoch, uint16_t seq,
+    bool force, bool owner_link);
+/* Host starts a correction for this receiver state: new epoch, seq reset. */
+uint16_t coop_lite_pose_order_bump(CoopPoseOrder* st);
+/* Map identity for poses: index (low 16) + load generation (high 16), so
+   leaving and re-entering the same map index is distinguishable. */
+int coop_lite_pose_map_key(int map, uint16_t gen);
+/* map.c: a map finished opening (host bumps its load generation). */
+void coop_lite_on_map_opened(void);
+uint16_t coop_lite_map_gen(void);
+
 bool coop_lite_pc_pos_plausible(int pkt_map, int cur_map, int64_t step_tiles,
     int pkt_art_type, int cur_art_type);
 
