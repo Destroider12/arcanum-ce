@@ -838,6 +838,17 @@ bool coop_lite_client_offer_character(int basic_prototype, const char* name)
     return true;
 }
 
+bool coop_lite_pc_pos_moved(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur)
+{
+    if (prev == NULL || cur == NULL) {
+        return true;
+    }
+    return prev->loc != cur->loc
+        || prev->offset_x != cur->offset_x
+        || prev->offset_y != cur->offset_y
+        || memcmp(prev->oid, cur->oid, sizeof(prev->oid)) != 0;
+}
+
 bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur)
 {
     if (prev == NULL || cur == NULL) {
@@ -1595,7 +1606,10 @@ void coop_lite_ping(unsigned int now_ms)
 
         if (slot > 0
             && coop_client_applied_valid[slot]
-            && !coop_lite_pc_pos_changed(&coop_client_applied[slot], &pkt)) {
+            && !coop_lite_pc_pos_moved(&coop_client_applied[slot], &pkt)) {
+            /* Same place as its owner reported (art-only drift such as a
+               host-side stand frame is not a correction): relay, no echo,
+               never FORCE. */
             /* Pose came from its owner: relay to everyone else, no echo. */
             tig_net_send_app_except(&pkt, sizeof(pkt), slot);
         } else {
@@ -1657,7 +1671,19 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
     }
 
     multiplayer_lock();
-    coop_lite_apply_pc_pos(obj, pkt);
+    if (obj == player_get_local_pc_obj()) {
+        /* Host correction of our PC: position only. Its art would be a
+           stand frame, and a stand art ends our running move goal. */
+        if (obj_field_int64_get(obj, OBJ_F_LOCATION) != pkt->loc
+            || obj_field_int32_get(obj, OBJ_F_OFFSET_X) != pkt->offset_x
+            || obj_field_int32_get(obj, OBJ_F_OFFSET_Y) != pkt->offset_y) {
+            tig_debug_printf("CoopLite: host correction of own PC to %d,%d\n",
+                (int)LOCATION_GET_X(pkt->loc), (int)LOCATION_GET_Y(pkt->loc));
+            sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+        }
+    } else {
+        coop_lite_apply_pc_pos(obj, pkt);
+    }
     multiplayer_unlock();
 
     if (obj == player_get_local_pc_obj()) {

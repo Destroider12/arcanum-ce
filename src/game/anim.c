@@ -4068,7 +4068,27 @@ bool sub_423FF0(int64_t obj)
 }
 
 // 0x424070
+static bool sub_424070_impl(int64_t obj, int priority_level, bool a3, bool a4);
+
+/*
+ * Coop client: interrupting the PC we drive is local. Sending Packet9 made
+ * the host interrupt its proxy (stand art), which came back as a forced
+ * PC_POS and ended our fresh move goal a few tiles in (Playtest 7).
+ */
 bool sub_424070(int64_t obj, int priority_level, bool a3, bool a4)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = sub_424070_impl(obj, priority_level, a3, a4);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+    return sub_424070_impl(obj, priority_level, a3, a4);
+}
+
+static bool sub_424070_impl(int64_t obj, int priority_level, bool a3, bool a4)
 {
     int prev = -1;
     int slot;

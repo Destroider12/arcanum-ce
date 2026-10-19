@@ -229,6 +229,8 @@ void coop_lite_host_on_client_disconnect(int slot);
 bool coop_lite_sender_owns_obj(int64_t obj);
 
 /* True if two PC_POS samples differ (loc/offset/art). Pure; used by tests. */
+/* Location/offset differ (art ignored): a real move, not frame drift. */
+bool coop_lite_pc_pos_moved(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
 bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
 
 /* True if at least interval_ms elapsed (wrap-safe). Pure; used by tests. */
