@@ -441,29 +441,29 @@ void dialog_ui_display(DialogUiEntry* entry)
         entry->state.speech_id);
 
     if (player_is_local_pc_obj(entry->state.pc_obj)) {
-        /* Compact out quest/story responses for non-host companions. */
+        /*
+         * Non-host companions: blank out quest/story responses in place.
+         * Indices must not move — the dialog engine reads fixed slots
+         * (e.g. rumor/skill/spell replies use options/field_17F0/field_1804[1]).
+         * dialog_ui_process_option rejects the blanked entries.
+         */
         filter = tig_net_is_active() && !tig_net_is_host();
         if (filter) {
             out = 0;
             for (index = 0; index < entry->state.num_options; index++) {
-                if (!coop_lite_dialog_option_allowed(entry->state.actions[index],
+                if (coop_lite_dialog_option_allowed(entry->state.actions[index],
                         entry->state.field_17F0[index])) {
+                    out++;
                     continue;
                 }
-                if (out != index) {
-                    memcpy(entry->state.options[out], entry->state.options[index],
-                        sizeof(entry->state.options[0]));
-                    entry->state.actions[out] = entry->state.actions[index];
-                    entry->state.field_17F0[out] = entry->state.field_17F0[index];
-                    entry->state.field_1804[out] = entry->state.field_1804[index];
-                    entry->state.field_1818[out] = entry->state.field_1818[index];
-                }
-                out++;
+                strncpy(entry->state.options[index], "(Only the party leader can discuss this.)",
+                    sizeof(entry->state.options[0]) - 1);
+                entry->state.options[index][sizeof(entry->state.options[0]) - 1] = '\0';
             }
-            entry->state.num_options = out;
-            if (entry->state.num_options == 0) {
-                /* Keep a harmless goodbye so dialog is not empty. */
-                strncpy(entry->state.options[0], "(Only the party leader can discuss this.)",
+            if (out == 0) {
+                /* Nothing selectable: leave a harmless goodbye so the
+                   dialog can be closed. */
+                strncpy(entry->state.options[0], "(Leave.)",
                     sizeof(entry->state.options[0]) - 1);
                 entry->state.options[0][sizeof(entry->state.options[0]) - 1] = '\0';
                 entry->state.actions[0] = NULL;

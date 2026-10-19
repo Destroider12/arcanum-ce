@@ -165,6 +165,17 @@ int main(void)
         fprintf(stderr, "reaction-only should allow\n");
         return 1;
     }
+    /* Barter is no longer a blanket pass: story codes still deny. */
+    if (coop_lite_dialog_option_allowed("qu 1011 2", 3) != false) {
+        fprintf(stderr, "barter node with quest action should deny\n");
+        return 1;
+    }
+    /* Local (per-NPC) flags/vars are shared campaign state too. */
+    if (coop_lite_dialog_option_allowed("lf 3 1", 0) != false
+        || coop_lite_dialog_option_allowed("LV 2 5", 0) != false) {
+        fprintf(stderr, "lf/lv should deny\n");
+        return 1;
+    }
     /* classify always ALLOW now */
     if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_ALLOW) {
         fprintf(stderr, "story NPC should ALLOW (filtered)\n");

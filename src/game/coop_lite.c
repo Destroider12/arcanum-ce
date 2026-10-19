@@ -245,18 +245,29 @@ CoopTalkPolicy coop_lite_classify_talk(bool coop_active, bool is_host,
 
 bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
 {
-    char code[3];
+    /*
+     * Two-letter dialog action codes that touch shared campaign state:
+     * quests, global vars/flags, local (per-NPC) vars/flags, story state,
+     * reputation, alignment, rumors, XP.
+     */
+    static const char blocked[][2] = {
+        { 'q', 'u' }, { 'g', 'v' }, { 'g', 'f' }, { 'l', 'v' }, { 'l', 'f' },
+        { 's', 's' }, { 'r', 'p' }, { 'a', 'l' }, { 'r', 'u' }, { 'r', 'q' },
+        { 'x', 'p' },
+    };
+    char c0;
+    char c1;
     const char* pch;
+    size_t i;
 
-    /* Barter / trade response code from dialog engine (b: → field_17F0=3). */
-    if (response_code == 3) {
-        return true;
-    }
+    (void)response_code;
+
+    /* Barter (response code 3) is allowed only if its actions are harmless
+       too — a node can carry b: plus story codes. */
     if (actions == NULL || actions[0] == '\0') {
         return true;
     }
 
-    code[2] = '\0';
     pch = actions;
     while (*pch != '\0') {
         while (*pch != '\0' && !((*pch >= 'A' && *pch <= 'Z')
@@ -267,38 +278,21 @@ bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
         if (*pch == '\0') {
             break;
         }
-        code[0] = *pch++;
+        c0 = *pch++;
         if (*pch == '\0') {
             break;
         }
-        code[1] = *pch++;
-
-        if ((code[0] == 'q' || code[0] == 'Q') && (code[1] == 'u' || code[1] == 'U')) {
-            return false;
+        c1 = *pch++;
+        if (c0 >= 'A' && c0 <= 'Z') {
+            c0 = (char)(c0 - 'A' + 'a');
         }
-        if ((code[0] == 'g' || code[0] == 'G') && (code[1] == 'v' || code[1] == 'V')) {
-            return false;
+        if (c1 >= 'A' && c1 <= 'Z') {
+            c1 = (char)(c1 - 'A' + 'a');
         }
-        if ((code[0] == 'g' || code[0] == 'G') && (code[1] == 'f' || code[1] == 'F')) {
-            return false;
-        }
-        if ((code[0] == 's' || code[0] == 'S') && (code[1] == 's' || code[1] == 'S')) {
-            return false;
-        }
-        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'p' || code[1] == 'P')) {
-            return false;
-        }
-        if ((code[0] == 'a' || code[0] == 'A') && (code[1] == 'l' || code[1] == 'L')) {
-            return false;
-        }
-        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'u' || code[1] == 'U')) {
-            return false;
-        }
-        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'q' || code[1] == 'Q')) {
-            return false;
-        }
-        if ((code[0] == 'x' || code[0] == 'X') && (code[1] == 'p' || code[1] == 'P')) {
-            return false;
+        for (i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
+            if (c0 == blocked[i][0] && c1 == blocked[i][1]) {
+                return false;
+            }
         }
     }
     return true;
