@@ -82,8 +82,8 @@ static int test_mp_packet_roles(void)
         fprintf(stderr, "pkt4 should be host-resolve\n");
         return 1;
     }
-    if (coop_lite_mp_packet_role(8) != COOP_MP_PKT_CLIENT_APPLY) {
-        fprintf(stderr, "pkt8 should be client-apply\n");
+    if (coop_lite_mp_packet_role(8) != COOP_MP_PKT_BOTH) {
+        fprintf(stderr, "pkt8 (anim modify) is sent by host and clients\n");
         return 1;
     }
     if (coop_lite_mp_packet_role(10) != COOP_MP_PKT_CLIENT_APPLY) {
@@ -383,7 +383,7 @@ static int test_packet_hardening(void)
     }
     if (coop_lite_packet_allowed(PACKET_COOP_FOLLOW_HOST, true, 2)
         || coop_lite_packet_allowed(2, true, 1) || coop_lite_packet_allowed(70, true, 1)
-        || coop_lite_packet_allowed(8, true, 1)) {
+        || coop_lite_packet_allowed(10, true, 1)) {
         fprintf(stderr, "host must drop host->client state from clients\n");
         return 1;
     }

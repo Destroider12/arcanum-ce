@@ -683,7 +683,6 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_ATTACK_INTENT: /* client attack → host AG_ATTACK */
     case PACKET_COOP_CHAR_OFFER: /* client char → host spawn */
         return COOP_MP_PKT_HOST_RESOLVE;
-    case 8: /* anim modify */
     case 10: /* anim pose */
     case 11: /* combat mode */
     case 58: /* cast spell */
@@ -707,6 +706,8 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
         return COOP_MP_PKT_CLIENT_APPLY;
     case 122: /* client notification (ignored on host) */
         return COOP_MP_PKT_HOST_RESOLVE;
+    case 8: /* anim modify: host→clients applies; a client→host modify of
+               its own goal is legal vanilla MP traffic (host ignores it) */
     case 98: /* multiplayer flags change */
     case PACKET_COOP_PC_POS: /* owner PC pos: client→host, host→others */
         return COOP_MP_PKT_BOTH;

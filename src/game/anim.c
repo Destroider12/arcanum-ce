@@ -15201,7 +15201,37 @@ bool anim_goal_attempt_spread_out(int64_t obj, int64_t target_obj)
 // NOTE: Passes AnimID by value.
 //
 // 0x436AB0
+static void turn_on_running_impl(AnimID anim_id);
+
+/*
+ * Coop client: modifying a goal of the PC we drive locally is a local
+ * (SP-path) change; never send Packet8 for it (the host has no such goal).
+ */
+static bool anim_id_client_drives(AnimID anim_id)
+{
+    AnimRunInfo* run_info;
+
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return false;
+    }
+    if (!anim_id_to_run_info(&anim_id, &run_info)) {
+        return false;
+    }
+    return coop_lite_client_drives_obj(run_info->goals[0].params[AGDATA_SELF_OBJ].obj);
+}
+
 void turn_on_running(AnimID anim_id)
+{
+    if (anim_id_client_drives(anim_id)) {
+        tig_net_local_suspend_begin();
+        turn_on_running_impl(anim_id);
+        tig_net_local_suspend_end();
+        return;
+    }
+    turn_on_running_impl(anim_id);
+}
+
+static void turn_on_running_impl(AnimID anim_id)
 {
     AnimRunInfo* run_info;
     char str[ANIM_ID_STR_SIZE];
@@ -15291,7 +15321,20 @@ void sub_436D20(unsigned int flags1, unsigned int flags2)
 // NOTE: Passes AnimID by value.
 //
 // 0x436D50
+static void turn_on_flags_impl(AnimID anim_id, unsigned int flags1, unsigned int flags2);
+
 void turn_on_flags(AnimID anim_id, unsigned int flags1, unsigned int flags2)
+{
+    if (anim_id_client_drives(anim_id)) {
+        tig_net_local_suspend_begin();
+        turn_on_flags_impl(anim_id, flags1, flags2);
+        tig_net_local_suspend_end();
+        return;
+    }
+    turn_on_flags_impl(anim_id, flags1, flags2);
+}
+
+static void turn_on_flags_impl(AnimID anim_id, unsigned int flags1, unsigned int flags2)
 {
     AnimRunInfo* run_info;
     char str[ANIM_ID_STR_SIZE];
