@@ -25,8 +25,10 @@ extern "C" {
 #define PACKET_COOP_OBJ_REQ 139 /* client → host: full state of these items, please */
 #define PACKET_COOP_OBJ_BLOB 140 /* host → client: one item as an object blob */
 
+#define PACKET_COOP_CHAR_BUNDLE 141 /* client → host: own character bundle, chunked */
+
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 141
+#define PACKET_COOP_TYPE_LIMIT 142
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -294,6 +296,42 @@ COOP_STATIC_ASSERT(offsetof(PacketCoopObjBlob, data) == 0x40, "PacketCoopObjBlob
 /* Structure check before obj_read_mem: sizes, and the instance OID inside
    the blob ([u32 version][proto oid][oid]...) is the one announced. */
 bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size);
+
+/*
+ * v2 character offer: before CHAR_OFFER the client streams its character
+ * bundle (PC + items, sub_442050 blobs) in order; the host builds the PC
+ * from it (custom characters carry over) after checking it, and falls back
+ * to the proto + name offer when it is missing or refused.
+ */
+#define COOP_CHAR_CHUNK 1024
+#define COOP_CHAR_WIRE_MAX (64 * 1024)
+#define COOP_CHAR_MAX_ITEMS 64
+
+typedef struct PacketCoopCharChunk {
+    /* 0000 */ int type;
+    /* 0004 */ int total;
+    /* 0008 */ int offset;
+    /* 000C */ int len;
+    /* 0010 */ uint8_t data[COOP_CHAR_CHUNK];
+} PacketCoopCharChunk;
+
+COOP_STATIC_ASSERT(offsetof(PacketCoopCharChunk, data) == 0x10, "PacketCoopCharChunk layout");
+
+typedef struct CoopCharRx {
+    uint8_t* data;
+    int total;
+    int got;
+    bool complete;
+} CoopCharRx;
+
+/* In-order reassembly; offset 0 starts over. false: chunk refused (the
+   transfer is dropped). */
+bool coop_char_rx_accept(CoopCharRx* rx, const PacketCoopCharChunk* pkt, int size);
+void coop_char_rx_free(CoopCharRx* rx);
+/* Character sanity (anti-cheat-lite for friends' co-op). */
+bool coop_lite_char_plausible(int level, int xp, const int* base_stats, int num_stats,
+    int gold, int num_items);
+void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
 bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size);
 void coop_lite_handle_obj_req(PacketCoopObjReq* pkt);
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);

@@ -1139,6 +1139,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_OBJ_BLOB:
         coop_lite_handle_obj_blob((PacketCoopObjBlob*)msg);
         break;
+    case PACKET_COOP_CHAR_BUNDLE:
+        coop_lite_handle_char_chunk((PacketCoopCharChunk*)msg);
+        break;
     case 81:
         coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
         break;

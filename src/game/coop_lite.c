@@ -174,7 +174,7 @@ static void coop_lite_copy_portrait(int64_t pc, const char* oidstr, int size, co
  * reset, which also revived a corpse) and two anim interrupts at
  * PRIORITY_HIGHEST (the anim.c:4096 assertion seen on every dev save).
  */
-static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
+static bool coop_lite_build_char_bundle(int64_t pc, CoopCharBundleBuf* out)
 {
     CoopCharBundleBuf buf;
     int count;
@@ -182,7 +182,6 @@ static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
     int scheme;
     const char* rule = NULL;
     const char* name = NULL;
-    TigFile* stream;
     bool ok;
 
     count = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
@@ -224,7 +223,21 @@ static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
         tig_debug_printf("CoopLite: character bundle: level scheme strings rejected\n");
         ok = false;
     }
+    if (!ok) {
+        coop_char_bundle_free(&buf);
+        return false;
+    }
+    *out = buf;
+    return true;
+}
 
+static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
+{
+    CoopCharBundleBuf buf;
+    TigFile* stream;
+    bool ok;
+
+    ok = coop_lite_build_char_bundle(pc, &buf);
     if (ok) {
         if (!tig_file_is_directory("Players")) {
             tig_file_mkdir("Players");
@@ -1090,6 +1103,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 125: /* identify service */
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
     case PACKET_COOP_OBJ_REQ: /* item blob request (P1-2) */
+    case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 10: /* anim pose */
     case 58: /* cast spell */
@@ -1238,6 +1252,56 @@ static bool coop_lite_load_or_create_token(unsigned char token[16])
 }
 #endif
 
+#ifndef COOP_LITE_TEST_STUBS
+/* v2 offer: our character bundle, in order, ahead of CHAR_OFFER. */
+static void coop_lite_client_send_char_bundle(int64_t pc)
+{
+    CoopCharBundleBuf buf;
+    PacketCoopCharChunk* chunk;
+    int off;
+
+    {
+        /* Dev: a custom stat ("STAT:VALUE", e.g. "0:15") to see it carry
+           over, or an absurd one to see the host refuse the bundle. */
+        const char* env = getenv("ARCANUM_DEV_OFFER_STAT");
+        int stat;
+        int value;
+
+        if (env != NULL && sscanf(env, "%d:%d", &stat, &value) == 2
+            && stat >= STAT_STRENGTH && stat <= STAT_CHARISMA) {
+            tig_net_local_suspend_begin();
+            stat_base_set(pc, stat, value);
+            tig_net_local_suspend_end();
+            tig_debug_printf("CoopLite: dev: offer stat %d = %d (now %d)\n", stat, value,
+                stat_base_get(pc, stat));
+        }
+    }
+    if (!coop_lite_build_char_bundle(pc, &buf)) {
+        tig_debug_printf("CoopLite: v2 offer: no bundle (proto offer only)\n");
+        return;
+    }
+    if (buf.size == 0 || buf.size > COOP_CHAR_WIRE_MAX) {
+        tig_debug_printf("CoopLite: v2 offer: bundle too large (%d bytes)\n", (int)buf.size);
+        coop_char_bundle_free(&buf);
+        return;
+    }
+    chunk = (PacketCoopCharChunk*)MALLOC(sizeof(*chunk));
+    for (off = 0; off < (int)buf.size; off += COOP_CHAR_CHUNK) {
+        int len = (int)buf.size - off < COOP_CHAR_CHUNK ? (int)buf.size - off : COOP_CHAR_CHUNK;
+
+        chunk->type = PACKET_COOP_CHAR_BUNDLE;
+        chunk->total = (int)buf.size;
+        chunk->offset = off;
+        chunk->len = len;
+        memcpy(chunk->data, buf.data + off, (size_t)len);
+        tig_net_send_app_all(chunk, (int)offsetof(PacketCoopCharChunk, data) + len);
+    }
+    FREE(chunk);
+    tig_debug_printf("CoopLite: v2 offer: sent character bundle (%d bytes)\n", (int)buf.size);
+    coop_char_bundle_free(&buf);
+}
+#endif
+
 bool coop_lite_client_offer_character(int basic_prototype, const char* name)
 {
     PacketCoopCharOffer pkt;
@@ -1263,6 +1327,9 @@ bool coop_lite_client_offer_character(int basic_prototype, const char* name)
             pkt.has_oid = 1;
         }
         coop_lite_load_or_create_token(pkt.token);
+        if (pc != OBJ_HANDLE_NULL) {
+            coop_lite_client_send_char_bundle(pc);
+        }
     }
 #endif
     tig_net_send_app_all(&pkt, sizeof(pkt));
@@ -1470,6 +1537,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return offsetof(PacketCoopObjReq, oid);
     case PACKET_COOP_OBJ_BLOB:
         return offsetof(PacketCoopObjBlob, data);
+    case PACKET_COOP_CHAR_BUNDLE:
+        return offsetof(PacketCoopCharChunk, data);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -1523,11 +1592,14 @@ bool coop_lite_sender_owns_obj(int64_t obj)
 #endif
 }
 
+static CoopCharRx coop_char_rx[8];
+
 void coop_lite_host_on_client_disconnect(int slot)
 {
     if (slot <= 0 || slot >= 8) {
         return;
     }
+    coop_char_rx_free(&coop_char_rx[slot]);
     coop_pending_offers[slot].valid = false;
     coop_pending_offers[slot].has_oid = false;
     coop_last_pc_pos_valid[slot] = false;
@@ -1935,6 +2007,156 @@ static void coop_lite_pc_census(bool destroy_unbound)
     }
 }
 
+void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt)
+{
+    int slot;
+
+    if (!tig_net_is_host()) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    if (!coop_char_rx_accept(&coop_char_rx[slot], pkt, tig_net_last_message_size())) {
+        tig_debug_printf("CoopLite: v2 offer: slot %d bundle chunk refused\n", slot);
+        return;
+    }
+    if (coop_char_rx[slot].complete) {
+        tig_debug_printf("CoopLite: v2 offer: slot %d bundle received (%d bytes)\n",
+            slot, coop_char_rx[slot].total);
+    }
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+#define COOP_BLOB_PROTO_AT 4
+#define COOP_BLOB_OID_AT (4 + 24)
+#define COOP_BLOB_TYPE_AT (4 + 24 + 24)
+
+typedef struct CoopBundleBlobs {
+    const uint8_t* blob[COOP_CHAR_MAX_ITEMS + 1];
+    size_t size[COOP_CHAR_MAX_ITEMS + 1];
+    int n;
+} CoopBundleBlobs;
+
+static bool coop_lite_bundle_collect(void* ctx, int index, const uint8_t* blob, size_t size)
+{
+    CoopBundleBlobs* b = (CoopBundleBlobs*)ctx;
+
+    (void)index;
+    if (b->n > COOP_CHAR_MAX_ITEMS || size < COOP_BLOB_TYPE_AT + 4) {
+        return false;
+    }
+    b->blob[b->n] = blob;
+    b->size[b->n] = size;
+    b->n++;
+    return true;
+}
+
+/* Header checks on one blob: its type, a prototype we have, an OID that is
+   not taken yet (no overwriting or aliasing a host object). */
+static bool coop_lite_bundle_blob_ok(const uint8_t* blob, bool want_pc, const ObjectID* want_oid)
+{
+    ObjectID proto_oid;
+    ObjectID oid;
+    int type;
+
+    memcpy(&proto_oid, blob + COOP_BLOB_PROTO_AT, sizeof(proto_oid));
+    memcpy(&oid, blob + COOP_BLOB_OID_AT, sizeof(oid));
+    memcpy(&type, blob + COOP_BLOB_TYPE_AT, sizeof(type));
+    if (want_pc ? type != OBJ_TYPE_PC : (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
+        return false;
+    }
+    if (oid.type == OID_TYPE_NULL || obj_pool_perm_lookup(oid) != OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (want_oid != NULL && want_oid->type != OID_TYPE_NULL && !objid_is_equal(oid, *want_oid)) {
+        return false;
+    }
+    return obj_pool_perm_lookup(proto_oid) != OBJ_HANDLE_NULL;
+}
+
+/* Host: the client's own character from its v2 bundle, at loc. NULL when
+   there is none or it does not pass the checks (proto offer then). */
+static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const ObjectID* want_oid)
+{
+    CoopCharRx* rx = &coop_char_rx[slot];
+    CoopBundleBlobs blobs;
+    int64_t objs[COOP_CHAR_MAX_ITEMS + 1];
+    int64_t pc = OBJ_HANDLE_NULL;
+    int stats[8];
+    int count = 0;
+    int i;
+    bool ok;
+
+    if (!rx->complete) {
+        return OBJ_HANDLE_NULL;
+    }
+    memset(&blobs, 0, sizeof(blobs));
+    memset(objs, 0, sizeof(objs));
+    ok = coop_char_bundle_parse(rx->data, (size_t)rx->total, coop_lite_bundle_collect, &blobs,
+             &count, NULL, NULL)
+        && blobs.n >= 1 && blobs.n == count;
+    for (i = 0; ok && i < blobs.n; i++) {
+        ok = coop_lite_bundle_blob_ok(blobs.blob[i], i == 0, i == 0 ? want_oid : NULL);
+    }
+    if (!ok) {
+        tig_debug_printf("CoopLite: v2 offer: slot %d bundle refused (layout/objects)\n", slot);
+        coop_char_rx_free(rx);
+        return OBJ_HANDLE_NULL;
+    }
+
+    /* Items first (registered, handles still ids), then the PC with its
+       postprocess (its inventory list now resolves), then the items'
+       postprocess (their parent resolves to the PC). */
+    tig_net_local_suspend_begin();
+    for (i = 1; ok && i < blobs.n; i++) {
+        ok = obj_read_mem((uint8_t*)blobs.blob[i], &objs[i]) && objs[i] != OBJ_HANDLE_NULL;
+    }
+    if (ok) {
+        ok = sub_4420D0((uint8_t*)blobs.blob[0], &pc, loc) && pc != OBJ_HANDLE_NULL;
+        objs[0] = pc;
+    }
+    for (i = 1; ok && i < blobs.n; i++) {
+        obj_load_postprocess(objs[i]);
+    }
+    if (ok) {
+        for (i = 0; i < 8; i++) {
+            stats[i] = stat_base_get(pc, STAT_STRENGTH + i);
+        }
+        ok = coop_lite_char_plausible(stat_level_get(pc, STAT_LEVEL),
+            stat_level_get(pc, STAT_EXPERIENCE_POINTS), stats, 8, item_gold_get(pc),
+            obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
+        if (!ok) {
+            tig_debug_printf("CoopLite: v2 offer: slot %d character implausible (level %d)\n",
+                slot, stat_level_get(pc, STAT_LEVEL));
+        }
+    }
+    if (!ok) {
+        for (i = 0; i <= COOP_CHAR_MAX_ITEMS; i++) {
+            if (objs[i] != OBJ_HANDLE_NULL) {
+                object_destroy(objs[i]);
+            }
+        }
+        tig_net_local_suspend_end();
+        coop_char_rx_free(rx);
+        return OBJ_HANDLE_NULL;
+    }
+    object_flags_unset(pc, OF_OFF);
+    obj_field_int64_set(pc, OBJ_F_CRITTER_TELEPORT_DEST, loc);
+    obj_field_int32_set(pc, OBJ_F_CRITTER_TELEPORT_MAP, map_current_map());
+    tig_net_local_suspend_end();
+    /* A fresh custom character has no kit yet: the host's, as for a
+       proto offer. */
+    coop_lite_generate_start_inventory(pc);
+    tig_debug_printf("CoopLite: v2 offer: slot %d character from bundle (level %d, ST %d, %d items, gold %d)\n",
+        slot, stat_level_get(pc, STAT_LEVEL), stat_base_get(pc, STAT_STRENGTH),
+        obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM), item_gold_get(pc));
+    coop_char_rx_free(rx);
+    return pc;
+}
+#endif
+
 static bool coop_lite_host_spawn_client(int slot)
 {
     int64_t host_pc;
@@ -2012,6 +2234,12 @@ static bool coop_lite_host_spawn_client(int slot)
             }
             client_obj = existing;
         }
+    }
+    if (client_obj == OBJ_HANDLE_NULL) {
+        /* v2: the client's own character (stats, skills, spells, gear). */
+        client_obj = coop_lite_host_pc_from_bundle(slot, spawn_loc, &client_oid);
+    } else {
+        coop_char_rx_free(&coop_char_rx[slot]);
     }
     if (client_obj == OBJ_HANDLE_NULL) {
         /* Adopt the client's own OID so attack/dialog OIDs match. */
@@ -4242,6 +4470,58 @@ size_t coop_lite_inven_sync_size(int count)
         count = COOP_INVEN_CHUNK_ENTRIES;
     }
     return offsetof(PacketCoopInvenSync, entries) + (size_t)count * sizeof(PacketCoopInvenEntry);
+}
+
+void coop_char_rx_free(CoopCharRx* rx)
+{
+    free(rx->data);
+    memset(rx, 0, sizeof(*rx));
+}
+
+bool coop_char_rx_accept(CoopCharRx* rx, const PacketCoopCharChunk* pkt, int size)
+{
+    if (pkt == NULL || pkt->type != PACKET_COOP_CHAR_BUNDLE
+        || size < (int)offsetof(PacketCoopCharChunk, data)
+        || pkt->len <= 0 || pkt->len > COOP_CHAR_CHUNK
+        || size < (int)offsetof(PacketCoopCharChunk, data) + pkt->len
+        || pkt->total <= 0 || pkt->total > COOP_CHAR_WIRE_MAX
+        || pkt->offset < 0 || pkt->offset > pkt->total - pkt->len) {
+        coop_char_rx_free(rx);
+        return false;
+    }
+    if (pkt->offset == 0) {
+        coop_char_rx_free(rx);
+        rx->data = (uint8_t*)malloc((size_t)pkt->total);
+        if (rx->data == NULL) {
+            return false;
+        }
+        rx->total = pkt->total;
+    }
+    if (rx->data == NULL || pkt->total != rx->total || pkt->offset != rx->got || rx->complete) {
+        coop_char_rx_free(rx);
+        return false;
+    }
+    memcpy(rx->data + rx->got, pkt->data, (size_t)pkt->len);
+    rx->got += pkt->len;
+    rx->complete = rx->got == rx->total;
+    return true;
+}
+
+bool coop_lite_char_plausible(int level, int xp, const int* base_stats, int num_stats,
+    int gold, int num_items)
+{
+    int i;
+
+    if (level < 1 || level > 127 || xp < 0 || gold < 0 || gold > 1000000
+        || num_items < 0 || num_items > COOP_CHAR_MAX_ITEMS) {
+        return false;
+    }
+    for (i = 0; i < num_stats; i++) {
+        if (base_stats[i] < 1 || base_stats[i] > 25) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size)

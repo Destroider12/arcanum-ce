@@ -632,7 +632,7 @@ static int test_packet_hardening(void)
         static const int client_sends[] = {
             4, 8, 9, 11, 26, 27, 28, 29, 57, 81, 98, 100, 125,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
-            PACKET_COOP_BARTER, PACKET_COOP_OBJ_REQ,
+            PACKET_COOP_BARTER, PACKET_COOP_OBJ_REQ, PACKET_COOP_CHAR_BUNDLE,
         };
         static const int host_sends[] = {
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
@@ -1086,6 +1086,103 @@ static int test_obj_blob(void)
 }
 
 /* Parked PCs and rejoin tokens. */
+static int test_char_rx(void)
+{
+    static PacketCoopCharChunk c;
+    CoopCharRx rx;
+    int stats[8] = { 8, 8, 8, 8, 8, 8, 8, 8 };
+    int hdr = (int)offsetof(PacketCoopCharChunk, data);
+    int i;
+
+    memset(&rx, 0, sizeof(rx));
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_CHAR_BUNDLE;
+    c.total = 1500;
+    c.offset = 0;
+    c.len = COOP_CHAR_CHUNK;
+    for (i = 0; i < COOP_CHAR_CHUNK; i++) {
+        c.data[i] = (uint8_t)i;
+    }
+    if (!coop_char_rx_accept(&rx, &c, hdr + c.len) || rx.complete || rx.got != COOP_CHAR_CHUNK) {
+        fprintf(stderr, "char rx: first chunk\n");
+        return 1;
+    }
+    /* Out of order / duplicate: refused, transfer dropped. */
+    if (coop_char_rx_accept(&rx, &c, hdr + c.len - 0) == false) {
+        /* offset 0 restarts: accepted */
+        fprintf(stderr, "char rx: restart refused\n");
+        return 1;
+    }
+    c.offset = COOP_CHAR_CHUNK;
+    c.len = 1500 - COOP_CHAR_CHUNK;
+    if (coop_char_rx_accept(&rx, &c, hdr + c.len - 1)) {
+        fprintf(stderr, "char rx: short packet accepted\n");
+        return 1;
+    }
+    if (rx.data != NULL) {
+        fprintf(stderr, "char rx: refused chunk kept the transfer\n");
+        return 1;
+    }
+    c.offset = 0;
+    c.len = COOP_CHAR_CHUNK;
+    coop_char_rx_accept(&rx, &c, hdr + c.len);
+    c.offset = COOP_CHAR_CHUNK;
+    c.len = 1500 - COOP_CHAR_CHUNK;
+    if (!coop_char_rx_accept(&rx, &c, hdr + c.len) || !rx.complete || rx.data[1023] != (uint8_t)1023) {
+        fprintf(stderr, "char rx: completion\n");
+        return 1;
+    }
+    /* Past the end, oversize totals, skipped offsets. */
+    if (coop_char_rx_accept(&rx, &c, hdr + c.len)) {
+        fprintf(stderr, "char rx: chunk after completion accepted\n");
+        return 1;
+    }
+    c.offset = 0;
+    c.total = COOP_CHAR_WIRE_MAX + 1;
+    c.len = 16;
+    if (coop_char_rx_accept(&rx, &c, hdr + 16)) {
+        fprintf(stderr, "char rx: oversize total\n");
+        return 1;
+    }
+    c.total = 100;
+    c.offset = 90;
+    c.len = 16;
+    if (coop_char_rx_accept(&rx, &c, hdr + 16)) {
+        fprintf(stderr, "char rx: chunk past total\n");
+        return 1;
+    }
+    c.offset = 0;
+    c.len = 16;
+    coop_char_rx_accept(&rx, &c, hdr + 16);
+    c.offset = 32;
+    if (coop_char_rx_accept(&rx, &c, hdr + 16)) {
+        fprintf(stderr, "char rx: gap accepted\n");
+        return 1;
+    }
+    coop_char_rx_free(&rx);
+
+    if (!coop_lite_char_plausible(1, 0, stats, 8, 400, 3)
+        || !coop_lite_char_plausible(50, 5000000, stats, 8, 0, 0)) {
+        fprintf(stderr, "char plausible: normal characters refused\n");
+        return 1;
+    }
+    stats[3] = 99;
+    if (coop_lite_char_plausible(1, 0, stats, 8, 400, 3)) {
+        fprintf(stderr, "char plausible: stat 99\n");
+        return 1;
+    }
+    stats[3] = 8;
+    if (coop_lite_char_plausible(0, 0, stats, 8, 0, 0)
+        || coop_lite_char_plausible(500, 0, stats, 8, 0, 0)
+        || coop_lite_char_plausible(1, -1, stats, 8, 0, 0)
+        || coop_lite_char_plausible(1, 0, stats, 8, 2000000, 0)
+        || coop_lite_char_plausible(1, 0, stats, 8, 0, COOP_CHAR_MAX_ITEMS + 1)) {
+        fprintf(stderr, "char plausible: limits\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int test_parked(void)
 {
     unsigned char zero[16] = { 0 };
@@ -1269,6 +1366,15 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_parked() != 0) {
+        return 1;
+    }
+    if (test_char_rx() != 0) {
+        return 1;
+    }
+    if (!coop_lite_packet_allowed(PACKET_COOP_CHAR_BUNDLE, true, 1)
+        || coop_lite_packet_allowed(PACKET_COOP_CHAR_BUNDLE, false, 0)
+        || coop_lite_coop_packet_min_size(PACKET_COOP_CHAR_BUNDLE) != 16) {
+        fprintf(stderr, "char bundle packet role/size\n");
         return 1;
     }
     if (test_interp() != 0) {
