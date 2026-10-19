@@ -930,3 +930,47 @@ Client talk uses existing `dialog_ui` + per-node filter once the shared map/PCs 
 - **Dev hook:** `ARCANUM_DEV_AUTOSTART_PREGEN=<1..8>` starts a New Game with
   that premade character after ~2 s on the main menu, so test runs need no
   input automation. Unset means no effect.
+
+## 21. Playtest 7 fixes
+
+**Client could run Virgil's whole intro and recruit him (main issue).**
+Root cause: the client's own talk (and the AG_TALK goal → `dialog_ui_start_dialog`)
+runs under `tig_net_local_suspend`. While suspended, `tig_net_is_active()` reads
+false, so every `tig_net_is_active() && !tig_net_is_host()` check in the dialog
+filter was off: no "(Only the party leader can discuss this.)" blanking, and option
+actions ran locally. Virgil's option 121 is `{jo 0 74}` (critter_follow), and node 1
+runs NPC-line actions (`gf… in -2804 … qu1010 2, ru2013`) through the same executor
+`sub_415BA0`, which had no filter at all.
+Fixes:
+- `coop_lite_is_client_role()` = locally suspended || (active && !host); used by the
+  dialog option display/process filters and the executor.
+- `coop_lite_dialog_action_blocked(code)`: one table for the option filter and for
+  `sub_415BA0` (option and NPC-line actions). Blocked: qu gv gf lv lf lc ss rp al ru rq
+  xp fp pv pf jo wa uw sc so ce su ii ri et $$ in co nk or np. Allowed: re fl mm tr.
+  Skipped actions are logged ("Dialog: coop client skipped action …").
+- A client clicking another player's follower (critter leader != own PC) gets a float
+  line "(Following the party leader. Speak with them.)" and no dialog.
+- `critter_follow` / `critter_disband` refuse on clients unless applying a host packet
+  (`multiplayer_is_locked()`): follower state is host-owned.
+- Test: `coop_lite_dialog_filter_test` checks Virgil's real action strings (embedded),
+  suspension-aware role, and — when `/workspace/tools/01324virgil.dlg` or
+  `COOP_VIRGIL_DLG` is present (game data, not committed) — every jo/wa/lv/uw line and
+  every gf/qu/ru/lf/in/al line in the real file is denied.
+
+**Client walk stopped short (~190 px).** Root cause: a click calls `sub_424070`
+(interrupt) on the client PC before adding the move goal; it was not suspended, so a
+Packet9 went to the host, which interrupted its proxy (stand art). The host relay then
+saw the proxy sample differ from the client-reported pose and sent `COOP_PC_POS_FORCE`
+to the owner; applying a stand art ends `AGUpdateAnimMove` → the walk stopped a few
+tiles in. Fixes: `sub_424070` on our own PC runs locally (suspended); host FORCE only
+when location/offset differ (`coop_lite_pc_pos_moved`), never for art-only drift;
+a client applying a FORCE to its own PC moves position only (no art), logged as
+"host correction of own PC".
+
+**Jerky client camera.** The follow ran only on the 50 ms pose tick and used the tile
+centre (jumps a tile at a time). It now runs every ping (frame) and includes the
+sub-tile `OBJ_F_OFFSET_X/Y`.
+
+**Host: rapid dialog-option clicks sometimes stall.** The host dialog path has no coop
+code (`tc_handle_message` / `dialog_ui` unchanged from SP: repeat-flagged button-down
+events are ignored by design). Not coop-related; left as is.
