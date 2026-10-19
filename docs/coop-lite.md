@@ -1089,3 +1089,97 @@ cost M ms` every 10 s. Headless runs measured gaps of 17–25 ms and a coop cost
 - `ARCANUM_DEV_START_LOC=shrouded` teleports the host PC on the current map 3 s after
   it enters the world. `shrouded` is Shrouded Hills, 90226,84176; `x,y` also works.
   Clients follow through the normal follow packet.
+
+## 24. Coop death: corpses, the fallen leader, and party wipes (PT10)
+
+This replaces the PT8 automatic revive, which put a fallen client back up 8 s later.
+
+**Fallen client PC.** The PC stays a corpse: no timer, no revive. It can only be
+brought back by normal game means, such as Resurrect, scrolls, or anything else that
+reaches `combat_heal` with `CDF_RESURRECT`.
+- The resurrection is resolved on the host. Before this, a client's own cast ran
+  inside its locally suspended animation and so only on that client.
+  `magictech_invocation_run` now leaves suspension for that one call
+  (`tig_net_local_suspend_pause/resume`), so the cast becomes a Packet57 request.
+  The host checks that the caster belongs to the sender, then runs it and
+  broadcasts Packet58 and the vitals (Packet100 subtype 13). Item casts take the
+  same path.
+- While dead, the client cannot act: the vanilla `critter_is_dead(pc)` input gates
+  apply, and its PC_POS reports stop. Its camera follows the first living party
+  member, which makes it a spectator.
+- The corpse never crawls after the party. When the host travels (teleport,
+  stairs, cellar, world map), `teleport_process` hands every other bound slot PC
+  to the same teleport (`coop_lite_party_carry_list`), corpses included. Across
+  maps they are written into the destination map with the host's PC instead of
+  being left in the old map's save. Previously they were left behind and
+  re-created from proto, losing their stats.
+- After the teleport, `coop_lite_after_party_carry` puts each carried PC at its
+  usual follow spot and keeps corpses in the fallen pose. The client does the same
+  for its copies when it applies the host's follow packet. A dead client's own
+  corpse follows through the normal follow teleport.
+
+**Fallen host.** Every screen shows "The party leader has fallen! Resurrect them to
+continue." (the host sees its own variant). This uses
+`PACKET_COOP_PARTY_STATE` (135, host → clients) with kind `HOST_DOWN`.
+- There is no timeout: living clients can resurrect the host on the current map
+  for as long as they like. `HOST_UP` announces the return.
+- If the host's map changes while it is down, the location has been left and the
+  host reloads at once. This should not normally happen, because only the host
+  travels.
+
+**Party wipe.** When every bound PC is dead, including a host playing alone, the
+host announces `WIPE` with a 10 s grace (`COOP_LITE_WIPE_GRACE_MS`). If anyone gets
+up during the grace (for example a delayed effect), `WIPE_CANCEL` follows. When
+the grace ends:
+1. The host announces `RELOADING`. The main loop, outside `gamelib_ping`, loads
+   the most recent save (`gamelib_last_save_name`) through
+   `mainmenu_ui_coop_reload_save`.
+2. In the reloaded world the host re-arms follow and sends `RESYNC`.
+3. Each client resets its session state, stands its PC back up, and re-offers it
+   (CHAR_OFFER with its OID). The host adopts the PC that is in the save under that
+   OID, or creates one if the client joined after the save. It brings every
+   re-offered PC up at full health and sends SESSION_SYNC, so the client teleports
+   to its saved spot.
+- If there is no save, or it fails to load, the host instead raises every PC with
+  full health in place and announces `NO_SAVE`.
+- Limitation: a client's own world is not reloaded. Nearby NPCs converge through
+  NPC_POS (pose, hp, dead), but other changes such as dropped items or opened
+  containers may differ until the client re-enters the area. Client characters
+  keep their own progress; they are not rolled back.
+
+**Pure, tested state machine.** `coop_lite_party_step()` (with `CoopPartyWatch`)
+produces `HOST_DOWN`, `HOST_UP`, `WIPE_COUNTDOWN`, `WIPE_CANCEL` and `RELOAD`, plus
+per-slot fell/rose masks. `coop_lite_should_carry_slot()` is the carry rule. The
+policy test covers:
+- a client dies, its corpse waits ten minutes without any action, is carried across
+  a host map change, and is resurrected;
+- the host dies while a client lives: it waits fifteen minutes, then is resurrected;
+- everyone dies: countdown, reload exactly once after the grace;
+- a cancel during the grace;
+- the host is down and the map changes: immediate reload;
+- a host playing alone wipes;
+- no host in the world: nothing happens;
+- the direction and size rules of the 135 packet.
+
+**Dev hooks** (coop host only).
+- `ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT=1` spawns one wolf at the client 10 s after
+  it joins. That is once per session: PT10 had a spawn loop with 8 wolves.
+  `=2` also sends a second wolf at the host, for party-wipe tests.
+- `ARCANUM_DEV_COOP_SAVE=1` saves `Slot9990` "Coop dev save" 4 s after the first
+  client is bound, so a wipe has something to reload.
+- `ARCANUM_DEV_START_LOC=merchant` teleports to Shrouded Hills, then 2 s later moves
+  the host next to the nearest living merchant within 80 tiles. Merchants are found
+  with the client-talk rule, via `object_list_rect`; in town that is the Blacksmith,
+  20 tiles away. The client joins beside the host, so it can barter at once.
+
+**Other PT10 fixes.**
+- A departed player's PC lingered on the host (census `slot=-1`). At DISCONNECT the
+  slot is already inactive, so `sub_4A2B60` returned NULL. `multiplayer.c` now reads
+  the binding directly (`sub_4A1F60`), and `coop_lite_host_remove_left_pc(slot, pc)`
+  falls back to the OID remembered for the slot. It also drops that slot's sector
+  keep-alive lock.
+- If a loaded save bound a slot to a PC other than the one the player now offers
+  (a re-picked character, or a save from another session), the stale PC is
+  destroyed and the offered one is used.
+- The host's own death was silent in PT10 (pool of blood, no log line). It is now
+  logged as "host PC fell" and announced on every screen (see above).

@@ -17,9 +17,10 @@ extern "C" {
 #define PACKET_COOP_PC_POS 132
 #define PACKET_COOP_FOLLOWERS 133 /* host → clients: who follows which slot PC */
 #define PACKET_COOP_NPC_POS 134 /* host → clients: NPC pose batch near PCs */
+#define PACKET_COOP_PARTY_STATE 135 /* host → clients: death / wipe / reload notices */
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 135
+#define PACKET_COOP_TYPE_LIMIT 136
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -150,6 +151,17 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopFollowerEntry) == 0x20, "PacketCoopFollowerE
 COOP_STATIC_ASSERT(offsetof(PacketCoopFollowers, entries) == 0x08, "PacketCoopFollowers layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopNpcPosEntry) == 0x38, "PacketCoopNpcPosEntry size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopNpcPos, entries) == 0x08, "PacketCoopNpcPos layout");
+
+typedef struct PacketCoopPartyState {
+    /* 0000 */ int type;
+    /* 0004 */ int kind;
+    /* 0008 */ int slot;
+    /* 000C */ unsigned int countdown_ms;
+    /* 0010 */ unsigned int dead_mask;
+    /* 0014 */ int reserved;
+} PacketCoopPartyState;
+
+COOP_STATIC_ASSERT(sizeof(PacketCoopPartyState) == 0x18, "PacketCoopPartyState size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_loc) == 0x08, "PacketCoopSessionSync layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, client_slot) == 0x48, "PacketCoopSessionSync layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_name) == 0x94, "PacketCoopSessionSync layout");
@@ -198,6 +210,20 @@ const char* coop_lite_bark_text(CoopTalkPolicy policy);
 /* Follower table handlers. */
 void coop_lite_handle_followers(PacketCoopFollowers* pkt);
 void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt);
+void coop_lite_handle_party_state(PacketCoopPartyState* pkt);
+
+/* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
+   placement once the teleport is done. */
+int coop_lite_party_carry_list(int64_t mover, int64_t* objs, int max);
+void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc);
+
+/* Host: a party-wipe reload is due. Copies the save name; main loop loads it
+   outside of gamelib_ping. */
+bool coop_lite_take_reload_request(char* name, size_t size);
+/* Host: the reload could not be started (bad save). */
+void coop_lite_reload_failed(void);
+/* ARCANUM_DEV_COOP_SAVE=1: host saves Slot9990 once a client is in (dev). */
+bool coop_lite_take_dev_save_request(void);
 
 /* Client camera: true when the target is off the visible area (recentre). */
 bool coop_lite_follow_needs_jump(int64_t dx, int64_t dy, int64_t half_w, int64_t half_h);
@@ -213,10 +239,48 @@ bool coop_lite_world_ready_rule(bool in_session, bool sync_pending, bool waiting
 /* ARCANUM_DEV_START_LOC: "x,y" or "shrouded". */
 bool coop_lite_parse_dev_loc(const char* value, int* x, int* y);
 
-/* Host: seconds a fallen client PC stays down before it is revived. */
-#define COOP_LITE_REVIVE_DELAY_MS 8000u
-/* Host: revive is due (pure, for tests). */
-bool coop_lite_revive_due(unsigned int dead_since_ms, unsigned int now_ms);
+/*
+ * Coop death (PT10). No auto-revive: a dead PC stays a corpse until it is
+ * resurrected by normal game means (resolved on the host). The host watches
+ * the party with this pure state machine.
+ */
+/* All players dead: seconds of grace before the host reloads its last save. */
+#define COOP_LITE_WIPE_GRACE_MS 10000u
+
+#define COOP_PARTY_ACT_HOST_DOWN 0x01u /* host PC fell — notify everyone */
+#define COOP_PARTY_ACT_HOST_UP 0x02u /* host PC resurrected */
+#define COOP_PARTY_ACT_WIPE_COUNTDOWN 0x04u /* every player is dead — grace starts */
+#define COOP_PARTY_ACT_WIPE_CANCEL 0x08u /* someone got up during the grace */
+#define COOP_PARTY_ACT_RELOAD 0x10u /* reload the host's last save now */
+
+typedef struct CoopPartyWatch {
+    bool was_dead[8];
+    bool host_down;
+    int host_down_map;
+    bool wipe_pending;
+    unsigned int wipe_since_ms;
+    bool reload_issued;
+} CoopPartyWatch;
+
+/*
+ * One step. present[s]: slot s has a bound PC (slot 0 = host). dead[s]: it is
+ * dead. map: host's current map. fell/rose (optional) get per-slot masks of
+ * PCs that died / got up since the last step. Returns COOP_PARTY_ACT_* bits.
+ */
+unsigned int coop_lite_party_step(CoopPartyWatch* w, const bool present[8], const bool dead[8],
+    int map, unsigned int now_ms, unsigned int* fell, unsigned int* rose);
+
+/* Teleport of the local PC carries the other slot PCs (alive or dead). */
+bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
+
+/* PACKET_COOP_PARTY_STATE kinds. */
+#define COOP_PARTY_HOST_DOWN 1
+#define COOP_PARTY_HOST_UP 2
+#define COOP_PARTY_WIPE 3 /* countdown_ms until reload */
+#define COOP_PARTY_WIPE_CANCEL 4
+#define COOP_PARTY_RELOADING 5
+#define COOP_PARTY_RESYNC 6 /* host loaded its save: re-offer your PC */
+#define COOP_PARTY_NO_SAVE 7 /* nothing to reload: everyone is brought back */
 
 /* Starting kit for a coop-created/offered PC, generated locally (suspended). */
 void coop_lite_generate_start_inventory(int64_t pc_obj);
@@ -228,7 +292,7 @@ void coop_lite_on_game_reset(void);
 void coop_lite_before_map_flush(void);
 
 /* Host: a client disconnected — remove the PC it left behind. */
-void coop_lite_host_remove_left_pc(int64_t pc_obj);
+void coop_lite_host_remove_left_pc(int slot, int64_t pc_obj);
 
 /* Client: re-establish the configured -join connection after quit-to-menu. */
 bool coop_lite_client_reconnect(void);

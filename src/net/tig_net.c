@@ -626,6 +626,19 @@ void tig_net_local_suspend_end(void)
     }
 }
 
+int tig_net_local_suspend_pause(void)
+{
+    int depth = local_suspend_depth;
+
+    local_suspend_depth = 0;
+    return depth;
+}
+
+void tig_net_local_suspend_resume(int depth)
+{
+    local_suspend_depth = depth > 0 ? depth : 0;
+}
+
 bool tig_net_is_locally_suspended(void)
 {
     return local_suspend_depth > 0;

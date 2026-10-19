@@ -3010,6 +3010,26 @@ bool sub_5432B0(const char* name)
     return false;
 }
 
+bool mainmenu_ui_coop_reload_save(const char* name)
+{
+    char slot[9];
+
+    if (mainmenu_ui_gsi_loaded) {
+        gamelib_saveinfo_exit(&mainmenu_ui_gsi);
+        mainmenu_ui_gsi_loaded = false;
+    }
+    if (name == NULL || !gamelib_saveinfo_load(name, &mainmenu_ui_gsi)) {
+        tig_debug_printf("MainMenu-UI: coop reload: no save info for %s\n", name != NULL ? name : "(null)");
+        return false;
+    }
+    mainmenu_ui_gsi_loaded = true;
+    /* Save list names carry the description; the slot is the first 8. */
+    strncpy(slot, name, 8);
+    slot[8] = '\0';
+    tig_debug_printf("MainMenu-UI: coop reload of %s\n", slot);
+    return sub_5432B0(slot);
+}
+
 // 0x543380
 void mainmenu_ui_save_game_create(void)
 {

@@ -97,6 +97,9 @@ bool tig_net_welcome_slot_valid(int slot);
 void tig_net_local_suspend_begin(void);
 void tig_net_local_suspend_end(void);
 bool tig_net_is_locally_suspended(void);
+/* Leave local suspension for one network request (returns the depth). */
+int tig_net_local_suspend_pause(void);
+void tig_net_local_suspend_resume(int depth);
 int sub_52A900(void); /* non-zero blocks time advance */
 void sub_52A940(void);
 void sub_52A950(void);

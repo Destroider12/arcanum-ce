@@ -27,6 +27,8 @@ typedef struct TeleportData {
 } TeleportData;
 #include "net/tig_net.h"
 
+static int coop_lite_party_death_tests(void);
+
 #define TEST_PORT 17888
 #define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
 #define LOCATION_GET_X(l) ((int64_t)((l) & 0xFFFFFFFF))
@@ -470,7 +472,7 @@ static int test_packet_hardening(void)
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
             77, 92, 94, 98, 99, 100, 106, 118, 121,
             PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
-            PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS,
+            PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS, PACKET_COOP_PARTY_STATE,
         };
         size_t i;
 
@@ -514,12 +516,8 @@ static int test_packet_hardening(void)
         fprintf(stderr, "batch_valid wrong\n");
         return 1;
     }
-    /* Fallen client PC revive timer. */
-    if (coop_lite_revive_due(0, 100000u)
-        || coop_lite_revive_due(1000u, 1000u + COOP_LITE_REVIVE_DELAY_MS - 1)
-        || !coop_lite_revive_due(1000u, 1000u + COOP_LITE_REVIVE_DELAY_MS)
-        || !coop_lite_revive_due(0xFFFFF000u, 0xFFFFF000u + COOP_LITE_REVIVE_DELAY_MS + 5)) {
-        fprintf(stderr, "revive_due wrong\n");
+    /* PT10: no auto-revive; party death state machine. */
+    if (coop_lite_party_death_tests() != 0) {
         return 1;
     }
     /* Camera: recentre only when the PC leaves the visible area. */
@@ -554,6 +552,7 @@ static int test_packet_hardening(void)
 
         if (!coop_lite_parse_dev_loc("shrouded", &x, &y)
             || x != COOP_LITE_DEV_SHROUDED_X || y != COOP_LITE_DEV_SHROUDED_Y
+            || !coop_lite_parse_dev_loc("merchant", &x, &y) || x != COOP_LITE_DEV_SHROUDED_X
             || !coop_lite_parse_dev_loc("1200,3400", &x, &y) || x != 1200 || y != 3400
             || coop_lite_parse_dev_loc("", &x, &y)
             || coop_lite_parse_dev_loc(NULL, &x, &y)
@@ -586,6 +585,125 @@ static int test_packet_hardening(void)
     }
 
     printf("packet hardening (direction/size/proto/name/sender audit/follow) OK\n");
+    return 0;
+}
+
+/* ---- PT10 coop death state machine ---- */
+static void party_set(bool present[8], bool dead[8], int n_present)
+{
+    int s;
+
+    for (s = 0; s < 8; s++) {
+        present[s] = s < n_present;
+        dead[s] = false;
+    }
+}
+
+#define PARTY_FAIL(msg) do { fprintf(stderr, "party: %s\n", msg); return 1; } while (0)
+
+static int coop_lite_party_death_tests(void)
+{
+    CoopPartyWatch w;
+    bool present[8];
+    bool dead[8];
+    unsigned int fell;
+    unsigned int rose;
+    unsigned int acts;
+    unsigned int t;
+
+    /* 1. Client dies -> corpse (no revive, no reload) -> carried across a
+          host map change -> resurrected. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 2);
+    if (coop_lite_party_step(&w, present, dead, 1, 1000u, &fell, &rose) != 0) PARTY_FAIL("idle");
+    dead[1] = true;
+    acts = coop_lite_party_step(&w, present, dead, 1, 2000u, &fell, &rose);
+    if (acts != 0 || fell != 0x2u || rose != 0) PARTY_FAIL("client fell");
+    for (t = 2000u; t < 600000u; t += 5000u) {
+        if (coop_lite_party_step(&w, present, dead, 1, t, &fell, &rose) != 0 || fell != 0) {
+            PARTY_FAIL("client corpse must just stay");
+        }
+    }
+    if (!coop_lite_should_carry_slot(1, 0, true) /* host travel carries the corpse */
+        || coop_lite_should_carry_slot(0, 0, true) /* not the mover itself */
+        || coop_lite_should_carry_slot(2, 0, false) /* nothing bound */
+        || !coop_lite_should_carry_slot(0, 1, true) /* client follow carries the host proxy */
+        || coop_lite_should_carry_slot(8, 0, true)) {
+        PARTY_FAIL("carry rule");
+    }
+    /* Host (alive) changes map with the corpse: still no action. */
+    if (coop_lite_party_step(&w, present, dead, 2, 610000u, &fell, &rose) != 0) PARTY_FAIL("map change, host alive");
+    dead[1] = false;
+    acts = coop_lite_party_step(&w, present, dead, 2, 611000u, &fell, &rose);
+    if (acts != 0 || rose != 0x2u) PARTY_FAIL("client resurrected");
+
+    /* 2. Host dies, client alive -> notice, waits indefinitely, resurrected
+          by the client. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 2);
+    coop_lite_party_step(&w, present, dead, 1, 0u, NULL, NULL);
+    dead[0] = true;
+    acts = coop_lite_party_step(&w, present, dead, 1, 1000u, &fell, NULL);
+    if (acts != COOP_PARTY_ACT_HOST_DOWN || fell != 0x1u) PARTY_FAIL("host down");
+    for (t = 1000u; t < 900000u; t += 7000u) {
+        if (coop_lite_party_step(&w, present, dead, 1, t, NULL, NULL) != 0) PARTY_FAIL("host down must wait");
+    }
+    dead[0] = false;
+    if (coop_lite_party_step(&w, present, dead, 1, 900000u, NULL, &rose) != COOP_PARTY_ACT_HOST_UP || rose != 0x1u) {
+        PARTY_FAIL("host up");
+    }
+
+    /* 3. Everyone dead -> countdown -> reload once after the grace. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 3);
+    coop_lite_party_step(&w, present, dead, 1, 0u, NULL, NULL);
+    dead[1] = true;
+    coop_lite_party_step(&w, present, dead, 1, 100u, NULL, NULL);
+    dead[0] = true;
+    acts = coop_lite_party_step(&w, present, dead, 1, 200u, NULL, NULL);
+    if (acts != COOP_PARTY_ACT_HOST_DOWN) PARTY_FAIL("host down with client 2 alive");
+    dead[2] = true;
+    if (coop_lite_party_step(&w, present, dead, 1, 300u, NULL, NULL) != COOP_PARTY_ACT_WIPE_COUNTDOWN) PARTY_FAIL("wipe countdown");
+    if (coop_lite_party_step(&w, present, dead, 1, 300u + COOP_LITE_WIPE_GRACE_MS - 1, NULL, NULL) != 0) PARTY_FAIL("grace");
+    if (coop_lite_party_step(&w, present, dead, 1, 300u + COOP_LITE_WIPE_GRACE_MS, NULL, NULL) != COOP_PARTY_ACT_RELOAD) PARTY_FAIL("reload");
+    if (coop_lite_party_step(&w, present, dead, 1, 400000u, NULL, NULL) != 0) PARTY_FAIL("reload only once");
+
+    /* 3b. Someone gets up during the grace -> cancel. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 2);
+    dead[0] = dead[1] = true;
+    acts = coop_lite_party_step(&w, present, dead, 1, 50u, NULL, NULL);
+    if (acts != (COOP_PARTY_ACT_HOST_DOWN | COOP_PARTY_ACT_WIPE_COUNTDOWN)) PARTY_FAIL("wipe at once");
+    dead[1] = false;
+    if (coop_lite_party_step(&w, present, dead, 1, 5000u, NULL, NULL) != COOP_PARTY_ACT_WIPE_CANCEL) PARTY_FAIL("cancel");
+    if (coop_lite_party_step(&w, present, dead, 1, 60000u, NULL, NULL) != 0) PARTY_FAIL("no reload after cancel");
+
+    /* 4. Host down and the location is left -> reload at once. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 2);
+    dead[0] = true;
+    coop_lite_party_step(&w, present, dead, 5, 10u, NULL, NULL);
+    if (coop_lite_party_step(&w, present, dead, 6, 20u, NULL, NULL) != COOP_PARTY_ACT_RELOAD) PARTY_FAIL("left location");
+
+    /* 5. Host alone dies -> wipe; host not in the world -> nothing. */
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 1);
+    dead[0] = true;
+    if (coop_lite_party_step(&w, present, dead, 1, 10u, NULL, NULL) != (COOP_PARTY_ACT_HOST_DOWN | COOP_PARTY_ACT_WIPE_COUNTDOWN)) {
+        PARTY_FAIL("solo host wipe");
+    }
+    memset(&w, 0, sizeof(w));
+    party_set(present, dead, 0);
+    if (coop_lite_party_step(&w, present, dead, 1, 10u, NULL, NULL) != 0) PARTY_FAIL("no host");
+
+    /* Packet. */
+    if (!coop_lite_packet_allowed(PACKET_COOP_PARTY_STATE, false, 0)
+        || coop_lite_packet_allowed(PACKET_COOP_PARTY_STATE, true, 1)
+        || coop_lite_coop_packet_min_size(PACKET_COOP_PARTY_STATE) != sizeof(PacketCoopPartyState)
+        || PACKET_COOP_PARTY_STATE >= PACKET_COOP_TYPE_LIMIT) {
+        PARTY_FAIL("PARTY_STATE packet rules");
+    }
+    printf("PT10 party death state machine: OK\n");
     return 0;
 }
 

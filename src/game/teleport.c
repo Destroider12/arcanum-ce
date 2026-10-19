@@ -212,6 +212,21 @@ bool teleport_process(TeleportData* teleport_data)
 
     schedule_teleport_obj_recursively(teleport_data->obj, teleport_data->loc);
 
+    /* Coop Lite: the party (other players' PCs, corpses included) travels
+       with the local PC — host travel, or a client applying the host's. */
+    {
+        int64_t carry[8];
+        int carry_cnt;
+        int idx;
+
+        carry_cnt = coop_lite_party_carry_list(teleport_data->obj, carry, 8);
+        for (idx = 0; idx < carry_cnt; idx++) {
+            if (!teleport_is_teleporting_obj(carry[idx])) {
+                schedule_teleport_obj_recursively(carry[idx], teleport_data->loc);
+            }
+        }
+    }
+
     if (teleport_is_teleporting_pc) {
         object_flush();
         wallcheck_flush();
@@ -277,6 +292,7 @@ bool teleport_process(TeleportData* teleport_data)
 
     /* Coop Lite: host PC travel forces remote players to the same destination. */
     if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
+        coop_lite_after_party_carry(teleport_data->obj, teleport_data->loc);
         coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
         /* Client may have queued a follow while still on ShopMap / main menu. */
         coop_lite_flush_pending_follow();

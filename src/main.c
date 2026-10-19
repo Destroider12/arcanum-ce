@@ -12,6 +12,7 @@
 #include <tig/tig.h>
 
 #include "game/ai.h"
+#include "game/coop_lite.h"
 #include "game/anim.h"
 #include "game/combat.h"
 #include "game/critter.h"
@@ -430,6 +431,24 @@ void main_loop(void)
 
         tig_ping();
         gamelib_ping();
+
+        /* Coop Lite: party-wipe reload / dev save, outside gamelib_ping. */
+        {
+            char coop_save[TIG_MAX_PATH];
+
+            if (coop_lite_take_reload_request(coop_save, sizeof(coop_save))) {
+                if (!mainmenu_ui_coop_reload_save(coop_save)) {
+                    coop_lite_reload_failed();
+                }
+                continue;
+            }
+            if (coop_lite_take_dev_save_request()) {
+                coop_lite_export_local_character();
+                tig_debug_printf("CoopLite: dev save Slot9990: %s\n",
+                    gamelib_save("Slot9990", "Coop dev save") ? "ok" : "FAILED");
+            }
+        }
+
         iso_redraw();
         tig_window_display();
 

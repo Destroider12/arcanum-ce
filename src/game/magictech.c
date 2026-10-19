@@ -9,6 +9,8 @@
 #include "game/antiteleport.h"
 #include "game/area.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/effect.h"
@@ -4666,6 +4668,19 @@ void magictech_invocation_init(MagicTechInvocation* mt_invocation, int64_t obj, 
 void magictech_invocation_run(MagicTechInvocation* mt_invocation)
 {
     if (magictech_editor) {
+        return;
+    }
+
+    /*
+     * Coop Lite: a client's own cast runs inside its locally suspended
+     * animation; it must still go to the host as a request (Packet57) so the
+     * effect — e.g. Resurrect on a fallen companion — is resolved there and
+     * synced, instead of only on this client.
+     */
+    if (tig_net_is_coop_enabled() && tig_net_is_locally_suspended() && coop_lite_is_client_role()) {
+        int depth = tig_net_local_suspend_pause();
+        magictech_invocation_run(mt_invocation);
+        tig_net_local_suspend_resume(depth);
         return;
     }
 

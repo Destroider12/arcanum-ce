@@ -94,6 +94,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/invensource.h"
 #include "game/combat.h"
 #include "game/tf.h"
+#include "game/gamelib.h"
 #include "game/stat.h"
 #include "tig/file.h"
 #include "tig/debug.h"
@@ -169,6 +170,18 @@ static int64_t coop_lite_host_pc_obj(void)
 void coop_lite_host_on_entered_world(void);
 
 static bool coop_lite_applying_follow;
+/* Coop death (PT10), see coop_lite_host_watch_party. */
+#ifndef COOP_LITE_TEST_STUBS
+static CoopPartyWatch coop_party_watch;
+static bool coop_reload_request_valid;
+static char coop_reload_request_name[TIG_MAX_PATH];
+/* Survive the gamelib reset of the reload itself. */
+static bool coop_reload_resync_pending;
+static bool coop_reload_raise[8];
+#endif
+/* Client: follow packet seen — carry other PCs on the next own teleport. */
+static bool coop_follow_carry_pending;
+static int64_t coop_follow_host_loc;
 static bool coop_lite_follow_armed; /* set after first host PC teleport; that one is not broadcast */
 static bool coop_lite_pending_follow_valid;
 static PacketCoopFollowHost coop_lite_pending_follow;
@@ -301,7 +314,7 @@ bool coop_lite_parse_dev_loc(const char* value, int* x, int* y)
     if (value == NULL || value[0] == '\0') {
         return false;
     }
-    if (strcmp(value, "shrouded") == 0) {
+    if (strcmp(value, "shrouded") == 0 || strcmp(value, "merchant") == 0) {
         *x = COOP_LITE_DEV_SHROUDED_X;
         *y = COOP_LITE_DEV_SHROUDED_Y;
         return true;
@@ -319,10 +332,78 @@ bool coop_lite_follow_needs_jump(int64_t dx, int64_t dy, int64_t half_w, int64_t
     return llabs(dx) > half_w || llabs(dy) > half_h;
 }
 
-bool coop_lite_revive_due(unsigned int dead_since_ms, unsigned int now_ms)
+unsigned int coop_lite_party_step(CoopPartyWatch* w, const bool present[8], const bool dead[8],
+    int map, unsigned int now_ms, unsigned int* fell, unsigned int* rose)
 {
-    return dead_since_ms != 0
-        && coop_lite_interval_elapsed(dead_since_ms, now_ms, COOP_LITE_REVIVE_DELAY_MS);
+    unsigned int acts = 0;
+    unsigned int fell_mask = 0;
+    unsigned int rose_mask = 0;
+    bool all_dead;
+    bool d;
+    int s;
+
+    for (s = 0; s < 8; s++) {
+        d = present[s] && dead[s];
+        if (d && !w->was_dead[s]) {
+            fell_mask |= 1u << s;
+        } else if (!d && w->was_dead[s]) {
+            rose_mask |= 1u << s;
+        }
+        w->was_dead[s] = d;
+    }
+    if (fell != NULL) {
+        *fell = fell_mask;
+    }
+    if (rose != NULL) {
+        *rose = rose_mask;
+    }
+    if (w->reload_issued || !present[0]) {
+        return 0; /* reload under way / host not in the world */
+    }
+
+    if ((fell_mask & 1u) != 0) {
+        w->host_down = true;
+        w->host_down_map = map;
+        acts |= COOP_PARTY_ACT_HOST_DOWN;
+    } else if ((rose_mask & 1u) != 0) {
+        w->host_down = false;
+        acts |= COOP_PARTY_ACT_HOST_UP;
+    }
+
+    /* The location was left while the host is down: nobody can bring the
+       leader back there any more. */
+    if (w->host_down && map != w->host_down_map) {
+        w->reload_issued = true;
+        w->wipe_pending = false;
+        return acts | COOP_PARTY_ACT_RELOAD;
+    }
+
+    all_dead = dead[0];
+    for (s = 1; s < 8; s++) {
+        if (present[s] && !dead[s]) {
+            all_dead = false;
+        }
+    }
+    if (all_dead && !w->wipe_pending) {
+        w->wipe_pending = true;
+        w->wipe_since_ms = now_ms;
+        acts |= COOP_PARTY_ACT_WIPE_COUNTDOWN;
+    } else if (!all_dead && w->wipe_pending) {
+        w->wipe_pending = false;
+        acts |= COOP_PARTY_ACT_WIPE_CANCEL;
+    }
+    if (w->wipe_pending
+        && coop_lite_interval_elapsed(w->wipe_since_ms, now_ms, COOP_LITE_WIPE_GRACE_MS)) {
+        w->wipe_pending = false;
+        w->reload_issued = true;
+        acts |= COOP_PARTY_ACT_RELOAD;
+    }
+    return acts;
+}
+
+bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound)
+{
+    return bound && slot >= 0 && slot < 8 && slot != mover_slot;
 }
 
 bool coop_lite_is_client_role(void)
@@ -667,6 +748,9 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     teleport_data.loc = dest;
     teleport_data.map = pkt->map;
 
+    /* The teleport runs later (teleport_ping); carry the other PCs then. */
+    coop_follow_carry_pending = true;
+    coop_follow_host_loc = pkt->loc;
     coop_lite_applying_follow = true;
     teleport_do(&teleport_data);
     coop_lite_applying_follow = false;
@@ -682,6 +766,9 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
 static void coop_lite_world_reset(void);
 static void coop_lite_keep_sector(int slot, int64_t loc);
 static void coop_lite_remember_slot_pc(int slot, int64_t obj, int proto);
+static void coop_lite_host_raise_pc(int64_t pc);
+static void coop_lite_unkeep_sector(int slot);
+static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
 void coop_lite_session_reset(void)
@@ -852,6 +939,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_FOLLOW_HOST:
     case PACKET_COOP_FOLLOWERS: /* host follower table → client */
     case PACKET_COOP_NPC_POS: /* host NPC poses → client */
+    case PACKET_COOP_PARTY_STATE: /* host death / reload notices → client */
     case PACKET_COOP_SESSION_SYNC: /* host map+PC snapshot → client */
         return COOP_MP_PKT_CLIENT_APPLY;
     case 122: /* client notification (ignored on host) */
@@ -1024,6 +1112,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopSessionSync);
     case PACKET_COOP_PC_POS:
         return sizeof(PacketCoopPcPos);
+    case PACKET_COOP_PARTY_STATE:
+        return sizeof(PacketCoopPartyState);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -1133,11 +1223,22 @@ void coop_lite_on_game_reset(void)
 #endif
 }
 
-void coop_lite_host_remove_left_pc(int64_t pc_obj)
+void coop_lite_host_remove_left_pc(int slot, int64_t pc_obj)
 {
 #ifndef COOP_LITE_TEST_STUBS
     char oid_str[80];
 
+    /* PT10: the slot is already inactive at DISCONNECT, so sub_4A2B60 gave
+       NULL and the PC lingered (census slot=-1). Fall back to the OID we
+       remembered for the slot. */
+    if (slot > 0 && slot < 8) {
+        int64_t remembered = coop_lite_take_slot_pc(slot);
+
+        if (pc_obj == OBJ_HANDLE_NULL) {
+            pc_obj = remembered;
+        }
+        coop_lite_unkeep_sector(slot);
+    }
     if (pc_obj == OBJ_HANDLE_NULL || !tig_net_is_host()
         || pc_obj == player_get_local_pc_obj()
         || obj_field_int32_get(pc_obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
@@ -1149,6 +1250,7 @@ void coop_lite_host_remove_left_pc(int64_t pc_obj)
     tig_debug_printf("CoopLite: removing PC %s of the player who left\n", oid_str);
     object_destroy(pc_obj);
 #else
+    (void)slot;
     (void)pc_obj;
 #endif
 }
@@ -1436,6 +1538,15 @@ static bool coop_lite_host_spawn_client(int slot)
     }
 
     client_obj = sub_4A2B60(slot);
+    if (client_obj != OBJ_HANDLE_NULL && client_obj != host_pc
+        && client_oid.type != OID_TYPE_NULL
+        && !objid_is_equal(obj_get_id(client_obj), client_oid)) {
+        /* A loaded save bound this slot to another character (other session
+           or a re-picked PC): the player's own PC wins, the stale one goes. */
+        tig_debug_printf("CoopLite: slot %d was bound to another PC — replacing it\n", slot);
+        object_destroy(client_obj);
+        client_obj = OBJ_HANDLE_NULL;
+    }
     if (client_obj == OBJ_HANDLE_NULL && client_oid.type != OID_TYPE_NULL) {
         existing = obj_pool_perm_lookup(client_oid);
         if (existing != OBJ_HANDLE_NULL) {
@@ -1467,6 +1578,16 @@ static bool coop_lite_host_spawn_client(int slot)
 
     multiplayer_bind_slot_pc(slot, client_obj);
     multiplayer_bind_slot_pc(0, host_pc);
+    if (coop_reload_raise[slot]) {
+        /* Party reload: everyone comes back on their feet, and the client
+           gets our vitals for its PC (Packet100). */
+        coop_reload_raise[slot] = false;
+        if (critter_is_dead(client_obj)) {
+            coop_lite_host_raise_pc(client_obj);
+        } else {
+            object_hp_damage_set(client_obj, object_hp_damage_get(client_obj));
+        }
+    }
     coop_lite_remember_slot_pc(slot, client_obj, coop_pending_offers[slot].proto);
     coop_lite_keep_sector(slot, obj_field_int64_get(client_obj, OBJ_F_LOCATION));
     coop_last_pc_pos_valid[slot] = false;
@@ -1588,7 +1709,6 @@ typedef struct CoopNpcHpEntry {
 static CoopNpcHpEntry coop_npc_hp[COOP_NPC_CACHE];
 
 /* Host: per-slot time the PC fell (0 = alive). */
-static unsigned int coop_dead_since_ms[8];
 /* Client: last hp damage per slot PC (damage floats) and fallen state. */
 static int coop_slot_hp_damage[8];
 static bool coop_slot_hp_valid[8];
@@ -1635,6 +1755,16 @@ static void coop_lite_keep_sector(int slot, int64_t loc)
     k->id = id;
 }
 
+static void coop_lite_unkeep_sector(int slot)
+{
+    if (coop_sector_keep[slot].valid
+        && map_is_valid()
+        && coop_sector_keep[slot].map == map_current_map()) {
+        sector_unlock(coop_sector_keep[slot].id);
+    }
+    coop_sector_keep[slot].valid = false;
+}
+
 static void coop_lite_release_sectors(void)
 {
     int slot;
@@ -1668,6 +1798,18 @@ typedef struct CoopSlotPc {
     char name[64];
 } CoopSlotPc;
 static CoopSlotPc coop_slot_pc[8];
+
+/* Forget a slot's PC (player left); returns it if still loaded. */
+static int64_t coop_lite_take_slot_pc(int slot)
+{
+    int64_t obj = OBJ_HANDLE_NULL;
+
+    if (coop_slot_pc[slot].valid) {
+        obj = obj_pool_perm_lookup(coop_slot_pc[slot].oid);
+    }
+    coop_slot_pc[slot].valid = false;
+    return obj;
+}
 
 static void coop_lite_remember_slot_pc(int slot, int64_t obj, int proto)
 {
@@ -1761,6 +1903,72 @@ static unsigned int coop_dev_wolf_ms[8];
  * ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT=1: a wolf is spawned next to every
  * client PC (10 s after it is bound, again 45 s after the last one died).
  */
+static bool coop_dev_save_request;
+static bool coop_dev_save_done;
+static unsigned int coop_dev_save_ms;
+
+bool coop_lite_take_dev_save_request(void)
+{
+    bool r = coop_dev_save_request;
+
+    coop_dev_save_request = false;
+    return r;
+}
+
+static bool coop_dev_wolf_spawned;
+static bool coop_dev_merchant_pending;
+static unsigned int coop_dev_merchant_ms;
+
+/* ARCANUM_DEV_START_LOC=merchant: host (and so the party) next to the
+   nearest living merchant within 80 tiles. */
+static void coop_lite_dev_go_to_merchant(void)
+{
+    int64_t host_pc = player_get_local_pc_obj();
+    int64_t loc;
+    int64_t best = OBJ_HANDLE_NULL;
+    int64_t best_dist = 0;
+    int64_t d;
+    LocRect rect;
+    ObjectList objects;
+    ObjectNode* node;
+    TeleportData teleport_data;
+    char name[2000];
+
+    if (host_pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+    rect.x1 = LOCATION_GET_X(loc) - 80;
+    rect.y1 = LOCATION_GET_Y(loc) - 80;
+    rect.x2 = LOCATION_GET_X(loc) + 80;
+    rect.y2 = LOCATION_GET_Y(loc) + 80;
+    object_list_rect(&rect, OBJ_TM_NPC, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        if (critter_is_dead(node->obj) || !coop_lite_npc_is_merchant(node->obj)) {
+            continue;
+        }
+        d = location_dist(loc, obj_field_int64_get(node->obj, OBJ_F_LOCATION));
+        if (best == OBJ_HANDLE_NULL || d < best_dist) {
+            best = node->obj;
+            best_dist = d;
+        }
+    }
+    object_list_destroy(&objects);
+    if (best == OBJ_HANDLE_NULL) {
+        tig_debug_printf("CoopLite: dev start: no merchant within 80 tiles\n");
+        return;
+    }
+    loc = obj_field_int64_get(best, OBJ_F_LOCATION);
+    object_examine(best, host_pc, name);
+    memset(&teleport_data, 0, sizeof(teleport_data));
+    teleport_data.obj = host_pc;
+    teleport_data.loc = coop_lite_follow_loc_for_slot(loc, 1);
+    teleport_data.map = map_current_map();
+    tig_debug_printf("CoopLite: dev start: merchant '%s' at %d,%d (%d tiles) — moving the party there\n",
+        name, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), (int)best_dist);
+    teleport_do(&teleport_data);
+}
+
 static void coop_lite_dev_tick(unsigned int now_ms)
 {
     const char* env;
@@ -1790,12 +1998,32 @@ static void coop_lite_dev_tick(unsigned int now_ms)
                 teleport_data.map = map_current_map();
                 tig_debug_printf("CoopLite: dev start: teleport host to %d,%d\n", x, y);
                 teleport_do(&teleport_data);
+                if (strcmp(env, "merchant") == 0) {
+                    coop_dev_merchant_pending = true;
+                    coop_dev_merchant_ms = now_ms;
+                }
             }
+        }
+    }
+    if (coop_dev_merchant_pending && coop_lite_interval_elapsed(coop_dev_merchant_ms, now_ms, 2000u)) {
+        coop_dev_merchant_pending = false;
+        coop_lite_dev_go_to_merchant();
+    }
+
+    if (!coop_dev_save_done && sub_4A2B60(1) != OBJ_HANDLE_NULL) {
+        env = getenv("ARCANUM_DEV_COOP_SAVE");
+        if (env == NULL || env[0] != '1') {
+            coop_dev_save_done = true;
+        } else if (coop_dev_save_ms == 0) {
+            coop_dev_save_ms = now_ms != 0 ? now_ms : 1;
+        } else if (coop_lite_interval_elapsed(coop_dev_save_ms, now_ms, 4000u)) {
+            coop_dev_save_done = true;
+            coop_dev_save_request = true;
         }
     }
 
     env = getenv("ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT");
-    if (env == NULL || env[0] != '1') {
+    if (env == NULL || (env[0] != '1' && env[0] != '2')) {
         return;
     }
     for (slot = 1; slot < 8; slot++) {
@@ -1804,24 +2032,18 @@ static void coop_lite_dev_tick(unsigned int now_ms)
             coop_dev_wolf_ms[slot] = 0;
             continue;
         }
-        if (coop_dev_wolf_valid[slot]) {
-            wolf = obj_pool_perm_lookup(coop_dev_wolf[slot]);
-            if (wolf != OBJ_HANDLE_NULL && !critter_is_dead(wolf)) {
-                continue;
-            }
-            coop_dev_wolf_valid[slot] = false;
-            coop_dev_wolf_ms[slot] = now_ms;
-            continue;
+        if (coop_dev_wolf_spawned) {
+            break; /* PT10: once per session, not on a loop */
         }
         if (coop_dev_wolf_ms[slot] == 0) {
-            /* First sighting of this client PC: give it 10 s, then 45 s. */
-            coop_dev_wolf_ms[slot] = now_ms - 35000u;
+            /* First sighting of a client PC: spawn 10 s later. */
+            coop_dev_wolf_ms[slot] = now_ms != 0 ? now_ms : 1;
             continue;
         }
-        if (!coop_lite_interval_elapsed(coop_dev_wolf_ms[slot], now_ms, 45000u)) {
+        if (!coop_lite_interval_elapsed(coop_dev_wolf_ms[slot], now_ms, 10000u)) {
             continue;
         }
-        coop_dev_wolf_ms[slot] = now_ms;
+        coop_dev_wolf_spawned = true;
         loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
         loc = coop_lite_follow_loc_for_slot(LOCATION_MAKE(LOCATION_GET_X(loc) + 3, LOCATION_GET_Y(loc)), 0);
         if (!mp_object_create(BP_WOLF, loc, &wolf) || wolf == OBJ_HANDLE_NULL) {
@@ -1833,6 +2055,18 @@ static void coop_lite_dev_tick(unsigned int now_ms)
         ai_attack(pc, wolf, LOUDNESS_NORMAL, 0);
         tig_debug_printf("CoopLite: dev: wolf spawned to attack slot %d PC at %d,%d\n",
             slot, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+        if (env[0] == '2') {
+            /* =2: a second wolf for the host too (party-wipe testing). */
+            int64_t host_pc = player_get_local_pc_obj();
+            int64_t wolf2;
+
+            loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+            loc = coop_lite_follow_loc_for_slot(LOCATION_MAKE(LOCATION_GET_X(loc) - 3, LOCATION_GET_Y(loc)), 0);
+            if (mp_object_create(BP_WOLF, loc, &wolf2) && wolf2 != OBJ_HANDLE_NULL) {
+                ai_attack(host_pc, wolf2, LOUDNESS_NORMAL, 0);
+                tig_debug_printf("CoopLite: dev: second wolf spawned to attack the host\n");
+            }
+        }
     }
 }
 
@@ -1860,12 +2094,13 @@ static void coop_lite_world_reset(void)
     memset(coop_npc_hp, 0, sizeof(coop_npc_hp));
     coop_npc_pos_ms = 0;
     for (i = 0; i < 8; i++) {
-        coop_dead_since_ms[i] = 0;
         coop_slot_hp_valid[i] = false;
         coop_slot_pc[i].valid = false;
     }
     coop_client_fallen = false;
     coop_lite_release_sectors();
+    memset(&coop_party_watch, 0, sizeof(coop_party_watch));
+    coop_follow_carry_pending = false;
     memset(coop_dev_wolf_valid, 0, sizeof(coop_dev_wolf_valid));
     memset(coop_dev_wolf_ms, 0, sizeof(coop_dev_wolf_ms));
     coop_stats_last_ping_ms = 0;
@@ -2211,51 +2446,386 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
     multiplayer_unlock();
 }
 
-/* Host: a fallen client PC is revived next to the host after a delay. */
-static void coop_lite_host_revive_fallen(unsigned int now_ms)
+/* ---- Coop death (PT10): corpses, host down, party wipe reload ---- */
+
+static void coop_lite_show_notice(const char* str, int tf_type)
+{
+    int64_t pc = player_get_local_pc_obj();
+    UiMessage ui_message;
+
+    if (str == NULL) {
+        return;
+    }
+    ui_message.type = UI_MSG_TYPE_FEEDBACK;
+    ui_message.str = (char*)str;
+    ui_display_msg(&ui_message);
+    if (pc != OBJ_HANDLE_NULL) {
+        tf_add(pc, tf_type, str);
+    }
+    tig_debug_printf("CoopLite: notice: %s\n", str);
+}
+
+static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local_is_host,
+    char* buf, size_t size)
+{
+    switch (kind) {
+    case COOP_PARTY_HOST_DOWN:
+        snprintf(buf, size, "%s", local_is_host
+                ? "You have fallen. Your companions can resurrect you."
+                : "The party leader has fallen! Resurrect them to continue.");
+        break;
+    case COOP_PARTY_HOST_UP:
+        snprintf(buf, size, "%s", local_is_host ? "You have been resurrected." : "The party leader is back on their feet.");
+        break;
+    case COOP_PARTY_WIPE:
+        snprintf(buf, size, "The whole party has fallen. Reloading the last save in %u seconds...",
+            (countdown_ms + 999u) / 1000u);
+        break;
+    case COOP_PARTY_WIPE_CANCEL:
+        snprintf(buf, size, "%s", "Someone got back up - reload cancelled.");
+        break;
+    case COOP_PARTY_RELOADING:
+        snprintf(buf, size, "%s", "Reloading the party leader's last save...");
+        break;
+    case COOP_PARTY_RESYNC:
+        snprintf(buf, size, "%s", "The party leader reloaded. Rejoining...");
+        break;
+    case COOP_PARTY_NO_SAVE:
+        snprintf(buf, size, "%s", "No save to reload - the party gets back up.");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+}
+
+/* Host: tell every client, and show it here too. */
+static void coop_lite_host_party_notice(int kind, int slot, unsigned int countdown_ms)
+{
+    PacketCoopPartyState pkt;
+    char str[160];
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_STATE;
+    pkt.kind = kind;
+    pkt.slot = slot;
+    pkt.countdown_ms = countdown_ms;
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+
+    coop_lite_party_notice_text(kind, countdown_ms, true, str, sizeof(str));
+    if (str[0] != '\0') {
+        coop_lite_show_notice(str, kind == COOP_PARTY_HOST_UP ? TF_TYPE_GREEN : TF_TYPE_RED);
+    }
+}
+
+/* Corpse pose (local only; peers get the pose from PC_POS / vitals). */
+static void coop_lite_set_corpse_pose(int64_t pc, bool dead)
+{
+    tig_art_id_t art_id;
+    TigArtAnimData art_anim_data;
+
+    art_id = obj_field_int32_get(pc, OBJ_F_CURRENT_AID);
+    if (dead) {
+        art_id = tig_art_id_anim_set(art_id, TIG_ART_ANIM_FALL_DOWN);
+        if (tig_art_anim_data(art_id, &art_anim_data) == TIG_OK) {
+            art_id = tig_art_id_frame_set(art_id, art_anim_data.num_frames - 1);
+        }
+        object_flags_set(pc, OF_FLAT | OF_NO_BLOCK);
+    } else {
+        art_id = tig_art_id_anim_set(art_id, TIG_ART_ANIM_STAND);
+        art_id = tig_art_id_frame_set(art_id, 0);
+        object_flags_unset(pc, OF_FLAT | OF_NO_BLOCK);
+    }
+    object_set_current_aid(pc, art_id);
+}
+
+/* Host: bring a PC back with full health (no-save fallback, post-reload). */
+static void coop_lite_host_raise_pc(int64_t pc)
+{
+    sub_424070(pc, PRIORITY_HIGHEST, false, true);
+    if (combat_critter_is_combat_mode_active(pc)) {
+        combat_critter_deactivate_combat_mode(pc);
+    }
+    critter_decay_timeevent_cancel(pc);
+    coop_lite_set_corpse_pose(pc, false);
+    critter_fatigue_damage_set(pc, 0);
+    object_hp_damage_set(pc, 0); /* broadcasts vitals (Packet100) */
+}
+
+bool coop_lite_take_reload_request(char* name, size_t size)
+{
+    if (!coop_reload_request_valid) {
+        return false;
+    }
+    coop_reload_request_valid = false;
+    snprintf(name, size, "%s", coop_reload_request_name);
+    return true;
+}
+
+void coop_lite_reload_failed(void)
 {
     int slot;
     int64_t pc;
-    int64_t host_pc;
-    int64_t loc;
-    tig_art_id_t art_id;
 
-    host_pc = sub_4A2B60(0);
+    tig_debug_printf("CoopLite: reload of '%s' failed — raising the party instead\n",
+        coop_reload_request_name);
+    coop_reload_resync_pending = false;
+    memset(&coop_party_watch, 0, sizeof(coop_party_watch));
+    for (slot = 0; slot < 8; slot++) {
+        pc = sub_4A2B60(slot);
+        if (pc != OBJ_HANDLE_NULL && critter_is_dead(pc)) {
+            coop_lite_host_raise_pc(pc);
+        }
+    }
+    coop_lite_host_party_notice(COOP_PARTY_NO_SAVE, -1, 0);
+}
+
+static void coop_lite_host_start_reload(void)
+{
+    const char* name = gamelib_last_save_name();
+    int slot;
+
+    if (name == NULL || name[0] == '\0') {
+        snprintf(coop_reload_request_name, sizeof(coop_reload_request_name), "%s", "(none)");
+        coop_lite_reload_failed();
+        return;
+    }
+    snprintf(coop_reload_request_name, sizeof(coop_reload_request_name), "%s", name);
+    coop_reload_request_valid = true;
+    coop_reload_resync_pending = true;
+    for (slot = 1; slot < 8; slot++) {
+        coop_reload_raise[slot] = tig_net_client_is_active(slot);
+    }
+    coop_lite_host_party_notice(COOP_PARTY_RELOADING, -1, 0);
+    tig_debug_printf("CoopLite: party reload of last save '%s' requested\n", coop_reload_request_name);
+}
+
+/* Host, every ping in the world: deaths, host down, wipe, reload. */
+static void coop_lite_host_watch_party(unsigned int now_ms)
+{
+    bool present[8];
+    bool dead[8];
+    unsigned int fell;
+    unsigned int rose;
+    unsigned int acts;
+    int slot;
+    int64_t pc;
+    char name[64];
+    char str[160];
+
+    for (slot = 0; slot < 8; slot++) {
+        pc = sub_4A2B60(slot);
+        if (slot == 0 && pc == OBJ_HANDLE_NULL) {
+            pc = player_get_local_pc_obj();
+        }
+        present[slot] = pc != OBJ_HANDLE_NULL;
+        dead[slot] = present[slot] && critter_is_dead(pc);
+    }
+
+    acts = coop_lite_party_step(&coop_party_watch, present, dead, map_current_map(), now_ms, &fell, &rose);
+
     for (slot = 1; slot < 8; slot++) {
         pc = sub_4A2B60(slot);
-        if (pc == OBJ_HANDLE_NULL || !critter_is_dead(pc)) {
-            coop_dead_since_ms[slot] = 0;
+        if (pc == OBJ_HANDLE_NULL) {
             continue;
         }
-        if (coop_dead_since_ms[slot] == 0) {
-            coop_dead_since_ms[slot] = now_ms != 0 ? now_ms : 1;
-            tig_debug_printf("CoopLite: slot %d PC fell — revive in %u ms\n",
-                slot, COOP_LITE_REVIVE_DELAY_MS);
-            continue;
+        if ((fell & (1u << slot)) != 0) {
+            coop_lite_copy_pc_name(pc, name, sizeof(name));
+            snprintf(str, sizeof(str), "%s has fallen.", name);
+            tf_add(pc, TF_TYPE_RED, str);
+            tig_debug_printf("CoopLite: slot %d PC fell — corpse until resurrected\n", slot);
+        } else if ((rose & (1u << slot)) != 0) {
+            tig_debug_printf("CoopLite: slot %d PC resurrected\n", slot);
         }
-        if (!coop_lite_revive_due(coop_dead_since_ms[slot], now_ms)) {
-            continue;
-        }
-        coop_dead_since_ms[slot] = 0;
+    }
 
-        sub_424070(pc, PRIORITY_HIGHEST, false, true);
-        if (combat_critter_is_combat_mode_active(pc)) {
-            combat_critter_deactivate_combat_mode(pc);
+    if ((acts & COOP_PARTY_ACT_HOST_DOWN) != 0) {
+        tig_debug_printf("CoopLite: host PC fell\n");
+        coop_lite_host_party_notice(COOP_PARTY_HOST_DOWN, 0, 0);
+    }
+    if ((acts & COOP_PARTY_ACT_HOST_UP) != 0) {
+        tig_debug_printf("CoopLite: host PC resurrected\n");
+        coop_lite_host_party_notice(COOP_PARTY_HOST_UP, 0, 0);
+    }
+    if ((acts & COOP_PARTY_ACT_WIPE_COUNTDOWN) != 0) {
+        tig_debug_printf("CoopLite: party wiped — reload in %u ms\n", COOP_LITE_WIPE_GRACE_MS);
+        coop_lite_host_party_notice(COOP_PARTY_WIPE, -1, COOP_LITE_WIPE_GRACE_MS);
+    }
+    if ((acts & COOP_PARTY_ACT_WIPE_CANCEL) != 0) {
+        coop_lite_host_party_notice(COOP_PARTY_WIPE_CANCEL, -1, 0);
+    }
+    if ((acts & COOP_PARTY_ACT_RELOAD) != 0) {
+        coop_lite_host_start_reload();
+    }
+}
+
+/* Host, once in the world after a party reload: clients re-offer their PC. */
+static void coop_lite_host_resync_after_reload(void)
+{
+    PacketCoopPartyState pkt;
+
+    if (!coop_reload_resync_pending) {
+        return;
+    }
+    coop_reload_resync_pending = false;
+    coop_lite_follow_armed = true; /* the load had no spawn teleport to arm it */
+    multiplayer_bind_slot_pc(0, player_get_local_pc_obj());
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_STATE;
+    pkt.kind = COOP_PARTY_RESYNC;
+    pkt.slot = -1;
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_debug_printf("CoopLite: reload done — asking clients to resync\n");
+}
+
+/* Camera: our PC, or (dead) the first living party member — spectate. */
+static int64_t coop_lite_camera_target(void)
+{
+    int64_t local_pc = player_get_local_pc_obj();
+    int64_t pc;
+    int slot;
+
+    if (local_pc == OBJ_HANDLE_NULL || !critter_is_dead(local_pc)) {
+        return local_pc;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        pc = sub_4A2B60(slot);
+        if (pc != OBJ_HANDLE_NULL && pc != local_pc && !critter_is_dead(pc)) {
+            return pc;
         }
+    }
+    return local_pc;
+}
+
+int coop_lite_party_carry_list(int64_t mover, int64_t* objs, int max)
+{
+    int n = 0;
+    int slot;
+    int mover_slot;
+    int64_t pc;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_active() || objs == NULL) {
+        return 0;
+    }
+    if (mover == OBJ_HANDLE_NULL || mover != player_get_local_pc_obj()) {
+        return 0;
+    }
+    if (tig_net_is_host()) {
+        if (!coop_lite_follow_armed) {
+            return 0; /* spawn / load placement, nobody to carry yet */
+        }
+        mover_slot = 0;
+    } else {
+        if (!coop_follow_carry_pending) {
+            return 0; /* only the host's travel moves the party */
+        }
+        mover_slot = sub_529520();
+    }
+    for (slot = 0; slot < 8 && n < max; slot++) {
+        pc = sub_4A2B60(slot);
+        if (pc == mover) {
+            continue;
+        }
+        if (coop_lite_should_carry_slot(slot, mover_slot, pc != OBJ_HANDLE_NULL)) {
+            objs[n++] = pc;
+        }
+    }
+    return n;
+}
+
+void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc)
+{
+    int slot;
+    int64_t pc;
+    int64_t host_loc;
+    int64_t loc;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_active()) {
+        return;
+    }
+    if (mover == OBJ_HANDLE_NULL || mover != player_get_local_pc_obj()) {
+        return;
+    }
+    if (tig_net_is_host()) {
+        host_loc = dest_loc;
+    } else {
+        if (!coop_follow_carry_pending) {
+            return;
+        }
+        coop_follow_carry_pending = false;
+        host_loc = coop_follow_host_loc;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        pc = sub_4A2B60(slot);
+        if (pc == OBJ_HANDLE_NULL || pc == mover) {
+            continue;
+        }
+        loc = slot == 0 ? host_loc : coop_lite_follow_loc_for_slot(host_loc, slot);
+        multiplayer_lock();
+        sub_43E770(pc, loc, 0, 0);
+        if (critter_is_dead(pc)) {
+            coop_lite_set_corpse_pose(pc, true);
+        }
+        multiplayer_unlock();
+        coop_lite_keep_sector(slot, loc);
+        tig_debug_printf("CoopLite: carried slot %d PC%s to %d,%d\n", slot,
+            critter_is_dead(pc) ? " (corpse)" : "",
+            (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+    }
+}
+
+/* Client, on COOP_PARTY_RESYNC: the host reloaded — re-offer our PC. */
+static void coop_lite_client_resync(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    char name[64];
+    int proto;
+
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    coop_lite_session_reset();
+    if (critter_is_dead(pc)) {
+        /* The host brings every PC back after a reload; match it locally. */
+        multiplayer_lock();
+        tig_net_local_suspend_begin();
         critter_decay_timeevent_cancel(pc);
-        /* Back on its feet with a third of its hit points. */
-        object_hp_damage_set(pc, object_hp_max(pc) * 2 / 3);
         critter_fatigue_damage_set(pc, 0);
-        object_flags_unset(pc, OF_FLAT | OF_NO_BLOCK);
-        art_id = obj_field_int32_get(pc, OBJ_F_CURRENT_AID);
-        art_id = tig_art_id_anim_set(art_id, TIG_ART_ANIM_STAND);
-        art_id = tig_art_id_frame_set(art_id, 0);
-        object_set_current_aid(pc, art_id);
-        if (host_pc != OBJ_HANDLE_NULL) {
-            loc = coop_lite_follow_loc_for_slot(obj_field_int64_get(host_pc, OBJ_F_LOCATION), slot);
-            sub_43E770(pc, loc, 0, 0); /* next PC_POS tick FORCEs it to the owner */
-        }
-        tig_debug_printf("CoopLite: slot %d PC revived beside the host\n", slot);
+        object_hp_damage_set(pc, 0);
+        coop_lite_set_corpse_pose(pc, false);
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
+    }
+    proto = sub_49B290(pc);
+    if (!coop_lite_proto_is_pc(proto)) {
+        proto = BP_GENERIC_PC;
+    }
+    coop_lite_copy_pc_name(pc, name, sizeof(name));
+    coop_lite_show_notice("The party leader reloaded. Rejoining...", TF_TYPE_WHITE);
+    coop_lite_client_offer_character(proto, name);
+}
+
+void coop_lite_handle_party_state(PacketCoopPartyState* pkt)
+{
+    char str[160];
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_PARTY_STATE) {
+        return;
+    }
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return;
+    }
+    if (pkt->kind == COOP_PARTY_RESYNC) {
+        tig_debug_printf("CoopLite: host reloaded its save — resyncing\n");
+        coop_lite_client_resync();
+        return;
+    }
+    if (!coop_lite_client_world_ready()) {
+        return;
+    }
+    coop_lite_party_notice_text(pkt->kind, pkt->countdown_ms, false, str, sizeof(str));
+    if (str[0] != '\0') {
+        coop_lite_show_notice(str, pkt->kind == COOP_PARTY_HOST_UP ? TF_TYPE_GREEN : TF_TYPE_RED);
     }
 }
 
@@ -2300,7 +2870,7 @@ static void coop_lite_client_watch_vitals(void)
         object_flags_set(local_pc, OF_FLAT | OF_NO_BLOCK);
         tig_net_local_suspend_end();
         multiplayer_unlock();
-        tf_add(local_pc, TF_TYPE_RED, "You have fallen! You will be revived beside the party leader.");
+        coop_lite_show_notice("You have fallen. A companion can resurrect you.", TF_TYPE_RED);
         tig_debug_printf("CoopLite: local PC fell\n");
     } else if (!critter_is_dead(local_pc) && coop_client_fallen) {
         coop_client_fallen = false;
@@ -2313,7 +2883,7 @@ static void coop_lite_client_watch_vitals(void)
         object_set_current_aid(local_pc, art_id);
         tig_net_local_suspend_end();
         multiplayer_unlock();
-        tf_add(local_pc, TF_TYPE_GREEN, "Revived.");
+        coop_lite_show_notice("You have been resurrected.", TF_TYPE_GREEN);
         tig_debug_printf("CoopLite: local PC revived\n");
     }
 }
@@ -2533,7 +3103,7 @@ void coop_lite_ping(unsigned int now_ms)
 
         /* Client camera: every frame (not the 50 ms pose tick) so the
            scroll follows the PC smoothly. */
-        coop_lite_client_follow_own_pc(player_get_local_pc_obj());
+        coop_lite_client_follow_own_pc(coop_lite_camera_target());
         coop_lite_client_watch_vitals();
         coop_lite_keep_remote_sectors();
         coop_lite_frame_stats(now_ms, 0);
@@ -2542,7 +3112,7 @@ void coop_lite_ping(unsigned int now_ms)
         if (coop_lite_interval_elapsed(coop_last_pc_pos_ms, now_ms, COOP_LITE_PC_POS_INTERVAL_MS)) {
             coop_last_pc_pos_ms = now_ms;
             obj = player_get_local_pc_obj();
-            if (obj != OBJ_HANDLE_NULL) {
+            if (obj != OBJ_HANDLE_NULL && !critter_is_dead(obj)) {
                 coop_lite_fill_pc_pos(&pkt, sub_529520(), obj);
                 if (!coop_client_pos_valid || coop_lite_pc_pos_changed(&coop_client_pos, &pkt)) {
                     coop_client_pos = pkt;
@@ -2567,7 +3137,8 @@ void coop_lite_ping(unsigned int now_ms)
 
     /* Host camera follows the host PC exactly like a client's (PT9: the
        host had to press Home). Same dead zone, every frame. */
-    coop_lite_client_follow_own_pc(player_get_local_pc_obj());
+    coop_lite_host_resync_after_reload();
+    coop_lite_client_follow_own_pc(coop_lite_camera_target());
     coop_lite_keep_remote_sectors();
     coop_lite_dev_tick(now_ms);
 
@@ -2575,7 +3146,7 @@ void coop_lite_ping(unsigned int now_ms)
         Uint64 t0 = SDL_GetTicksNS();
         coop_lite_host_send_followers(now_ms);
         coop_lite_host_send_npc_pos(now_ms);
-        coop_lite_host_revive_fallen(now_ms);
+        coop_lite_host_watch_party(now_ms);
         coop_lite_frame_stats(now_ms, SDL_GetTicksNS() - t0);
     }
 
