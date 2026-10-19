@@ -1,5 +1,7 @@
 #include "ui/dialog_ui.h"
 
+#include <string.h>
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -7,6 +9,7 @@
 #include "game/broadcast.h"
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/dialog.h"
 #include "game/gsound.h"
@@ -123,14 +126,9 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     char str[2000];
     CoopTalkPolicy talk_policy;
 
-    /* Coop Lite: non-host companions may only fully talk to merchants / safe NPCs. */
+    /* Coop Lite: clients open dialog; story nodes filtered in display/process. */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
     if (talk_policy == COOP_TALK_BLOCK) {
-        return;
-    }
-    if (talk_policy == COOP_TALK_INFO_ONLY) {
-        dialog_ui_float_line(npc_obj, pc_obj,
-            "Only the party leader can discuss this matter.", -1);
         return;
     }
 
@@ -296,6 +294,15 @@ bool dialog_ui_process_option(DialogUiEntry* entry, int option)
     bool is_pc;
 
     is_pc = player_is_local_pc_obj(entry->state.pc_obj);
+
+    if (tig_net_is_active() && !tig_net_is_host()
+        && option >= 0 && option < entry->state.num_options
+        && !coop_lite_dialog_option_allowed(entry->state.actions[option],
+            entry->state.field_17F0[option])) {
+        dialog_ui_float_line(entry->state.npc_obj, entry->state.pc_obj,
+            "Only the party leader can discuss this matter.", -1);
+        return true;
+    }
     dialog_ui_pc_say(entry->state.pc_obj,
         entry->state.npc_obj,
         TB_TYPE_GREEN,
@@ -423,6 +430,8 @@ void dialog_ui_execute_script(DialogUiEntry* entry, int line)
 void dialog_ui_display(DialogUiEntry* entry)
 {
     int index;
+    int out;
+    bool filter;
 
     dialog_ui_npc_say(entry->state.npc_obj,
         entry->state.pc_obj,
@@ -432,6 +441,37 @@ void dialog_ui_display(DialogUiEntry* entry)
         entry->state.speech_id);
 
     if (player_is_local_pc_obj(entry->state.pc_obj)) {
+        /* Compact out quest/story responses for non-host companions. */
+        filter = tig_net_is_active() && !tig_net_is_host();
+        if (filter) {
+            out = 0;
+            for (index = 0; index < entry->state.num_options; index++) {
+                if (!coop_lite_dialog_option_allowed(entry->state.actions[index],
+                        entry->state.field_17F0[index])) {
+                    continue;
+                }
+                if (out != index) {
+                    memcpy(entry->state.options[out], entry->state.options[index],
+                        sizeof(entry->state.options[0]));
+                    entry->state.actions[out] = entry->state.actions[index];
+                    entry->state.field_17F0[out] = entry->state.field_17F0[index];
+                    entry->state.field_1804[out] = entry->state.field_1804[index];
+                    entry->state.field_1818[out] = entry->state.field_1818[index];
+                }
+                out++;
+            }
+            entry->state.num_options = out;
+            if (entry->state.num_options == 0) {
+                /* Keep a harmless goodbye so dialog is not empty. */
+                strncpy(entry->state.options[0], "(Only the party leader can discuss this.)",
+                    sizeof(entry->state.options[0]) - 1);
+                entry->state.options[0][sizeof(entry->state.options[0]) - 1] = '\0';
+                entry->state.actions[0] = NULL;
+                entry->state.field_17F0[0] = 1; /* end dialog */
+                entry->state.num_options = 1;
+            }
+        }
+
         intgame_dialog_clear();
 
         for (index = 0; index < entry->state.num_options; index++) {

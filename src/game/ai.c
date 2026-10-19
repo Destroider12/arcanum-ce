@@ -3,6 +3,7 @@
 #include "game/anim.h"
 #include "game/anim_private.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -1048,6 +1049,9 @@ void ai_attack(int64_t source_obj, int64_t target_obj, int loudness, unsigned in
             source_obj,
             NULL);
     }
+
+    /* Coop Lite: companion PC aggression counts as party aggression on host. */
+    coop_lite_propagate_party_aggression(source_obj, target_obj);
 }
 
 // 0x4A9AD0

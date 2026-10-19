@@ -1,9 +1,11 @@
 #include "game/anim.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "game/ai.h"
 #include "game/animfx.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
@@ -3625,6 +3627,14 @@ bool anim_timeevent_process(TimeEvent* timeevent)
         goal_node = anim_goal_nodes[goal_data->type];
 
         ASSERT(goal_node != NULL); // 2035, "pGoalNode != NULL"
+        /* Coop/net desync (and unfinished goals like AG_PICK_WEAPON) can leave a
+           NULL node; ASSERT only logs - bail before calling through NULL. */
+        if (goal_node == NULL) {
+            tig_debug_printf("Anim: ERROR: NULL goal node for type %d - aborting run\n",
+                goal_data->type);
+            run_info->flags |= 0x02;
+            err = true;
+        }
     } else {
         run_info->flags |= 0x02;
         err = true;
@@ -3661,7 +3671,26 @@ bool anim_timeevent_process(TimeEvent* timeevent)
             return true;
         }
 
+        if (goal_node == NULL) {
+            run_info->flags |= 0x02;
+            break;
+        }
+
+        if (run_info->current_state < 0 || run_info->current_state >= 15) {
+            tig_debug_printf("Anim: ERROR: current_state %d out of range - aborting\n",
+                run_info->current_state);
+            run_info->flags |= 0x02;
+            break;
+        }
+
         goal_subnode = &(goal_node->subnodes[run_info->current_state]);
+        if (goal_subnode->func == NULL) {
+            tig_debug_printf("Anim: ERROR: NULL subnode func state=%d type=%d - aborting\n",
+                run_info->current_state, goal_data->type);
+            run_info->flags |= 0x02;
+            break;
+        }
+
         if (!anim_recover_handles(run_info, goal_subnode)) {
             return true;
         }
@@ -13948,6 +13977,24 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
 
     if (attacker_obj == target_obj) {
         return false;
+    }
+
+    /* Coop Lite: client attack intent → host resolves (DEX timing + ai_attack). */
+    if (tig_net_is_active()
+        && !tig_net_is_host()
+        && !multiplayer_is_locked()
+        && player_is_local_pc_obj(attacker_obj)) {
+        PacketCoopAttackIntent pkt;
+        ObjectID attacker_oid;
+        ObjectID target_oid;
+        pkt.type = PACKET_COOP_ATTACK_INTENT;
+        pkt.attack_kind = 0;
+        attacker_oid = obj_get_id(attacker_obj);
+        target_oid = obj_get_id(target_obj);
+        memcpy(pkt.attacker_oid, &attacker_oid, sizeof(attacker_oid));
+        memcpy(pkt.target_oid, &target_oid, sizeof(target_oid));
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+        return true;
     }
 
     weapon_obj = item_wield_get(attacker_obj, ITEM_INV_LOC_WEAPON);

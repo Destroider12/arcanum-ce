@@ -278,6 +278,8 @@ bool teleport_process(TeleportData* teleport_data)
     /* Coop Lite: host PC travel forces remote players to the same destination. */
     if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
         coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
+        /* Client may have queued a follow while still on ShopMap / main menu. */
+        coop_lite_flush_pending_follow();
     }
 
     return true;

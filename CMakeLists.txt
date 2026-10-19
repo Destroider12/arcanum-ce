@@ -385,6 +385,26 @@ if(WIN32)
 endif()
 add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
 
+add_executable(coop_lite_dialog_filter_test
+    "tests/coop_lite_dialog_filter_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_dialog_filter_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_dialog_filter_test PRIVATE enet)
+target_compile_definitions(coop_lite_dialog_filter_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_dialog_filter_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_dialog_filter COMMAND coop_lite_dialog_filter_test
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # SDL HID on Android requires C++ linker.
 if(ANDROID)
     enable_language(CXX)

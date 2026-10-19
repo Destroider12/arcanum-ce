@@ -74,9 +74,13 @@ static int64_t coop_lite_host_pc_obj(void)
 }
 
 #else
+#include "game/ai.h"
+#include "game/anim.h"
 #include "game/location.h"
+#include "game/map.h"
 #include "game/multiplayer.h"
 #include "game/obj.h"
+#include "game/obj_pool.h"
 #include "game/object.h"
 #include "game/player.h"
 #include "game/script.h"
@@ -167,6 +171,9 @@ static int64_t coop_lite_host_pc_obj(void)
 #endif
 
 static bool coop_lite_applying_follow;
+static bool coop_lite_follow_armed; /* set after first host PC teleport; that one is not broadcast */
+static bool coop_lite_pending_follow_valid;
+static PacketCoopFollowHost coop_lite_pending_follow;
 
 bool coop_lite_can_use_worldmap(void)
 {
@@ -195,16 +202,73 @@ bool coop_lite_can_save_world(void)
 CoopTalkPolicy coop_lite_classify_talk(bool coop_active, bool is_host,
     bool is_merchant, bool dialog_has_story_effects)
 {
-    if (!coop_active || is_host) {
-        return COOP_TALK_ALLOW;
-    }
-    if (is_merchant) {
-        return COOP_TALK_ALLOW;
-    }
-    if (dialog_has_story_effects) {
-        return COOP_TALK_INFO_ONLY;
-    }
+    (void)is_merchant;
+    (void)dialog_has_story_effects;
+    /* Per-node filtering replaces whole-NPC INFO_ONLY. */
+    (void)coop_active;
+    (void)is_host;
     return COOP_TALK_ALLOW;
+}
+
+bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
+{
+    char code[3];
+    const char* pch;
+
+    /* Barter / trade response code from dialog engine (b: → field_17F0=3). */
+    if (response_code == 3) {
+        return true;
+    }
+    if (actions == NULL || actions[0] == '\0') {
+        return true;
+    }
+
+    code[2] = '\0';
+    pch = actions;
+    while (*pch != '\0') {
+        while (*pch != '\0' && !((*pch >= 'A' && *pch <= 'Z')
+                || (*pch >= 'a' && *pch <= 'z')
+                || *pch == '$')) {
+            pch++;
+        }
+        if (*pch == '\0') {
+            break;
+        }
+        code[0] = *pch++;
+        if (*pch == '\0') {
+            break;
+        }
+        code[1] = *pch++;
+
+        if ((code[0] == 'q' || code[0] == 'Q') && (code[1] == 'u' || code[1] == 'U')) {
+            return false;
+        }
+        if ((code[0] == 'g' || code[0] == 'G') && (code[1] == 'v' || code[1] == 'V')) {
+            return false;
+        }
+        if ((code[0] == 'g' || code[0] == 'G') && (code[1] == 'f' || code[1] == 'F')) {
+            return false;
+        }
+        if ((code[0] == 's' || code[0] == 'S') && (code[1] == 's' || code[1] == 'S')) {
+            return false;
+        }
+        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'p' || code[1] == 'P')) {
+            return false;
+        }
+        if ((code[0] == 'a' || code[0] == 'A') && (code[1] == 'l' || code[1] == 'L')) {
+            return false;
+        }
+        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'u' || code[1] == 'U')) {
+            return false;
+        }
+        if ((code[0] == 'r' || code[0] == 'R') && (code[1] == 'q' || code[1] == 'Q')) {
+            return false;
+        }
+        if ((code[0] == 'x' || code[0] == 'X') && (code[1] == 'p' || code[1] == 'P')) {
+            return false;
+        }
+    }
+    return true;
 }
 
 CoopTalkPolicy coop_lite_can_talk(int64_t npc_obj, int64_t pc_obj)
@@ -322,11 +386,37 @@ int64_t coop_lite_follow_loc_for_slot(int64_t host_loc, int slot)
 void coop_lite_notify_host_teleported(int map, int64_t loc)
 {
     PacketCoopFollowHost pkt;
+    int shopping_map;
 
     if (!tig_net_is_active() || !tig_net_is_host()) {
         return;
     }
     if (coop_lite_applying_follow) {
+        return;
+    }
+
+#ifndef COOP_LITE_TEST_STUBS
+    shopping_map = map_by_type(MAP_TYPE_SHOPPING_MAP);
+    /* Never broadcast menu/shop placement or invalid maps. */
+    if (map <= 0 || (shopping_map != 0 && map == shopping_map)) {
+        return;
+    }
+#else
+    (void)shopping_map;
+    if (map <= 0) {
+        return;
+    }
+#endif
+
+    /*
+     * First host PC teleport after session start is the New Game / Load spawn.
+     * Arm follow for subsequent real travel; do not yank clients still on the
+     * main menu into the world (that crashed host via bad client anim packets).
+     */
+    if (!coop_lite_follow_armed) {
+        coop_lite_follow_armed = true;
+        tig_debug_printf("CoopLite: armed follow (skip initial spawn broadcast map=%d)\n",
+            map);
         return;
     }
 
@@ -336,6 +426,33 @@ void coop_lite_notify_host_teleported(int map, int64_t loc)
     tig_net_send_app_all(&pkt, sizeof(pkt));
     tig_debug_printf("CoopLite: host follow broadcast map=%d loc=%lld\n",
         map, (long long)loc);
+}
+
+static bool coop_lite_client_in_world(void)
+{
+    int64_t pc_obj;
+    int cur;
+    int shopping_map;
+
+    pc_obj = player_get_local_pc_obj();
+    if (pc_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+
+#ifndef COOP_LITE_TEST_STUBS
+    cur = map_current_map();
+    shopping_map = map_by_type(MAP_TYPE_SHOPPING_MAP);
+    if (cur <= 0) {
+        return false;
+    }
+    if (shopping_map != 0 && cur == shopping_map) {
+        return false; /* still on main-menu ShopMap backdrop */
+    }
+#else
+    (void)cur;
+    (void)shopping_map;
+#endif
+    return true;
 }
 
 void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
@@ -356,11 +473,16 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
         return;
     }
 
-    pc_obj = player_get_local_pc_obj();
-    if (pc_obj == OBJ_HANDLE_NULL) {
+    /* Clients still on the main menu must not teleport/load the host map. */
+    if (!coop_lite_client_in_world()) {
+        coop_lite_pending_follow = *pkt;
+        coop_lite_pending_follow_valid = true;
+        tig_debug_printf("CoopLite: queued follow map=%d (client not in world yet)\n",
+            pkt->map);
         return;
     }
 
+    pc_obj = player_get_local_pc_obj();
     slot = sub_529520();
     dest = coop_lite_follow_loc_for_slot(pkt->loc, slot);
 
@@ -381,6 +503,103 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     coop_lite_export_local_character();
 }
 
+void coop_lite_session_reset(void)
+{
+    coop_lite_follow_armed = false;
+    coop_lite_pending_follow_valid = false;
+    memset(&coop_lite_pending_follow, 0, sizeof(coop_lite_pending_follow));
+}
+
+void coop_lite_flush_pending_follow(void)
+{
+    PacketCoopFollowHost pkt;
+
+    if (!coop_lite_pending_follow_valid) {
+        return;
+    }
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        coop_lite_pending_follow_valid = false;
+        return;
+    }
+    if (!coop_lite_client_in_world()) {
+        return;
+    }
+
+    pkt = coop_lite_pending_follow;
+    coop_lite_pending_follow_valid = false;
+    coop_lite_handle_follow_packet(&pkt);
+}
+
+bool coop_lite_can_use_turn_based(void)
+{
+    if (!tig_net_is_active()) {
+        return true;
+    }
+    /* Hard real-time in coop — TB desyncs DEX timing across peers. */
+    return false;
+}
+
+void coop_lite_handle_attack_intent(PacketCoopAttackIntent* pkt)
+{
+    int64_t attacker;
+    int64_t target;
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_ATTACK_INTENT) {
+        return;
+    }
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+
+#ifndef COOP_LITE_TEST_STUBS
+    {
+        ObjectID attacker_oid;
+        ObjectID target_oid;
+        memcpy(&attacker_oid, pkt->attacker_oid, sizeof(attacker_oid));
+        memcpy(&target_oid, pkt->target_oid, sizeof(target_oid));
+        attacker = obj_pool_perm_lookup(attacker_oid);
+        target = obj_pool_perm_lookup(target_oid);
+    }
+    if (attacker == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL) {
+        tig_debug_printf("CoopLite: attack intent dropped (missing oid)\n");
+        return;
+    }
+    (void)pkt->attack_kind;
+    /* Host resolves AG_ATTACK — combat_dmg / ai_attack run here (event-level). */
+    anim_goal_attack(attacker, target);
+#else
+    (void)attacker;
+    (void)target;
+#endif
+}
+
+void coop_lite_propagate_party_aggression(int64_t attacker_obj, int64_t target_obj)
+{
+#ifdef COOP_LITE_TEST_STUBS
+    (void)attacker_obj;
+    (void)target_obj;
+#else
+    int64_t host_pc;
+
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+    if (attacker_obj == OBJ_HANDLE_NULL || target_obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (obj_field_int32_get(attacker_obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return;
+    }
+    host_pc = coop_lite_host_pc_obj();
+    if (host_pc == OBJ_HANDLE_NULL || host_pc == attacker_obj) {
+        return;
+    }
+    /* Quiet mirror: flags 0x01 = already-in-combat path reduces float spam. */
+    ai_attack(host_pc, target_obj, LOUDNESS_SILENT, 0x01);
+#endif
+}
+
+
 bool coop_lite_export_local_character(void)
 {
     if (!tig_net_is_active()) {
@@ -399,6 +618,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 4: /* move intent */
     case 29: /* open container */
     case 57: /* request cast */
+    case PACKET_COOP_ATTACK_INTENT: /* client attack → host AG_ATTACK */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 8: /* anim modify */
     case 10: /* anim pose */
@@ -406,13 +626,13 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 58: /* cast spell */
     case 60:
     case 61:
-    case 70:
+    case 70: /* object create — keep for summons; blood FX optional */
     case 72:
     case 73:
     case 74:
     case 75:
     case 76:
-    case 77:
+    /* 77 eye-candy: suppressed — clients spawn FX locally from Packet58 cast */
     case 92:
     case 99: /* location */
         return COOP_MP_PKT_CLIENT_APPLY;

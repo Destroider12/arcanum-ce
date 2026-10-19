@@ -1093,6 +1093,9 @@ void multiplayer_handle_message(void* msg)
     case 121:
         sub_4EFB50((Packet121*)msg);
         break;
+    case PACKET_COOP_ATTACK_INTENT:
+        coop_lite_handle_attack_intent((PacketCoopAttackIntent*)msg);
+        break;
     case PACKET_COOP_FOLLOW_HOST:
         coop_lite_handle_follow_packet((PacketCoopFollowHost*)msg);
         break;
@@ -1171,6 +1174,9 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
         if (client_id < 0 || client_id >= NUM_PLAYERS) {
             return false;
         }
+        /* Hard real-time for the whole coop session. */
+        settings_set_value(&settings, TURN_BASED_KEY, 0);
+        settings_set_value(&settings, FAST_TURN_BASED_KEY, 0);
         if (tig_net_is_host()) {
             if (client_id != 0) {
                 /* Ensure slot struct is initialized for the new peer. */
@@ -1190,6 +1196,10 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
             if (tig_net_is_host()) {
                 multiplayer_send_player_list();
             }
+        }
+        /* Local peer left the session — clear follow arming / queued follow. */
+        if (client_id == 0 || !tig_net_is_active()) {
+            coop_lite_session_reset();
         }
         return true;
     default:

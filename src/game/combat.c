@@ -1,4 +1,5 @@
 #include "game/combat.h"
+#include "game/coop_lite.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -2870,6 +2871,10 @@ bool sub_4B6C90(bool turn_based)
 {
     int64_t pc;
 
+    if (!coop_lite_can_use_turn_based() && turn_based) {
+        turn_based = false;
+    }
+
     if (combat_turn_based == turn_based) {
         return true;
     }
@@ -2904,6 +2909,14 @@ bool sub_4B6C90(bool turn_based)
 // 0x4B6D20
 void combat_turn_based_toggle(void)
 {
+    if (!coop_lite_can_use_turn_based()) {
+        /* Force real-time while coop is active. */
+        if (combat_is_turn_based()) {
+            settings_set_value(&settings, TURN_BASED_KEY, 0);
+        }
+        return;
+    }
+
     if (combat_is_turn_based()) {
         settings_set_value(&settings, TURN_BASED_KEY, 0);
     } else {

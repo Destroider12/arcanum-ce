@@ -2505,7 +2505,8 @@ void MTComponentEyeCandy_ProcFunc(void)
                 magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell,
                 mt_id);
 
-            if (tig_net_is_active()) {
+            /* Coop Lite: no Packet77 eye-candy stream — local FX from cast. */
+            if (0 && tig_net_is_active()) {
                 PacketMagicTechEyeCandy pkt;
 
                 pkt.type = 77;
@@ -5270,7 +5271,9 @@ void magictech_fx_remove(int64_t obj, int fx)
 
     animfx_remove(&spell_eye_candies, obj, fx % 10 + 6 * (fx / 10), -1);
 
-    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+    /* Coop Lite: do not stream per-sprite eye candy (Packet77). Clients spawn
+       particles locally when they apply Packet58 cast. */
+    if (0 && tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
         PacketMagicTechEyeCandy pkt;
 
         pkt.type = 77;

@@ -94,6 +94,10 @@ static int test_mp_packet_roles(void)
         fprintf(stderr, "pkt11 combat mode should be client-apply\n");
         return 1;
     }
+    if (coop_lite_mp_packet_role(PACKET_COOP_ATTACK_INTENT) != COOP_MP_PKT_HOST_RESOLVE) {
+        fprintf(stderr, "attack intent should be HOST_RESOLVE\n");
+        return 1;
+    }
     if (coop_lite_mp_packet_role(57) != COOP_MP_PKT_HOST_RESOLVE) {
         fprintf(stderr, "pkt57 should be host-resolve\n");
         return 1;
@@ -133,8 +137,8 @@ static int test_classify_and_offsets(void)
         fprintf(stderr, "merchant should ALLOW even with story\n");
         return 1;
     }
-    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_INFO_ONLY) {
-        fprintf(stderr, "story NPC should INFO_ONLY for companion\n");
+    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "story NPC should ALLOW (per-node filter) for companion\n");
         return 1;
     }
     if (coop_lite_classify_talk(true, false, false, false) != COOP_TALK_ALLOW) {
@@ -213,8 +217,8 @@ static int run_client(void)
 
     g_coop_lite_test_merchant = 0;
     g_coop_lite_test_story = 1;
-    if (coop_lite_can_talk(99, 1) != COOP_TALK_INFO_ONLY) {
-        fprintf(stderr, "client: story NPC should be INFO_ONLY\n");
+    if (coop_lite_can_talk(99, 1) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "client: story NPC should ALLOW (filtered)\n");
         return 1;
     }
     g_coop_lite_test_merchant = 1;
@@ -289,7 +293,10 @@ static int run_host(void)
         return 1;
     }
 
-    coop_lite_notify_host_teleported(42, 0x1234);
+    /* First notify arms follow (skips New-Game spawn); second broadcasts. */
+    coop_lite_session_reset();
+    coop_lite_notify_host_teleported(42, 0x1234); /* arm only */
+    coop_lite_notify_host_teleported(42, 0x1234); /* real travel broadcast */
     pump_ms(800);
 
     printf("host: PASS\n");

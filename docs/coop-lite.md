@@ -711,3 +711,46 @@ Linux local equivalent (this box layout):
 cd /workspace/game/run-host && ./arcanum-ce -window -coop -host 7777
 cd /workspace/game/run-client && ./arcanum-ce -window -coop -join 127.0.0.1:7777
 ```
+
+---
+
+## 16. Design-review fixes + New-Game crash (`coop-lite-review-fixes`)
+
+### 16.1 Host crash after New Game (playtest)
+
+**Symptom:** Host segfault (`ip 0`) right after `[Beginning Game]` → start-map load → `CoopLite: host follow broadcast` while client still on main menu applied follow, hit `anim.c` priority ASSERT, and loaded the host map in the background.
+
+**Root causes & fixes:**
+
+| Issue | Fix |
+| --- | --- |
+| (a) Follow broadcast on initial New Game / load spawn | First host PC teleport **arms** follow only (`coop_lite_follow_armed`); subsequent travel broadcasts. Skip shopping-map destinations. |
+| (b) Client apply while on ShopMap / menu | Queue follow if not in-world (`coop_lite_client_in_world`); `coop_lite_flush_pending_follow` after client enters world. |
+| (c) NULL function pointer in anim | `ASSERT(goal_node != NULL)` only logged then continued into `goal_subnode->func(...)` — RIP=0 when type is unfinished (`AG_PICK_WEAPON`) or corrupt. Now abort the run; also NULL-check subnode `func` and validate Packet9 `priority_level`. |
+
+### 16.2 Hard real-time combat
+
+- `coop_lite_can_use_turn_based()` → false when coop active.
+- `combat_turn_based_toggle` / `sub_4B6C90` / options UI refuse TB; CONNECT forces `TURN_BASED_KEY=0`.
+
+**Event-level combat (PR #5 adapted):** CE already uses discrete packets (not frame streams): Packet4 move intent, Packet8/9/10 anim, Packet11 combat mode, Packet100 subtype 13 HP/fatigue (= DAMAGE_APPLIED). New **Packet128 `PACKET_COOP_ATTACK_INTENT`**: client `anim_goal_attack` → host resolves `AG_ATTACK` (DEX timing + `ai_attack` on host).
+
+### 16.3 Spells / FX
+
+- Keep Packet57 request + Packet58 cast (CAST_SPELL).
+- **Suppress Packet77** eye-candy send/receive — clients spawn particles locally from cast apply / game data.
+
+### 16.4 Aggression
+
+- Host `ai_attack` path unchanged for resolution.
+- `coop_lite_propagate_party_aggression`: when a companion PC attacks, mirror hostility onto host PC so NPCs fight the party.
+
+### 16.5 Dialogs (PR #4 fix)
+
+- No whole-NPC INFO_ONLY float.
+- `coop_lite_dialog_option_allowed(actions, response_code)` denies `qu/gv/gf/ss/rp/al/ru/rq/xp`; **barter (`B:` → code 3) always allowed**.
+- Offline test uses synthetic dlg lines mirroring Steam `dlg/01040ristezze.dlg` barter (`B:`) vs quest (`qu`/`gf`/…) patterns (game data not committed).
+
+### 16.6 Human playtest notes
+
+After updating binaries, both peers must start/load into the world before follow teleports apply. Host New Game no longer yanks a menu-only client.

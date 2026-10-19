@@ -520,7 +520,7 @@ void mp_handle_gsound_play_scheme(PacketPlaySound* pkt)
     }
 }
 
-// 0x4EF320 — Packet4: client move intent → host resolves into real anim goals.
+// 0x4EF320 - Packet4: client move intent → host resolves into real anim goals.
 void mp_handle_packet4(Packet4* pkt)
 {
     int64_t obj;
@@ -565,6 +565,12 @@ void mp_handle_packet9(Packet9* pkt)
     }
     obj = pkt->field_18.obj;
     if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    /* Reject corrupt priority from peers (menu-time follow used to ASSERT then continue). */
+    if (pkt->priority_level < PRIORITY_NONE || pkt->priority_level >= PRIORITY_HIGHEST) {
+        tig_debug_printf("MP: drop Packet9 with bad priority_level=%d\n", pkt->priority_level);
         return;
     }
 
@@ -799,7 +805,7 @@ void mp_handle_packet74(Packet74* pkt)
     multiplayer_lock();
     switch (pkt->subtype) {
     case 0:
-        /* End maintain / dispel variant — best-effort via maintain end. */
+        /* End maintain / dispel variant - best-effort via maintain end. */
         ui_spell_maintain_end(pkt->mt_id);
         break;
     case 1:
@@ -854,18 +860,14 @@ void mp_handle_packet76(Packet76* pkt)
 // Packet77: eye candy add/remove.
 void mp_handle_packet77(PacketMagicTechEyeCandy* pkt)
 {
-    if (pkt == NULL || tig_net_is_host()) {
-        return;
-    }
-    multiplayer_lock();
-    mp_magictech_apply_eye_candy_ex(pkt->subtype, pkt->oid, pkt->fx_id, pkt->mt_id);
-    multiplayer_unlock();
+    /* Coop Lite: ignore streamed eye candy - FX are local from Packet58. */
+    (void)pkt;
 }
 
 // 0x4EF320
 void sub_4EF320(void)
 {
-    /* Legacy stub slot — receive path lives in mp_handle_* above. */
+    /* Legacy stub slot - receive path lives in mp_handle_* above. */
 }
 
 // 0x4EF3D0
