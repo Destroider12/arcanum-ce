@@ -11,6 +11,11 @@ extern "C" {
 /* Packet type for host→client forced follow teleport (within 1..130). */
 #define PACKET_COOP_ATTACK_INTENT 128
 #define PACKET_COOP_FOLLOW_HOST 129
+#define PACKET_COOP_CHAR_OFFER 130
+#define PACKET_COOP_SESSION_SYNC 131
+
+/* multiplayer_validate_message must allow up to this (exclusive). */
+#define PACKET_COOP_TYPE_LIMIT 132
 
 
 typedef struct PacketCoopAttackIntent {
@@ -25,6 +30,32 @@ typedef struct PacketCoopFollowHost {
     /* 0004 */ int map;
     /* 0008 */ int64_t loc;
 } PacketCoopFollowHost;
+
+/* Client → host: character chosen in menu (do not start an independent world). */
+typedef struct PacketCoopCharOffer {
+    /* 0000 */ int type;
+    /* 0004 */ int slot;
+    /* 0008 */ int basic_prototype;
+    /* 000C */ char name[64];
+} PacketCoopCharOffer;
+
+/*
+ * Host → client: join the host's session. Client loads map, creates both PCs
+ * with matching OIDs (host PC as NETWORK proxy, local PC as player_pc_obj).
+ */
+typedef struct PacketCoopSessionSync {
+    /* 0000 */ int type;
+    /* 0004 */ int map;
+    /* 0008 */ int64_t host_loc;
+    /* 0010 */ int64_t client_loc;
+    /* 0018 */ unsigned char host_pc_oid[24];
+    /* 0030 */ unsigned char client_pc_oid[24];
+    /* 0048 */ int client_slot;
+    /* 004C */ int client_proto;
+    /* 0050 */ int host_proto;
+    /* 0054 */ char client_name[64];
+    /* 0094 */ char host_name[64];
+} PacketCoopSessionSync;
 
 typedef enum CoopTalkPolicy {
     COOP_TALK_ALLOW = 0,
@@ -108,6 +139,31 @@ typedef enum CoopMpPacketRole {
 } CoopMpPacketRole;
 
 CoopMpPacketRole coop_lite_mp_packet_role(int type);
+
+/* Client: send CHAR_OFFER from local premade/created PC; return true if sent. */
+bool coop_lite_client_offer_character(int basic_prototype, const char* name);
+
+/* True while a coop client is waiting for SESSION_SYNC (no independent New Game). */
+bool coop_lite_client_waiting_for_sync(void);
+
+/* True after SESSION_SYNC applied — mainmenu may close into the shared world. */
+bool coop_lite_client_session_ready(void);
+
+/* Consume the one-shot "menu may close" signal after SESSION_SYNC. */
+void coop_lite_acknowledge_session_ready(void);
+
+/* Host: remember offer / spawn + SESSION_SYNC when in-world. */
+void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt);
+
+/* Client: apply SESSION_SYNC (load host map, bind PCs). */
+void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt);
+
+/* Host: after entering world, bind slot 0 and sync any pending client offers. */
+void coop_lite_host_on_entered_world(void);
+
+/* True if this peer should skip the single-player New Game start-map teleport. */
+bool coop_lite_should_skip_independent_new_game(void);
+
 
 #ifdef __cplusplus
 }

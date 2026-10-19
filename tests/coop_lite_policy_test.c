@@ -72,7 +72,7 @@ static void on_message(void* msg)
 static bool on_validate(void* msg)
 {
     int type = *(int*)msg;
-    return type > 0 && type < 131;
+    return type > 0 && type < PACKET_COOP_TYPE_LIMIT;
 }
 
 

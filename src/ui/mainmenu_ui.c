@@ -6,6 +6,7 @@
 #include "game/background.h"
 #include "game/critter.h"
 #include "game/coop_lite.h"
+#include "tig/memory.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
 #include "game/gfade.h"
@@ -1649,6 +1650,20 @@ void sub_5412E0(bool a1)
             if (mainmenu_ui_start_new_game) {
                 mainmenu_ui_start_new_game = false;
 
+                if (coop_lite_should_skip_independent_new_game()) {
+                    char* offer_name = NULL;
+                    int proto = 16066;
+                    obj_field_string_get(pc_obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
+                    /* Prototype unknown here; CHAR_OFFER should already have been sent. */
+                    if (!coop_lite_client_waiting_for_sync()) {
+                        coop_lite_client_offer_character(proto,
+                            offer_name != NULL ? offer_name : "Companion");
+                    }
+                    if (offer_name != NULL) {
+                        FREE(offer_name);
+                    }
+                    tig_debug_printf("MainMenu-UI: coop client skipped independent New Game teleport\n");
+                } else {
                 map = map_by_type(MAP_TYPE_START_MAP);
                 if (map == 0) {
                     tig_debug_printf("MMUI: ERROR: Teleport/World Loc Failure!\n");
@@ -1690,6 +1705,7 @@ void sub_5412E0(bool a1)
                 timeevent_add_delay(&timeevent, &datetime);
 
                 wmap_rnd_schedule();
+                } /* end !coop client skip */
             } else {
                 if (dword_5C4004) {
                     sub_40FED0();
@@ -1745,6 +1761,14 @@ bool mainmenu_ui_handle(void)
         tig_timer_now(&timestamp);
         timeevent_ping(timestamp);
         gamelib_ping();
+        /* Coop client: SESSION_SYNC arrived — leave menu into host world. */
+        if (coop_lite_client_session_ready()) {
+            tig_debug_printf("MainMenu-UI: coop session ready — closing menu\n");
+            coop_lite_acknowledge_session_ready();
+            mainmenu_ui_start_new_game = false;
+            sub_5412D0();
+            break;
+        }
         iso_redraw();
         tig_window_display();
 
@@ -4368,6 +4392,21 @@ bool mainmenu_ui_pregen_char_execute(int btn)
     }
 
     item_wield_best_all(player_create_info.obj, OBJ_HANDLE_NULL);
+
+    if (coop_lite_should_skip_independent_new_game()) {
+        char* offer_name = NULL;
+        obj_field_string_get(player_create_info.obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
+        coop_lite_client_offer_character(player_create_info.basic_prototype,
+            offer_name != NULL ? offer_name : "Companion");
+        if (offer_name != NULL) {
+            FREE(offer_name);
+        }
+        /* Stay in menu loop until SESSION_SYNC; do not load our own start map. */
+        mainmenu_ui_start_new_game = false;
+        tig_debug_printf("MainMenu-UI: coop client offered char — waiting for host sync\n");
+        return true;
+    }
+
     sub_5412D0();
 
     return true;

@@ -1,4 +1,5 @@
 #include "game/mp_utils.h"
+#include "game/coop_lite.h"
 
 #include "game/a_name.h"
 #include "game/anim.h"
@@ -674,6 +675,12 @@ void mp_handle_packet70(Packet70* pkt)
     int64_t blood_obj;
 
     if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    /* Avoid creating world objects onto ShopMap before SESSION_SYNC. */
+    if (tig_net_is_active() && coop_lite_should_skip_independent_new_game()
+        && coop_lite_client_waiting_for_sync()) {
+        tig_debug_printf("MP: Packet70 deferred (client waiting for session sync)\n");
         return;
     }
 

@@ -757,3 +757,30 @@ cd /workspace/game/run-client && ./arcanum-ce -window -coop -join 127.0.0.1:7777
 ### 16.6 Human playtest notes
 
 After updating binaries, both peers must start/load into the world before follow teleports apply. Host New Game no longer yanks a menu-only client.
+
+## 17. Session sync + client anim time (`coop-lite-session-sync`)
+
+### 17.1 Client world frozen
+
+**Cause:** `timeevent_ping` skipped *both* game-time and anim-time on clients.
+**Fix:** Clients still advance **real-time** and **anim-time** (movement/rendering). Only **game-time** (clock, NPC schedules, day/night) is host-authoritative via PacketGameTime.
+
+### 17.2 Separate New Game worlds
+
+**Cause:** Both peers ran independent New Game → different OIDs/maps; host never saw client PC.
+**Fix (MVP session sync):**
+1. Coop **client** accepting a premade/created char sends `PACKET_COOP_CHAR_OFFER` (130) and **does not** teleport to its own start map.
+2. Host (when in-world, or when first arming follow on New Game) binds slot 0, spawns the client PC near the host (`PLAYER_CREATE_INFO_NETWORK`), binds `stru_5E8AD0[slot]`, mirrors via Packet70, and sends `PACKET_COOP_SESSION_SYNC` (131) with map + both PC OIDs/locs.
+3. Client applies SESSION_SYNC: recreates local PC with host-assigned OID, creates host PC proxy, teleports to host map, closes main menu.
+
+### 17.3 Dialog
+
+Client talk uses existing `dialog_ui` + per-node filter once the shared map/PCs exist. Frozen anim (17.1) was the main blocker for click-to-talk.
+
+### 17.4 Gaps
+
+- Full late-join sector/`tig_net_xfer` snapshot still missing (dynamic NPC state, inventory deltas).
+- Host PC art on clients uses generic prototype (16066) in SESSION_SYNC; premade appearance may not match until proto is plumbed.
+- Orphan ShopMap PC on client after OID recreate not destroyed.
+- Client-created (charedit) path should also call `coop_lite_client_offer_character` (premade path does).
+

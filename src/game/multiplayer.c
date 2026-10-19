@@ -1099,6 +1099,12 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_FOLLOW_HOST:
         coop_lite_handle_follow_packet((PacketCoopFollowHost*)msg);
         break;
+    case PACKET_COOP_CHAR_OFFER:
+        coop_lite_handle_char_offer((PacketCoopCharOffer*)msg);
+        break;
+    case PACKET_COOP_SESSION_SYNC:
+        coop_lite_handle_session_sync((PacketCoopSessionSync*)msg);
+        break;
     default:
         tig_debug_printf("MP: unhandled packet type %d\n", type);
         break;
@@ -1150,7 +1156,7 @@ bool multiplayer_validate_message(void* msg)
     int type;
 
     type = *(int*)msg;
-    return type > 0 && type < 131;
+    return type > 0 && type < PACKET_COOP_TYPE_LIMIT;
 }
 
 // 0x4A2040
@@ -1185,9 +1191,10 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
                 }
             }
             multiplayer_send_player_list();
-            /* Late-join world snapshot (tig_net_xfer / sector dump) not implemented.
-               Joiners must start with the host or load the same save beforehand. */
-            tig_debug_printf("MP: client %d connected — no late-join world xfer yet\n", client_id);
+            /* Session sync: if host already in-world and client later offers a
+               character, CHAR_OFFER triggers spawn. Full sector xfer still TODO. */
+            tig_debug_printf("MP: client %d connected — waiting for CHAR_OFFER / SESSION_SYNC\n", client_id);
+            coop_lite_host_on_entered_world();
         }
         return true;
     case TIG_NET_EVENT_DISCONNECT:
@@ -1294,6 +1301,22 @@ int64_t sub_4A2B60(int player)
 
     return OBJ_HANDLE_NULL;
 }
+
+void multiplayer_bind_slot_pc(int slot, int64_t obj)
+{
+    if (slot < 0 || slot >= NUM_PLAYERS) {
+        return;
+    }
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    stru_5E8AD0[slot].field_8 = obj_get_id(obj);
+    if (tig_net_is_host()) {
+        multiplayer_send_player_list();
+    }
+    tig_debug_printf("MP: bound slot %d to PC\n", slot);
+}
+
 
 // 0x4A2BA0
 bool multiplayer_is_locked(void)

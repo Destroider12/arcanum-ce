@@ -824,16 +824,18 @@ void timeevent_ping(tig_timestamp_t timestamp)
     timeevent_in_ping = true;
     datetime_add_milliseconds(&timeevent_real_time, delta);
 
-    if (!coop_lite_can_advance_game_time()) {
-        /* Coop clients: do not advance game/anim clocks; host PacketGameTime
-           (type 3) applies via timeevent_sync in multiplayer_handle_message. */
-    } else {
-        if (!sub_45B300()) {
+    /*
+     * Coop clients: host owns *game* time (time-of-day, NPC schedules, etc.)
+     * via PacketGameTime. Clients must still advance real-time (already done
+     * above) and anim-time so local movement/rendering are not frozen.
+     */
+    if (!sub_45B300()) {
+        if (coop_lite_can_advance_game_time()) {
             if (!combat_turn_based_is_active()) {
                 datetime_add_milliseconds(&timeevent_game_time, 8 * delta);
             }
-            datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
         }
+        datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
     }
 
     for (time_type = 0; time_type < TIME_TYPE_COUNT; time_type++) {
