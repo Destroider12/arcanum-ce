@@ -368,6 +368,13 @@ endif()
 enable_testing()
 add_test(NAME tig_net_loopback COMMAND tig_net_loopback_test)
 
+if(NOT WIN32 AND NOT ANDROID)
+    # tig file helpers against the real tig library (native paths only).
+    add_executable(tig_file_empty_dir_test "tests/tig_file_empty_dir_test.c")
+    target_link_libraries(tig_file_empty_dir_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_file_empty_dir COMMAND tig_file_empty_dir_test)
+endif()
+
 add_executable(coop_lite_policy_test
     "tests/coop_lite_policy_test.c"
     "src/net/tig_net.c"

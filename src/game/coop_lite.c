@@ -1,5 +1,6 @@
 #include "game/coop_lite.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +95,8 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/script.h"
 #include "game/teleport.h"
 #include "game/tile.h"
+#include "game/scroll.h"
+#include "tig/file.h"
 #include "tig/debug.h"
 #include "tig/memory.h"
 
@@ -1366,6 +1369,27 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
     coop_pending_sync_valid = true;
     /* A queued follow from before sync is superseded. */
     coop_lite_pending_follow_valid = false;
+
+#ifndef COOP_LITE_TEST_STUBS
+    /*
+     * The client never runs its own New Game reset before loading the host
+     * map, and a killed client leaves Save\Current behind. Its stale copy of
+     * the host map (old proxies / old local PCs = the "bare-torso" extras)
+     * would be loaded instead of the pristine map. Drop it first.
+     */
+    if (map_current_map() != pkt->map) {
+        char* map_name = NULL;
+        char path[TIG_MAX_PATH];
+
+        if (map_get_name(pkt->map, &map_name) && map_name != NULL) {
+            snprintf(path, sizeof(path), "Save\\Current\\maps\\%s", map_name);
+            if (tig_file_is_directory(path)) {
+                tig_debug_printf("CoopLite: clearing stale client map state %s\n", path);
+                tig_file_empty_directory(path);
+            }
+        }
+    }
+#endif
 
     coop_lite_client_request_sync_teleport();
     /* Binding happens in coop_lite_client_on_teleport_done (teleport.c). */

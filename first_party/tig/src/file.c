@@ -174,8 +174,18 @@ bool tig_file_is_empty_directory_native(const char* path)
 
     tig_file_list_create_native(&list, pattern);
 
-    // Only contains trivia (`.` and `..`).
-    is_empty = list.count <= 2;
+    // Only contains trivia (`.` and `..`). CE: count real entries — native
+    // listings on non-Windows platforms do not report `.`/`..`, so the
+    // original `count <= 2` treated a directory with one or two entries
+    // (e.g. Save\Current holding only `maps`) as empty and never cleared it.
+    is_empty = true;
+    for (unsigned int index = 0; index < list.count; index++) {
+        if (strcmp(list.entries[index].path, ".") != 0
+            && strcmp(list.entries[index].path, "..") != 0) {
+            is_empty = false;
+            break;
+        }
+    }
 
     tig_file_list_destroy(&list);
 
