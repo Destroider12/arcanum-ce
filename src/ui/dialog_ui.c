@@ -132,6 +132,12 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
         return;
     }
 
+    if (!coop_lite_client_may_open_dialog(npc_obj, pc_obj)) {
+        dialog_ui_float_line(npc_obj, pc_obj,
+            "(Following the party leader. Speak with them.)", -1);
+        return;
+    }
+
     if (critter_is_dead(pc_obj)) {
         return;
     }
@@ -295,7 +301,7 @@ bool dialog_ui_process_option(DialogUiEntry* entry, int option)
 
     is_pc = player_is_local_pc_obj(entry->state.pc_obj);
 
-    if (tig_net_is_active() && !tig_net_is_host()
+    if (coop_lite_is_client_role()
         && option >= 0 && option < entry->state.num_options
         && !coop_lite_dialog_option_allowed(entry->state.actions[option],
             entry->state.field_17F0[option])) {
@@ -447,7 +453,9 @@ void dialog_ui_display(DialogUiEntry* entry)
          * (e.g. rumor/skill/spell replies use options/field_17F0/field_1804[1]).
          * dialog_ui_process_option rejects the blanked entries.
          */
-        filter = tig_net_is_active() && !tig_net_is_host();
+        /* Not tig_net_is_active(): the client's talk runs under local
+           suspension, where net reads inactive (Playtest 7: no filter). */
+        filter = coop_lite_is_client_role();
         if (filter) {
             out = 0;
             for (index = 0; index < entry->state.num_options; index++) {

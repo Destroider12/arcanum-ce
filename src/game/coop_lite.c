@@ -78,6 +78,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #else
 #include "game/ai.h"
 #include "game/anim.h"
+#include "game/critter.h"
 #include "game/location.h"
 #include "game/map.h"
 #include "game/multiplayer.h"
@@ -256,31 +257,73 @@ CoopTalkPolicy coop_lite_classify_talk(bool coop_active, bool is_host,
     return COOP_TALK_ALLOW;
 }
 
-bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
+bool coop_lite_is_client_role(void)
+{
+    /* Local suspension is only used by clients running their own PC's SP
+       path (move/talk); the dialog it opens is still a client dialog. */
+    if (tig_net_is_locally_suspended()) {
+        return true;
+    }
+    return tig_net_is_active() && !tig_net_is_host();
+}
+
+bool coop_lite_dialog_action_blocked(const char* code)
 {
     /*
-     * Two-letter dialog action codes that touch shared campaign state:
-     * quests, global vars/flags, local (per-NPC) vars/flags, story state,
-     * reputation, alignment, rumors, XP.
+     * Two-letter dialog action codes a client must not run: they touch
+     * shared campaign state (quests, global/local/PC vars and flags, story
+     * state, reputation, alignment, rumors, XP, fate points), followers and
+     * party (join/wait/unwait/leave/stay close/spread out/orders), items and
+     * money (host-authoritative economy), combat, kill, origin, newspapers.
+     * Allowed: re (reaction), fl (float line), mm (area known), tr (skill
+     * training on the client's own PC).
      */
     static const char blocked[][2] = {
         { 'q', 'u' }, { 'g', 'v' }, { 'g', 'f' }, { 'l', 'v' }, { 'l', 'f' },
-        { 's', 's' }, { 'r', 'p' }, { 'a', 'l' }, { 'r', 'u' }, { 'r', 'q' },
-        { 'x', 'p' },
+        { 'l', 'c' }, { 's', 's' }, { 'r', 'p' }, { 'a', 'l' }, { 'r', 'u' },
+        { 'r', 'q' }, { 'x', 'p' }, { 'f', 'p' }, { 'p', 'v' }, { 'p', 'f' },
+        { 'j', 'o' }, { 'w', 'a' }, { 'u', 'w' }, { 's', 'c' }, { 's', 'o' },
+        { 'c', 'e' }, { 's', 'u' }, { 'i', 'i' }, { 'r', 'i' }, { 'e', 't' },
+        { '$', '$' }, { 'i', 'n' }, { 'c', 'o' }, { 'n', 'k' }, { 'o', 'r' },
+        { 'n', 'p' },
     };
     char c0;
     char c1;
-    const char* pch;
     size_t i;
 
+    if (code == NULL || code[0] == '\0' || code[1] == '\0') {
+        return false;
+    }
+    c0 = code[0];
+    c1 = code[1];
+    if (c0 >= 'A' && c0 <= 'Z') {
+        c0 = (char)(c0 - 'A' + 'a');
+    }
+    if (c1 >= 'A' && c1 <= 'Z') {
+        c1 = (char)(c1 - 'A' + 'a');
+    }
+    for (i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
+        if (c0 == blocked[i][0] && c1 == blocked[i][1]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
+{
+    char code[3];
+    const char* pch;
+
+    /* response_code (e.g. 3 = barter) does not change the verdict: barter
+       itself is fine, only its action string matters. */
     (void)response_code;
 
-    /* Barter (response code 3) is allowed only if its actions are harmless
-       too — a node can carry b: plus story codes. */
     if (actions == NULL || actions[0] == '\0') {
         return true;
     }
 
+    code[2] = '\0';
     pch = actions;
     while (*pch != '\0') {
         while (*pch != '\0' && !((*pch >= 'A' && *pch <= 'Z')
@@ -291,23 +334,36 @@ bool coop_lite_dialog_option_allowed(const char* actions, int response_code)
         if (*pch == '\0') {
             break;
         }
-        c0 = *pch++;
+        code[0] = *pch++;
         if (*pch == '\0') {
             break;
         }
-        c1 = *pch++;
-        if (c0 >= 'A' && c0 <= 'Z') {
-            c0 = (char)(c0 - 'A' + 'a');
-        }
-        if (c1 >= 'A' && c1 <= 'Z') {
-            c1 = (char)(c1 - 'A' + 'a');
-        }
-        for (i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
-            if (c0 == blocked[i][0] && c1 == blocked[i][1]) {
-                return false;
-            }
+        code[1] = *pch++;
+        if (coop_lite_dialog_action_blocked(code)) {
+            return false;
         }
     }
+    return true;
+}
+
+bool coop_lite_client_may_open_dialog(int64_t npc_obj, int64_t pc_obj)
+{
+    if (!coop_lite_is_client_role()) {
+        return true;
+    }
+#ifndef COOP_LITE_TEST_STUBS
+    if (npc_obj != OBJ_HANDLE_NULL) {
+        int64_t leader = critter_leader_get(npc_obj);
+        /* Someone else's companion (e.g. Virgil following the host): the
+           conversation belongs to its leader. */
+        if (leader != OBJ_HANDLE_NULL && leader != pc_obj) {
+            return false;
+        }
+    }
+#else
+    (void)npc_obj;
+    (void)pc_obj;
+#endif
     return true;
 }
 

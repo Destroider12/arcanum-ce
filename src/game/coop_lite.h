@@ -139,6 +139,13 @@ CoopTalkPolicy coop_lite_classify_talk(bool coop_active, bool is_host,
 
 /* True if non-host may pick this response (barter / harmless actions). */
 bool coop_lite_dialog_option_allowed(const char* actions, int response_code);
+/* True on a coop client, including while running local SP paths under
+   tig_net_local_suspend (net reads inactive there). */
+bool coop_lite_is_client_role(void);
+/* Dialog action code (2 chars) a client must not execute. */
+bool coop_lite_dialog_action_blocked(const char* code);
+/* Client may not open dialog with another player's follower. */
+bool coop_lite_client_may_open_dialog(int64_t npc_obj, int64_t pc_obj);
 
 /* Story scripts that resolve SFO_PLAYER / "the PC" use the host PC in coop. */
 int64_t coop_lite_story_pc_obj(void);

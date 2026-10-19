@@ -30,6 +30,7 @@
 #include "game/stat.h"
 #include "game/tf.h"
 #include "game/ui.h"
+#include "game/coop_lite.h"
 
 typedef enum FatigueEventType {
     FATIGUE_EVENT_RECOVERY,
@@ -893,6 +894,12 @@ bool critter_follow(int64_t follower_obj, int64_t leader_obj, bool force)
 {
     unsigned int flags;
 
+    /* Coop: followers are host-owned; clients only receive them. */
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        tig_debug_printf("critter_follow: refused on coop client\n");
+        return false;
+    }
+
     // Validate follower is an NPC.
     if (obj_field_int32_get(follower_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
         return false;
@@ -951,6 +958,10 @@ bool critter_disband(int64_t obj, bool force)
 {
     int64_t leader_obj;
     int64_t v1;
+
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        return false;
+    }
 
     leader_obj = critter_leader_get(obj);
     if (leader_obj != OBJ_HANDLE_NULL) {
