@@ -1270,3 +1270,23 @@ Virgil behind. The dev hook causes this; it is not a coop bug.
 - L5: Packet57's source must be the PC or an item the PC holds.
 - L6: `coop_reload_raise` is cleared on reset and on a failed reload.
 - L7: Packet29 (junk-pile collapse) must be within 5 tiles of the sender's PC.
+
+## 26. Strategy recon P0/P1 and Playtest 12
+
+- **P0-1 character bundle.** `coop_lite_export_local_character` no longer goes through `save_char`. `save_char` stripped the live PC's inventory (`sub_463730`), fully healed it and reset its flags (`sub_4A6010`), and queued a PRIORITY_HIGHEST anim (`sub_424070`, the anim.c:4096 assert). In PT12 that dropped the host from 385 gold to 0. The export now writes `Players\<oid>.coopchar` with magic `CCB1`, laid out as PC blob + item blobs + level scheme + name. Nothing is destroyed. Separately, `save_char` itself had two bugs, also fixed: it wrote `&data`, and it used `OPCF_USE_ALT_DATA` as a field id.
+- **`obj_data_write_mem`** was a stub, so every memory blob was header-only. It is implemented now as the inverse of `obj_data_read_mem`.
+- **P0-2 pose ordering.** `PacketCoopPcPos` carries an epoch and a seq. The host bumps a slot's epoch on every correction and every join. A map generation (`coop_map_gen`, sent in FOLLOW and SESSION_SYNC) keys the map identity. Stale unreliable poses therefore can't undo host corrections.
+- **P1-1 roster.** The host resends the full roster every 5 s and whenever the map generation changes. Clients reconcile against it and remove ghost PCs.
+- **P1-2 items.**
+  - Only the host generates starting kits.
+  - Every client gets the other PCs' inventories, at most once a second when something changed and every 10 s regardless.
+  - A missing item arrives as a full object blob (`OBJ_REQ` 139 / `OBJ_BLOB` 140). It is created from the proto only as a fallback.
+- **P1-3 item ops.** Packets 26, 27, 28 and 125 are resolved by the host. The host checks reach, ownership, locks, merchant and cost, then resyncs. A drop is announced on the ground first, so the owner moves its own object instead of destroying and recreating it. Worn and wielded slots follow the host.
+- **PT12.**
+  - The host's Esc menu lacked Save/Load because the host was still in dialog mode: the dev-start teleport happened while the Virgil dialog was open. The dialog is now ended first.
+  - Client combat mode is sent to the host as an intent (Packet11), and the host mirrors it back.
+  - Clicking an NPC in combat mode attacks it. That is vanilla behaviour.
+- **Dev hooks:**
+  - `ARCANUM_DEV_EXPORT_CHAR=1`: export twice and re-parse.
+  - `ARCANUM_DEV_CLIENT_COMBAT=1`: combat-mode toggles.
+  - `ARCANUM_DEV_CLIENT_ITEMS=1`: drop, pickup and equip round trip. On the host it gives the client a dagger.
