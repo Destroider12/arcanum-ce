@@ -394,6 +394,93 @@ static int test_pc_pos_helpers(void)
     return 0;
 }
 
+static bool bundle_visit(void* ctx, int index, const uint8_t* blob, size_t size)
+{
+    int* seen = (int*)ctx;
+
+    if (size != (size_t)(index + 1) * 3 || blob[0] != (uint8_t)(0xA0 + index)) {
+        return false;
+    }
+    seen[0]++;
+    return true;
+}
+
+/* P0-1: the .coopchar character bundle round-trips and rejects damage. */
+static int test_char_bundle(void)
+{
+    CoopCharBundleBuf buf;
+    uint8_t blob[16];
+    int seen = 0;
+    int count = 0;
+    const char* rule = NULL;
+    const char* name = NULL;
+    int i;
+    size_t cut;
+
+    if (!coop_char_bundle_begin(&buf, 3)) {
+        fprintf(stderr, "bundle begin failed\n");
+        return 1;
+    }
+    for (i = 0; i < 3; i++) {
+        memset(blob, 0xA0 + i, sizeof(blob));
+        if (!coop_char_bundle_add_blob(&buf, blob, (size_t)(i + 1) * 3)) {
+            fprintf(stderr, "bundle add failed\n");
+            return 1;
+        }
+    }
+    if (!coop_char_bundle_finish(&buf, "Fighter", "Melee")) {
+        fprintf(stderr, "bundle finish failed\n");
+        return 1;
+    }
+    if (!coop_char_bundle_parse(buf.data, buf.size, bundle_visit, &seen, &count, &rule, &name)
+        || seen != 3 || count != 3 || strcmp(rule, "Fighter") != 0 || strcmp(name, "Melee") != 0) {
+        fprintf(stderr, "bundle round trip failed (seen=%d count=%d)\n", seen, count);
+        return 1;
+    }
+    /* Every truncation must be refused before the visitor runs. */
+    for (cut = 0; cut < buf.size; cut++) {
+        seen = 0;
+        if (coop_char_bundle_parse(buf.data, cut, bundle_visit, &seen, NULL, NULL, NULL) || seen != 0) {
+            fprintf(stderr, "truncated bundle (%zu/%zu) accepted\n", cut, buf.size);
+            return 1;
+        }
+    }
+    /* Trailing junk, wrong magic, oversized blob length. */
+    {
+        uint8_t* copy = (uint8_t*)malloc(buf.size + 1);
+
+        memcpy(copy, buf.data, buf.size);
+        copy[buf.size] = 0;
+        if (coop_char_bundle_parse(copy, buf.size + 1, NULL, NULL, NULL, NULL, NULL)) {
+            fprintf(stderr, "trailing junk accepted\n");
+            return 1;
+        }
+        copy[0] ^= 0xFF;
+        if (coop_char_bundle_parse(copy, buf.size, NULL, NULL, NULL, NULL, NULL)) {
+            fprintf(stderr, "bad magic accepted\n");
+            return 1;
+        }
+        copy[0] ^= 0xFF;
+        copy[12] = 0xFF;
+        copy[13] = 0xFF;
+        copy[14] = 0xFF;
+        copy[15] = 0x7F;
+        if (coop_char_bundle_parse(copy, buf.size, NULL, NULL, NULL, NULL, NULL)) {
+            fprintf(stderr, "huge blob length accepted\n");
+            return 1;
+        }
+        free(copy);
+    }
+    coop_char_bundle_free(&buf);
+    if (coop_char_bundle_begin(&buf, 0) || coop_char_bundle_begin(&buf, COOP_CHAR_BUNDLE_MAX_OBJECTS + 1)) {
+        fprintf(stderr, "bundle object count limits wrong\n");
+        return 1;
+    }
+    coop_char_bundle_free(&buf);
+    printf("character bundle format OK\n");
+    return 0;
+}
+
 static int test_packet_hardening(void)
 {
     char name[8];
@@ -838,6 +925,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_packet_hardening() != 0) {
+        return 1;
+    }
+    if (test_char_bundle() != 0) {
         return 1;
     }
 

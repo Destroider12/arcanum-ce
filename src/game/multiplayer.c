@@ -1972,7 +1972,7 @@ bool save_char(const char* path, int64_t obj)
 
     flags = obj_field_int32_get(obj, OBJ_F_PC_FLAGS);
     flags |= OPCF_USE_ALT_DATA;
-    obj_field_int32_set(obj, OPCF_USE_ALT_DATA, flags);
+    obj_field_int32_set(obj, OBJ_F_PC_FLAGS, flags); // FIX: field id was OPCF_USE_ALT_DATA.
 
     sub_4A6010(obj);
 
@@ -1990,7 +1990,8 @@ bool save_char(const char* path, int64_t obj)
             break;
         }
 
-        if (tig_file_fwrite(&data, size, 1, stream) != 1) {
+        /* FIX: was &data (the pointer variable and the stack after it). */
+        if (tig_file_fwrite(data, size, 1, stream) != 1) {
             break;
         }
 

@@ -101,6 +101,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "tig/debug.h"
 #include "tig/memory.h"
 #include "tig/art.h"
+#include "game/portrait.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
 {
@@ -153,10 +154,112 @@ static bool coop_lite_loc_is_free_walkable(int64_t loc)
     return node == NULL;
 }
 
+static void coop_lite_copy_portrait(int64_t pc, const char* oidstr, int size, const char* suffix)
+{
+    char src_path[TIG_MAX_PATH];
+    char dst_path[TIG_MAX_PATH];
+
+    src_path[0] = '\0';
+    portrait_path(portrait_get(pc), src_path, sizeof(src_path), size);
+    if (src_path[0] != '\0') {
+        snprintf(dst_path, sizeof(dst_path), "Players\\%s%s.bmp", oidstr, suffix);
+        tig_file_copy(src_path, dst_path);
+    }
+}
+
+/*
+ * P0-1: non-destructive character bundle. The old path (sub_4A4320 ->
+ * save_char) ran sub_463730(pc, true) — dropping every item (host: items on
+ * the ground; client: orphan Packet27) — plus sub_4A6010 (full heal, flag
+ * reset, which also revived a corpse) and two anim interrupts at
+ * PRIORITY_HIGHEST (the anim.c:4096 assertion seen on every dev save).
+ */
+static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
+{
+    CoopCharBundleBuf buf;
+    int count;
+    int index;
+    int scheme;
+    const char* rule = NULL;
+    const char* name = NULL;
+    TigFile* stream;
+    bool ok;
+
+    count = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
+    if (count < 0 || count + 1 > COOP_CHAR_BUNDLE_MAX_OBJECTS) {
+        return false;
+    }
+    if (!coop_char_bundle_begin(&buf, count + 1)) {
+        return false;
+    }
+
+    ok = true;
+    for (index = -1; index < count && ok; index++) {
+        int64_t obj = index < 0
+            ? pc
+            : obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, index);
+        uint8_t* data = NULL;
+        int size = 0;
+
+        if (obj == OBJ_HANDLE_NULL) {
+            ok = false;
+            break;
+        }
+        sub_442050(&data, &size, obj);
+        ok = data != NULL && size > 0 && coop_char_bundle_add_blob(&buf, data, (size_t)size);
+        if (!ok) {
+            tig_debug_printf("CoopLite: character bundle: object %d not written (size %d)\n", index, size);
+        }
+        if (data != NULL) {
+            FREE(data);
+        }
+    }
+
+    scheme = auto_level_scheme_get(pc);
+    if (scheme != 0) {
+        rule = auto_level_scheme_rule(scheme);
+        name = auto_level_scheme_name(scheme);
+    }
+    if (ok && !coop_char_bundle_finish(&buf, rule, name)) {
+        tig_debug_printf("CoopLite: character bundle: level scheme strings rejected\n");
+        ok = false;
+    }
+
+    if (ok) {
+        if (!tig_file_is_directory("Players")) {
+            tig_file_mkdir("Players");
+        }
+        stream = tig_file_fopen(path, "wb");
+        ok = stream != NULL;
+        if (ok) {
+            ok = tig_file_fwrite(buf.data, buf.size, 1, stream) == 1;
+            tig_file_fclose(stream);
+        } else {
+            tig_debug_printf("CoopLite: character bundle: cannot open %s\n", path);
+        }
+    }
+    coop_char_bundle_free(&buf);
+    return ok;
+}
+
 static bool coop_lite_export_local_character_impl(void)
 {
-    /* Existing MP char exporter (Players/<oid>.mpc). */
-    return sub_4A4320();
+    int64_t pc = player_get_local_pc_obj();
+    char oidstr[40];
+    char path[TIG_MAX_PATH];
+    int before;
+    bool ok;
+
+    objid_id_to_str(oidstr, obj_get_id(pc));
+    snprintf(path, sizeof(path), "Players\\%s.coopchar", oidstr);
+    before = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    coop_lite_copy_portrait(pc, oidstr, 32, "");
+    coop_lite_copy_portrait(pc, oidstr, 128, "_b");
+    ok = coop_lite_write_char_bundle(pc, path);
+    tig_debug_printf("CoopLite: character bundle %s: %s (items %d -> %d, gold %d)\n",
+        path, ok ? "ok" : "FAILED", before,
+        obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM), item_gold_get(pc));
+    return ok;
 }
 
 static int64_t coop_lite_host_pc_obj(void)
@@ -2201,6 +2304,88 @@ static int coop_dev_far_stage;
 static unsigned int coop_dev_far_ms;
 static int64_t coop_dev_far_home;
 
+/* P0-1 dev check (ARCANUM_DEV_EXPORT_CHAR=1, either side): 8 s after
+   joining, export the local character twice and compare the live PC. */
+static unsigned int coop_dev_export_ms;
+static bool coop_dev_export_done;
+
+static bool coop_lite_dev_export_count_visit(void* ctx, int index, const uint8_t* blob, size_t size)
+{
+    (void)index;
+    (void)blob;
+    (void)size;
+    (*(int*)ctx)++;
+    return true;
+}
+
+static void coop_lite_dev_export_tick(unsigned int now_ms)
+{
+    const char* env;
+    int64_t pc = player_get_local_pc_obj();
+    int items_before;
+    int gold_before;
+    int hp_before;
+    char oidstr[40];
+    char path[TIG_MAX_PATH];
+    TigFile* stream;
+    int visited = 0;
+    int count = 0;
+    bool parsed = false;
+
+    if (coop_dev_export_done) {
+        return;
+    }
+    env = getenv("ARCANUM_DEV_EXPORT_CHAR");
+    if (env == NULL || env[0] != '1') {
+        coop_dev_export_done = true;
+        return;
+    }
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_dev_export_ms == 0) {
+        coop_dev_export_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_export_ms, now_ms, 8000u)) {
+        return;
+    }
+    coop_dev_export_done = true;
+
+    items_before = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    gold_before = item_gold_get(pc);
+    hp_before = object_hp_current(pc);
+    coop_lite_export_local_character();
+    coop_lite_export_local_character();
+
+    objid_id_to_str(oidstr, obj_get_id(pc));
+    snprintf(path, sizeof(path), "Players\\%s.coopchar", oidstr);
+    stream = tig_file_fopen(path, "rb");
+    if (stream != NULL) {
+        int len = tig_file_filelength(stream);
+        uint8_t* data = len > 0 ? (uint8_t*)MALLOC((size_t)len) : NULL;
+
+        if (data != NULL) {
+            if (tig_file_fread(data, (size_t)len, 1, stream) == 1) {
+                parsed = coop_char_bundle_parse(data, (size_t)len,
+                    coop_lite_dev_export_count_visit, &visited, &count, NULL, NULL);
+            }
+            FREE(data);
+        }
+        tig_file_fclose(stream);
+    }
+    tig_debug_printf("CoopLite: dev export check: items %d -> %d, gold %d -> %d, hp %d -> %d, "
+                     "bundle %s objects=%d -> %s\n",
+        items_before, obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM),
+        gold_before, item_gold_get(pc), hp_before, object_hp_current(pc),
+        parsed ? "parsed" : "UNREADABLE", count,
+        (parsed && count == items_before + 1
+            && items_before == obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM)
+            && gold_before == item_gold_get(pc) && hp_before == object_hp_current(pc))
+            ? "PASS"
+            : "FAIL");
+}
+
 static void coop_lite_host_dev_far_tick(unsigned int now_ms)
 {
     const char* env;
@@ -3295,6 +3480,7 @@ void coop_lite_ping(unsigned int now_ms)
         if (coop_lite_client_in_session) {
             coop_lite_dev_grant_resurrect(sub_529520(), player_get_local_pc_obj());
             coop_lite_client_dev_barter_tick(now_ms);
+            coop_lite_dev_export_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -3337,6 +3523,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_keep_remote_sectors();
     coop_lite_dev_tick(now_ms);
     coop_lite_host_dev_far_tick(now_ms);
+    coop_lite_dev_export_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -4502,4 +4689,178 @@ void coop_lite_client_host_left(void)
     tig_debug_printf("CoopLite: the host left the session\n");
     coop_lite_show_notice("The host left the game. Quit to the main menu to join again.", TF_TYPE_RED);
 #endif
+}
+
+/* ---- Character bundle wire format (pure; unit-tested) ---- */
+
+static bool coop_char_bundle_reserve(CoopCharBundleBuf* buf, size_t extra)
+{
+    size_t need;
+    size_t cap;
+    uint8_t* data;
+
+    if (extra > SIZE_MAX - buf->size) {
+        return false;
+    }
+    need = buf->size + extra;
+    if (need <= buf->cap) {
+        return true;
+    }
+    cap = buf->cap != 0 ? buf->cap : 4096;
+    while (cap < need) {
+        cap *= 2;
+    }
+    data = (uint8_t*)realloc(buf->data, cap);
+    if (data == NULL) {
+        return false;
+    }
+    buf->data = data;
+    buf->cap = cap;
+    return true;
+}
+
+static bool coop_char_bundle_put_u32(CoopCharBundleBuf* buf, uint32_t v)
+{
+    if (!coop_char_bundle_reserve(buf, 4)) {
+        return false;
+    }
+    buf->data[buf->size++] = (uint8_t)(v & 0xFF);
+    buf->data[buf->size++] = (uint8_t)((v >> 8) & 0xFF);
+    buf->data[buf->size++] = (uint8_t)((v >> 16) & 0xFF);
+    buf->data[buf->size++] = (uint8_t)((v >> 24) & 0xFF);
+    return true;
+}
+
+static uint32_t coop_char_bundle_get_u32(const uint8_t* p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+bool coop_char_bundle_begin(CoopCharBundleBuf* buf, int count)
+{
+    memset(buf, 0, sizeof(*buf));
+    if (count <= 0 || count > COOP_CHAR_BUNDLE_MAX_OBJECTS) {
+        return false;
+    }
+    return coop_char_bundle_put_u32(buf, COOP_CHAR_BUNDLE_MAGIC)
+        && coop_char_bundle_put_u32(buf, COOP_CHAR_BUNDLE_VERSION)
+        && coop_char_bundle_put_u32(buf, (uint32_t)count);
+}
+
+bool coop_char_bundle_add_blob(CoopCharBundleBuf* buf, const void* blob, size_t size)
+{
+    if (blob == NULL || size == 0 || size > COOP_CHAR_BUNDLE_MAX_BLOB) {
+        return false;
+    }
+    if (!coop_char_bundle_put_u32(buf, (uint32_t)size) || !coop_char_bundle_reserve(buf, size)) {
+        return false;
+    }
+    memcpy(buf->data + buf->size, blob, size);
+    buf->size += size;
+    return true;
+}
+
+static bool coop_char_bundle_put_str(CoopCharBundleBuf* buf, const char* str)
+{
+    size_t len;
+
+    if (str == NULL) {
+        str = "";
+    }
+    len = strlen(str) + 1;
+    if (len > COOP_CHAR_BUNDLE_MAX_STR) {
+        return false;
+    }
+    if (!coop_char_bundle_put_u32(buf, (uint32_t)len) || !coop_char_bundle_reserve(buf, len)) {
+        return false;
+    }
+    memcpy(buf->data + buf->size, str, len);
+    buf->size += len;
+    return true;
+}
+
+bool coop_char_bundle_finish(CoopCharBundleBuf* buf, const char* rule, const char* name)
+{
+    return coop_char_bundle_put_str(buf, rule) && coop_char_bundle_put_str(buf, name);
+}
+
+void coop_char_bundle_free(CoopCharBundleBuf* buf)
+{
+    free(buf->data);
+    memset(buf, 0, sizeof(*buf));
+}
+
+static bool coop_char_bundle_walk(const uint8_t* data, size_t size, CoopCharBundleVisitFn visit,
+    void* ctx, int* count_out, const char** rule_out, const char** name_out)
+{
+    size_t off = 12;
+    uint32_t count;
+    uint32_t index;
+
+    if (data == NULL || size < 12
+        || coop_char_bundle_get_u32(data) != COOP_CHAR_BUNDLE_MAGIC
+        || coop_char_bundle_get_u32(data + 4) != COOP_CHAR_BUNDLE_VERSION) {
+        return false;
+    }
+    count = coop_char_bundle_get_u32(data + 8);
+    if (count == 0 || count > COOP_CHAR_BUNDLE_MAX_OBJECTS) {
+        return false;
+    }
+    for (index = 0; index < count; index++) {
+        uint32_t len;
+
+        if (size - off < 4) {
+            return false;
+        }
+        len = coop_char_bundle_get_u32(data + off);
+        off += 4;
+        if (len == 0 || len > COOP_CHAR_BUNDLE_MAX_BLOB || len > size - off) {
+            return false;
+        }
+        if (visit != NULL && !visit(ctx, (int)index, data + off, len)) {
+            return false;
+        }
+        off += len;
+    }
+    for (index = 0; index < 2; index++) {
+        uint32_t len;
+        const char* str;
+
+        if (size - off < 4) {
+            return false;
+        }
+        len = coop_char_bundle_get_u32(data + off);
+        off += 4;
+        if (len == 0 || len > COOP_CHAR_BUNDLE_MAX_STR || len > size - off) {
+            return false;
+        }
+        str = (const char*)(data + off);
+        if (str[len - 1] != '\0') {
+            return false;
+        }
+        if (index == 0 && rule_out != NULL) {
+            *rule_out = str;
+        }
+        if (index == 1 && name_out != NULL) {
+            *name_out = str;
+        }
+        off += len;
+    }
+    if (off != size) {
+        return false;
+    }
+    if (count_out != NULL) {
+        *count_out = (int)count;
+    }
+    return true;
+}
+
+bool coop_char_bundle_parse(const uint8_t* data, size_t size, CoopCharBundleVisitFn visit,
+    void* ctx, int* count_out, const char** rule_out, const char** name_out)
+{
+    /* Structure first, so a truncated file never reaches the visitor. */
+    if (!coop_char_bundle_walk(data, size, NULL, NULL, NULL, NULL, NULL)) {
+        return false;
+    }
+    return coop_char_bundle_walk(data, size, visit, ctx, count_out, rule_out, name_out);
 }

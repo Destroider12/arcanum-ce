@@ -447,10 +447,43 @@ bool coop_lite_can_use_turn_based(void);
 void coop_lite_propagate_party_aggression(int64_t attacker_obj, int64_t target_obj);
 
 /*
- * Export the local PC to Players/<oid>.mpc (client character file). No-op when
- * coop is off or there is no local PC. Does not write the campaign save.
+ * Export the local PC to Players/<oid>.coopchar (character bundle, see below).
+ * Non-destructive: the live PC keeps its inventory, HP and animations
+ * (PT12: the old .mpc path, save_char, stripped the whole inventory). No-op
+ * when coop is off or there is no local PC. Does not write the campaign save.
  */
 bool coop_lite_export_local_character(void);
+
+/*
+ * Character bundle (.coopchar), little-endian:
+ *   u32 magic 'CCB1', u32 version, u32 count,
+ *   count x { u32 size, size bytes }   -- [0] is the PC, then its items
+ *   u32 len, level-scheme rule (NUL incl.), u32 len, level-scheme name
+ * Each object blob is sub_442050 output (obj_write_mem with handles saved as
+ * ids), which leaves the live object untouched.
+ */
+#define COOP_CHAR_BUNDLE_MAGIC 0x31424343u
+#define COOP_CHAR_BUNDLE_VERSION 1u
+#define COOP_CHAR_BUNDLE_MAX_OBJECTS 1024
+#define COOP_CHAR_BUNDLE_MAX_BLOB (1u << 20)
+#define COOP_CHAR_BUNDLE_MAX_STR 4096u
+
+typedef struct CoopCharBundleBuf {
+    uint8_t* data;
+    size_t size;
+    size_t cap;
+} CoopCharBundleBuf;
+
+bool coop_char_bundle_begin(CoopCharBundleBuf* buf, int count);
+bool coop_char_bundle_add_blob(CoopCharBundleBuf* buf, const void* blob, size_t size);
+bool coop_char_bundle_finish(CoopCharBundleBuf* buf, const char* rule, const char* name);
+void coop_char_bundle_free(CoopCharBundleBuf* buf);
+
+typedef bool (*CoopCharBundleVisitFn)(void* ctx, int index, const uint8_t* blob, size_t size);
+
+/* Validates the whole layout first, then visits every blob in order. */
+bool coop_char_bundle_parse(const uint8_t* data, size_t size, CoopCharBundleVisitFn visit,
+    void* ctx, int* count_out, const char** rule_out, const char** name_out);
 
 /* Packet routing roles for anim/combat/magictech receive (docs + tests). */
 typedef enum CoopMpPacketRole {
