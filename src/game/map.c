@@ -33,6 +33,7 @@
 #include "game/tile.h"
 #include "game/timeevent.h"
 #include "game/townmap.h"
+#include "game/coop_lite.h"
 #include "game/ui.h"
 #include "game/wall.h"
 #include "game/wallcheck.h"
@@ -954,6 +955,7 @@ void map_flush(unsigned int flags)
     char path[TIG_MAX_PATH];
     TigFile* stream;
 
+    coop_lite_before_map_flush();
     wallcheck_flush();
 
     if (!map_save_preprocess()) {
@@ -1148,6 +1150,7 @@ void map_close(void)
     if (!dword_5D11E8) {
         dword_5D11E8 = true;
 
+        coop_lite_before_map_flush();
         wallcheck_flush();
         gsound_flush();
 

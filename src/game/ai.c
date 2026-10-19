@@ -2876,6 +2876,16 @@ bool ai_timeevent_process(TimeEvent* timeevent)
         return true;
     }
 
+    /*
+     * Coop client: the host simulates every NPC (AI, heartbeat scripts,
+     * monster generators); poses arrive via PACKET_COOP_NPC_POS. Running AI
+     * here only produced Packet4 move intents for NPCs the host rejects
+     * ("Packet4 from slot 1 for an object it does not own", PT9).
+     */
+    if (tig_net_is_coop_enabled() && coop_lite_is_client_role()) {
+        return true;
+    }
+
     skip = false;
     v1 = false;
     if (!critter_is_dead(obj) && timeevent->params[1].integer_value != 0) {

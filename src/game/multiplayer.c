@@ -440,6 +440,8 @@ void multiplayer_reset(void)
     S5F0DEC* node;
     int index;
 
+    coop_lite_on_game_reset();
+
     if (!dword_5F0E10) {
         if (dword_5F0E00) {
             multiplayer_end();

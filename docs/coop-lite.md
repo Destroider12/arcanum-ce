@@ -1037,3 +1037,55 @@ instead of lingering as an unbound corpse.
 **Virgil not following the host after the client left:** nothing in the logs.
 Host-side follower AI is unchanged single-player code, and the walk was short (about 6
 tiles), which may be inside the follow distance. Re-check with a longer walk.
+
+## 23. Playtest 9 fixes
+
+**Client crash on Esc → Quit Game (SIGSEGV in `coop_lite_handle_followers`).**
+Quit Game runs `gamelib_reset`, which does not disconnect. The client stayed "in
+session" and kept the follower list as raw object handles. The next host packet 133
+called `critter_leader_get` on a freed handle. The fixes:
+- `coop_lite_on_game_reset()` runs first in `multiplayer_reset`. A coop client leaves
+  the session cleanly: session state is reset, then `tig_net_reset_connection()`. The
+  host removes its PC, and New Game reconnects as in §22. On the host, it only drops
+  session caches.
+- The client follower list is now a list of `ObjectID`s, resolved with
+  `obj_pool_perm_lookup` on every use.
+- Every client world handler (133 followers, 134 NPC state, 132 PC pose) and the
+  client ping return early unless `coop_lite_world_ready_rule(...)` holds. That needs:
+  in session, no pending or awaited sync, map valid, not clearing objects, and a
+  local PC.
+- The host ping does nothing while the host is on the menu or a map is loading, and
+  attack intents are dropped then too.
+- Follow (129) and session sync (131) already queue or load safely from the menu.
+
+**Remote PC vanished beyond about 17 tiles (census total=1).** The sector cache holds
+16 sectors and evicts by LRU any sector with refcount 0. Nothing on the other machine
+draws the remote PC's sector, so it was evicted and the PC went with it. The fixes:
+- Each side now keeps one `sector_lock` on the sector of every bound remote PC
+  (`coop_lite_keep_sector`). It moves with the PC.
+- `map_flush` and `map_close` call `coop_lite_before_map_flush()` first. This
+  releases the locks, because locked sectors are neither saved by `map_flush` nor
+  unref'd by `map_close`. The next ping takes the locks again.
+- As a backstop, `coop_lite_resolve_remote_pc` re-creates a missing remote PC from
+  its OID and proto when its pose arrives. The proto is recorded per slot at spawn
+  and at sync. The log line is "re-created missing remote PC".
+
+**Host camera didn't follow the host PC.** The host ping now runs the same
+every-frame dead-zone follow that clients use.
+
+**Client "unknown AnimID" spam.** Host anim goals are not replicated in coop, so the
+host's Packet8 (anim modify) named goals the client never had. Packet8 is now
+ignored in coop. Coop clients also skip `ai_timeevent_process`, because only the host
+runs NPC AI. That also ends the host log lines "Packet4 from slot 1 … dropped".
+
+**Host frame time.** The new probe logs `CoopLite: 10s frame: max gap N ms, max coop
+cost M ms` every 10 s. Headless runs measured gaps of 17–25 ms and a coop cost under
+0.4 ms on the host, so 134 and its keyframes are cheap.
+
+**Dev hooks.** These apply on the coop host only and are ignored in single player.
+- `ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT=1` spawns a wolf (BP_WOLF) 3 tiles from each
+  client PC and makes it attack. The first wolf comes about 10 s after the client is
+  bound, and the next one 45 s after the last wolf died. Log line: "dev: wolf spawned".
+- `ARCANUM_DEV_START_LOC=shrouded` teleports the host PC on the current map 3 s after
+  it enters the world. `shrouded` is Shrouded Hills, 90226,84176; `x,y` also works.
+  Clients follow through the normal follow packet.

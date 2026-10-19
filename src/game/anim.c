@@ -15521,6 +15521,16 @@ void mp_anim_modify(Packet8* pkt)
         return;
     }
 
+    /*
+     * Coop: host anim goals are never replicated (NPC poses arrive via
+     * PACKET_COOP_NPC_POS, PCs via PC_POS), so a host AnimID means nothing
+     * here — or worse, collides with one of our own local goals. PT9 logged
+     * dozens of "unknown AnimID" per minute.
+     */
+    if (tig_net_is_coop_enabled()) {
+        return;
+    }
+
     if (!anim_id_to_run_info(&pkt->modify_data.id, &run_info)) {
         anim_id_to_str(&pkt->modify_data.id, str);
         tig_debug_printf("Anim: mp_anim_modify: unknown AnimID %s\n", str);

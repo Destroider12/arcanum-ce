@@ -202,6 +202,17 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt);
 /* Client camera: true when the target is off the visible area (recentre). */
 bool coop_lite_follow_needs_jump(int64_t dx, int64_t dy, int64_t half_w, int64_t half_h);
 
+/* Client handlers apply host world packets only when this holds. */
+bool coop_lite_world_ready_rule(bool in_session, bool sync_pending, bool waiting_sync,
+    bool map_valid, bool map_clearing, bool has_local_pc);
+
+/* Shrouded Hills town square (gamearea.mes). */
+#define COOP_LITE_DEV_SHROUDED_X 90226
+#define COOP_LITE_DEV_SHROUDED_Y 84176
+
+/* ARCANUM_DEV_START_LOC: "x,y" or "shrouded". */
+bool coop_lite_parse_dev_loc(const char* value, int* x, int* y);
+
 /* Host: seconds a fallen client PC stays down before it is revived. */
 #define COOP_LITE_REVIVE_DELAY_MS 8000u
 /* Host: revive is due (pure, for tests). */
@@ -209,6 +220,12 @@ bool coop_lite_revive_due(unsigned int dead_since_ms, unsigned int now_ms);
 
 /* Starting kit for a coop-created/offered PC, generated locally (suspended). */
 void coop_lite_generate_start_inventory(int64_t pc_obj);
+
+/* gamelib reset (Quit Game, load): drop session state; a client leaves. */
+void coop_lite_on_game_reset(void);
+
+/* map_flush / map_close: release coop sector keep-alive locks first. */
+void coop_lite_before_map_flush(void);
 
 /* Host: a client disconnected — remove the PC it left behind. */
 void coop_lite_host_remove_left_pc(int64_t pc_obj);

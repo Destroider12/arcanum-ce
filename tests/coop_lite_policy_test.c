@@ -537,6 +537,35 @@ static int test_packet_hardening(void)
     }
     printf("PT8 world replication helpers: OK\n");
 
+    /* PT9: no host world packets outside a synced, loaded world. */
+    if (!coop_lite_world_ready_rule(true, false, false, true, false, true)
+        || coop_lite_world_ready_rule(false, false, false, true, false, true)
+        || coop_lite_world_ready_rule(true, true, false, true, false, true)
+        || coop_lite_world_ready_rule(true, false, true, true, false, true)
+        || coop_lite_world_ready_rule(true, false, false, false, false, true)
+        || coop_lite_world_ready_rule(true, false, false, true, true, true)
+        || coop_lite_world_ready_rule(true, false, false, true, false, false)) {
+        fprintf(stderr, "world_ready_rule wrong\n");
+        return 1;
+    }
+    {
+        int x = 0;
+        int y = 0;
+
+        if (!coop_lite_parse_dev_loc("shrouded", &x, &y)
+            || x != COOP_LITE_DEV_SHROUDED_X || y != COOP_LITE_DEV_SHROUDED_Y
+            || !coop_lite_parse_dev_loc("1200,3400", &x, &y) || x != 1200 || y != 3400
+            || coop_lite_parse_dev_loc("", &x, &y)
+            || coop_lite_parse_dev_loc(NULL, &x, &y)
+            || coop_lite_parse_dev_loc("12", &x, &y)
+            || coop_lite_parse_dev_loc("12,34x", &x, &y)
+            || coop_lite_parse_dev_loc("-1,5", &x, &y)) {
+            fprintf(stderr, "parse_dev_loc wrong\n");
+            return 1;
+        }
+    }
+    printf("PT9 world-ready / dev loc helpers: OK\n");
+
     /* Camera dead zone follow. */
     {
         int64_t sx;
