@@ -5,11 +5,10 @@ Date: 2026-10-19
 Target: real-time co-op (up to 8 players) on arcanum-ce, campaign-compatible.
 Required compatibility: **Arcanum: ReForged** ([kurkijar/Arcanum-ReForged](https://github.com/kurkijar/Arcanum-ReForged)).
 
-**Honest finding:** there is **no usable multiplayer transport** in this tree.
-Priority (1) world-map restrict + teleport-all cannot be made to work over the
-wire yet. This document records what exists, what is stubbed, ReForged install
-steps (for when Steam game data arrives), and the intended implementation plan.
-Large speculative network code is intentionally **not** added here.
+**Status (coop-lite-net):** a real **ENet** transport now implements `tig_net_*`
+behind `-coop`. Single-player (no `-coop`) is unchanged. Message dispatch covers
+known packet types; many anim/combat apply paths remain incomplete (logged).
+Priority (1) world-map gate + teleport-all can proceed on this transport next.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
 **Steam** install archive is expected soon; ReForged will be installed from that
@@ -19,10 +18,12 @@ Runtime testing is currently impossible: game data is not on this box. A clean
 
 ## 1. What network / multiplayer code exists in arcanum-ce
 
-### 1.1 Transport: fully stubbed
+### 1.1 Transport: ENet (Coop Lite)
 
-`src/net_compat.h` is an explicit temporary compatibility layer. Every
-`tig_net_*` entry is a macro that returns 0 / does nothing:
+`src/net_compat.h` now includes `src/net/tig_net.h`. Implementation:
+`src/net/tig_net.c` on vendored **ENet 1.3.18** (MIT) under `third_party/enet/`.
+Inactive unless `-coop` is passed (macros replaced by real functions that no-op
+when coop is off). Historical stub behaviour for reference:
 
 | Macro | Stub behaviour |
 | --- | --- |
@@ -98,10 +99,11 @@ always false → **SP path only**.
 
 ### 1.5 Verdict for priority (1)
 
-**No usable MP layer.** Implementing broadcast teleport-all requires a real
-transport + a filled-in `multiplayer_handle_message`. Adding a full stack in
-this PR would be speculative and is out of scope. See §5 for the intended
-hooks once transport exists (or is revived).
+**Transport exists** (ENet). `multiplayer_handle_message` dispatches known
+types (player list, game time, inventory UI, flags, lag icons, packets
+99/100/106/118/121). Anim/combat/magictech apply on receive is still largely
+missing (logged as unhandled). Next: world-map host gate + follow-teleport
+broadcast (§5) on this stack.
 
 ---
 
@@ -412,9 +414,80 @@ slot. Do not diverge save version from ReForged/CE without a migration note.
 
 ---
 
-## 8. What this PR contains
+## 8. What landed in coop-lite-net
 
-- This document only (`docs/coop-lite.md`).
-- No speculative network stack and no behaviour-changing game code, because
-  transport is stubbed and receive dispatch is `TODO: Incomplete`.
+- ENet transport: `src/net/tig_net.{c,h}`, vendored `third_party/enet/` (MIT)
+- `src/net_compat.h` → real API (SP unchanged without `-coop`)
+- Dispatch + join/leave in `multiplayer.c`; `multiplayer_ping` pumps ENet
+- CLI: `-coop`, `-host [port]`, `-join host[:port]`
+- Headless test: `tig_net_loopback_test` (CTest)
+- Docs: host/join, Coop Anything strategy map (§9–§10)
 
+---
+
+## 9. How to host / join (Coop Lite net)
+
+Requires a build with this branch. **Game data still required to play**; the
+loopback test does not need data.
+
+```bash
+# Terminal A — host (default port 7777)
+./arcanum-ce -window -coop -host 7777
+
+# Terminal B — client
+./arcanum-ce -window -coop -join 192.168.1.10:7777
+```
+
+Notes:
+
+- Without `-coop`, `tig_net_is_active()` stays false — identical to pre-net SP.
+- `-host` / `-join` imply configuring the session; both require `-coop`.
+- Max players: 8 (slot 0 = host). File xfer (`tig_net_xfer_*`) is still a no-op
+  (map streaming for late join is a known gap).
+- Direct IP only for now (LAN / VPN / Tailscale). Steam relay is a future option
+  per Coop Anything networking playbook — not implemented here.
+- Headless proof: `tig_net_loopback_test` or `ctest -R tig_net_loopback`.
+
+---
+
+## 10. Coop Anything strategy map
+
+**What it is:** [cranebeaker/coop-anything](https://github.com/cranebeaker/coop-anything)
+— MIT-licensed MCP server + playbook that guides agents to revive or build
+co-op for single-player games. It is **not** a drop-in netcode library; it is
+process/docs (see `playbook/networking.md`, `playbook/how-coop-mods-work.md`).
+License: MIT (Copyright 2026 cranebeaker and contributors).
+
+Strategies taken from that playbook (not invented) and how Coop Lite applies them:
+
+| Coop Anything strategy | Source | Applied in Coop Lite? | How / why not |
+| --- | --- | --- | --- |
+| **Host-authoritative state sync** (default for SP retrofits) | networking.md §0–1.1 | **Yes (design)** | Host is slot 0; clients send app packets to host; host broadcasts. Matches Troika `tig_net_is_host()` gating already in CE. |
+| **Client-owned avatar / camera** (client-auth with host arbitration for shared state) | networking.md §1.1, §1.3 | **Partial** | Spec: each player keeps own character (stats/inventory). Story/quests/world = host. Transport ready; ownership rules not fully coded yet. |
+| **ENet as C transport** | networking.md §0, §2 | **Yes** | Vendored ENet 1.3.18, reliable UDP, 2 channels (app + session control). |
+| **Reliable for events, not for continuous motion** | networking.md §1.2 | **Partial** | All app sends currently reliable (CE packet model). Future: unreliable channel for high-rate pose if needed. |
+| **Entity ownership (NPC AI on host)** | how-coop-mods-work.md §1.2 | **Planned** | Host runs world AI; remote players are puppets. Stock MP slots support this; puppet spawn not done. |
+| **Quest/story flags: host owns, mirror writes** | networking.md §1.3; methods.md host-authority table | **Planned (prio 2)** | Aligns with user dialog restrictions. |
+| **Time / weather / RNG: host broadcasts** | networking.md §1.3 | **Started** | `PacketGameTime` (type 3) applied via `timeevent_sync` on clients; host already sends in `timeevent_ping`. |
+| **Dialog/cutscenes: one driver, others watch** | networking.md §1.3; how-coop-mods-work.md §1.5 | **Planned (prio 2)** | User: non-hosts blocked from story/quest NPCs. |
+| **Follow-the-leader on map change** | networking.md §1.4 | **Planned (prio 1)** | User: only host opens world map; all teleported with host. |
+| **Host save is canonical; clients keep char only** | networking.md §1.4; how-coop-mods-work.md §1.4 | **Planned (prio 3)** | Matches user save split. |
+| **Late join = full snapshot then deltas** | networking.md §1.4; how-coop-mods-work.md §1.8 | **Not yet** | Needs xfer + world dump; `tig_net_xfer_*` still no-op. Documented gap. |
+| **Delta / snapshot compression, priority accumulator** | networking.md §1.2 | **Not yet** | Premature until entity sync volume exists; CE uses discrete event packets today. |
+| **Interest management** | networking.md §1.2; how-coop-mods-work.md §1.7 | **Not yet** | Playbook: start without it for small co-op; add when profiling demands. Area-follow rule reduces need. |
+| **Desync detection via state hash / soak** | networking.md §5; how-coop-mods-work.md §1.6; lessons.md | **Not yet** | Add after gameplay sync; loopback test covers transport only. |
+| **Deterministic lockstep** | networking.md §1.1 | **No** | Playbook: unrealistic for non-deterministic SP engines. CE is not bit-exact. |
+| **Steam Spacewar relay** | networking-steam-spacewar.md | **Not yet** | Keep direct IP; add relay later for Steam friends without port forward. |
+| **Path 1: revive existing co-op** | README | **Yes (process)** | We revive CE's stubbed Troika MP layer rather than inventing parallel netcode. |
+| **Automated in-game bot QA** | automated-qa.md; lessons.md | **Partial** | Headless transport test now; in-game bots need Steam data + later work. |
+
+---
+
+## 11. Known gaps / risks (net)
+
+- **Unhandled packet types:** anim/combat/magictech receive apply incomplete — clients may not see remote animations until handlers are ported.
+- **File xfer:** map/module streaming for join-in-progress not implemented.
+- **No Steam relay / NAT traversal** beyond what the user's VPN provides.
+- **ReForged:** still a separate Windows binary; must merge or rebase to pick up `tig_net`. Gate world-map at `teleport_do` so `ModernWorldMap` stays compatible.
+- **Endianness / struct layout:** packets are raw structs (LAN same-arch assumption).
+- **Pause / script spam:** no host-only script suppression yet (Coop Anything FNV lesson).

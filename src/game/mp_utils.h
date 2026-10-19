@@ -695,4 +695,12 @@ void mp_gsound_play_scheme(int music_scheme_idx, int ambient_scheme_idx);
 void sub_4F0640(int64_t obj, ObjectID* oid_ptr);
 void sub_4F0690(ObjectID oid, int64_t* obj_ptr);
 
+/* Receive-side helpers used by multiplayer_handle_message. */
+void mp_handle_ui_update_inven(PacketUpdateInven* pkt);
+void sub_4EDFF0(Packet99* pkt);
+void sub_4EE5E0(Packet100* pkt);
+void mp_handle_gsound_play_scheme(PacketPlaySound* pkt);
+void sub_4EF8B0(Packet118* pkt);
+void sub_4EFB50(Packet121* pkt);
+
 #endif /* ARCANUM_GAME_MP_UTILS_H_ */

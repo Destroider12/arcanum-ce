@@ -14,6 +14,10 @@ add_subdirectory("third_party/sdl3" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/sdl3_mixer" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/zlib" EXCLUDE_FROM_ALL)
 
+# ENet v1.3.18 (MIT) — vendored under third_party/enet; C-only target so we
+# do not require a C++ toolchain just for networking.
+add_subdirectory("third_party/enet" EXCLUDE_FROM_ALL)
+
 add_subdirectory("first_party/bink_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/mss_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/tig" EXCLUDE_FROM_ALL)
@@ -314,6 +318,8 @@ set(SRCS
     "src/ui/written_ui.c"
     "src/ui/written_ui.h"
     "src/net_compat.h"
+    "src/net/tig_net.c"
+    "src/net/tig_net.h"
     "src/main.c"
 )
 
@@ -333,7 +339,30 @@ target_include_directories(arcanum-ce PUBLIC
 
 target_link_libraries(arcanum-ce PUBLIC
     ${TIG_LIBRARY}
+    enet
 )
+
+# Headless transport loopback test (no game data / SDL window required).
+add_executable(tig_net_loopback_test
+    "tests/tig_net_loopback_test.c"
+    "src/net/tig_net.c"
+)
+target_include_directories(tig_net_loopback_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(tig_net_loopback_test PRIVATE
+    enet
+)
+# Minimal tig_debug_printf stub for the test binary (avoid linking full tig/SDL).
+target_compile_definitions(tig_net_loopback_test PRIVATE TIG_NET_TEST_STUB_DEBUG=1)
+if(WIN32)
+    target_link_libraries(tig_net_loopback_test PRIVATE ws2_32 winmm)
+    target_link_libraries(arcanum-ce PUBLIC ws2_32 winmm)
+endif()
+
+enable_testing()
+add_test(NAME tig_net_loopback COMMAND tig_net_loopback_test)
 
 # SDL HID on Android requires C++ linker.
 if(ANDROID)

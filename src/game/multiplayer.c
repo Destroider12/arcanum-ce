@@ -970,7 +970,80 @@ bool multiplayer_map_open_by_name(const char* name)
 // 0x49D690
 void multiplayer_handle_message(void* msg)
 {
-    // TODO: Incomplete.
+    int type;
+    PacketGamePlayerList* player_list;
+    PacketGameTime* game_time;
+    PacketMultiplayerFlagsChange* flags_pkt;
+    PacketNotifyPlayerLagging* lag_pkt;
+    PacketNotifyPlayerRecovered* recover_pkt;
+    DateTime game_dt;
+    DateTime anim_dt;
+    int index;
+
+    if (msg == NULL) {
+        return;
+    }
+
+    type = *(int*)msg;
+
+    switch (type) {
+    case 2:
+        player_list = (PacketGamePlayerList*)msg;
+        for (index = 0; index < NUM_PLAYERS; index++) {
+            stru_5E8AD0[index].field_8 = player_list->oids[index];
+        }
+        break;
+    case 3:
+        game_time = (PacketGameTime*)msg;
+        game_dt.value = game_time->game_time;
+        anim_dt.value = game_time->anim_time;
+        timeevent_sync(&game_dt, &anim_dt);
+        break;
+    case 68:
+        lag_pkt = (PacketNotifyPlayerLagging*)msg;
+        sub_444110(&lag_pkt->field_8);
+        if (lag_pkt->field_8.obj != OBJ_HANDLE_NULL) {
+            anim_lag_icon_add(lag_pkt->field_8.obj);
+        }
+        break;
+    case 69:
+        recover_pkt = (PacketNotifyPlayerRecovered*)msg;
+        sub_444110(&recover_pkt->field_8);
+        if (recover_pkt->field_8.obj != OBJ_HANDLE_NULL) {
+            anim_lag_icon_remove(recover_pkt->field_8.obj);
+        }
+        break;
+    case 94:
+        mp_handle_ui_update_inven((PacketUpdateInven*)msg);
+        break;
+    case 98:
+        flags_pkt = (PacketMultiplayerFlagsChange*)msg;
+        if (flags_pkt->client_id >= 0 && flags_pkt->client_id < NUM_PLAYERS) {
+            stru_5E8AD0[flags_pkt->client_id].flags &= ~0xFF00u;
+            stru_5E8AD0[flags_pkt->client_id].flags |= flags_pkt->flags & 0xFF00u;
+        }
+        break;
+    case 99:
+        sub_4EDFF0((Packet99*)msg);
+        break;
+    case 100:
+        sub_4EE5E0((Packet100*)msg);
+        break;
+    case 106:
+        mp_handle_gsound_play_scheme((PacketPlaySound*)msg);
+        break;
+    case 118:
+        sub_4EF8B0((Packet118*)msg);
+        break;
+    case 121:
+        sub_4EFB50((Packet121*)msg);
+        break;
+    default:
+        /* Anim/combat/magictech packet apply paths were never recovered in CE.
+           Delivered reliably; unhandled types are logged once transport works. */
+        tig_debug_printf("MP: unhandled packet type %d (size inferred by sender)\n", type);
+        break;
+    }
 }
 
 // 0x4A1F30
@@ -1034,7 +1107,35 @@ void sub_4A2040(int a1)
 // 0x4A2070
 bool multiplayer_handle_network_event(int type, int client_id, void* data, int size)
 {
-    // TODO: Incomplete.
+    (void)data;
+    (void)size;
+
+    switch (type) {
+    case TIG_NET_EVENT_CONNECT:
+        if (client_id < 0 || client_id >= NUM_PLAYERS) {
+            return false;
+        }
+        if (tig_net_is_host()) {
+            if (client_id != 0) {
+                /* Ensure slot struct is initialized for the new peer. */
+                if (stru_5E8AD0[client_id].field_8.type == OID_TYPE_NULL) {
+                    sub_4A2AE0(client_id);
+                }
+            }
+            multiplayer_send_player_list();
+        }
+        return true;
+    case TIG_NET_EVENT_DISCONNECT:
+        if (client_id > 0 && client_id < NUM_PLAYERS) {
+            sub_4A2AE0(client_id);
+            if (tig_net_is_host()) {
+                multiplayer_send_player_list();
+            }
+        }
+        return true;
+    default:
+        return true;
+    }
 }
 
 // 0x4A2A30
@@ -2424,6 +2525,7 @@ int sub_4A5460(int64_t a1)
 void multiplayer_ping(tig_timestamp_t timestamp)
 {
     (void)timestamp;
+    tig_net_pump();
 }
 
 // 0x4A54A0

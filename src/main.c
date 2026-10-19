@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include <SDL3/SDL_main.h>
 
@@ -20,6 +21,7 @@
 #include "game/gmovie.h"
 #include "game/gsound.h"
 #include "game/highres_config.h"
+#include "net/tig_net.h"
 #include "game/hrp.h"
 #include "game/item.h"
 #include "game/level.h"
@@ -27,6 +29,7 @@
 #include "game/location.h"
 #include "game/magictech.h"
 #include "game/map.h"
+#include "game/multiplayer.h"
 #include "game/name.h"
 #include "game/obj.h"
 #include "game/object.h"
@@ -146,6 +149,42 @@ int main(int argc, char** argv)
 
     if (strstr(lpCmdLine, "-4637") != NULL) {
         gamelib_cheat_level_set(3);
+    }
+
+    /* Coop Lite: inactive unless -coop. Optional -host [port] / -join host[:port]. */
+    if (strstr(lpCmdLine, "-coop") != NULL) {
+        tig_net_set_coop_enabled(true);
+        pch = strstr(lpCmdLine, "-host");
+        if (pch != NULL) {
+            int port = TIG_NET_DEFAULT_PORT;
+            pch += 5;
+            while (*pch == ' ' || *pch == '=') {
+                pch++;
+            }
+            if (*pch >= '0' && *pch <= '9') {
+                port = atoi(pch);
+            }
+            tig_net_configure_host(port);
+            tig_debug_printf("Coop: will host on port %d\n", port);
+        }
+        pch = strstr(lpCmdLine, "-join");
+        if (pch != NULL) {
+            char hostbuf[256];
+            int port = TIG_NET_DEFAULT_PORT;
+            char* colon;
+            pch += 5;
+            while (*pch == ' ' || *pch == '=') {
+                pch++;
+            }
+            sscanf(pch, "%255s", hostbuf);
+            colon = strchr(hostbuf, ':');
+            if (colon != NULL) {
+                *colon = '\0';
+                port = atoi(colon + 1);
+            }
+            tig_net_configure_join(hostbuf, port);
+            tig_debug_printf("Coop: will join %s:%d\n", hostbuf, port);
+        }
     }
 
     pch = strstr(lpCmdLine, "-pathlimit");
@@ -275,6 +314,12 @@ int main(int argc, char** argv)
         tig_window_destroy(game_init_info.iso_window_handle);
         tig_exit();
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
+    }
+
+    if (tig_net_is_coop_enabled()) {
+        if (!multiplayer_start()) {
+            tig_debug_printf("Coop: multiplayer_start failed\n");
+        }
     }
 
     if (!gamelib_mod_load(gamelib_default_module_name_get())) {
