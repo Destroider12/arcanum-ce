@@ -551,6 +551,16 @@ bool timeevent_set_funcs(TimeEventFuncs* funcs)
     return true;
 }
 
+/* True if a handler is registered for this event type (UI-provided types
+   such as MP_CTRL_UI are NULL until the UI layer calls timeevent_set_funcs). */
+bool timeevent_type_has_handler(int type)
+{
+    if (type < 0 || type >= TIMEEVENT_TYPE_COUNT) {
+        return false;
+    }
+    return stru_5B2188[type].process_func != NULL;
+}
+
 // 0x45AE80
 void timeevent_reset(void)
 {

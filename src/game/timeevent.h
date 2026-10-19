@@ -140,6 +140,7 @@ void datetime_set_start_hour(int ratio);
 int sub_45AD70(void);
 bool timeevent_init(GameInitInfo* init_info);
 bool timeevent_set_funcs(TimeEventFuncs* funcs);
+bool timeevent_type_has_handler(int type);
 void timeevent_reset(void);
 void timeevent_exit(void);
 bool timeevent_save(TigFile* stream);

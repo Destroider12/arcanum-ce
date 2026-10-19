@@ -296,6 +296,16 @@ void sub_4BA320(int64_t a1, int64_t a2, int a3)
     TimeEvent timeevent;
     DateTime datetime;
 
+    /*
+     * Party feedback is a UI-provided event type. Only schedule it when a
+     * handler is registered (otherwise timeevent_ping would pop an event
+     * with no process_func), and only in networked play where the
+     * multiplayer party UI is meaningful.
+     */
+    if (!tig_net_is_active() || !timeevent_type_has_handler(TIMEEVENT_TYPE_MP_CTRL_UI)) {
+        return;
+    }
+
     timeevent.type = TIMEEVENT_TYPE_MP_CTRL_UI;
     timeevent.params[0].integer_value = 1;
     timeevent.params[1].object_value = a1;
