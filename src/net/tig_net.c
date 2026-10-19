@@ -58,6 +58,61 @@ static bool want_host;
 static bool want_join;
 
 static ENetHost* enet_host;
+
+/* Per-type app packet counters (diagnose spam / lag). Logged every ~10 s. */
+static unsigned int tig_net_stat_sent[256];
+static unsigned int tig_net_stat_recv[256];
+static unsigned int tig_net_stat_window_start;
+static bool tig_net_send_pending_flush;
+
+static void tig_net_stat_count(unsigned int* table, const void* data, size_t size)
+{
+    int type;
+
+    if (data == NULL || size < sizeof(int)) {
+        return;
+    }
+    memcpy(&type, data, sizeof(type));
+    table[(unsigned int)type & 0xFFu]++;
+}
+
+static void tig_net_stat_maybe_log(void)
+{
+    unsigned int now;
+    unsigned int total_s = 0;
+    unsigned int total_r = 0;
+    int i;
+    char line[512];
+    size_t len;
+
+    now = (unsigned int)enet_time_get();
+    if (tig_net_stat_window_start == 0) {
+        tig_net_stat_window_start = now;
+        return;
+    }
+    if (now - tig_net_stat_window_start < 10000u) {
+        return;
+    }
+
+    for (i = 0; i < 256; i++) {
+        total_s += tig_net_stat_sent[i];
+        total_r += tig_net_stat_recv[i];
+    }
+    if (total_s + total_r > 0) {
+        len = (size_t)snprintf(line, sizeof(line), "tig_net: 10s stats sent=%u recv=%u top:",
+            total_s, total_r);
+        for (i = 0; i < 256 && len < sizeof(line) - 24; i++) {
+            if (tig_net_stat_sent[i] + tig_net_stat_recv[i] >= 50) {
+                len += (size_t)snprintf(line + len, sizeof(line) - len, " %d:%u/%u",
+                    i, tig_net_stat_sent[i], tig_net_stat_recv[i]);
+            }
+        }
+        tig_debug_printf("%s\n", line);
+    }
+    memset(tig_net_stat_sent, 0, sizeof(tig_net_stat_sent));
+    memset(tig_net_stat_recv, 0, sizeof(tig_net_stat_recv));
+    tig_net_stat_window_start = now;
+}
 static TigNetClient clients[TIG_NET_MAX_PLAYERS];
 static int local_slot;
 static int last_sender_slot;
@@ -354,6 +409,10 @@ void tig_net_reset_connection(void)
     int i;
 
     if (enet_host != NULL) {
+        if (tig_net_send_pending_flush) {
+            enet_host_flush(enet_host);
+            tig_net_send_pending_flush = false;
+        }
         for (i = 0; i < TIG_NET_MAX_PLAYERS; i++) {
             if (clients[i].peer != NULL) {
                 enet_peer_disconnect_now(clients[i].peer, 0);
@@ -432,6 +491,7 @@ void tig_net_pump(void)
                     /* On clients, app traffic comes from host (slot 0). */
                     from = 0;
                 }
+                tig_net_stat_count(tig_net_stat_recv, event.packet->data, event.packet->dataLength);
                 tig_net_dispatch_app(event.packet->data, event.packet->dataLength, from);
             }
             enet_packet_destroy(event.packet);
@@ -459,6 +519,12 @@ void tig_net_pump(void)
             break;
         }
     }
+
+    if (tig_net_send_pending_flush && enet_host != NULL) {
+        enet_host_flush(enet_host);
+        tig_net_send_pending_flush = false;
+    }
+    tig_net_stat_maybe_log();
 }
 
 bool tig_net_is_active(void)
@@ -517,7 +583,9 @@ static void tig_net_send_raw(void* data, int size, int client_id, bool all, bool
                 enet_peer_send(clients[i].peer, TIG_NET_CHANNEL_APP, packet);
             }
         }
-        enet_host_flush(enet_host);
+        /* Batched: flushed once per frame in tig_net_pump (was per packet). */
+        tig_net_send_pending_flush = true;
+        tig_net_stat_count(tig_net_stat_sent, data, (size_t)size);
     } else {
         /* Clients only talk to host. */
         if (clients[0].peer == NULL) {
@@ -526,7 +594,8 @@ static void tig_net_send_raw(void* data, int size, int client_id, bool all, bool
         packet = enet_packet_create(data, (size_t)size, ENET_PACKET_FLAG_RELIABLE);
         if (packet != NULL) {
             enet_peer_send(clients[0].peer, TIG_NET_CHANNEL_APP, packet);
-            enet_host_flush(enet_host);
+            tig_net_send_pending_flush = true;
+            tig_net_stat_count(tig_net_stat_sent, data, (size_t)size);
         }
     }
 }
