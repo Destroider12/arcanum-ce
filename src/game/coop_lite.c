@@ -908,6 +908,11 @@ static void coop_lite_unkeep_sector(int slot);
 static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
+static unsigned int coop_obj_now_ms; /* last coop_lite_ping time */
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_obj_pending_reset(void);
+#endif
+
 void coop_lite_session_reset(void)
 {
     int i;
@@ -915,6 +920,7 @@ void coop_lite_session_reset(void)
     coop_lite_follow_armed = false;
     coop_lite_pose_order_reset();
 #ifndef COOP_LITE_TEST_STUBS
+    coop_lite_obj_pending_reset();
     coop_lite_roster_reset();
 #endif
     coop_lite_pending_follow_valid = false;
@@ -1067,6 +1073,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 28: /* item transfer / pickup / equip */
     case 125: /* identify service */
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
+    case PACKET_COOP_OBJ_REQ: /* item blob request (P1-2) */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 10: /* anim pose */
     case 58: /* cast spell */
@@ -1092,6 +1099,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_SESSION_SYNC: /* host map+PC snapshot → client */
     case PACKET_COOP_INVEN_SYNC: /* host inventory snapshot → client */
     case PACKET_COOP_ROSTER: /* other clients' PCs → client */
+    case PACKET_COOP_OBJ_BLOB: /* item blob → client (P1-2) */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -1292,6 +1300,10 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopRoster);
     case PACKET_COOP_INVEN_SYNC:
         return offsetof(PacketCoopInvenSync, entries);
+    case PACKET_COOP_OBJ_REQ:
+        return offsetof(PacketCoopObjReq, oid);
+    case PACKET_COOP_OBJ_BLOB:
+        return offsetof(PacketCoopObjBlob, data);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -3678,6 +3690,7 @@ void coop_lite_client_on_teleport_done(void)
 
 void coop_lite_ping(unsigned int now_ms)
 {
+    coop_obj_now_ms = now_ms;
 #ifndef COOP_LITE_TEST_STUBS
     int slot;
     int64_t obj;
@@ -3981,6 +3994,34 @@ size_t coop_lite_inven_sync_size(int count)
         count = COOP_INVEN_CHUNK_ENTRIES;
     }
     return offsetof(PacketCoopInvenSync, entries) + (size_t)count * sizeof(PacketCoopInvenEntry);
+}
+
+bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size)
+{
+    if (pkt == NULL || pkt->type != PACKET_COOP_OBJ_REQ
+        || size < (int)offsetof(PacketCoopObjReq, oid)) {
+        return false;
+    }
+    if (pkt->count <= 0 || pkt->count > COOP_OBJ_REQ_MAX) {
+        return false;
+    }
+    return (size_t)size >= offsetof(PacketCoopObjReq, oid) + (size_t)pkt->count * 24u;
+}
+
+bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size)
+{
+    if (pkt == NULL || pkt->type != PACKET_COOP_OBJ_BLOB
+        || size < (int)offsetof(PacketCoopObjBlob, data)) {
+        return false;
+    }
+    /* version + proto oid + oid + type at least. */
+    if (pkt->size < 4 + 24 + 24 + 4 || pkt->size > COOP_OBJ_BLOB_MAX) {
+        return false;
+    }
+    if ((size_t)size < offsetof(PacketCoopObjBlob, data) + (size_t)pkt->size) {
+        return false;
+    }
+    return memcmp(pkt->data + 4 + 24, pkt->oid, 24) == 0;
 }
 
 bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size)
@@ -4662,6 +4703,215 @@ static void coop_lite_inv_destroy_stray(const uint8_t* oid_bytes)
     }
 }
 
+/* ---- P1-2: item object blobs ---- */
+#define COOP_OBJ_PENDING_MAX 64
+#define COOP_OBJ_BLOB_TIMEOUT_MS 3000u
+
+typedef struct CoopObjPending {
+    uint8_t oid[24];
+    unsigned int asked_ms;
+    bool used;
+    bool queued;
+} CoopObjPending;
+
+static CoopObjPending coop_obj_pending[COOP_OBJ_PENDING_MAX];
+
+static void coop_lite_obj_pending_reset(void)
+{
+    memset(coop_obj_pending, 0, sizeof(coop_obj_pending));
+}
+
+static bool coop_lite_obj_blobs_enabled(void)
+{
+    const char* env = getenv("ARCANUM_COOP_NO_OBJ_BLOB");
+
+    return env == NULL || env[0] != '1';
+}
+
+static CoopObjPending* coop_lite_obj_pending_find(const uint8_t* oid)
+{
+    int i;
+
+    for (i = 0; i < COOP_OBJ_PENDING_MAX; i++) {
+        if (coop_obj_pending[i].used && memcmp(coop_obj_pending[i].oid, oid, 24) == 0) {
+            return &coop_obj_pending[i];
+        }
+    }
+    return NULL;
+}
+
+/* true: skip this entry now (a blob is on its way). false: create it from
+   the proto (blobs off, table full, or the blob never came). */
+static bool coop_lite_obj_blob_defer(const uint8_t* oid)
+{
+    unsigned int now = coop_obj_now_ms;
+    CoopObjPending* p;
+    int i;
+
+    if (!coop_lite_obj_blobs_enabled()) {
+        return false;
+    }
+    p = coop_lite_obj_pending_find(oid);
+    if (p != NULL) {
+        if (coop_lite_interval_elapsed(p->asked_ms, now, COOP_OBJ_BLOB_TIMEOUT_MS)) {
+            tig_debug_printf("CoopLite: obj blob: timed out, using the proto\n");
+            p->used = false;
+            return false;
+        }
+        return true;
+    }
+    for (i = 0; i < COOP_OBJ_PENDING_MAX; i++) {
+        if (!coop_obj_pending[i].used) {
+            memcpy(coop_obj_pending[i].oid, oid, 24);
+            coop_obj_pending[i].asked_ms = now != 0 ? now : 1;
+            coop_obj_pending[i].used = true;
+            coop_obj_pending[i].queued = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void coop_lite_obj_req_flush(void)
+{
+    PacketCoopObjReq pkt;
+    int i;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_OBJ_REQ;
+    for (i = 0; i <= COOP_OBJ_PENDING_MAX; i++) {
+        if (pkt.count == COOP_OBJ_REQ_MAX || (i == COOP_OBJ_PENDING_MAX && pkt.count > 0)) {
+            tig_net_send_app(&pkt, (int)(offsetof(PacketCoopObjReq, oid) + (size_t)pkt.count * 24u), 0);
+            pkt.count = 0;
+        }
+        if (i < COOP_OBJ_PENDING_MAX && coop_obj_pending[i].used && coop_obj_pending[i].queued) {
+            coop_obj_pending[i].queued = false;
+            memcpy(pkt.oid[pkt.count++], coop_obj_pending[i].oid, 24);
+        }
+    }
+}
+
+void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    PacketCoopObjBlob* out;
+    int slot;
+    int i;
+    int sent = 0;
+
+    if (!tig_net_is_host() || !coop_lite_obj_req_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8 || sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
+        return;
+    }
+    out = (PacketCoopObjBlob*)MALLOC(sizeof(*out));
+    for (i = 0; i < pkt->count; i++) {
+        int64_t item = coop_lite_get_oid_obj(pkt->oid[i]);
+        int64_t parent = OBJ_HANDLE_NULL;
+        uint8_t* data = NULL;
+        int size = 0;
+
+        /* Only items in an inventory (what INVEN_SYNC lists). */
+        if (item == OBJ_HANDLE_NULL || !item_is_item(item) || coop_lite_is_stackable(item)
+            || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0
+            || !item_parent(item, &parent) || parent == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        sub_442050(&data, &size, item);
+        if (data != NULL && size > 0 && size <= COOP_OBJ_BLOB_MAX) {
+            memset(out, 0, offsetof(PacketCoopObjBlob, data));
+            out->type = PACKET_COOP_OBJ_BLOB;
+            out->size = size;
+            coop_lite_put_oid(out->oid, item);
+            coop_lite_put_oid(out->owner_oid, parent);
+            out->inventory_location = item_inventory_location_get(item);
+            memcpy(out->data, data, (size_t)size);
+            tig_net_send_app(out, (int)(offsetof(PacketCoopObjBlob, data) + (size_t)size), slot);
+            sent++;
+        }
+        if (data != NULL) {
+            FREE(data);
+        }
+    }
+    FREE(out);
+    tig_debug_printf("CoopLite: obj blob: slot %d asked %d, sent %d\n", slot, pkt->count, sent);
+#else
+    (void)pkt;
+#endif
+}
+
+void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    CoopObjPending* p;
+    int64_t owner;
+    int64_t item = OBJ_HANDLE_NULL;
+    int64_t local_pc = player_get_local_pc_obj();
+    int loc;
+    int free_loc;
+    unsigned int flags;
+    char name[64] = "?";
+
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_obj_blob_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    p = coop_lite_obj_pending_find(pkt->oid);
+    if (p == NULL) {
+        /* Unasked (or already timed out and created from the proto). */
+        return;
+    }
+    p->used = false;
+    if (!coop_lite_client_world_ready() || coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL) {
+        return;
+    }
+    owner = coop_lite_get_oid_obj(pkt->owner_oid);
+    if (owner == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE))) {
+        return;
+    }
+
+    multiplayer_lock();
+    tig_net_local_suspend_begin();
+    if (obj_read_mem(pkt->data, &item) && item != OBJ_HANDLE_NULL) {
+        obj_load_postprocess(item);
+        if (!item_is_item(item) || coop_lite_is_stackable(item)) {
+            object_destroy(item);
+            item = OBJ_HANDLE_NULL;
+        }
+    } else {
+        item = OBJ_HANDLE_NULL;
+    }
+    if (item != OBJ_HANDLE_NULL) {
+        loc = pkt->inventory_location;
+        flags = (unsigned int)obj_field_int32_get(item, OBJ_F_FLAGS);
+        obj_field_int32_set(item, OBJ_F_FLAGS, (int)(flags | OF_INVENTORY));
+        obj_field_handle_set(item, OBJ_F_ITEM_PARENT, owner);
+        if (IS_WEAR_INV_LOC(loc) ? item_wield_get(owner, loc) != OBJ_HANDLE_NULL
+                                 : owner == local_pc) {
+            if (item_check_insert(item, owner, &free_loc) == ITEM_CANNOT_OK) {
+                loc = free_loc;
+            }
+        }
+        item_insert(item, owner, loc);
+        {
+            char buf[256];
+
+            buf[0] = '\0';
+            object_examine(item, local_pc, buf);
+            snprintf(name, sizeof(name), "%s", buf);
+        }
+    }
+    tig_net_local_suspend_end();
+    multiplayer_unlock();
+    tig_debug_printf("CoopLite: obj blob: %s '%s' (%d bytes)\n",
+        item != OBJ_HANDLE_NULL ? "loaded" : "rejected", name, pkt->size);
+#else
+    (void)pkt;
+#endif
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t owner_obj[COOP_INV_BUF_OWNERS];
@@ -4722,6 +4972,11 @@ static void coop_lite_client_apply_inven_batch(void)
             if (item != OBJ_HANDLE_NULL && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
                 /* Destroyed but not yet freed: never re-insert it (that left
                    a parentless duplicate in the inventory list). */
+                continue;
+            }
+            if (item == OBJ_HANDLE_NULL && coop_lite_obj_blob_defer(e->oid)) {
+                /* Asked the host for the full object; it is inserted when
+                   the blob arrives (proto fallback after a timeout). */
                 continue;
             }
             if (item == OBJ_HANDLE_NULL) {
@@ -4832,6 +5087,7 @@ static void coop_lite_client_apply_inven_batch(void)
 
     tig_net_local_suspend_end();
     multiplayer_unlock();
+    coop_lite_obj_req_flush();
 
     tig_debug_printf("CoopLite: inven sync: %d owners, %d entries, %d moved, %d created, %d removed, gold %d\n",
         coop_inv_owner_cnt, coop_inv_entry_cnt, moved, created, num_doomed,

@@ -1133,6 +1133,12 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_INVEN_SYNC:
         coop_lite_handle_inven_sync((PacketCoopInvenSync*)msg);
         break;
+    case PACKET_COOP_OBJ_REQ:
+        coop_lite_handle_obj_req((PacketCoopObjReq*)msg);
+        break;
+    case PACKET_COOP_OBJ_BLOB:
+        coop_lite_handle_obj_blob((PacketCoopObjBlob*)msg);
+        break;
     case 81:
         coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
         break;

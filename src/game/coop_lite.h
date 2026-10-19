@@ -22,8 +22,11 @@ extern "C" {
 #define PACKET_COOP_INVEN_SYNC 137 /* host → client: authoritative inventory snapshot */
 #define PACKET_COOP_ROSTER 138 /* host → clients: another client's PC joined / left */
 
+#define PACKET_COOP_OBJ_REQ 139 /* client → host: full state of these items, please */
+#define PACKET_COOP_OBJ_BLOB 140 /* host → client: one item as an object blob */
+
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 139
+#define PACKET_COOP_TYPE_LIMIT 141
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -248,6 +251,43 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fit
 size_t coop_lite_inven_sync_size(int count);
 /* Wire-level sanity of a received INVEN_SYNC of `size` bytes. */
 bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size);
+
+/*
+ * P1-2 item fidelity. A client that lacks a listed item asks the host for
+ * it (PACKET_COOP_OBJ_REQ) instead of creating a bare proto copy; the host
+ * answers with the sub_442050 blob (HP, charges, flags, names, scripts),
+ * which the client loads with obj_read_mem + obj_load_postprocess. Proto
+ * creation stays as the fallback if no blob arrives in time.
+ */
+#define COOP_OBJ_REQ_MAX 16
+#define COOP_OBJ_BLOB_MAX 8192
+
+typedef struct PacketCoopObjReq {
+    /* 0000 */ int type;
+    /* 0004 */ int count;
+    /* 0008 */ uint8_t oid[COOP_OBJ_REQ_MAX][24];
+} PacketCoopObjReq;
+
+COOP_STATIC_ASSERT(sizeof(PacketCoopObjReq) == 0x188, "PacketCoopObjReq size");
+
+typedef struct PacketCoopObjBlob {
+    /* 0000 */ int type;
+    /* 0004 */ int size;
+    /* 0008 */ uint8_t oid[24];
+    /* 0020 */ uint8_t owner_oid[24];
+    /* 0038 */ int inventory_location;
+    /* 003C */ unsigned int reserved;
+    /* 0040 */ uint8_t data[COOP_OBJ_BLOB_MAX];
+} PacketCoopObjBlob;
+
+COOP_STATIC_ASSERT(offsetof(PacketCoopObjBlob, data) == 0x40, "PacketCoopObjBlob layout");
+
+/* Structure check before obj_read_mem: sizes, and the instance OID inside
+   the blob ([u32 version][proto oid][oid]...) is the one announced. */
+bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size);
+bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size);
+void coop_lite_handle_obj_req(PacketCoopObjReq* pkt);
+void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);
 /*
  * Which barter/inventory transfers a client may ask the host to perform
  * (Packet81 flags): plain moves between its PC and the merchant it is

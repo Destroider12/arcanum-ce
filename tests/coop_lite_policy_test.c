@@ -630,14 +630,14 @@ static int test_packet_hardening(void)
         static const int client_sends[] = {
             4, 8, 9, 11, 26, 27, 28, 29, 57, 81, 98, 100, 125,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
-            PACKET_COOP_BARTER,
+            PACKET_COOP_BARTER, PACKET_COOP_OBJ_REQ,
         };
         static const int host_sends[] = {
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
             77, 92, 94, 98, 99, 100, 106, 118, 121,
             PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
             PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS, PACKET_COOP_PARTY_STATE,
-            PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, 54,
+            PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_OBJ_BLOB, 54,
         };
         size_t i;
 
@@ -660,6 +660,7 @@ static int test_packet_hardening(void)
         static const int never_from_client[] = {
             54, 71, 94, 106, 118, 121, 97, 6, 64,
             PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_SESSION_SYNC,
+            PACKET_COOP_OBJ_BLOB,
         };
         size_t i;
 
@@ -984,6 +985,92 @@ static int coop_lite_party_death_tests(void)
     return 0;
 }
 
+/* P1-2: item blob request / reply validation. */
+static int test_obj_blob(void)
+{
+    static PacketCoopObjBlob blob;
+    PacketCoopObjReq req;
+    const int hdr = (int)offsetof(PacketCoopObjBlob, data);
+    int i;
+
+    if (coop_lite_packet_allowed(PACKET_COOP_OBJ_BLOB, true, 1)
+        || !coop_lite_packet_allowed(PACKET_COOP_OBJ_REQ, true, 1)
+        || coop_lite_packet_allowed(PACKET_COOP_OBJ_REQ, false, 0)
+        || !coop_lite_packet_allowed(PACKET_COOP_OBJ_BLOB, false, 0)) {
+        fprintf(stderr, "obj blob: packet roles wrong\n");
+        return 1;
+    }
+    if (coop_lite_coop_packet_min_size(PACKET_COOP_OBJ_REQ) != 8
+        || coop_lite_coop_packet_min_size(PACKET_COOP_OBJ_BLOB) != 0x40) {
+        fprintf(stderr, "obj blob: min sizes wrong\n");
+        return 1;
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.type = PACKET_COOP_OBJ_REQ;
+    req.count = 2;
+    if (!coop_lite_obj_req_valid(&req, 8 + 48)
+        || coop_lite_obj_req_valid(&req, 8 + 47)
+        || coop_lite_obj_req_valid(&req, 7)) {
+        fprintf(stderr, "obj req: size checks wrong\n");
+        return 1;
+    }
+    req.count = 0;
+    if (coop_lite_obj_req_valid(&req, (int)sizeof(req))) {
+        fprintf(stderr, "obj req: empty accepted\n");
+        return 1;
+    }
+    req.count = COOP_OBJ_REQ_MAX + 1;
+    if (coop_lite_obj_req_valid(&req, (int)sizeof(req))) {
+        fprintf(stderr, "obj req: count over max accepted\n");
+        return 1;
+    }
+
+    memset(&blob, 0, sizeof(blob));
+    blob.type = PACKET_COOP_OBJ_BLOB;
+    for (i = 0; i < 24; i++) {
+        blob.oid[i] = (uint8_t)(0x40 + i);
+    }
+    blob.size = 200;
+    memcpy(blob.data + 4 + 24, blob.oid, 24);
+    if (!coop_lite_obj_blob_valid(&blob, hdr + 200)) {
+        fprintf(stderr, "obj blob: good blob refused\n");
+        return 1;
+    }
+    if (coop_lite_obj_blob_valid(&blob, hdr + 199)) {
+        fprintf(stderr, "obj blob: truncated blob accepted\n");
+        return 1;
+    }
+    blob.data[4 + 24] ^= 1;
+    if (coop_lite_obj_blob_valid(&blob, hdr + 200)) {
+        fprintf(stderr, "obj blob: blob of another object accepted\n");
+        return 1;
+    }
+    blob.data[4 + 24] ^= 1;
+    blob.size = COOP_OBJ_BLOB_MAX + 1;
+    if (coop_lite_obj_blob_valid(&blob, (int)sizeof(blob))) {
+        fprintf(stderr, "obj blob: oversize accepted\n");
+        return 1;
+    }
+    blob.size = 10;
+    if (coop_lite_obj_blob_valid(&blob, hdr + 10)) {
+        fprintf(stderr, "obj blob: tiny blob accepted\n");
+        return 1;
+    }
+    blob.size = -5;
+    if (coop_lite_obj_blob_valid(&blob, hdr)) {
+        fprintf(stderr, "obj blob: negative size accepted\n");
+        return 1;
+    }
+    blob.size = 200;
+    blob.type = PACKET_COOP_INVEN_SYNC;
+    if (coop_lite_obj_blob_valid(&blob, hdr + 200)) {
+        fprintf(stderr, "obj blob: wrong type accepted\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -1010,6 +1097,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_pose_order() != 0) {
+        return 1;
+    }
+    if (test_obj_blob() != 0) {
         return 1;
     }
 
