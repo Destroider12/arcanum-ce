@@ -718,7 +718,9 @@ cd /workspace/game/run-client && ./arcanum-ce -window -coop -join 127.0.0.1:7777
 
 ### 16.1 Host crash after New Game (playtest)
 
-**Symptom:** Host segfault (`ip 0`) right after `[Beginning Game]` → start-map load → `CoopLite: host follow broadcast` while client still on main menu applied follow, hit `anim.c` priority ASSERT, and loaded the host map in the background.
+**Symptom (1st):** Host segfault (`ip 0`) after New Game + follow broadcast while client still on main menu.
+
+**Symptom (2nd, gdb):** Still crashed after follow arm-only fix. `host-gdb.log`: SIGSEGV at `0x0` from `timeevent_ping` ← `gamelib_ping` ← `main`, a few seconds into the first map after `CoopLite: armed follow` + Animate Forever sound errors. gdb `r14=0x1e` = `TIMEEVENT_TYPE_MP_CTRL_UI` (30).
 
 **Root causes & fixes:**
 
@@ -726,7 +728,8 @@ cd /workspace/game/run-client && ./arcanum-ce -window -coop -join 127.0.0.1:7777
 | --- | --- |
 | (a) Follow broadcast on initial New Game / load spawn | First host PC teleport **arms** follow only (`coop_lite_follow_armed`); subsequent travel broadcasts. Skip shopping-map destinations. |
 | (b) Client apply while on ShopMap / menu | Queue follow if not in-world (`coop_lite_client_in_world`); `coop_lite_flush_pending_follow` after client enters world. |
-| (c) NULL function pointer in anim | `ASSERT(goal_node != NULL)` only logged then continued into `goal_subnode->func(...)` — RIP=0 when type is unfinished (`AG_PICK_WEAPON`) or corrupt. Now abort the run; also NULL-check subnode `func` and validate Packet9 `priority_level`. |
+| (c) NULL anim goal/func | Abort runs with NULL `goal_node`/`func`; validate Packet9 priority. |
+| (d) **NULL `TIMEEVENT_TYPE_MP_CTRL_UI` process_func** | CE removed `mp_ctrl_ui` (network UI) but left `party_add`/`party_remove` scheduling that type (500 ms delay) whenever `tig_net_is_active()`. Map transition / PC destroy with a connected client fires it → call through NULL. Restored stub `mp_ctrl_ui_process_callback` (party feedback log + local UI msg); register in `anim_ui_init`; defensive NULL check + log in `timeevent_ping`. **SP unaffected** (`party_*` only schedules when net active; SP never enqueues this type). |
 
 ### 16.2 Hard real-time combat
 

@@ -290,6 +290,8 @@ set(SRCS
     "src/ui/logbook_ui.h"
     "src/ui/mainmenu_ui.c"
     "src/ui/mainmenu_ui.h"
+    "src/ui/mp_ctrl_ui.c"
+    "src/ui/mp_ctrl_ui.h"
     "src/ui/options_ui.c"
     "src/ui/options_ui.h"
     "src/ui/roller_ui.c"

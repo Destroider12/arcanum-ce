@@ -867,7 +867,13 @@ void timeevent_ping(tig_timestamp_t timestamp)
                 // immediate processing.
                 offending_node_candidate = *node;
 
-                info->process_func(&(node->te));
+                if (info->process_func == NULL) {
+                    tig_debug_printf("TimeEvent: timeevent_ping: ERROR: NULL process_func for type %d (%s) — dropping event\n",
+                        node->te.type,
+                        info->name != NULL ? info->name : "?");
+                } else {
+                    info->process_func(&(node->te));
+                }
             }
 
             // Give user code a chance for cleanup.
