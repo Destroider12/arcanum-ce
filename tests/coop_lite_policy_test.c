@@ -437,7 +437,57 @@ static int test_packet_hardening(void)
         fprintf(stderr, "terminate_name failed\n");
         return 1;
     }
-    printf("packet hardening (direction/size/proto/name) OK\n");
+    /*
+     * Audit against real senders (Playtest 6: Packet8 from a client was
+     * dropped as "wrong direction"). Every type a client really sends must
+     * pass on the host, every type the host sends must pass on a client.
+     */
+    {
+        static const int client_sends[] = {
+            4, 8, 9, 29, 57, 98, 100,
+            PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
+        };
+        static const int host_sends[] = {
+            2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+            77, 92, 94, 98, 99, 100, 106, 118, 121,
+            PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(client_sends) / sizeof(client_sends[0]); i++) {
+            if (!coop_lite_packet_allowed(client_sends[i], true, 1)) {
+                fprintf(stderr, "host drops client-sent type %d\n", client_sends[i]);
+                return 1;
+            }
+        }
+        for (i = 0; i < sizeof(host_sends) / sizeof(host_sends[0]); i++) {
+            if (!coop_lite_packet_allowed(host_sends[i], false, 0)) {
+                fprintf(stderr, "client drops host-sent type %d\n", host_sends[i]);
+                return 1;
+            }
+        }
+    }
+
+    /* Camera dead zone follow. */
+    {
+        int64_t sx;
+        int64_t sy;
+
+        if (coop_lite_follow_delta(100, -50, 200, 120, &sx, &sy) || sx != 0 || sy != 0) {
+            fprintf(stderr, "follow: inside dead zone must not scroll\n");
+            return 1;
+        }
+        if (!coop_lite_follow_delta(260, -50, 200, 120, &sx, &sy) || sx != 60 || sy != 0) {
+            fprintf(stderr, "follow: right of zone should scroll 60 (got %lld)\n", (long long)sx);
+            return 1;
+        }
+        if (!coop_lite_follow_delta(-230, 150, 200, 120, &sx, &sy) || sx != -30 || sy != 30) {
+            fprintf(stderr, "follow: corner case wrong (%lld,%lld)\n", (long long)sx, (long long)sy);
+            return 1;
+        }
+    }
+
+    printf("packet hardening (direction/size/proto/name/sender audit/follow) OK\n");
     return 0;
 }
 

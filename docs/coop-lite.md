@@ -887,3 +887,46 @@ Client talk uses existing `dialog_ui` + per-node filter once the shared map/PCs 
 - Dialog script side effects on a client stay local; the filter blocks
   shared-state actions.
 - XP and score are per player.
+
+## 20. Playtest 6 fixes
+
+- **Host could not move, and the intro looked stuck.** This was not a hang.
+  The host was inside Virgil's opening dialog: Virgil's line plus two reply
+  options in the text box ("What are you going on about?" / "By the gods,
+  man! ..."). Single player (`-coop` off, dev autostart) shows the same screen,
+  and memory reads of the running host confirmed the dialog was active. The
+  game takes no ground clicks until a reply is picked. Before Playtest 6 the
+  broken move guard (section 19) stopped Virgil before he reached the PC, so
+  the intro never opened and the host could still walk.
+- **AGUpdateAnimMove spam** (wandering wolves and kite scouts, always
+  "2 tiles away, curr(1)"): the guard now allows one tile of slack.
+- **`drop type 8 ... wrong direction`:** Packet8 (anim modify) is sent by both
+  host and clients in vanilla MP, so its role is now BOTH; the host's handler
+  ignores it. A client no longer sends Packet8 for the PC it drives:
+  `turn_on_running`/`turn_on_flags` run locally under `tig_net_local_suspend`,
+  so client running works too. The new policy test checks every real sender
+  type against the direction table.
+- **Client talk:** a click on Virgil did open the dialog. The client shows the
+  same intro text box, confirmed from memory on both processes. Pick an
+  option to continue.
+- **"Disband Failed: Merwin Tumblebrook" x3:** these came from the client
+  destroying stale PC copies (`object_destroy` → `sub_45E180` →
+  `party_remove`), not from a click. Party add/remove now does nothing on
+  clients; parties are host-authoritative and replicated by Packet71. The
+  portrait shown after clicking Merwin is the normal target/examine panel,
+  not party membership.
+- **Root cause of the stale PCs (Linux):** `tig_file_is_empty_directory`
+  counted `<= 2` entries as empty because it expected Windows' `.`/`..`.
+  On Linux, `Save\Current`, which holds only `maps`, was "empty", so startup
+  never cleared it. Every killed client then reloaded its old map state with
+  old proxies and old local PCs. Fixed in tig, with the new test
+  `tig_file_empty_dir`. As extra safety, the client clears
+  `Save\Current\maps\<host map>` before the sync teleport, and the PC census
+  still removes any unbound PC.
+- **Client camera:** CE single player only recentres for town-map routes
+  (anim flag 0x80000). Coop clients now keep their own PC inside a central
+  200x120 px dead zone, using smooth `scroll_view_by` every PC_POS tick, and
+  jump only after teleports.
+- **Dev hook:** `ARCANUM_DEV_AUTOSTART_PREGEN=<1..8>` starts a New Game with
+  that premade character after ~2 s on the main menu, so test runs need no
+  input automation. Unset means no effect.
