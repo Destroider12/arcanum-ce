@@ -128,6 +128,7 @@ static bool mainmenu_ui_new_char_button_leave(tig_button_handle_t button_handle)
 static void mainmenu_ui_new_char_mouse_idle(int x, int y);
 static bool mainmenu_ui_new_char_execute(int btn);
 static void mainmenu_ui_pregen_char_create(void);
+static void mainmenu_ui_dev_autostart_tick(void);
 static void mainmenu_ui_pregen_char_refresh(TigRect* rect);
 static bool mainmenu_ui_pregen_char_button_released(tig_button_handle_t button_handle);
 static bool mainmenu_ui_pregen_char_execute(int btn);
@@ -1761,6 +1762,10 @@ bool mainmenu_ui_handle(void)
         tig_timer_now(&timestamp);
         timeevent_ping(timestamp);
         gamelib_ping();
+        mainmenu_ui_dev_autostart_tick();
+        if (!mainmenu_ui_active) {
+            break;
+        }
         /* Coop client: SESSION_SYNC arrived — leave menu into host world. */
         if (coop_lite_client_session_ready()) {
             tig_debug_printf("MainMenu-UI: coop session ready — closing menu\n");
@@ -1798,6 +1803,56 @@ bool mainmenu_ui_handle(void)
     }
 
     return true;
+}
+
+/*
+ * Developer hook (headless playtests without input automation):
+ * ARCANUM_DEV_AUTOSTART_PREGEN=<1..8> starts a New Game with that premade
+ * character once the main menu has been idle for ~2 s. Unset = no effect.
+ */
+static void mainmenu_ui_dev_autostart_tick(void)
+{
+    static int frames;
+    static bool done;
+    const char* env;
+    int idx;
+
+    if (done) {
+        return;
+    }
+
+    env = getenv("ARCANUM_DEV_AUTOSTART_PREGEN");
+    if (env == NULL || *env == '\0') {
+        done = true;
+        return;
+    }
+
+    if (mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+        return;
+    }
+
+    if (++frames < 120) {
+        return;
+    }
+
+    done = true;
+    idx = atoi(env);
+    if (idx < 1 || idx >= mainmenu_ui_pregen_char_cnt) {
+        idx = 1;
+    }
+
+    tig_debug_printf("MainMenu-UI: dev autostart: New Game with pregen %d\n", idx);
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_SINGLE_PLAYER;
+    mainmenu_ui_open();
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_PICK_NEW_OR_PREGEN;
+    mainmenu_ui_open();
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_PREGEN_CHAR;
+    mainmenu_ui_open();
+    mainmenu_ui_pregen_char_idx = idx;
+    sub_5480C0(2);
 }
 
 // 0x541680
