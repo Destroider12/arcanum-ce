@@ -92,8 +92,8 @@ static int test_mp_packet_roles(void)
         fprintf(stderr, "pkt10 should be client-apply\n");
         return 1;
     }
-    if (coop_lite_mp_packet_role(11) != COOP_MP_PKT_CLIENT_APPLY) {
-        fprintf(stderr, "pkt11 combat mode should be client-apply\n");
+    if (coop_lite_mp_packet_role(11) != COOP_MP_PKT_BOTH) { /* PT12: client toggles own PC */
+        fprintf(stderr, "pkt11 combat mode should be BOTH (client own-PC toggle)\n");
         return 1;
     }
     if (coop_lite_mp_packet_role(PACKET_COOP_ATTACK_INTENT) != COOP_MP_PKT_HOST_RESOLVE) {
