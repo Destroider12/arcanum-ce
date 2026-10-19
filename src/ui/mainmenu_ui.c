@@ -5,6 +5,7 @@
 #include "game/area.h"
 #include "game/background.h"
 #include "game/critter.h"
+#include "game/coop_lite.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
 #include "game/gfade.h"
@@ -3027,6 +3028,17 @@ bool mainmenu_ui_save_game_execute(int btn)
 
     (void)btn;
 
+    /* Coop Lite: only the host writes the campaign/world save. Clients keep .mpc chars. */
+    if (!coop_lite_can_save_world()) {
+        coop_lite_export_local_character();
+        mes_file_entry.num = 5003; /* reuse corrupt/fail string channel */
+        mes_get_msg(mainmenu_ui_mainmenu_mes_file, &mes_file_entry);
+        ui_message.type = UI_MSG_TYPE_EXCLAMATION;
+        ui_message.str = "Only the host can save the campaign. Your character was exported.";
+        ui_display_msg(&ui_message);
+        return false;
+    }
+
     v1 = main_menu_window_info[mainmenu_ui_window_type]->selected_index;
     if (v1 == -1) {
         return false;
@@ -3097,6 +3109,9 @@ bool mainmenu_ui_save_game_execute(int btn)
     if (mainmenu_ui_textedit_buffer[0] == '\0') {
         strcpy(mainmenu_ui_textedit_buffer, name);
     }
+
+    /* Host: keep local character file in sync; remote PCs own their .mpc files. */
+    coop_lite_export_local_character();
 
     if (!gamelib_save(name, mainmenu_ui_textedit_buffer)) {
         mes_file_entry.num = 5003; // "Save Game Corrupt!  Save Failed!"

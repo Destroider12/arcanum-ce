@@ -1,6 +1,7 @@
 /*
- * Policy + follow-packet round-trip for Coop Lite priority 1.
- * Host/client via fork; verifies worldmap/time gates and PACKET_COOP_FOLLOW_HOST.
+ * Policy + follow-packet + dialog/save gates for Coop Lite.
+ * Host/client via fork; verifies worldmap/time/save gates, talk classify,
+ * per-slot follow offset, and PACKET_COOP_FOLLOW_HOST.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +10,7 @@
 #include <sys/wait.h>
 
 #include "game/coop_lite.h"
-/* Minimal TeleportData matching coop_lite.c test stubs. */
+
 typedef unsigned int TeleportFlags;
 typedef struct TeleportData {
     TeleportFlags flags;
@@ -26,13 +27,18 @@ typedef struct TeleportData {
 } TeleportData;
 #include "net/tig_net.h"
 
-#define TEST_PORT 17887
+#define TEST_PORT 17888
+#define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
+#define LOCATION_GET_X(l) ((int64_t)((l) & 0xFFFFFFFF))
+#define LOCATION_GET_Y(l) ((int64_t)(((l) >> 32) & 0xFFFFFFFF))
 
 static int g_applied_map = -1;
 static int64_t g_applied_loc = 0;
 static int g_teleport_calls = 0;
 
-/* Stubs used by coop_lite.c when COOP_LITE_TEST_STUBS is defined. */
+extern int g_coop_lite_test_merchant;
+extern int g_coop_lite_test_story;
+
 int64_t player_get_local_pc_obj(void)
 {
     return 1;
@@ -69,8 +75,66 @@ static bool on_validate(void* msg)
     return type > 0 && type < 131;
 }
 
+static int test_classify_and_offsets(void)
+{
+    int dx, dy;
+    int64_t host = LOCATION_MAKE(100, 200);
+    int64_t loc1;
+    int64_t loc2;
+
+    if (coop_lite_classify_talk(false, false, false, true) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "SP classify should ALLOW\n");
+        return 1;
+    }
+    if (coop_lite_classify_talk(true, true, false, true) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "host classify should ALLOW\n");
+        return 1;
+    }
+    if (coop_lite_classify_talk(true, false, true, true) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "merchant should ALLOW even with story\n");
+        return 1;
+    }
+    if (coop_lite_classify_talk(true, false, false, true) != COOP_TALK_INFO_ONLY) {
+        fprintf(stderr, "story NPC should INFO_ONLY for companion\n");
+        return 1;
+    }
+    if (coop_lite_classify_talk(true, false, false, false) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "ordinary NPC should ALLOW\n");
+        return 1;
+    }
+    printf("classify: OK\n");
+
+    coop_lite_slot_preferred_offset(0, &dx, &dy);
+    if (dx != 0 || dy != 0) {
+        fprintf(stderr, "slot0 offset expected 0,0 got %d,%d\n", dx, dy);
+        return 1;
+    }
+    coop_lite_slot_preferred_offset(1, &dx, &dy);
+    if (dx != 1 || dy != 0) {
+        fprintf(stderr, "slot1 offset expected 1,0 got %d,%d\n", dx, dy);
+        return 1;
+    }
+    loc1 = coop_lite_follow_loc_for_slot(host, 1);
+    loc2 = coop_lite_follow_loc_for_slot(host, 2);
+    if (loc1 == host || loc2 == host || loc1 == loc2) {
+        fprintf(stderr, "slot offsets should differ from host and each other (%lld %lld host=%lld)\n",
+            (long long)loc1, (long long)loc2, (long long)host);
+        return 1;
+    }
+    if (LOCATION_GET_X(loc1) != 101 || LOCATION_GET_Y(loc1) != 200) {
+        fprintf(stderr, "slot1 loc wrong\n");
+        return 1;
+    }
+    printf("follow offsets: OK\n");
+    return 0;
+}
+
 static int run_client(void)
 {
+    int64_t host_loc = 0x1234;
+    int64_t expect;
+    int slot;
+
     tig_net_set_coop_enabled(true);
     tig_net_configure_join("127.0.0.1", TEST_PORT);
     tig_net_on_message(on_message);
@@ -82,7 +146,6 @@ static int run_client(void)
         return 1;
     }
 
-    /* Wait for WELCOME / slot assignment without racing host teardown. */
     {
         int waits = 0;
         while (sub_529520() < 1 && waits < 3000) {
@@ -104,7 +167,28 @@ static int run_client(void)
         fprintf(stderr, "client: time advance should be blocked\n");
         return 1;
     }
-    printf("client: worldmap/time gates OK\n");
+    if (coop_lite_can_save_world()) {
+        fprintf(stderr, "client: world save should be blocked\n");
+        return 1;
+    }
+
+    g_coop_lite_test_merchant = 0;
+    g_coop_lite_test_story = 1;
+    if (coop_lite_can_talk(99, 1) != COOP_TALK_INFO_ONLY) {
+        fprintf(stderr, "client: story NPC should be INFO_ONLY\n");
+        return 1;
+    }
+    g_coop_lite_test_merchant = 1;
+    if (coop_lite_can_talk(99, 1) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "client: merchant should ALLOW\n");
+        return 1;
+    }
+    g_coop_lite_test_merchant = 0;
+    g_coop_lite_test_story = 0;
+    printf("client: worldmap/time/save/talk gates OK\n");
+
+    slot = sub_529520();
+    expect = coop_lite_follow_loc_for_slot(host_loc, slot);
 
     g_teleport_calls = 0;
     g_applied_map = -1;
@@ -116,12 +200,14 @@ static int run_client(void)
             waits++;
         }
     }
-    if (g_teleport_calls != 1 || g_applied_map != 42 || g_applied_loc != 0x1234) {
-        fprintf(stderr, "client: follow not applied (calls=%d map=%d loc=%lld)\n",
-            g_teleport_calls, g_applied_map, (long long)g_applied_loc);
+    if (g_teleport_calls != 1 || g_applied_map != 42 || g_applied_loc != expect) {
+        fprintf(stderr, "client: follow not applied (calls=%d map=%d loc=%lld expect=%lld slot=%d)\n",
+            g_teleport_calls, g_applied_map, (long long)g_applied_loc,
+            (long long)expect, slot);
         return 1;
     }
-    printf("client: follow applied map=%d loc=%lld\n", g_applied_map, (long long)g_applied_loc);
+    printf("client: follow applied map=%d loc=%lld (offset from host)\n",
+        g_applied_map, (long long)g_applied_loc);
     tig_net_reset_connection();
     printf("client: PASS\n");
     return 0;
@@ -140,11 +226,16 @@ static int run_host(void)
         fprintf(stderr, "host: start failed\n");
         return 1;
     }
-    if (!coop_lite_can_use_worldmap() || !coop_lite_can_advance_game_time()) {
-        fprintf(stderr, "host: should allow worldmap/time\n");
+    if (!coop_lite_can_use_worldmap() || !coop_lite_can_advance_game_time()
+        || !coop_lite_can_save_world()) {
+        fprintf(stderr, "host: should allow worldmap/time/save\n");
         return 1;
     }
-    printf("host: worldmap/time gates OK\n");
+    if (coop_lite_can_talk(1, 1) != COOP_TALK_ALLOW) {
+        fprintf(stderr, "host: talk should ALLOW\n");
+        return 1;
+    }
+    printf("host: worldmap/time/save/talk gates OK\n");
 
     {
         int waits = 0;
@@ -162,20 +253,23 @@ static int run_host(void)
     coop_lite_notify_host_teleported(42, 0x1234);
     pump_ms(800);
 
-    /* Do not reset here — keep the session up until the child client exits. */
     printf("host: PASS\n");
     return 0;
 }
 
 int main(int argc, char** argv)
 {
-    /* SP policy without coop. */
     tig_net_set_coop_enabled(false);
-    if (!coop_lite_can_use_worldmap() || !coop_lite_can_advance_game_time()) {
+    if (!coop_lite_can_use_worldmap() || !coop_lite_can_advance_game_time()
+        || !coop_lite_can_save_world()) {
         fprintf(stderr, "SP: gates should allow\n");
         return 1;
     }
-    printf("SP: worldmap/time allowed OK\n");
+    printf("SP: worldmap/time/save allowed OK\n");
+
+    if (test_classify_and_offsets() != 0) {
+        return 1;
+    }
 
     if (argc >= 2 && strcmp(argv[1], "--client") == 0) {
         return run_client();
@@ -186,7 +280,6 @@ int main(int argc, char** argv)
 
     {
         char self[512];
-        char port_str[16];
         pid_t child;
         int status;
         ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -209,7 +302,7 @@ int main(int argc, char** argv)
             fprintf(stderr, "client failed\n");
             return 1;
         }
-        printf("PASS: coop_lite worldmap/time gates + follow packet\n");
+        printf("PASS: coop_lite dialog/save/follow-offset policy\n");
         return 0;
     }
 }

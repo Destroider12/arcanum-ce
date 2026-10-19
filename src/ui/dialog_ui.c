@@ -6,6 +6,7 @@
 #include "game/anim.h"
 #include "game/broadcast.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/dialog.h"
 #include "game/gsound.h"
@@ -120,6 +121,18 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     DialogUiEntry* entry;
     char path[TIG_MAX_PATH];
     char str[2000];
+    CoopTalkPolicy talk_policy;
+
+    /* Coop Lite: non-host companions may only fully talk to merchants / safe NPCs. */
+    talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
+    if (talk_policy == COOP_TALK_BLOCK) {
+        return;
+    }
+    if (talk_policy == COOP_TALK_INFO_ONLY) {
+        dialog_ui_float_line(npc_obj, pc_obj,
+            "Only the party leader can discuss this matter.", -1);
+        return;
+    }
 
     if (critter_is_dead(pc_obj)) {
         return;

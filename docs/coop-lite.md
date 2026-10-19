@@ -5,10 +5,10 @@ Date: 2026-10-19
 Target: real-time co-op (up to 8 players) on arcanum-ce, campaign-compatible.
 Required compatibility: **Arcanum: ReForged** ([kurkijar/Arcanum-ReForged](https://github.com/kurkijar/Arcanum-ReForged)).
 
-**Status (coop-lite-worldmap-follow):** ENet transport + **priority (1)** —
-host-only world map (`coop_lite_can_use_worldmap`), host teleport follow
-broadcast (`PACKET_COOP_FOLLOW_HOST` / 129), host-authoritative game/anim time.
-Single-player without `-coop` unchanged. Anim/combat receive apply still incomplete.
+**Status (coop-lite-dialog-saves):** ENet + P1 worldmap/follow/time + **P2 dialogs**
+(`coop_lite_can_talk`, story scripts → host PC) + **P3 saves** (host world save,
+per-player `.mpc` chars). Follow uses per-slot nearest walkable offset. SP without
+`-coop` unchanged. Anim/combat receive / late-join xfer still incomplete.
 
 Runtime testing is currently impossible: game data is not on this box. A clean
 **Steam** install archive is expected soon; ReForged will be installed from that
@@ -468,11 +468,11 @@ Strategies taken from that playbook (not invented) and how Coop Lite applies the
 | **ENet as C transport** | networking.md §0, §2 | **Yes** | Vendored ENet 1.3.18, reliable UDP, 2 channels (app + session control). |
 | **Reliable for events, not for continuous motion** | networking.md §1.2 | **Partial** | All app sends currently reliable (CE packet model). Future: unreliable channel for high-rate pose if needed. |
 | **Entity ownership (NPC AI on host)** | how-coop-mods-work.md §1.2 | **Planned** | Host runs world AI; remote players are puppets. Stock MP slots support this; puppet spawn not done. |
-| **Quest/story flags: host owns, mirror writes** | networking.md §1.3; methods.md host-authority table | **Planned (prio 2)** | Aligns with user dialog restrictions. |
+| **Quest/story flags: host owns, mirror writes** | networking.md §1.3; methods.md host-authority table | **Yes (P2)** | `script_has_global_side_effects` + `coop_lite_can_talk`; SFO_PLAYER → host PC. |
 | **Time / weather / RNG: host broadcasts** | networking.md §1.3 | **Yes (time)** | Clients skip local clock advance; host sends type 3 ~1 Hz; clients `timeevent_sync`. Weather/RNG not specially handled. |
-| **Dialog/cutscenes: one driver, others watch** | networking.md §1.3; how-coop-mods-work.md §1.5 | **Planned (prio 2)** | User: non-hosts blocked from story/quest NPCs. |
+| **Dialog/cutscenes: one driver, others watch** | networking.md §1.3; how-coop-mods-work.md §1.5 | **Yes (P2)** | Non-hosts: merchants/safe NPCs full; story → info-only float. |
 | **Follow-the-leader on map change** | networking.md §1.4 | **Yes** | Host-only wmap; `coop_lite_notify_host_teleported` → packet 129 → client `teleport_do`. |
-| **Host save is canonical; clients keep char only** | networking.md §1.4; how-coop-mods-work.md §1.4 | **Planned (prio 3)** | Matches user save split. |
+| **Host save is canonical; clients keep char only** | networking.md §1.4; how-coop-mods-work.md §1.4 | **Yes (P3)** | `coop_lite_can_save_world`; clients export `Players/*.mpc` via `sub_4A4320`. |
 | **Late join = full snapshot then deltas** | networking.md §1.4; how-coop-mods-work.md §1.8 | **Not yet** | Needs xfer + world dump; `tig_net_xfer_*` still no-op. Documented gap. |
 | **Delta / snapshot compression, priority accumulator** | networking.md §1.2 | **Not yet** | Premature until entity sync volume exists; CE uses discrete event packets today. |
 | **Interest management** | networking.md §1.2; how-coop-mods-work.md §1.7 | **Not yet** | Playbook: start without it for small co-op; add when profiling demands. Area-follow rule reduces need. |
@@ -511,5 +511,52 @@ Tests: `coop_lite_policy_test` (SP gates, host/client gates, follow round-trip);
 existing `tig_net_loopback_test`.
 
 Gaps: ReForged binary must link/call the helper; no in-game QA without Steam data;
-follow uses exact host loc (no per-slot offset); jumppoint/script teleports of
+follow uses per-slot nearest walkable offset (see §13); jumppoint/script teleports of
 non-PC objects do not trigger follow (only local PC teleports).
+
+---
+
+## 13. Priority 2–3 (`coop-lite-dialog-saves`)
+
+Built on `coop-lite-worldmap-follow`.
+
+### Follow offset (P1 fix)
+
+Clients no longer teleport onto the host’s exact tile. `coop_lite_follow_loc_for_slot(host_loc, slot)`
+picks a stable per-slot neighbour, then (in-game) spirals for the nearest free walkable tile
+(`tile_is_blocking` + no critter on tile). Slot 0 bias is (0,0); slots 1–7 use distinct offsets.
+
+### Dialogs (P2)
+
+| API / hook | Role |
+| --- | --- |
+| `coop_lite_can_talk(npc, pc)` | Shared gate → `ALLOW` / `INFO_ONLY` / `BLOCK` |
+| `coop_lite_classify_talk(...)` | Pure policy for tests |
+| `script_has_global_side_effects(num)` | Scans `.scr` actions for quest/gvar/story/reputation/etc. |
+| Merchant heuristic | `OBJ_F_NPC_SUBSTITUTE_INVENTORY` or `SAP_BUY_OBJECT` script |
+| `dialog_ui_start_dialog` | INFO_ONLY → float “Only the party leader…”; no flag changes |
+| `coop_lite_story_pc_obj()` | Host PC (slot 0); used for `SFO_PLAYER` and rumor quell |
+
+Non-host companions are not “the PC” for story scripts.
+
+### Saves (P3)
+
+| API / hook | Role |
+| --- | --- |
+| `coop_lite_can_save_world()` | Host/SP only |
+| `mainmenu_ui_save_game_execute` | Clients blocked; still export local `.mpc` |
+| `coop_lite_export_local_character()` | Wraps existing `sub_4A4320` → `Players/<oid>.mpc` |
+| Host save path | Exports host char, then `gamelib_save` (SP format when coop off) |
+| `multiplayer_save` | Unchanged: stores slot OIDs when coop active |
+
+Single-player save format is untouched when `tig_net_is_active()` is false.
+
+### Tests
+
+`coop_lite_policy_test`: SP/host/client gates (wmap/time/save/talk), classify matrix,
+per-slot offset ≠ host, follow packet applies offset dest.
+
+### Remaining before in-game playtest
+
+See report checklist (Steam data, ReForged link of helpers, anim/combat receive,
+late-join xfer, live merchant/quest NPC soak).

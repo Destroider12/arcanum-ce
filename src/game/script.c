@@ -29,6 +29,7 @@
 #include "game/reaction.h"
 #include "game/reputation.h"
 #include "game/rumor.h"
+#include "game/coop_lite.h"
 #include "game/script_name.h"
 #include "game/scroll.h"
 #include "game/sector.h"
@@ -1943,7 +1944,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
     case SAT_QUELL_RUMOR: {
         int rumor = script_get_value(action->op_type[0], action->op_value[0], state);
         int64_t obj = script_get_obj(action->op_type[1], action->op_value[1], state);
-        if (obj == player_get_local_pc_obj()) {
+        if (obj == coop_lite_story_pc_obj()) {
             rumor_qstate_set(rumor);
         }
         return NEXT;
@@ -2284,7 +2285,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
             str[len] = '\0';
         }
         int speech_id;
-        dialog_copy_npc_newspaper_msg(npc_obj, player_get_local_pc_obj(), &(str[len]), &speech_id);
+        dialog_copy_npc_newspaper_msg(npc_obj, coop_lite_story_pc_obj(), &(str[len]), &speech_id);
         script_float_line_func(npc_obj, state->invocation->triggerer_obj, str, speech_id);
         return NEXT;
     }
@@ -3122,7 +3123,8 @@ int script_resolve_focus_obj(ScriptFocusObject type, int index, ScriptState* sta
         }
         break;
     case SFO_PLAYER:
-        objs[cnt++] = player_get_local_pc_obj();
+        /* Coop Lite: companions are not "the PC" for story scripts — use host. */
+        objs[cnt++] = coop_lite_story_pc_obj();
         break;
     case SFO_EVERY_ITEM_IN_VICINITY:
     case SFO_ANY_ITEM_IN_VICINITY:
@@ -3354,6 +3356,78 @@ bool script_flags(Script* scr, ScriptFlags* flags_ptr)
 
     return false;
 }
+
+// Coop Lite: detect dialog/scripts that mutate campaign-global state.
+static bool script_action_has_global_side_effects(const ScriptAction* action)
+{
+    if (action == NULL) {
+        return false;
+    }
+    switch (action->type) {
+    case SAT_SET_PC_QUEST_STATE:
+    case SAT_SET_QUEST_GLOBAL_STATE:
+    case SAT_SET_STORY_STATE:
+    case SAT_SET_GLOBAL_FLAG:
+    case SAT_CLEAR_GLOBAL_FLAG:
+    case SAT_ADD_REPUTATION:
+    case SAT_REMOVE_REPUTATION:
+    case SAT_GIVE_QUEST_XP:
+    case SAT_SET_PC_QUEST_UNBOTCHED:
+    case SAT_MARK_MAP_LOCATION:
+    case SAT_SET_RUMOR:
+    case SAT_QUELL_RUMOR:
+    case SAT_TELEPORT:
+    case SAT_FADE_AND_TELEPORT:
+    case SAT_CREATE_OBJECT:
+    case SAT_KILL:
+    case SAT_DESTROY:
+    case SAT_TRANSFORM_ATTACHEE_INTO_BASIC_PROTOTYPE:
+    case SAT_CRITTER_FOLLOW:
+    case SAT_CRITTER_DISBAND:
+    case SAT_TOGGLE_SECTOR_BLOCKED:
+    case SAT_UNFOG_TOWNMAP:
+    case SAT_QUEUE_NEWSPAPER:
+    case SAT_GRANT_ONE_FATE_POINT:
+    case SAT_QUEUE_SLIDE:
+    case SAT_END_GAME_AND_PLAY_SLIDES:
+    case SAT_TOGGLE_MONSTER_GENERATOR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool script_has_global_side_effects(int script_num)
+{
+    ScriptFile* script_file;
+    int index;
+    ScriptCondition entry;
+
+    if (script_num == 0) {
+        return false;
+    }
+
+    script_file = script_lock(script_num);
+    if (script_file == NULL) {
+        return false;
+    }
+
+    for (index = 0; index < script_file->num_entries; index++) {
+        if (!sub_44C1B0(script_file, (unsigned int)index, &entry)) {
+            continue;
+        }
+        if (script_action_has_global_side_effects(&entry.action)
+            || script_action_has_global_side_effects(&entry.els)) {
+            script_unlock(script_num);
+            return true;
+        }
+    }
+
+    script_unlock(script_num);
+    return false;
+}
+
+
 
 // 0x44C390
 ScriptFile* script_lock(int script_id)
