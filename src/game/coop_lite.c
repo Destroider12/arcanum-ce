@@ -898,6 +898,7 @@ static void coop_lite_barter_reset(void);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
+static void coop_lite_host_party_inven_tick(unsigned int now_ms);
 static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms);
 static void coop_lite_roster_reset(void);
 static void coop_lite_host_send_roster_entry(int slot, int64_t pc, bool present, int to_slot);
@@ -1482,6 +1483,13 @@ void coop_lite_generate_start_inventory(int64_t pc_obj)
     }
     if (obj_field_int32_get(pc_obj, OBJ_F_CRITTER_INVENTORY_NUM) > 0) {
         /* Already equipped (shop map ran, or a reconnect adopted it). */
+        return;
+    }
+    if (coop_lite_is_client_role()) {
+        /* P1-2: the kit is host-only. A client-rolled kit had different
+           OIDs (and rolls) than the host's; the host's kit reaches us via
+           INVEN_SYNC (own PC) and the party sync (remote PCs). */
+        tig_debug_printf("CoopLite: starting kit left to the host\n");
         return;
     }
     tig_net_local_suspend_begin();
@@ -3753,6 +3761,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_far_tick(now_ms);
     coop_lite_dev_export_tick(now_ms);
     coop_lite_host_roster_tick(now_ms);
+    coop_lite_host_party_inven_tick(now_ms);
     coop_lite_host_dev_give_weapon_tick(now_ms);
 
     {
@@ -4066,6 +4075,8 @@ static int64_t coop_lite_store_of(int64_t npc)
 }
 
 /* Host → one client: the owners' inventories as one batch. */
+static bool coop_party_inven_dirty;
+
 static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int num_owners)
 {
     PacketCoopInvenSync* pkt;
@@ -4080,6 +4091,8 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
     if (slot <= 0 || slot >= 8 || num_owners <= 0) {
         return;
     }
+    /* Anything that resyncs a slot may have changed what its PC wears. */
+    coop_party_inven_dirty = true;
     pkt = (PacketCoopInvenSync*)MALLOC(sizeof(*pkt));
     for (o = 0; o < num_owners; o++) {
         int64_t owner = owners[o];
@@ -4972,6 +4985,48 @@ static void coop_lite_roster_reset(void)
     coop_roster_ms = 0;
     coop_roster_gen = 0;
     memset(coop_roster_loc, 0, sizeof(coop_roster_loc));
+}
+
+/* P1-2: every client gets the host's inventories of the *other* PCs
+   (worn clothes/armour/weapon are what makes a remote PC look right), at
+   most once a second after a change and every 10 s as a keyframe. One
+   batch per PC so each stays atomic within the 4-owner buffer. */
+static unsigned int coop_party_inven_ms;
+static unsigned int coop_party_inven_key_ms;
+
+static void coop_lite_host_party_inven_tick(unsigned int now_ms)
+{
+    int dst;
+    int src;
+    bool key;
+
+    if (!coop_lite_interval_elapsed(coop_party_inven_ms, now_ms, 1000u)) {
+        return;
+    }
+    key = coop_lite_interval_elapsed(coop_party_inven_key_ms, now_ms, 10000u);
+    if (!coop_party_inven_dirty && !key) {
+        return;
+    }
+    coop_party_inven_ms = now_ms;
+    if (key) {
+        coop_party_inven_key_ms = now_ms;
+    }
+    coop_party_inven_dirty = false;
+    for (dst = 1; dst < 8; dst++) {
+        if (sub_4A2B60(dst) == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        for (src = 0; src < 8; src++) {
+            int64_t pc = src == 0 ? player_get_local_pc_obj() : sub_4A2B60(src);
+
+            if (src == dst || pc == OBJ_HANDLE_NULL) {
+                continue;
+            }
+            coop_lite_host_send_inven_batch(dst, &pc, 1);
+        }
+    }
+    /* Sending marked it dirty again; that was us. */
+    coop_party_inven_dirty = false;
 }
 
 static void coop_lite_host_roster_tick(unsigned int now_ms)
