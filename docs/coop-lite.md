@@ -1183,3 +1183,90 @@ policy test covers:
   destroyed and the offered one is used.
 - The host's own death was silent in PT10 (pool of blood, no log line). It is now
   logged as "host PC fell" and announced on every screen (see above).
+
+## 25. Playtest 11 and review #2
+
+**Client barter (PT11 #1, review H4).** In vanilla MP the client sent Packet100/12 and
+waited for a reply that only the host acted on, so no window ever opened. Packets
+26/27/28/81/125 also had no handler. Now:
+- `inven_ui_open` on a coop client opens the inventory or barter window locally
+  for its own PC, the same way own-PC movement runs locally. Barter sends
+  `PACKET_COOP_BARTER` (136) OPEN/CLOSE.
+- When the host gets OPEN, it checks the partner (a living merchant within 12
+  tiles), prepares the store as `sub_572640` would, and sends
+  `PACKET_COOP_INVEN_SYNC` (137) batches for the PC, the merchant and the store.
+- Each item move goes to the host as Packet81. The host checks it before running it:
+  - the sender owns the PC;
+  - the flags are a plain move, optionally a whole stack (no drop, steal or gamble);
+  - the sides are right;
+  - the parent and partner are valid;
+  - the merchant buys or sells the item;
+  - the payer has enough gold.
+  The price comes from the host's own `item_cost`. The host then runs the transfer
+  and resyncs both sides. A refused move also resyncs, which undoes the client's
+  local move.
+- The client reconciles each sync batch:
+  - non-stackables by OID;
+  - gold and ammo by total;
+  - stray ground stacks are destroyed.
+- After SESSION_SYNC the client asks for a sync, so its starting kit carries the
+  host's OIDs (M4).
+- The "Yes?" on the first click is not the coop talk classification: no coop bark
+  was logged. `DialogUI: start ...` logging was added to pin it down in the next
+  playtest.
+
+**Remote PCs at any distance (PT11 #2, review H3).** The PT11 census only searched the
+vicinity, so it showed "own PC only" even when the remote PC was still there.
+- The census now lists slots 0–7 and their distances, and marks a slot MISSING
+  when its registered OID can't be resolved.
+- The host sends a per-slot `PACKET_COOP_ROSTER` (138) on every spawn and leave.
+  Clients create, remember and bind every other client's PC (3+ players).
+- Verified headless: 61–64 tiles apart, total=3 on all three peers.
+- Dev hook `ARCANUM_DEV_TELEPORT_CLIENT_FAR=N` (host side) moves the slot-1 PC N
+  tiles east 15 s after it joins, then back 45 s later.
+
+**Esc menu (PT11 #3).** The host lost Save/Load because the dialog flag was left set.
+The Virgil intro dialog had started, and then the dev teleport moved the host away.
+- In coop, `dialog_ui_is_local_pc_in_dialog` clears the flag when the UI is not in
+  dialog or barter mode.
+- The host no longer runs dialog for remote PCs.
+- On a client, Save exports only the character, and Load is refused.
+
+**Virgil (PT11 #5).** Virgil's intro dialog starts in both runs, with and without the
+dev start. With `ARCANUM_DEV_START_LOC` the teleport fires right after it and leaves
+Virgil behind. The dev hook causes this; it is not a coop bug.
+
+**Dev hooks (PT11 #4).**
+- `ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT`: 1 or 2 spawns a sewer rat, 3 a wolf.
+- `ARCANUM_DEV_GRANT_RESURRECT=1`, set on both sides, teaches each PC Resurrect
+  once and raises WIL/CON to 18 so it can afford the cast.
+- `ARCANUM_DEV_CLIENT_BARTER=1`, on the client together with host
+  `ARCANUM_DEV_START_LOC=merchant`, runs a scripted buy and sell.
+
+**Review #2 fixes.**
+- H1: Packet100/13 (set HP/fatigue) is ignored on the host.
+- H2: the host accepts only whitelisted (HOST_RESOLVE/BOTH) types from clients.
+  121, 118, 94, 106, 54 and 71 are CLIENT_APPLY, and `sub_4EFB50` returns on the
+  host.
+- M1: a stale client ENet host is reset, so reconnecting works. Losing the host
+  shows a notice.
+- M2: PC_POS carries the map id. Poses for another map are dropped, and the client
+  sends no pose during a carry.
+- M3: the host checks ownership before pinning sectors. A client pose is rejected
+  when it jumps more than 12 tiles or changes the art type, and the client is
+  force-corrected.
+- M5: Packet 54 is handled as a no-op on clients, because magictech ids are
+  allocated per peer and freeing by the host's id is unsafe (known limitation).
+  Other unhandled types are logged once per type.
+- M6: on an adjacent target, the attacker's client plays a cosmetic swing after
+  sending the attack intent. The host still resolves the hit.
+- M7: poses (PC_POS, NPC_POS) go on ENet channel 2 as unreliable+sequenced, with a
+  reliable 1 s keyframe. FORCE corrections stay reliable.
+- L1: on the host, Packet98 must name the sender's own slot.
+- L2: the deferred Packet70 queue is cleared on session reset.
+- L3: each send creates one ENet packet, and it is destroyed if no peer took it.
+- L4: the SP turn-based preference is saved at coop connect and restored before
+  settings are saved or the session ends.
+- L5: Packet57's source must be the PC or an item the PC holds.
+- L6: `coop_reload_raise` is cleared on reset and on a failed reload.
+- L7: Packet29 (junk-pile collapse) must be within 5 tiles of the sender's PC.

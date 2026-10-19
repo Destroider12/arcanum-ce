@@ -1075,6 +1075,11 @@ void multiplayer_handle_message(void* msg)
         break;
     case 98:
         flags_pkt = (PacketMultiplayerFlagsChange*)msg;
+        /* Review L1: on the host a client may only change its own flags. */
+        if (tig_net_is_host() && sub_52A530() != 0 && flags_pkt->client_id != sub_52A530()) {
+            tig_debug_printf("MP: Packet98 from slot %d for slot %d dropped\n", sub_52A530(), flags_pkt->client_id);
+            break;
+        }
         if (flags_pkt->client_id >= 0 && flags_pkt->client_id < NUM_PLAYERS) {
             stru_5E8AD0[flags_pkt->client_id].flags &= ~0xFF00u;
             stru_5E8AD0[flags_pkt->client_id].flags |= flags_pkt->flags & 0xFF00u;
@@ -1119,13 +1124,42 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_PARTY_STATE:
         coop_lite_handle_party_state((PacketCoopPartyState*)msg);
         break;
+    case PACKET_COOP_BARTER:
+        coop_lite_handle_barter((PacketCoopBarter*)msg);
+        break;
+    case PACKET_COOP_ROSTER:
+        coop_lite_handle_roster((PacketCoopRoster*)msg);
+        break;
+    case PACKET_COOP_INVEN_SYNC:
+        coop_lite_handle_inven_sync((PacketCoopInvenSync*)msg);
+        break;
+    case 81:
+        coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
+        break;
+    case 54:
+        /* Magictech end (review M5). Client spell run ids are allocated
+           locally and need not match the host's, so freeing by the host's id
+           could end an unrelated spell. Effects still end through the host's
+           own state packets (HP, objects); handled here without the old
+           "unhandled" spam. */
+        break;
     case 122:
         /* Client→host notification with no host-side handler; drop quietly
            (was logging "unhandled" on every send). */
         break;
-    default:
-        tig_debug_printf("MP: unhandled packet type %d\n", type);
+    default: {
+        /* Types with no coop handler (71, 6, 64, 67, 80, 84, 93, 97, 123,
+           ...) are logged once per type instead of on every packet (M5). */
+        static unsigned char unhandled_logged[256];
+
+        if (type < 0 || type >= 256 || !unhandled_logged[type]) {
+            if (type >= 0 && type < 256) {
+                unhandled_logged[type] = 1;
+            }
+            tig_debug_printf("MP: unhandled packet type %d (further ones not logged)\n", type);
+        }
         break;
+    }
     }
 }
 
@@ -1199,6 +1233,7 @@ static size_t multiplayer_packet_min_size(int type)
     case 94: return sizeof(PacketUpdateInven);
     case 98: return sizeof(PacketMultiplayerFlagsChange);
     case 99: return sizeof(Packet99);
+    case 81: return sizeof(Packet81);
     case 100: return sizeof(Packet100);
     case 106: return sizeof(PacketPlaySound);
     case 118: return sizeof(Packet118);
@@ -1247,6 +1282,20 @@ void sub_4A2040(int a1)
     tig_net_send_app_all(&pkt, sizeof(pkt));
 }
 
+static bool multiplayer_sp_tb_saved;
+static int multiplayer_sp_tb;
+static int multiplayer_sp_fast_tb;
+
+void multiplayer_restore_sp_settings(void)
+{
+    if (!multiplayer_sp_tb_saved) {
+        return;
+    }
+    multiplayer_sp_tb_saved = false;
+    settings_set_value(&settings, FAST_TURN_BASED_KEY, multiplayer_sp_fast_tb);
+    settings_set_value(&settings, TURN_BASED_KEY, multiplayer_sp_tb);
+}
+
 // 0x4A2070
 bool multiplayer_handle_network_event(int type, int client_id, void* data, int size)
 {
@@ -1258,7 +1307,13 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
         if (client_id < 0 || client_id >= NUM_PLAYERS) {
             return false;
         }
-        /* Hard real-time for the whole coop session. */
+        /* Hard real-time for the whole coop session. The player's own
+           preference is put back before settings are saved (review L4). */
+        if (!multiplayer_sp_tb_saved) {
+            multiplayer_sp_tb = settings_get_value(&settings, TURN_BASED_KEY);
+            multiplayer_sp_fast_tb = settings_get_value(&settings, FAST_TURN_BASED_KEY);
+            multiplayer_sp_tb_saved = true;
+        }
         settings_set_value(&settings, TURN_BASED_KEY, 0);
         settings_set_value(&settings, FAST_TURN_BASED_KEY, 0);
         if (tig_net_is_host()) {
@@ -1292,7 +1347,12 @@ bool multiplayer_handle_network_event(int type, int client_id, void* data, int s
         }
         /* Local peer left the session — clear follow arming / queued follow. */
         if (client_id == 0 || !tig_net_is_active()) {
+            if (client_id == 0 && !tig_net_is_host()) {
+                /* Review M1: tell the player instead of silently going SP. */
+                coop_lite_client_host_left();
+            }
             coop_lite_session_reset();
+            multiplayer_restore_sp_settings();
         }
         return true;
     default:

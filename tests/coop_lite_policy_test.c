@@ -384,7 +384,8 @@ static int test_pc_pos_helpers(void)
         fprintf(stderr, "PC_POS not under validate limit\n");
         return 1;
     }
-    if (sizeof(PacketCoopPcPos) != 0x38 || sizeof(PacketCoopCharOffer) != 0x68) {
+    if (sizeof(PacketCoopPcPos) != 0x40 || offsetof(PacketCoopPcPos, map) != 0x38
+        || sizeof(PacketCoopCharOffer) != 0x68) {
         fprintf(stderr, "packet layout changed: pcpos=%zu offer=%zu\n",
             sizeof(PacketCoopPcPos), sizeof(PacketCoopCharOffer));
         return 1;
@@ -465,14 +466,16 @@ static int test_packet_hardening(void)
      */
     {
         static const int client_sends[] = {
-            4, 8, 9, 29, 57, 98, 100,
+            4, 8, 9, 29, 57, 81, 98, 100,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
+            PACKET_COOP_BARTER,
         };
         static const int host_sends[] = {
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
             77, 92, 94, 98, 99, 100, 106, 118, 121,
             PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
             PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS, PACKET_COOP_PARTY_STATE,
+            PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, 54,
         };
         size_t i;
 
@@ -489,6 +492,114 @@ static int test_packet_hardening(void)
             }
         }
     }
+
+    /* PT11 review H2: the host takes only whitelisted types from clients. */
+    {
+        static const int never_from_client[] = {
+            54, 71, 94, 106, 118, 121, 26, 27, 28, 125, 97, 6, 64,
+            PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_SESSION_SYNC,
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(never_from_client) / sizeof(never_from_client[0]); i++) {
+            if (coop_lite_packet_allowed(never_from_client[i], true, 1)) {
+                fprintf(stderr, "host accepts client-sent type %d\n", never_from_client[i]);
+                return 1;
+            }
+        }
+        /* The host's own loopback stays trusted. */
+        if (!coop_lite_packet_allowed(121, true, 0)) {
+            fprintf(stderr, "host loopback 121 dropped\n");
+            return 1;
+        }
+        /* Clients never take barter requests / item transfers. */
+        if (coop_lite_packet_allowed(PACKET_COOP_BARTER, false, 0)
+            || coop_lite_packet_allowed(81, false, 0)) {
+            fprintf(stderr, "client accepts host-resolve barter types\n");
+            return 1;
+        }
+    }
+    printf("packet whitelist (H2) OK\n");
+
+    /* PT11 barter: inventory sync wire checks + transfer flags. */
+    {
+        PacketCoopInvenSync sync;
+
+        memset(&sync, 0, sizeof(sync));
+        sync.type = PACKET_COOP_INVEN_SYNC;
+        sync.flags = COOP_INVEN_BATCH_FIRST | COOP_INVEN_BATCH_LAST;
+        sync.count = 3;
+        sync.gold = 400;
+        if (coop_lite_inven_sync_size(3) != offsetof(PacketCoopInvenSync, entries) + 3 * sizeof(PacketCoopInvenEntry)
+            || coop_lite_inven_sync_size(1000) != sizeof(PacketCoopInvenSync)
+            || coop_lite_inven_sync_size(-5) != offsetof(PacketCoopInvenSync, entries)) {
+            fprintf(stderr, "inven_sync_size wrong\n");
+            return 1;
+        }
+        if (!coop_lite_inven_sync_valid(&sync, (int)coop_lite_inven_sync_size(3))) {
+            fprintf(stderr, "valid inven sync rejected\n");
+            return 1;
+        }
+        if (coop_lite_inven_sync_valid(&sync, (int)coop_lite_inven_sync_size(2))) {
+            fprintf(stderr, "short inven sync accepted\n");
+            return 1;
+        }
+        sync.count = COOP_INVEN_CHUNK_ENTRIES + 1;
+        if (coop_lite_inven_sync_valid(&sync, (int)sizeof(sync))) {
+            fprintf(stderr, "oversized count accepted\n");
+            return 1;
+        }
+        sync.count = 0;
+        sync.gold = -1;
+        if (coop_lite_inven_sync_valid(&sync, (int)sizeof(sync))) {
+            fprintf(stderr, "negative gold accepted\n");
+            return 1;
+        }
+        sync.gold = 0;
+        sync.flags = 0x10;
+        if (coop_lite_inven_sync_valid(&sync, (int)sizeof(sync))) {
+            fprintf(stderr, "unknown batch flag accepted\n");
+            return 1;
+        }
+        if (!coop_lite_client_transfer_flags_allowed(0x01)
+            || !coop_lite_client_transfer_flags_allowed(0x21)
+            || coop_lite_client_transfer_flags_allowed(0x02)
+            || coop_lite_client_transfer_flags_allowed(0x04)
+            || coop_lite_client_transfer_flags_allowed(0x24)
+            || coop_lite_client_transfer_flags_allowed(0x08)
+            || coop_lite_client_transfer_flags_allowed(0x11)
+            || coop_lite_client_transfer_flags_allowed(0x12)
+            || coop_lite_client_transfer_flags_allowed(0)) {
+            fprintf(stderr, "transfer flag policy wrong\n");
+            return 1;
+        }
+        if (coop_lite_coop_packet_min_size(PACKET_COOP_BARTER) != sizeof(PacketCoopBarter)
+            || coop_lite_coop_packet_min_size(PACKET_COOP_INVEN_SYNC) != offsetof(PacketCoopInvenSync, entries)
+            || coop_lite_coop_packet_min_size(PACKET_COOP_ROSTER) != sizeof(PacketCoopRoster)) {
+            fprintf(stderr, "barter/roster min sizes wrong\n");
+            return 1;
+        }
+    }
+    printf("barter inventory sync rules OK\n");
+
+    /* Review M2/M3: client PC_POS plausibility on the host. */
+    if (!coop_lite_pc_pos_plausible(1, 1, 0, 2, 2)
+        || !coop_lite_pc_pos_plausible(1, 1, COOP_LITE_PC_POS_MAX_STEP, 2, 2)
+        || coop_lite_pc_pos_plausible(2, 1, 0, 2, 2)
+        || coop_lite_pc_pos_plausible(1, 1, COOP_LITE_PC_POS_MAX_STEP + 1, 2, 2)
+        || coop_lite_pc_pos_plausible(1, 1, -1, 2, 2)
+        || coop_lite_pc_pos_plausible(1, 1, 1, 3, 2)) {
+        fprintf(stderr, "pc_pos_plausible wrong\n");
+        return 1;
+    }
+    /* Review H3: roster entries only for other clients' slots. */
+    if (!coop_lite_roster_slot_ok(2, 1) || coop_lite_roster_slot_ok(1, 1)
+        || coop_lite_roster_slot_ok(0, 1) || coop_lite_roster_slot_ok(8, 1)
+        || coop_lite_roster_slot_ok(-1, 1)) {
+        fprintf(stderr, "roster_slot_ok wrong\n");
+        return 1;
+    }
+    printf("pose plausibility + roster rules OK\n");
 
     /* PT8 world replication: host-only state, clients may not inject it. */
     if (coop_lite_packet_allowed(PACKET_COOP_FOLLOWERS, true, 1)

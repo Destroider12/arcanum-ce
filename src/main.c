@@ -494,6 +494,13 @@ void main_loop(void)
                             intgame_mode_set(INTGAME_MODE_MAIN);
                             break;
                         }
+                        if (tig_net_is_coop_enabled()) {
+                            tig_debug_printf("Main: Esc menu: dialog=%d wmap=%d tb=%d mode=%d\n",
+                                dialog_ui_is_local_pc_in_dialog() ? 1 : 0,
+                                wmap_ui_is_created() ? 1 : 0,
+                                combat_turn_based_is_active() ? 1 : 0,
+                                (int)esc_mode);
+                        }
                         if (dialog_ui_is_local_pc_in_dialog()
                             || wmap_ui_is_created()
                             || (combat_turn_based_is_active()

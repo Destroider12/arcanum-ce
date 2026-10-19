@@ -422,7 +422,11 @@ void sub_4EE5E0(Packet100* pkt)
         }
         break;
     case 13:
-        /* Coop Lite vitals sync: field_8=oid, field_38=hp_damage, field_3C=fatigue. */
+        /* Coop Lite vitals sync: field_8=oid, field_38=hp_damage, field_3C=fatigue.
+           Host → clients only (review H1: a client could set any HP). */
+        if (tig_net_is_host()) {
+            break;
+        }
         sub_4F0690(pkt->d.z.field_8, &v1);
         if (v1 != OBJ_HANDLE_NULL) {
             multiplayer_lock();
@@ -686,15 +690,32 @@ void mp_handle_packet29(Packet29* pkt)
         return;
     }
     sub_4F0690(pkt->oid, &obj);
-    if (obj != OBJ_HANDLE_NULL) {
-        sub_463540(obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
     }
+    /* Review L7: a client may only collapse a junk pile next to its PC. */
+    if (sub_52A530() != 0) {
+        int64_t pc = sub_4A2B60(sub_52A530());
+
+        if (pc == OBJ_HANDLE_NULL
+            || location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION),
+                   obj_field_int64_get(obj, OBJ_F_LOCATION))
+                > 5) {
+            return;
+        }
+    }
+    sub_463540(obj);
 }
 
 /* Packet70s that arrived while the client was still loading the host map. */
 #define MP_DEFERRED_PACKET70_MAX 64
 static Packet70 mp_deferred_packet70[MP_DEFERRED_PACKET70_MAX];
 static int mp_deferred_packet70_count;
+
+void mp_clear_deferred_packet70(void)
+{
+    mp_deferred_packet70_count = 0;
+}
 
 void mp_flush_deferred_packet70(void)
 {
@@ -784,6 +805,20 @@ void mp_handle_packet92(Packet92* pkt)
     multiplayer_unlock();
 }
 
+static bool mp_cast_item_held_by(ObjectID source_oid, ObjectID parent_oid, int64_t pc)
+{
+    int64_t source = obj_pool_perm_lookup(source_oid);
+    int64_t parent = OBJ_HANDLE_NULL;
+
+    if (source == OBJ_HANDLE_NULL || !objid_is_equal(parent_oid, obj_get_id(pc))) {
+        return false;
+    }
+    if (!obj_type_is_item(obj_field_int32_get(source, OBJ_F_TYPE))) {
+        return false;
+    }
+    return item_parent(source, &parent) && parent == pc;
+}
+
 // Packet57: client spell request → host runs (rebroadcasts 58).
 void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
 {
@@ -799,8 +834,11 @@ void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
             return;
         }
         pc_oid = obj_get_id(pc);
+        /* Review L5: the caster is the PC itself, or an item the PC holds
+           (scroll, wand) with the PC as parent. */
         if (!objid_is_equal(pkt->invocation.source_obj.field_8.objid, pc_oid)
-            && !objid_is_equal(pkt->invocation.parent_obj.field_8.objid, pc_oid)) {
+            && !mp_cast_item_held_by(pkt->invocation.source_obj.field_8.objid,
+                pkt->invocation.parent_obj.field_8.objid, pc)) {
             tig_debug_printf("MP: Packet57 cast from slot %d not by its PC — dropped\n", sub_52A530());
             return;
         }
@@ -1025,6 +1063,10 @@ void sub_4EFB50(Packet121* pkt)
 {
     int64_t obj;
 
+    /* Host → clients only (review H2: a client could empty any inventory). */
+    if (tig_net_is_host()) {
+        return;
+    }
     multiplayer_lock();
     sub_4F0690(pkt->oid, &obj);
     sub_463B30(obj, pkt->field_20);

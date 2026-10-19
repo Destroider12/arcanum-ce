@@ -456,6 +456,7 @@ void gamelib_reset(void)
 // 0x4024D0
 void gamelib_exit(void)
 {
+    multiplayer_restore_sp_settings();
     settings_save(&settings);
 
     for (int index = MODULE_COUNT - 1; index >= 0; index--) {

@@ -710,6 +710,8 @@ void mp_handle_combat_mode_set(PacketCombatModeSet* pkt);
 void mp_handle_packet29(Packet29* pkt);
 void mp_handle_packet70(Packet70* pkt);
 void mp_flush_deferred_packet70(void);
+/* Drop queued Packet70s (session reset / disconnect; review L2). */
+void mp_clear_deferred_packet70(void);
 void mp_handle_packet92(Packet92* pkt);
 void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt);
 void mp_handle_packet58(PacketPlayerCastSpell* pkt);

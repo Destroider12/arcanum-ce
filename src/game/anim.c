@@ -14148,6 +14148,21 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
         memcpy(pkt.attacker_oid, &attacker_oid, sizeof(attacker_oid));
         memcpy(pkt.target_oid, &target_oid, sizeof(target_oid));
         tig_net_send_app_all(&pkt, sizeof(pkt));
+
+        /* Review M6: the host resolves the hit, but its swing never reached
+           the attacker's own screen. Adjacent target: play the swing here
+           (cosmetic AG_ANIMATE only — no hit is resolved locally). */
+        if (location_dist(obj_field_int64_get(attacker_obj, OBJ_F_LOCATION),
+                obj_field_int64_get(target_obj, OBJ_F_LOCATION))
+            <= 1) {
+            tig_art_id_t art_id = obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID);
+
+            tig_net_local_suspend_begin();
+            object_set_current_aid(attacker_obj,
+                tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)));
+            anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
+            tig_net_local_suspend_end();
+        }
         return true;
     }
 

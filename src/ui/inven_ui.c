@@ -9,7 +9,9 @@
 #include "game/hrp.h"
 #include "game/item.h"
 #include "game/mes.h"
+#include "game/coop_lite.h"
 #include "game/mp_utils.h"
+#include "net/tig_net.h"
 #include "game/multiplayer.h"
 #include "game/obj.h"
 #include "game/obj_private.h"
@@ -418,6 +420,7 @@ static int dword_739F84;
 // 0x572060
 bool inven_ui_init(GameInitInfo* init_info)
 {
+    coop_lite_set_inven_open_hook(inven_ui_open);
     TigFont font;
 
     (void)init_info;
@@ -476,6 +479,35 @@ bool inven_ui_open(int64_t pc_obj, int64_t target_obj, int mode)
 {
     if (sub_572340()) {
         return true;
+    }
+
+    /*
+     * Coop client, own inventory / barter: open the window here (review H4,
+     * PT11 — the vanilla Packet100/12 handshake below never opens it on a
+     * client). Transfers go to the host as Packet81, which answers with an
+     * authoritative inventory sync.
+     */
+    if (coop_lite_client_opens_inven_locally(mode, pc_obj)) {
+        bool ok;
+
+        if (!sub_572370(pc_obj, target_obj, mode)) {
+            return false;
+        }
+        if (!sub_572510(pc_obj, target_obj, mode)) {
+            return false;
+        }
+        if (mode == INVEN_UI_MODE_BARTER) {
+            coop_lite_client_request_barter(pc_obj, target_obj, COOP_BARTER_OPEN);
+        }
+        /* Same open-time prep the host does, so the stock looks right
+           before the host's sync lands. Local only. */
+        tig_net_local_suspend_begin();
+        sub_572640(pc_obj, target_obj, mode);
+        tig_net_local_suspend_end();
+        ok = inven_ui_create(pc_obj, target_obj, mode);
+        tig_debug_printf("InvenUI: coop client opened %s locally: %s\n",
+            mode == INVEN_UI_MODE_BARTER ? "barter" : "inventory", ok ? "ok" : "failed");
+        return ok;
     }
 
     if (tig_net_is_active() && !tig_net_is_host()) {
@@ -1115,6 +1147,11 @@ void inven_ui_destroy(void)
 
     inven_ui_created = false;
     sub_4A53B0(inven_ui_pc_obj, 0);
+
+    if (inven_ui_mode == INVEN_UI_MODE_BARTER
+        && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        coop_lite_client_request_barter(inven_ui_pc_obj, qword_682C78, COOP_BARTER_CLOSE);
+    }
 
     if ((inven_ui_mode == INVEN_UI_MODE_LOOT
             || inven_ui_mode == INVEN_UI_MODE_IDENTIFY)

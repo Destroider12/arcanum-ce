@@ -18,9 +18,12 @@ extern "C" {
 #define PACKET_COOP_FOLLOWERS 133 /* host → clients: who follows which slot PC */
 #define PACKET_COOP_NPC_POS 134 /* host → clients: NPC pose batch near PCs */
 #define PACKET_COOP_PARTY_STATE 135 /* host → clients: death / wipe / reload notices */
+#define PACKET_COOP_BARTER 136 /* client → host: open/close barter with a merchant */
+#define PACKET_COOP_INVEN_SYNC 137 /* host → client: authoritative inventory snapshot */
+#define PACKET_COOP_ROSTER 138 /* host → clients: another client's PC joined / left */
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 136
+#define PACKET_COOP_TYPE_LIMIT 139
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -70,6 +73,8 @@ typedef struct PacketCoopPcPos {
     /* 002C */ int offset_y;
     /* 0030 */ unsigned int art_id;
     /* 0034 */ int flags;
+    /* 0038 */ int map; /* review M2: a pose is only valid on its own map */
+    /* 003C */ int reserved;
 } PacketCoopPcPos;
 
 /* Host → clients: follower/leader table (variable length: count entries). */
@@ -143,7 +148,8 @@ COOP_STATIC_ASSERT(offsetof(PacketCoopFollowHost, loc) == 0x08, "PacketCoopFollo
 COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x68, "PacketCoopCharOffer size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, has_oid) == 0x4C, "PacketCoopCharOffer layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, pc_oid) == 0x50, "PacketCoopCharOffer layout");
-COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x38, "PacketCoopPcPos size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x40, "PacketCoopPcPos size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, map) == 0x38, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, flags) == 0x34, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopSessionSync) == 0xD8, "PacketCoopSessionSync size");
@@ -160,6 +166,89 @@ typedef struct PacketCoopPartyState {
     /* 0010 */ unsigned int dead_mask;
     /* 0014 */ int reserved;
 } PacketCoopPartyState;
+
+/*
+ * PACKET_COOP_ROSTER (review H3): with 3+ players a client only knew its own
+ * PC and the host's. The host announces every other client's PC (and its
+ * departure) so each client creates, binds and keeps it like the host's.
+ */
+typedef struct PacketCoopRoster {
+    /* 0000 */ int type;
+    /* 0004 */ int slot;
+    /* 0008 */ uint8_t oid[24];
+    /* 0020 */ int proto;
+    /* 0024 */ int present;
+    /* 0028 */ int64_t loc;
+    /* 0030 */ char name[64];
+} PacketCoopRoster;
+
+COOP_STATIC_ASSERT(sizeof(PacketCoopRoster) == 0x70, "PacketCoopRoster size");
+
+/* Client-side acceptance of a roster entry: a real other-client slot. */
+bool coop_lite_roster_slot_ok(int slot, int local_slot);
+
+/* PACKET_COOP_BARTER kinds. */
+#define COOP_BARTER_OPEN 0
+#define COOP_BARTER_CLOSE 1
+#define COOP_BARTER_SYNC 2 /* just send me my inventory (after joining) */
+
+typedef struct PacketCoopBarter {
+    /* 0000 */ int type;
+    /* 0004 */ int kind;
+    /* 0008 */ uint8_t pc_oid[24];
+    /* 0020 */ uint8_t npc_oid[24];
+} PacketCoopBarter;
+
+/*
+ * PACKET_COOP_INVEN_SYNC: one owner's inventory as the host has it, split in
+ * chunks. A batch (several owners: the client PC, the merchant, its store
+ * container) starts with COOP_INVEN_BATCH_FIRST and is applied as a whole on
+ * COOP_INVEN_BATCH_LAST, so an item moving between two owners is never lost.
+ * Gold travels as a total; ammo as a per-proto total (stacks merge, so their
+ * OIDs are not stable); everything else by OID.
+ */
+#define COOP_INVEN_BATCH_FIRST 0x1
+#define COOP_INVEN_BATCH_LAST 0x2
+#define COOP_INVEN_CHUNK_ENTRIES 90
+#define COOP_INVEN_AMMO_TYPES 4
+
+typedef struct PacketCoopInvenEntry {
+    /* 0000 */ uint8_t oid[24];
+    /* 0018 */ int proto;
+    /* 001C */ int inventory_location;
+    /* 0020 */ int reserved;
+    /* 0024 */ unsigned int item_flags;
+} PacketCoopInvenEntry;
+
+typedef struct PacketCoopInvenSync {
+    /* 0000 */ int type;
+    /* 0004 */ int flags;
+    /* 0008 */ uint8_t owner_oid[24];
+    /* 0020 */ uint8_t gold_oid[24]; /* host's gold stack (a host-created one
+                                        reaches clients as a stray Packet70) */
+    /* 0038 */ uint8_t ammo_oid[COOP_INVEN_AMMO_TYPES][24];
+    /* 0098 */ int gold;
+    /* 009C */ int ammo[COOP_INVEN_AMMO_TYPES];
+    /* 00AC */ int count;
+    /* 00B0 */ PacketCoopInvenEntry entries[COOP_INVEN_CHUNK_ENTRIES];
+} PacketCoopInvenSync;
+
+COOP_STATIC_ASSERT(sizeof(PacketCoopBarter) == 0x38, "PacketCoopBarter size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenEntry) == 0x28, "PacketCoopInvenEntry size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopInvenSync, entries) == 0xB0, "PacketCoopInvenSync layout");
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fits a net packet");
+
+/* Bytes a PACKET_COOP_INVEN_SYNC with `count` entries occupies on the wire. */
+size_t coop_lite_inven_sync_size(int count);
+/* Wire-level sanity of a received INVEN_SYNC of `size` bytes. */
+bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size);
+/*
+ * Which barter/inventory transfers a client may ask the host to perform
+ * (Packet81 flags): plain moves between its PC and the merchant it is
+ * bartering with. Drop (0x02), take-to-cursor/use (0x04), gamble (0x08) and
+ * steal (0x10) are refused.
+ */
+bool coop_lite_client_transfer_flags_allowed(unsigned int flags);
 
 COOP_STATIC_ASSERT(sizeof(PacketCoopPartyState) == 0x18, "PacketCoopPartyState size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_loc) == 0x08, "PacketCoopSessionSync layout");
@@ -211,6 +300,21 @@ const char* coop_lite_bark_text(CoopTalkPolicy policy);
 void coop_lite_handle_followers(PacketCoopFollowers* pkt);
 void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt);
 void coop_lite_handle_party_state(PacketCoopPartyState* pkt);
+void coop_lite_handle_barter(PacketCoopBarter* pkt);
+void coop_lite_handle_roster(PacketCoopRoster* pkt);
+/* Client: the host connection dropped (review M1). */
+void coop_lite_client_host_left(void);
+void coop_lite_handle_inven_sync(PacketCoopInvenSync* pkt);
+/* Host: a client's Packet81 inventory transfer (barter). */
+struct Packet81;
+void coop_lite_host_handle_inven_transfer(struct Packet81* pkt);
+/* Client: ask the host to open a barter session (it answers with a sync). */
+void coop_lite_client_request_barter(int64_t pc_obj, int64_t npc_obj, int kind);
+/* Client: open barter / own inventory locally (vanilla MP round-trip is
+   broken: the host's phase-1 reply is ignored by clients). */
+bool coop_lite_client_opens_inven_locally(int mode, int64_t pc_obj);
+/* inven_ui_open, for the headless barter dev hook (game code can't call UI). */
+void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
    placement once the teleport is done. */
@@ -392,6 +496,14 @@ bool coop_lite_sender_owns_obj(int64_t obj);
 /* Location/offset differ (art ignored): a real move, not frame drift. */
 bool coop_lite_pc_pos_moved(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
 bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos* cur);
+/* Max tiles a client PC may move between two of its own PC_POS samples
+   (review M3); a larger jump is refused and corrected by the host. */
+#define COOP_LITE_PC_POS_MAX_STEP 12
+/* Host-side plausibility of a client's own PC_POS: same map, a walkable-size
+   step from where the host has it, and the same art type (no swapping the
+   PC for some other art). */
+bool coop_lite_pc_pos_plausible(int pkt_map, int cur_map, int64_t step_tiles,
+    int pkt_art_type, int cur_art_type);
 
 /* True if at least interval_ms elapsed (wrap-safe). Pure; used by tests. */
 bool coop_lite_interval_elapsed(unsigned int last_ms, unsigned int now_ms, unsigned int interval_ms);

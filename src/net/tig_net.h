@@ -74,6 +74,11 @@ unsigned int tig_net_local_server_get_options(void);
 void tig_net_local_server_set_options(unsigned int options);
 
 bool tig_net_client_is_active(int client_id);
+/* Unreliable+sequenced pose traffic on its own channel (review M7). */
+void tig_net_send_pose_all(void* data, int size);
+void tig_net_send_pose_except(void* data, int size, int client_id);
+/* Client: mark another client's slot as present (host roster, review H3). */
+void tig_net_set_remote_slot_present(int slot, bool present);
 bool tig_net_client_is_waiting(int client_id);
 bool tig_net_client_is_loading(int client_id);
 const char* tig_net_client_info_get_name(int client_id);

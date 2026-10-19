@@ -23,6 +23,10 @@ void tig_debug_printf(const char* fmt, ...)
 
 #define TIG_NET_CHANNEL_APP 0
 #define TIG_NET_CHANNEL_CTRL 1
+/* Review M7: high-rate poses, unreliable+sequenced so a lost one never
+   holds back events queued behind it on the reliable app channel. */
+#define TIG_NET_CHANNEL_POSE 2
+#define TIG_NET_NUM_CHANNELS 3
 
 #define TIG_NET_CTRL_WELCOME 1
 #define TIG_NET_CTRL_NAME 2
@@ -124,6 +128,8 @@ static char local_name[TIG_NET_MAX_NAME] = "Player";
 
 static int last_message_size;
 static int local_suspend_depth;
+/* Client: host connection dropped during this pump; tear down after it. */
+static bool lost_host;
 
 static TigNetMessageFunc message_func;
 static TigNetMessageValidationFunc validation_func;
@@ -389,7 +395,7 @@ void tig_net_start_server(void)
     address.host = ENET_HOST_ANY;
     address.port = (enet_uint16)listen_port;
 
-    enet_host = enet_host_create(&address, (size_t)max_players, 2, 0, 0);
+    enet_host = enet_host_create(&address, (size_t)max_players, TIG_NET_NUM_CHANNELS, 0, 0);
     if (enet_host == NULL) {
         tig_debug_printf("tig_net: failed to listen on port %d\n", listen_port);
         return;
@@ -421,7 +427,12 @@ int tig_net_connect_configured(void)
     library_ready = true;
 
     if (enet_host != NULL) {
-        return TIG_OK;
+        if (active) {
+            return TIG_OK;
+        }
+        /* Review M1: the host dropped us earlier; that ENet host is dead. */
+        tig_debug_printf("tig_net: discarding stale client connection before reconnect\n");
+        tig_net_reset_connection();
     }
 
     if (join_host[0] == '\0') {
@@ -429,7 +440,7 @@ int tig_net_connect_configured(void)
         return TIG_ERR_GENERIC;
     }
 
-    enet_host = enet_host_create(NULL, 1, 2, 0, 0);
+    enet_host = enet_host_create(NULL, 1, TIG_NET_NUM_CHANNELS, 0, 0);
     if (enet_host == NULL) {
         tig_debug_printf("tig_net: client host create failed\n");
         return TIG_ERR_GENERIC;
@@ -438,7 +449,7 @@ int tig_net_connect_configured(void)
     enet_address_set_host(&address, join_host);
     address.port = (enet_uint16)join_port;
 
-    peer = enet_host_connect(enet_host, &address, 2, 0);
+    peer = enet_host_connect(enet_host, &address, TIG_NET_NUM_CHANNELS, 0);
     if (peer == NULL) {
         tig_debug_printf("tig_net: connect to %s:%d failed\n", join_host, join_port);
         enet_host_destroy(enet_host);
@@ -588,6 +599,7 @@ void tig_net_pump(void)
             event.peer->data = NULL;
             if (!is_host) {
                 active = false;
+                lost_host = true;
             }
             break;
         }
@@ -600,6 +612,11 @@ void tig_net_pump(void)
     if (tig_net_send_pending_flush && enet_host != NULL) {
         enet_host_flush(enet_host);
         tig_net_send_pending_flush = false;
+    }
+    if (lost_host) {
+        /* Review M1: free the dead client host so a later Join works. */
+        lost_host = false;
+        tig_net_reset_connection();
     }
     tig_net_stat_maybe_log();
 }
@@ -664,12 +681,22 @@ void tig_net_on_network_event(TigNetNetworkEventFunc func)
     network_event_func = func;
 }
 
-static void tig_net_send_raw(void* data, int size, int client_id, bool all, bool except)
+static void tig_net_send_raw_ex(void* data, int size, int client_id, bool all, bool except, bool pose)
 {
     ENetPacket* packet;
     int i;
+    int sent = 0;
+    enet_uint8 channel = pose ? TIG_NET_CHANNEL_POSE : TIG_NET_CHANNEL_APP;
+    enet_uint32 flags = pose ? 0 : ENET_PACKET_FLAG_RELIABLE;
 
     if (!tig_net_is_active() || data == NULL || size <= 0 || size > TIG_NET_MAX_PACKET) {
+        return;
+    }
+
+    /* Review L3: one packet for every recipient; ENet takes a reference per
+       successful send, and a failed send leaves it ours to free. */
+    packet = enet_packet_create(data, (size_t)size, flags);
+    if (packet == NULL) {
         return;
     }
 
@@ -689,27 +716,51 @@ static void tig_net_send_raw(void* data, int size, int client_id, bool all, bool
                     continue;
                 }
             }
-
-            packet = enet_packet_create(data, (size_t)size, ENET_PACKET_FLAG_RELIABLE);
-            if (packet != NULL) {
-                enet_peer_send(clients[i].peer, TIG_NET_CHANNEL_APP, packet);
+            if (enet_peer_send(clients[i].peer, channel, packet) == 0) {
+                sent++;
             }
         }
+    } else if (clients[0].peer != NULL) {
+        /* Clients only talk to host. */
+        if (enet_peer_send(clients[0].peer, channel, packet) == 0) {
+            sent++;
+        }
+    }
+
+    if (packet->referenceCount == 0) {
+        enet_packet_destroy(packet);
+    }
+    if (sent > 0) {
         /* Batched: flushed once per frame in tig_net_pump (was per packet). */
         tig_net_send_pending_flush = true;
         tig_net_stat_count(tig_net_stat_sent, data, (size_t)size);
-    } else {
-        /* Clients only talk to host. */
-        if (clients[0].peer == NULL) {
-            return;
-        }
-        packet = enet_packet_create(data, (size_t)size, ENET_PACKET_FLAG_RELIABLE);
-        if (packet != NULL) {
-            enet_peer_send(clients[0].peer, TIG_NET_CHANNEL_APP, packet);
-            tig_net_send_pending_flush = true;
-            tig_net_stat_count(tig_net_stat_sent, data, (size_t)size);
-        }
     }
+}
+
+static void tig_net_send_raw(void* data, int size, int client_id, bool all, bool except)
+{
+    tig_net_send_raw_ex(data, size, client_id, all, except, false);
+}
+
+void tig_net_send_pose_all(void* data, int size)
+{
+    tig_net_send_raw_ex(data, size, -1, true, false, true);
+}
+
+void tig_net_send_pose_except(void* data, int size, int client_id)
+{
+    tig_net_send_raw_ex(data, size, client_id, false, true, true);
+}
+
+void tig_net_set_remote_slot_present(int slot, bool present)
+{
+    /* Client bookkeeping only (review H3): other clients' slots exist so
+       their PCs resolve; clients never send to them (only to slot 0). */
+    if (is_host || slot <= 0 || slot >= TIG_NET_MAX_PLAYERS || slot == local_slot) {
+        return;
+    }
+    clients[slot].active = present;
+    clients[slot].peer = NULL;
 }
 
 void tig_net_send_app_all(void* data, int size)

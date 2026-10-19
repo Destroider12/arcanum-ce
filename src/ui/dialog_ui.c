@@ -132,6 +132,24 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
      * other players' followers, citizens — just barks.
      */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
+    if (tig_net_is_coop_enabled()) {
+        char npc_name[256];
+
+        npc_name[0] = '\0';
+        if (npc_obj != OBJ_HANDLE_NULL) {
+            object_examine(npc_obj, pc_obj, npc_name);
+        }
+        tig_debug_printf("DialogUI: start pc_local=%d npc='%s' script=%d line=%d policy=%d\n",
+            player_is_local_pc_obj(pc_obj) ? 1 : 0, npc_name, script_num, script_line, (int)talk_policy);
+    }
+    /* Coop host: a remote client's PC never runs dialog here — its owner
+       runs its own (merchant-only) dialog. Doing it here would also take
+       the single dialog entry from the host's own conversation. */
+    if (tig_net_is_coop_enabled() && tig_net_is_host() && !player_is_local_pc_obj(pc_obj)
+        && pc_obj != OBJ_HANDLE_NULL && obj_field_int32_get(pc_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        tig_debug_printf("DialogUI: remote PC dialog skipped on host\n");
+        return;
+    }
     if (talk_policy == COOP_TALK_BLOCK) {
         return;
     }
@@ -284,6 +302,16 @@ void sub_5679C0(DialogUiEntry* entry)
 // 0x567A10
 bool dialog_ui_is_local_pc_in_dialog(void)
 {
+    /* Coop (PT11: host Esc menu had no Save/Load): a dialog flag left set
+       after the dialog window went away — e.g. a remote PC's dialog reusing
+       the single entry — must not lock the menu forever. */
+    if (dialog_ui_local_pc_dialog_active
+        && tig_net_is_coop_enabled()
+        && intgame_mode_get() != INTGAME_MODE_DIALOG
+        && intgame_mode_get() != INTGAME_MODE_BARTER) {
+        tig_debug_printf("DialogUI: stale local dialog flag cleared (mode %d)\n", (int)intgame_mode_get());
+        dialog_ui_local_pc_dialog_active = false;
+    }
     return dialog_ui_local_pc_dialog_active;
 }
 

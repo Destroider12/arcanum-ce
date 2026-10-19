@@ -2429,6 +2429,17 @@ bool mainmenu_ui_load_game_execute(int btn)
 
     (void)btn;
 
+    /* Coop Lite: the world belongs to the host; a client loading a save
+       would fork the session (PT11 #3). */
+    if (!coop_lite_can_save_world()) {
+        UiMessage ui_message;
+
+        ui_message.type = UI_MSG_TYPE_EXCLAMATION;
+        ui_message.str = "Only the host can load the campaign.";
+        ui_display_msg(&ui_message);
+        return false;
+    }
+
     index = main_menu_window_info[mainmenu_ui_window_type]->selected_index;
     if (index == -1) {
         return false;
