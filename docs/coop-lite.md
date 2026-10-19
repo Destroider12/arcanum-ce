@@ -974,3 +974,66 @@ sub-tile `OBJ_F_OFFSET_X/Y`.
 **Host: rapid dialog-option clicks sometimes stall.** The host dialog path has no coop
 code (`tc_handle_message` / `dialog_ui` unchanged from SP: repeat-flagged button-down
 events are ignored by design). Not coop-related; left as is.
+
+## 22. Playtest 8 fixes and the merchant-only talk rule
+
+**Client talk rule (design change).** A coop client opens a dialog window only
+with merchants: NPCs with a substitute (shop) inventory, a buy-object script,
+or an inventory source with a buy list (Ristezze, Dernholm and other merchant
+quest-givers included). Their dialog is the reduced one: barter and neutral lines,
+with quest/story/follower options blanked by the per-node filter, and the executor
+still skips host-owned actions as a safety net. Every other NPC — quest givers,
+story NPCs, citizens — answers with its own generic farewell bark
+(`dialog_copy_npc_farewell_msg`, race/gender aware), falling back to "I have no
+business with you. Talk to your leader." Another player's follower (Virgil
+following the host) says "Talk to your leader." Esc always closes a client's
+dialog. Policy: `coop_lite_classify_client_talk(is_merchant, follows_other_player)`
+→ `COOP_TALK_ALLOW` / `COOP_TALK_BARK` / `COOP_TALK_BARK_FOLLOWER`.
+
+**Virgil still opened his intro on the client.** Root causes: (1) the follower
+link only existed on the host; `critter_follow` is not replicated, and Virgil joined
+before the client connected, so the client's copy had no leader. (2)
+`coop_lite_can_talk` still tested `tig_net_is_active()`, which is false during the
+client's suspended talk. Fixes: suspension-aware `can_talk`; the follower check also
+scans every slot PC's follower list; new `PACKET_COOP_FOLLOWERS` (133): the host sends
+the follower table (NPC OID → leader slot) on change and every 5 s, and the client
+applies it with `critter_follow(…, force)` / `critter_disband` under
+`multiplayer_lock` + local suspension.
+
+**Monsters invisible; client PC drained to 0 HP and stuck "Dead".** Root cause:
+NPC anim goals are not replicated (no Packet5/7 path), so client NPCs never moved;
+wolves attacked the client PC on the host only, and only the HP field reached the
+client. Fixes:
+- `PACKET_COOP_NPC_POS` (134): every 100 ms the host batches NPCs in the screen
+  vicinity of each PC (position, offsets, art id = animation frame, dead flag, HP
+  damage), sending only changed entries plus a 2 s keyframe, at most 24 per packet. The
+  client applies them, so walking, attacks and deaths show up.
+- Damage floats ("-N") on the client for NPCs and slot PCs when HP damage rises.
+- Fallen client PC: the client shows the fall-down pose and "You have fallen! You will
+  be revived beside the party leader." The host ignores the dead PC's own PC_POS and,
+  after `COOP_LITE_REVIVE_DELAY_MS` (8 s), revives it at 1/3 HP next to the host
+  (FORCE PC_POS). The client then stands up ("Revived.").
+
+**Host PC shirtless on the client, client gold 0.** Root cause: on a client
+`sub_463E20` only sends a request, and the client never runs SP's shop step
+(`item_generate_inventory`). `coop_lite_generate_start_inventory` now runs
+`item_generate_inventory` and wields the best items locally (suspended) for the client's
+own premade before CHAR_OFFER and for every coop-created PC on both sides. Items are
+peer-local (not OID-matched). The host PC_POS also resends a keyframe every second, so a
+late-loading client gets the host PC's current art.
+
+**Camera lag while running.** `location_origin_scroll` refuses a diagonal scroll
+that would expose an off-map corner, so the view stayed put. On a refused scroll the
+follow now retries each axis separately, and it recentres as soon as the PC leaves the
+visible area (380×220 px from centre) instead of at 1000×700.
+
+**Quit Game → New Game started single-player.** Quitting resets the network
+connection. Opening New Game on a `-join` client now reconnects first
+(`coop_lite_client_reconnect`, `tig_net_join_configured`), so the menu offers the
+character to the host again. If the host is unreachable, New Game stays single-player.
+On the host, a disconnecting player's PC is now removed (`coop_lite_host_remove_left_pc`)
+instead of lingering as an unbound corpse.
+
+**Virgil not following the host after the client left:** nothing in the logs.
+Host-side follower AI is unchanged single-player code, and the walk was short (about 6
+tiles), which may be inside the follow distance. Re-check with a longer walk.
