@@ -1183,6 +1183,63 @@ static int test_char_rx(void)
     return 0;
 }
 
+static int test_parked_save(void)
+{
+    static uint8_t buf[COOP_PARKED_SAVE_MAX];
+    unsigned char oid_a[24];
+    unsigned char oid_b[24];
+    unsigned char extra_oid[1][24];
+    unsigned char out[24];
+    uint64_t extra_hash[1] = { 0x2222 };
+    int size;
+
+    memset(oid_a, 0xA1, sizeof(oid_a));
+    memset(oid_b, 0xB2, sizeof(oid_b));
+    memcpy(extra_oid[0], oid_b, 24);
+    coop_lite_parked_reset();
+    coop_lite_parked_put(0x1111, oid_a);
+    size = coop_lite_parked_serialize(buf, (int)sizeof(buf), extra_hash,
+        (const unsigned char(*)[24])extra_oid, 1);
+    if (size != 8 + 2 * COOP_PARKED_SAVE_ENTRY || coop_lite_parked_count() != 1) {
+        fprintf(stderr, "parked save: size %d / live table changed\n", size);
+        return 1;
+    }
+    if (coop_lite_parked_serialize(buf, 16, NULL, NULL, 0) != -1) {
+        fprintf(stderr, "parked save: small buffer accepted\n");
+        return 1;
+    }
+    coop_lite_parked_reset();
+    if (!coop_lite_parked_deserialize(buf, size) || coop_lite_parked_count() != 2
+        || !coop_lite_parked_has_oid(oid_b)
+        || !coop_lite_parked_take(0x2222, out) || memcmp(out, oid_b, 24) != 0
+        || !coop_lite_parked_take(0x1111, out) || memcmp(out, oid_a, 24) != 0) {
+        fprintf(stderr, "parked save: round trip\n");
+        return 1;
+    }
+    /* Malformed: wrong length, wrong magic, too many entries. */
+    if (coop_lite_parked_deserialize(buf, size - 1) || coop_lite_parked_count() != 0) {
+        fprintf(stderr, "parked save: short block accepted\n");
+        return 1;
+    }
+    buf[0] ^= 1;
+    if (coop_lite_parked_deserialize(buf, size)) {
+        fprintf(stderr, "parked save: bad magic accepted\n");
+        return 1;
+    }
+    buf[0] ^= 1;
+    {
+        uint32_t big = COOP_PARKED_MAX + 1;
+
+        memcpy(buf + 4, &big, 4);
+        if (coop_lite_parked_deserialize(buf, 8 + (int)big * COOP_PARKED_SAVE_ENTRY)) {
+            fprintf(stderr, "parked save: oversize count accepted\n");
+            return 1;
+        }
+    }
+    coop_lite_parked_reset();
+    return 0;
+}
+
 static int test_parked(void)
 {
     unsigned char zero[16] = { 0 };
@@ -1369,6 +1426,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_char_rx() != 0) {
+        return 1;
+    }
+    if (test_parked_save() != 0) {
         return 1;
     }
     if (!coop_lite_packet_allowed(PACKET_COOP_CHAR_BUNDLE, true, 1)

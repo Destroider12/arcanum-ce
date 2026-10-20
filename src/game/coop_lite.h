@@ -433,6 +433,27 @@ bool coop_lite_parked_put(uint64_t hash, const unsigned char oid[24]);
 /* Removes and returns the entry. */
 bool coop_lite_parked_take(uint64_t hash, unsigned char oid_out[24]);
 int coop_lite_parked_count(void);
+bool coop_lite_parked_has_oid(const unsigned char oid[24]);
+
+/*
+ * Parked PCs in the host save: an optional block after the multiplayer
+ * section ('CPK1', count, {u64 token hash, 24-byte OID}...). Older saves have
+ * none; the loader peeks and rewinds. Players connected at save time are
+ * stored too, so after a load everyone gets their own PC back by token.
+ */
+#define COOP_PARKED_SAVE_MAGIC 0x314B5043u
+#define COOP_PARKED_SAVE_ENTRY 32
+#define COOP_PARKED_SAVE_MAX (8 + COOP_PARKED_MAX * COOP_PARKED_SAVE_ENTRY)
+/* Live table plus extra (hash, oid) pairs, without changing the table.
+   Returns bytes written, -1 if cap is too small. */
+int coop_lite_parked_serialize(uint8_t* out, int cap, const uint64_t* extra_hash,
+    const unsigned char (*extra_oid)[24], int num_extra);
+/* Replaces the table; false (table cleared) on a malformed block. */
+bool coop_lite_parked_deserialize(const uint8_t* in, int len);
+
+struct TigFile;
+bool coop_lite_save_appendix(struct TigFile* stream);
+bool coop_lite_load_appendix(struct TigFile* stream);
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and

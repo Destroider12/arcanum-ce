@@ -529,7 +529,8 @@ bool multiplayer_save(TigFile* stream)
         return false;
     }
 
-    return true;
+    /* Coop: player PCs kept for rejoin (optional trailing block). */
+    return coop_lite_save_appendix(stream);
 }
 
 // 0x49CA20
@@ -581,7 +582,7 @@ bool mutliplayer_load(GameLoadInfo* load_info)
         return false;
     }
 
-    return true;
+    return coop_lite_load_appendix(load_info->stream);
 }
 
 // 0x49CB50

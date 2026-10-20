@@ -1281,6 +1281,10 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
                 stat_base_get(pc, stat));
         }
     }
+    if (getenv("ARCANUM_COOP_NO_CHAR_BUNDLE") != NULL && getenv("ARCANUM_COOP_NO_CHAR_BUNDLE")[0] == '1') {
+        tig_debug_printf("CoopLite: v2 offer: disabled (ARCANUM_COOP_NO_CHAR_BUNDLE)\n");
+        return;
+    }
     if (!coop_lite_build_char_bundle(pc, &buf)) {
         tig_debug_printf("CoopLite: v2 offer: no bundle (proto offer only)\n");
         return;
@@ -2199,7 +2203,7 @@ static bool coop_lite_host_spawn_client(int slot)
             parked = obj_pool_perm_lookup(parked_oid);
             if (parked != OBJ_HANDLE_NULL && parked != host_pc
                 && obj_field_int32_get(parked, OBJ_F_TYPE) == OBJ_TYPE_PC
-                && coop_lite_slot_of_obj(parked) < 0
+                && (coop_lite_slot_of_obj(parked) < 0 || coop_lite_slot_of_obj(parked) == slot)
                 && (obj_field_int32_get(parked, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
                 /* The same player is back: their parked PC, next to us. */
                 client_oid = parked_oid;
@@ -2220,8 +2224,16 @@ static bool coop_lite_host_spawn_client(int slot)
         && !objid_is_equal(obj_get_id(client_obj), client_oid)) {
         /* A loaded save bound this slot to another character (other session
            or a re-picked PC): the player's own PC wins, the stale one goes. */
-        tig_debug_printf("CoopLite: slot %d was bound to another PC — replacing it\n", slot);
-        object_destroy(client_obj);
+        ObjectID stale = obj_get_id(client_obj);
+
+        if (coop_lite_parked_has_oid((const unsigned char*)&stale)) {
+            /* Another player's PC from the save, parked: it waits for them. */
+            tig_debug_printf("CoopLite: slot %d was bound to a parked PC — leaving it parked\n", slot);
+            object_flags_set(client_obj, OF_OFF);
+        } else {
+            tig_debug_printf("CoopLite: slot %d was bound to another PC — replacing it\n", slot);
+            object_destroy(client_obj);
+        }
         client_obj = OBJ_HANDLE_NULL;
     }
     if (client_obj == OBJ_HANDLE_NULL && client_oid.type != OID_TYPE_NULL) {
@@ -2259,6 +2271,8 @@ static bool coop_lite_host_spawn_client(int slot)
         spawn_loc = obj_field_int64_get(client_obj, OBJ_F_LOCATION);
     }
 
+    /* A PC parked by a load (or a leave) is back in the world. */
+    object_flags_unset(client_obj, OF_OFF);
     multiplayer_bind_slot_pc(slot, client_obj);
     multiplayer_bind_slot_pc(0, host_pc);
     if (coop_reload_raise[slot]) {
@@ -2608,6 +2622,7 @@ static unsigned int coop_dev_wolf_ms[8];
  * client PC (10 s after it is bound, again 45 s after the last one died).
  */
 static bool coop_dev_save_request;
+static void coop_lite_dev_items_log(int64_t pc, const char* step);
 static bool coop_dev_save_done;
 static unsigned int coop_dev_save_ms;
 
@@ -2774,6 +2789,27 @@ static void coop_lite_dev_tick(unsigned int now_ms)
             coop_dev_save_request = true;
         }
     }
+    {
+        /* ARCANUM_DEV_COOP_LOAD=N (host, with COOP_SAVE=1): N s after the
+           dev save, load it back (the party-reload path, whoever is
+           connected then). */
+        static bool coop_dev_load_done;
+        const char* load_env = getenv("ARCANUM_DEV_COOP_LOAD");
+
+        if (!coop_dev_load_done && coop_dev_save_done && coop_dev_save_ms != 0
+            && load_env != NULL && atoi(load_env) > 0
+            && coop_lite_interval_elapsed(coop_dev_save_ms, now_ms, (unsigned int)atoi(load_env) * 1000u)) {
+            coop_dev_load_done = true;
+            snprintf(coop_reload_request_name, sizeof(coop_reload_request_name), "%s", "Slot9990Coop dev save");
+            coop_reload_request_valid = true;
+            coop_reload_resync_pending = true;
+            for (slot = 1; slot < 8; slot++) {
+                coop_reload_raise[slot] = tig_net_client_is_active(slot);
+            }
+            tig_debug_printf("CoopLite: dev: loading Slot9990\n");
+            coop_lite_dev_items_log(player_get_local_pc_obj(), "host PC before dev load");
+        }
+    }
 
     env = getenv("ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT");
     if (env == NULL || (env[0] != '1' && env[0] != '2' && env[0] != '3')) {
@@ -2917,7 +2953,8 @@ static void coop_lite_dev_items_log(int64_t pc, const char* step)
             n2[0] = '\0';
             object_examine(items[i], pc, n2);
             objid_id_to_str(ids, id);
-            tig_debug_printf("CoopLite: dev items:   %s @%d %s flags=0x%x iflags=0x%x\n", n2, item_inventory_location_get(items[i]), ids,
+            tig_debug_printf("CoopLite: dev items:   %s @%d %s h=%llx flags=0x%x iflags=0x%x\n", n2, item_inventory_location_get(items[i]), ids,
+                (unsigned long long)items[i],
                 (unsigned int)obj_field_int32_get(items[i], OBJ_F_FLAGS), (unsigned int)obj_field_int32_get(items[i], OBJ_F_ITEM_FLAGS));
         }
         item_list_free(items);
@@ -6612,6 +6649,155 @@ bool coop_lite_parked_take(uint64_t hash, unsigned char oid_out[24])
     }
     return false;
 }
+
+bool coop_lite_parked_has_oid(const unsigned char oid[24])
+{
+    int i;
+
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        if (coop_parked[i].used && memcmp(coop_parked[i].oid, oid, 24) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int coop_lite_parked_serialize(uint8_t* out, int cap, const uint64_t* extra_hash,
+    const unsigned char (*extra_oid)[24], int num_extra)
+{
+    CoopParked saved[COOP_PARKED_MAX];
+    uint32_t magic = COOP_PARKED_SAVE_MAGIC;
+    uint32_t count = 0;
+    int off = 8;
+    int i;
+
+    if (out == NULL || cap < COOP_PARKED_SAVE_MAX) {
+        return -1;
+    }
+    memcpy(saved, coop_parked, sizeof(saved));
+    for (i = 0; i < num_extra; i++) {
+        coop_lite_parked_put(extra_hash[i], extra_oid[i]);
+    }
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        if (!coop_parked[i].used) {
+            continue;
+        }
+        memcpy(out + off, &coop_parked[i].hash, 8);
+        memcpy(out + off + 8, coop_parked[i].oid, 24);
+        off += COOP_PARKED_SAVE_ENTRY;
+        count++;
+    }
+    memcpy(coop_parked, saved, sizeof(saved));
+    memcpy(out, &magic, 4);
+    memcpy(out + 4, &count, 4);
+    return off;
+}
+
+bool coop_lite_parked_deserialize(const uint8_t* in, int len)
+{
+    uint32_t magic;
+    uint32_t count;
+    uint32_t i;
+
+    coop_lite_parked_reset();
+    if (in == NULL || len < 8) {
+        return false;
+    }
+    memcpy(&magic, in, 4);
+    memcpy(&count, in + 4, 4);
+    if (magic != COOP_PARKED_SAVE_MAGIC || count > COOP_PARKED_MAX
+        || len != 8 + (int)count * COOP_PARKED_SAVE_ENTRY) {
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        uint64_t hash;
+
+        memcpy(&hash, in + 8 + i * COOP_PARKED_SAVE_ENTRY, 8);
+        if (!coop_lite_parked_put(hash, in + 8 + i * COOP_PARKED_SAVE_ENTRY + 8)) {
+            coop_lite_parked_reset();
+            return false;
+        }
+    }
+    return true;
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+bool coop_lite_save_appendix(TigFile* stream)
+{
+    uint8_t buf[COOP_PARKED_SAVE_MAX];
+    uint64_t hash[8];
+    unsigned char oid[8][24];
+    int n = 0;
+    int size;
+    int slot;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_host()) {
+        return true;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        ObjectID id;
+
+        if (coop_slot_token_hash[slot] == 0 || pc == OBJ_HANDLE_NULL
+            || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+            continue;
+        }
+        id = obj_get_id(pc);
+        hash[n] = coop_slot_token_hash[slot];
+        memcpy(oid[n], &id, 24);
+        n++;
+    }
+    size = coop_lite_parked_serialize(buf, (int)sizeof(buf), hash, (const unsigned char(*)[24])oid, n);
+    if (size < 0 || tig_file_fwrite(buf, (size_t)size, 1, stream) != 1) {
+        return false;
+    }
+    tig_debug_printf("CoopLite: save: %d player PC(s) kept for rejoin\n", (size - 8) / COOP_PARKED_SAVE_ENTRY);
+    return true;
+}
+
+bool coop_lite_load_appendix(TigFile* stream)
+{
+    uint8_t buf[COOP_PARKED_SAVE_MAX];
+    uint32_t count;
+    int pos;
+    int i;
+
+    coop_lite_parked_reset();
+    pos = tig_file_ftell(stream);
+    if (tig_file_fread(buf, 8, 1, stream) != 1) {
+        tig_file_fseek(stream, pos, SEEK_SET);
+        return true;
+    }
+    memcpy(&count, buf + 4, 4);
+    if (*(uint32_t*)buf != COOP_PARKED_SAVE_MAGIC) {
+        /* Older save: the next module's data. */
+        tig_file_fseek(stream, pos, SEEK_SET);
+        return true;
+    }
+    if (count > COOP_PARKED_MAX
+        || (count > 0 && tig_file_fread(buf + 8, (size_t)count * COOP_PARKED_SAVE_ENTRY, 1, stream) != 1)
+        || !coop_lite_parked_deserialize(buf, 8 + (int)count * COOP_PARKED_SAVE_ENTRY)) {
+        return false;
+    }
+    /* Out of the world until their players come back. */
+    for (i = 0; i < COOP_PARKED_MAX; i++) {
+        int64_t pc;
+        ObjectID id;
+
+        if (!coop_parked[i].used) {
+            continue;
+        }
+        memcpy(&id, coop_parked[i].oid, sizeof(id));
+        pc = obj_pool_perm_lookup(id);
+        if (pc != OBJ_HANDLE_NULL && obj_field_int32_get(pc, OBJ_F_TYPE) == OBJ_TYPE_PC
+            && pc != player_get_local_pc_obj()) {
+            object_flags_set(pc, OF_OFF);
+        }
+    }
+    tig_debug_printf("CoopLite: load: %d player PC(s) parked for rejoin\n", (int)count);
+    return true;
+}
+#endif
 
 int coop_lite_parked_count(void)
 {
