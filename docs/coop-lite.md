@@ -1290,3 +1290,21 @@ Virgil behind. The dev hook causes this; it is not a coop bug.
   - `ARCANUM_DEV_EXPORT_CHAR=1`: export twice and re-parse.
   - `ARCANUM_DEV_CLIENT_COMBAT=1`: combat-mode toggles.
   - `ARCANUM_DEV_CLIENT_ITEMS=1`: drop, pickup and equip round trip. On the host it gives the client a dagger.
+
+## 27. PT13/PT14 follow-ups: v2 offer, parked saves, world state (§7)
+
+- **v2 character offer.** Before CHAR_OFFER the client sends its PC and items as a chunked bundle (`CHAR_BUNDLE` 141, ≤ 64 KB). The host validates every blob plus `coop_lite_char_plausible`, then builds the client PC from it, so a custom character (stats, skills, spells, inventory) carries over. Kill switch: `ARCANUM_COOP_NO_CHAR_BUNDLE=1`, which falls back to the proto plus the host's starting kit.
+- **Parked PCs in the host save.** After the multiplayer block, a `CPK1` appendix stores token hash → PC OID for parked PCs and connected slots. On load those PCs are restored as OF_OFF and parked. A rejoining client with the same token gets its PC back, items included. Old saves have no appendix and still load.
+- **Party reload hang fixed.** An open dialog that ended during `map_clear_objects` led to a validator failure, and the host sat at the quit prompt. The dialog is now ended before the reload.
+- **Bags.** Vanilla Arcanum has no carryable containers, so there is nothing to sync. Known gap: a key added to an existing keyring is not resynced, because INVEN_SYNC does not refresh the fields of items the client already has.
+- **§7 world state (subset).**
+  - When it asks: the client sends `WORLD_REQ` 142 1.5 s after each map load (key = map + map gen) and every 30 s after that.
+  - What the host sends back: `WORLD_STATE` 143, in 64-entry chunks, covering everything within 24 tiles of that client's PC (at most one answer per 3 s per slot):
+    - Doors and windows: art frame, see/shoot-through and no-block flags, lock/jam/bust flags.
+    - Containers: frame, lock flags, and contents. Contents go as one INVEN_SYNC per container; unknown items arrive as blobs.
+    - NPCs: dead ones get HP damage plus the corpse frame; hidden ones get OF_OFF.
+    - Ground items: unknown ones are fetched as blobs, moved ones are moved.
+  - Pruning: on the last chunk, the client removes ground items within 18 tiles that the host no longer has.
+  - Not covered yet: objects outside the radius until the next refresh, revived NPCs, and stackable ground piles the client has never seen.
+  - Kill switch: `ARCANUM_COOP_NO_WORLD_STATE=1`.
+  - Dev hooks: `ARCANUM_DEV_WORLD_MUTATE=1` (host) opens a door, locks one, toggles a container lock and puts a dagger in it, kills an NPC, removes a ground item and drops a dagger, all silently 10 s in. `ARCANUM_COOP_WORLD_TRACE=1` logs both sides.
