@@ -30,6 +30,7 @@
 #include "game/timeevent.h"
 #include "ui/broadcast_ui.h"
 #include "ui/charedit_ui.h"
+#include "ui/dialog_ui.h"
 #include "ui/fate_ui.h"
 #include "ui/gameuilib.h"
 #include "ui/intgame.h"
@@ -3061,6 +3062,12 @@ bool mainmenu_ui_coop_reload_save(const char* name)
     strncpy(slot, name, 8);
     slot[8] = '\0';
     tig_debug_printf("MainMenu-UI: coop reload of %s\n", slot);
+    /* An open dialog ends while the world is torn down: its UI redraw then
+       locks sectors with half the objects gone, the object validator fails
+       and the game asks to quit (party reload hung behind that prompt). */
+    if (dialog_ui_is_local_pc_in_dialog()) {
+        dialog_ui_end_dialog(player_get_local_pc_obj(), 0);
+    }
     return sub_5432B0(slot);
 }
 
