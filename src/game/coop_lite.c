@@ -938,6 +938,10 @@ static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 #endif
 
+/* Rejoin: our parked PC (host copy) is on its way; until it replaces the
+   menu character, that one has no PC on the host to report for. */
+static bool coop_rejoin_pc_wanted;
+
 void coop_lite_session_reset(void)
 {
     int i;
@@ -945,6 +949,7 @@ void coop_lite_session_reset(void)
     for (i = 0; i < 8; i++) {
         coop_interp_reset(&coop_interp[i]);
     }
+    coop_rejoin_pc_wanted = false;
 
     coop_lite_follow_armed = false;
     coop_lite_pose_order_reset();
@@ -2326,7 +2331,13 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     }
     local_oid = obj_get_id(local_pc);
     if (memcmp(&local_oid, pkt->client_pc_oid, sizeof(local_oid)) != 0) {
-        tig_debug_printf("CoopLite: WARNING local PC OID differs from host companion OID\n");
+        if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
+            /* Expected: the menu character stands in until the parked PC
+               blob replaces it (coop_lite_client_request_own_pc). */
+            tig_debug_printf("CoopLite: rejoin: menu character stands in until our parked PC arrives\n");
+        } else {
+            tig_debug_printf("CoopLite: WARNING local PC OID differs from host companion OID\n");
+        }
     }
     multiplayer_bind_slot_pc(pkt->client_slot, local_pc);
 
@@ -4195,7 +4206,8 @@ void coop_lite_ping(unsigned int now_ms)
             coop_last_pc_pos_ms = now_ms;
             obj = player_get_local_pc_obj();
             /* Not while a party teleport is in flight (review M2). */
-            if (obj != OBJ_HANDLE_NULL && !critter_is_dead(obj) && !coop_follow_carry_pending) {
+            if (obj != OBJ_HANDLE_NULL && !critter_is_dead(obj) && !coop_follow_carry_pending
+                && !coop_rejoin_pc_wanted) {
                 coop_lite_fill_pc_pos(&pkt, sub_529520(), obj);
                 /* Unreliable channel: resend once a second even unchanged,
                    so a lost final pose cannot stick. */
@@ -4707,6 +4719,13 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                 e->inventory_location = item_inventory_location_get(items[idx]);
                 e->reserved = 0;
                 e->item_flags = (unsigned int)obj_field_int32_get(items[idx], OBJ_F_ITEM_FLAGS);
+                if (getenv("ARCANUM_DEV_INVEN_TRACE") != NULL) {
+                    char oid_str[40];
+
+                    objid_id_to_str(oid_str, obj_get_id(items[idx]));
+                    tig_debug_printf("CoopLite: dev: inven sync slot %d: %s loc %d proto %d\n",
+                        slot, oid_str, e->inventory_location, e->proto);
+                }
                 continue;
             }
             /* Owner's last chunk (possibly empty: it still carries gold). */
@@ -5514,7 +5533,6 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
 }
 
 /* Client rejoin: the host's copy of our PC replaces the local one. */
-static bool coop_rejoin_pc_wanted;
 static unsigned char coop_rejoin_pc_oid[24];
 
 static void coop_lite_client_request_own_pc(const unsigned char oid[24])
@@ -5650,9 +5668,20 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         flags = (unsigned int)obj_field_int32_get(item, OBJ_F_FLAGS);
         obj_field_int32_set(item, OBJ_F_FLAGS, (int)(flags | OF_INVENTORY));
         obj_field_handle_set(item, OBJ_F_ITEM_PARENT, owner);
-        if (IS_WEAR_INV_LOC(loc) ? item_wield_get(owner, loc) != OBJ_HANDLE_NULL
-                                 : owner == local_pc) {
-            if (item_check_insert(item, owner, &free_loc) == ITEM_CANNOT_OK) {
+        if (IS_WEAR_INV_LOC(loc)) {
+            if (item_wield_get(owner, loc) != OBJ_HANDLE_NULL
+                && item_check_insert(item, owner, &free_loc) == ITEM_CANNOT_OK) {
+                loc = free_loc;
+            }
+        } else if (owner == local_pc) {
+            /* The host's grid cell when it is free here (PT14: positions
+               were reshuffled), else any free one. */
+            static int slots[960];
+
+            memset(slots, 0, sizeof(slots));
+            item_inventory_slots_get(owner, slots);
+            if ((loc < 0 || loc >= 120 || !item_inventory_slots_has_room_for(item, owner, loc, slots))
+                && item_check_insert(item, owner, &free_loc) == ITEM_CANNOT_OK) {
                 loc = free_loc;
             }
         }
@@ -5667,8 +5696,16 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     }
     tig_net_local_suspend_end();
     multiplayer_unlock();
-    tig_debug_printf("CoopLite: obj blob: %s '%s' (%d bytes)\n",
-        item != OBJ_HANDLE_NULL ? "loaded" : "rejected", name, pkt->size);
+    {
+        char oid_str[40];
+        ObjectID oid;
+
+        memcpy(&oid, pkt->oid, sizeof(oid));
+        objid_id_to_str(oid_str, oid);
+        tig_debug_printf("CoopLite: obj blob: %s '%s' %s loc %d->%d (%d bytes)\n",
+            item != OBJ_HANDLE_NULL ? "loaded" : "rejected", name, oid_str, pkt->inventory_location,
+            item != OBJ_HANDLE_NULL ? item_inventory_location_get(item) : -1, pkt->size);
+    }
     if (item != OBJ_HANDLE_NULL) {
         /* PT13: an open inventory window showed an empty grid for items
            that arrived after it was drawn. */
@@ -6269,16 +6306,62 @@ static int64_t coop_lite_dev_pick_item(int64_t owner, int64_t seller, int64_t bu
 }
 
 /* Dev (ARCANUM_DEV_OPEN_INVEN=1, client): open our own inventory window
-   20 s into the session (for a screenshot of the synced grid). */
+   20 s into the session (for a screenshot of the synced grid). =2: also,
+   4 s later, drop the first backpack item the way the window's drop box
+   does (Packet81 flag 0x02). */
 static unsigned int coop_dev_open_inven_ms;
 static bool coop_dev_open_inven_done;
+static bool coop_dev_dropbox_done;
 
 static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
 {
     const char* env = getenv("ARCANUM_DEV_OPEN_INVEN");
     int64_t pc = player_get_local_pc_obj();
 
-    if (coop_dev_open_inven_done || env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
+    if (env == NULL || (env[0] != '1' && env[0] != '2') || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_dev_open_inven_done && env[0] == '2' && !coop_dev_dropbox_done
+        && coop_lite_interval_elapsed(coop_dev_open_inven_ms, now_ms, 24000u)) {
+        int64_t* items;
+        int64_t pick = OBJ_HANDLE_NULL;
+        int cnt;
+        int i;
+
+        coop_dev_dropbox_done = true;
+        cnt = item_list_get(pc, &items);
+        for (i = 0; i < cnt && pick == OBJ_HANDLE_NULL; i++) {
+            if (!coop_lite_is_stackable(items[i]) && !IS_WEAR_INV_LOC(item_inventory_location_get(items[i]))) {
+                pick = items[i];
+            }
+        }
+        item_list_free(items);
+        if (pick != OBJ_HANDLE_NULL) {
+            Packet81 pkt;
+            int depth;
+
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = 81;
+            pkt.field_8 = 0x02;
+            pkt.field_10 = obj_get_id(pick);
+            pkt.field_28 = obj_get_id(pc);
+            pkt.field_40.type = OID_TYPE_NULL;
+            pkt.field_58 = -1;
+            pkt.field_5C = -1;
+            pkt.field_60 = 1;
+            pkt.field_68 = sub_529520();
+            pkt.field_70.type = OID_TYPE_NULL;
+            pkt.field_88.type = OID_TYPE_NULL;
+            pkt.field_A0 = obj_get_id(pc);
+            depth = tig_net_local_suspend_pause();
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+            tig_net_local_suspend_resume(depth);
+            tig_debug_printf("CoopLite: dev: drop box: dropping one item (%d carried)\n",
+                obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
+        }
+        return;
+    }
+    if (coop_dev_open_inven_done) {
         return;
     }
     if (coop_dev_open_inven_ms == 0) {
@@ -6294,9 +6377,42 @@ static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
     coop_inven_open_hook(pc, OBJ_HANDLE_NULL, 0 /* INVEN_UI_MODE_INVENTORY */);
 }
 
+/* Dev (ARCANUM_DEV_CLIENT_STEP=1, client): 20 s into the session move our
+   own PC 3 tiles east locally, as walking would; the host's census must
+   follow (PC_POS ownership, e.g. after a rejoin). */
+static unsigned int coop_dev_step_ms;
+static bool coop_dev_step_done;
+
+static void coop_lite_client_dev_step_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_CLIENT_STEP");
+    int64_t pc = player_get_local_pc_obj();
+    int64_t loc;
+
+    if (coop_dev_step_done || env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (coop_dev_step_ms == 0) {
+        coop_dev_step_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_step_ms, now_ms, 20000u)) {
+        return;
+    }
+    coop_dev_step_done = true;
+    loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    loc = location_make(LOCATION_GET_X(loc) + 3, LOCATION_GET_Y(loc));
+    tig_net_local_suspend_begin();
+    sub_43E770(pc, loc, 0, 0);
+    tig_net_local_suspend_end();
+    tig_debug_printf("CoopLite: dev: stepped own PC to %d,%d\n",
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+}
+
 void coop_lite_client_dev_barter_tick(unsigned int now_ms)
 {
     coop_lite_client_dev_open_inven_tick(now_ms);
+    coop_lite_client_dev_step_tick(now_ms);
 
     const char* env;
     int64_t pc = player_get_local_pc_obj();
