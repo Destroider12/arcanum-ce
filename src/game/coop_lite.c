@@ -103,6 +103,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "tig/art.h"
 #include "game/portrait.h"
 #include "game/portal.h"
+#include "game/skill.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
 {
@@ -942,6 +943,39 @@ static void coop_lite_world_state_reset(void);
 static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms);
 #endif
 
+#ifndef COOP_LITE_TEST_STUBS
+/* Build fingerprint of a PC (base stats, skills, colleges): host and client
+   copies of one character must log the same value (PT15: compare the host's
+   bundle PC with what the client shows). */
+static unsigned int coop_lite_pc_build_hash(int64_t pc)
+{
+    static const int stats[] = {
+        STAT_STRENGTH, STAT_DEXTERITY, STAT_CONSTITUTION, STAT_BEAUTY,
+        STAT_INTELLIGENCE, STAT_PERCEPTION, STAT_WILLPOWER, STAT_CHARISMA,
+        STAT_LEVEL, STAT_UNSPENT_POINTS, STAT_RACE, STAT_GENDER,
+    };
+    unsigned int h = 2166136261u;
+    size_t i;
+    int v;
+
+#define COOP_HASH_INT(x) do { v = (x); h = (h ^ (unsigned int)v) * 16777619u; } while (0)
+    for (i = 0; i < sizeof(stats) / sizeof(stats[0]); i++) {
+        COOP_HASH_INT(stat_base_get(pc, stats[i]));
+    }
+    for (i = 0; i < BASIC_SKILL_COUNT; i++) {
+        COOP_HASH_INT(basic_skill_points_get(pc, (int)i));
+    }
+    for (i = 0; i < TECH_SKILL_COUNT; i++) {
+        COOP_HASH_INT(tech_skill_points_get(pc, (int)i));
+    }
+    for (i = 0; i < COLLEGE_COUNT; i++) {
+        COOP_HASH_INT(spell_college_level_get(pc, (int)i));
+    }
+#undef COOP_HASH_INT
+    return h;
+}
+#endif
+
 /* Rejoin: our parked PC (host copy) is on its way; until it replaces the
    menu character, that one has no PC on the host to report for. */
 static bool coop_rejoin_pc_wanted;
@@ -1278,14 +1312,33 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
         const char* env = getenv("ARCANUM_DEV_OFFER_STAT");
         int stat;
         int value;
+        int n;
 
-        if (env != NULL && sscanf(env, "%d:%d", &stat, &value) == 2
-            && stat >= STAT_STRENGTH && stat <= STAT_CHARISMA) {
-            tig_net_local_suspend_begin();
-            stat_base_set(pc, stat, value);
-            tig_net_local_suspend_end();
-            tig_debug_printf("CoopLite: dev: offer stat %d = %d (now %d)\n", stat, value,
-                stat_base_get(pc, stat));
+        /* "0:15" or a list "0:15,1:12,b3:2" (bN = basic skill N points). */
+        while (env != NULL && *env != '\0') {
+            if (*env == 'b' && sscanf(env + 1, "%d:%d%n", &stat, &value, &n) == 2
+                && stat >= 0 && stat < BASIC_SKILL_COUNT) {
+                tig_net_local_suspend_begin();
+                basic_skill_points_set(pc, stat, value);
+                tig_net_local_suspend_end();
+                tig_debug_printf("CoopLite: dev: offer skill %d = %d (now %d)\n", stat, value,
+                    basic_skill_points_get(pc, stat));
+                env += n + 1;
+            } else if (sscanf(env, "%d:%d%n", &stat, &value, &n) == 2
+                && stat >= STAT_STRENGTH && stat <= STAT_CHARISMA) {
+                tig_net_local_suspend_begin();
+                stat_base_set(pc, stat, value);
+                tig_net_local_suspend_end();
+                tig_debug_printf("CoopLite: dev: offer stat %d = %d (base now %d, effective %d)\n", stat, value,
+                    stat_base_get(pc, stat), stat_level_get(pc, stat));
+                env += n;
+            } else {
+                break;
+            }
+            if (*env != ',') {
+                break;
+            }
+            env++;
         }
     }
     if (getenv("ARCANUM_COOP_NO_CHAR_BUNDLE") != NULL && getenv("ARCANUM_COOP_NO_CHAR_BUNDLE")[0] == '1') {
@@ -1313,7 +1366,9 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
         tig_net_send_app_all(chunk, (int)offsetof(PacketCoopCharChunk, data) + len);
     }
     FREE(chunk);
-    tig_debug_printf("CoopLite: v2 offer: sent character bundle (%d bytes)\n", (int)buf.size);
+    tig_debug_printf("CoopLite: v2 offer: sent character bundle (%d bytes, ST %d base / %d effective, build=%08x)\n",
+        (int)buf.size, stat_base_get(pc, STAT_STRENGTH), stat_level_get(pc, STAT_STRENGTH),
+        coop_lite_pc_build_hash(pc));
     coop_char_bundle_free(&buf);
 }
 #endif
@@ -1993,7 +2048,7 @@ static void coop_lite_pc_census(bool destroy_unbound)
             count++;
             loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
             objid_id_to_str(oid_str, obj_get_id(obj));
-            tig_debug_printf("CoopLite: PC census: %s @%d,%d slot=%d%s dist=%d proto=%d flags=0x%x%s\n",
+            tig_debug_printf("CoopLite: PC census: %s @%d,%d slot=%d%s dist=%d proto=%d flags=0x%x build=%08x ST %d/%d%s\n",
                 oid_str,
                 (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
                 slot,
@@ -2001,6 +2056,8 @@ static void coop_lite_pc_census(bool destroy_unbound)
                 (int)location_dist(local_loc, loc),
                 sub_49B290(obj),
                 (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS),
+                coop_lite_pc_build_hash(obj),
+                stat_base_get(obj, STAT_STRENGTH), stat_level_get(obj, STAT_STRENGTH),
                 critter_is_dead(obj) ? " dead" : "");
         }
 
@@ -2169,8 +2226,9 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
     /* A fresh custom character has no kit yet: the host's, as for a
        proto offer. */
     coop_lite_generate_start_inventory(pc);
-    tig_debug_printf("CoopLite: v2 offer: slot %d character from bundle (level %d, ST %d, %d items, gold %d)\n",
+    tig_debug_printf("CoopLite: v2 offer: slot %d character from bundle (level %d, ST %d base / %d effective, build=%08x, %d items, gold %d)\n",
         slot, stat_level_get(pc, STAT_LEVEL), stat_base_get(pc, STAT_STRENGTH),
+        stat_level_get(pc, STAT_STRENGTH), coop_lite_pc_build_hash(pc),
         obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM), item_gold_get(pc));
     coop_char_rx_free(rx);
     return pc;
@@ -2934,7 +2992,8 @@ static void coop_lite_client_dev_combat_tick(unsigned int now_ms)
 
 /* P1-3 dev check (ARCANUM_DEV_CLIENT_ITEMS=1, client): 12 s in the world,
    then every 4 s: drop a backpack item (26), pick it up again (28), unwield
-   the weapon (28 to backpack), wield it again (28 to the weapon slot). */
+   the weapon (28 to backpack), wield it again (28 to the weapon slot).
+   =2: the pickup runs the click's AG_PICKUP_ITEM goal instead. */
 static unsigned int coop_dev_items_ms;
 static int coop_dev_items_stage;
 static ObjectID coop_dev_items_oid;
@@ -2983,8 +3042,8 @@ static void coop_lite_client_dev_items_tick(unsigned int now_ms)
         return;
     }
     env = getenv("ARCANUM_DEV_CLIENT_ITEMS");
-    if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
-        coop_dev_items_stage = env == NULL || env[0] != '1' ? 5 : coop_dev_items_stage;
+    if (env == NULL || (env[0] != '1' && env[0] != '2') || pc == OBJ_HANDLE_NULL) {
+        coop_dev_items_stage = env == NULL || (env[0] != '1' && env[0] != '2') ? 5 : coop_dev_items_stage;
         return;
     }
     if (coop_dev_items_ms == 0) {
@@ -3026,7 +3085,13 @@ static void coop_lite_client_dev_items_tick(unsigned int now_ms)
         tig_debug_printf("CoopLite: dev items: dropped item %s on the ground\n",
             item != OBJ_HANDLE_NULL && !item_parent(item, NULL) ? "is" : "is NOT");
         if (item != OBJ_HANDLE_NULL) {
-            item_transfer(item, pc); /* client: Packet28 */
+            if (env[0] == '2') {
+                /* =2: the way a click does it (AG_PICKUP_ITEM goal). */
+                tig_debug_printf("CoopLite: dev items: pickup goal %s\n",
+                    anim_goal_pickup_item(pc, item) ? "started" : "refused");
+            } else {
+                item_transfer(item, pc); /* client: Packet28 */
+            }
         }
         break;
     case 2:
@@ -7176,6 +7241,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     int n_container = 0;
     int n_npc = 0;
     int n_item = 0;
+    Uint64 t0;
 
     if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
         return;
@@ -7200,6 +7266,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     coop_world_req_host_seen[slot] = true;
     coop_world_req_host_ms[slot] = coop_obj_now_ms;
 
+    t0 = SDL_GetTicksNS();
     center = obj_field_int64_get(pc, OBJ_F_LOCATION);
     out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
     memset(out, 0, offsetof(PacketCoopWorldState, entries));
@@ -7301,8 +7368,8 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             coop_lite_host_send_inven_batch(slot, &containers[i], 1);
         }
     }
-    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items\n",
-        slot, n_portal, n_container, n_npc, n_item);
+    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items (%.2f ms)\n",
+        slot, n_portal, n_container, n_npc, n_item, (double)(SDL_GetTicksNS() - t0) / 1e6);
 #else
     (void)pkt;
 #endif
@@ -7337,6 +7404,9 @@ static void coop_lite_world_apply_flags(int64_t obj, unsigned int want, unsigned
 
 static const CoopWorldEntry* coop_world_want[COOP_WORLD_CHUNK];
 static int coop_world_want_cnt;
+static int coop_world_fetched; /* unknown ground items asked for, this snapshot */
+static bool coop_world_log_pending;
+static int coop_world_pruned;
 
 static void coop_lite_world_apply(const CoopWorldEntry* e)
 {
@@ -7477,6 +7547,7 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
     if ((pkt->flags & COOP_WORLD_F_FIRST) != 0) {
         coop_oid_set_reset(coop_world_seen);
         memset(coop_world_stats, 0, sizeof(coop_world_stats));
+        coop_world_fetched = 0;
         coop_world_rx_active = true;
         coop_world_rx_map = pkt->map;
     }
@@ -7537,21 +7608,28 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         }
 
         coop_world_rx_active = false;
-        tig_debug_printf("CoopLite: world state applied: portals %d, containers %d, npcs %d, ground items %d (%d listed), %d pruned\n",
-            coop_world_stats[COOP_WORLD_PORTAL], coop_world_stats[COOP_WORLD_CONTAINER],
-            coop_world_stats[COOP_WORLD_NPC], coop_world_stats[COOP_WORLD_GROUND_ITEM],
-            coop_world_seen->count, pruned);
+        coop_world_log_pending = true;
+        coop_world_pruned = pruned;
     }
     tig_net_local_suspend_end();
     multiplayer_unlock();
     for (i = 0; i < coop_world_want_cnt; i++) {
         if (coop_lite_client_want_ground_blob(coop_world_want[i]->oid, coop_world_want[i]->loc,
                 coop_world_want[i]->proto)) {
-            coop_world_stats[COOP_WORLD_GROUND_ITEM]++;
+            coop_world_fetched++;
         }
     }
     coop_world_want_cnt = 0;
     coop_lite_obj_req_flush();
+    if (coop_world_log_pending) {
+        /* Counts are changes: an item already where the host has it counts
+           as listed, not changed. */
+        coop_world_log_pending = false;
+        tig_debug_printf("CoopLite: world state applied: changed portals %d, containers %d, npcs %d, ground items %d; fetched %d; %d ground items listed; %d pruned\n",
+            coop_world_stats[COOP_WORLD_PORTAL], coop_world_stats[COOP_WORLD_CONTAINER],
+            coop_world_stats[COOP_WORLD_NPC], coop_world_stats[COOP_WORLD_GROUND_ITEM],
+            coop_world_fetched, coop_world_seen->count, coop_world_pruned);
+    }
 #else
     (void)pkt;
 #endif

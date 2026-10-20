@@ -7986,6 +7986,14 @@ bool sub_42AA70(int64_t source_obj, int64_t target_obj)
         return item_transfer(target_obj, source_obj);
     }
 
+    /* Coop: the host does not run this client's goals (PT15: clicking a
+       ground item did nothing). Ask the host (Packet28); it checks reach
+       and moves the item, then resyncs our inventory. */
+    if (coop_lite_client_drives_obj(source_obj)) {
+        tig_debug_printf("CoopLite: pickup request sent to host\n");
+        return item_transfer(target_obj, source_obj);
+    }
+
     return true;
 }
 
