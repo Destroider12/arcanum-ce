@@ -102,6 +102,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "tig/memory.h"
 #include "tig/art.h"
 #include "game/portrait.h"
+#include "game/portal.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
 {
@@ -936,6 +937,9 @@ static void (*coop_return_to_menu_hook)(void);
 static void coop_lite_obj_pending_reset(void);
 static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 static void coop_lite_client_interp_tick(unsigned int now_ms);
+static void coop_lite_client_world_req_tick(unsigned int now_ms);
+static void coop_lite_world_state_reset(void);
+static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms);
 #endif
 
 /* Rejoin: our parked PC (host copy) is on its way; until it replaces the
@@ -956,6 +960,7 @@ void coop_lite_session_reset(void)
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_obj_pending_reset();
     coop_lite_roster_reset();
+    coop_lite_world_state_reset();
 #endif
     coop_lite_pending_follow_valid = false;
     memset(&coop_lite_pending_follow, 0, sizeof(coop_lite_pending_follow));
@@ -1109,6 +1114,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
     case PACKET_COOP_OBJ_REQ: /* item blob request (P1-2) */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
+    case PACKET_COOP_WORLD_REQ: /* §7 world state request */
         return COOP_MP_PKT_HOST_RESOLVE;
     case 10: /* anim pose */
     case 58: /* cast spell */
@@ -1135,6 +1141,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_INVEN_SYNC: /* host inventory snapshot → client */
     case PACKET_COOP_ROSTER: /* other clients' PCs → client */
     case PACKET_COOP_OBJ_BLOB: /* item blob → client (P1-2) */
+    case PACKET_COOP_WORLD_STATE: /* §7 world state → client */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -1548,6 +1555,10 @@ size_t coop_lite_coop_packet_min_size(int type)
         return offsetof(PacketCoopObjBlob, data);
     case PACKET_COOP_CHAR_BUNDLE:
         return offsetof(PacketCoopCharChunk, data);
+    case PACKET_COOP_WORLD_REQ:
+        return sizeof(PacketCoopWorldReq);
+    case PACKET_COOP_WORLD_STATE:
+        return offsetof(PacketCoopWorldState, entries);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -4235,6 +4246,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_dev_export_tick(now_ms);
             coop_lite_client_dev_combat_tick(now_ms);
             coop_lite_client_dev_items_tick(now_ms);
+            coop_lite_client_world_req_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -4284,6 +4296,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_roster_tick(now_ms);
     coop_lite_host_party_inven_tick(now_ms);
     coop_lite_host_dev_give_weapon_tick(now_ms);
+    coop_lite_host_dev_world_mutate_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -4519,6 +4532,69 @@ size_t coop_lite_inven_sync_size(int count)
         count = COOP_INVEN_CHUNK_ENTRIES;
     }
     return offsetof(PacketCoopInvenSync, entries) + (size_t)count * sizeof(PacketCoopInvenEntry);
+}
+
+int coop_lite_world_state_size(int count)
+{
+    return (int)offsetof(PacketCoopWorldState, entries) + count * (int)sizeof(CoopWorldEntry);
+}
+
+bool coop_lite_world_state_valid(const PacketCoopWorldState* pkt, int size)
+{
+    int i;
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_WORLD_STATE
+        || size < (int)offsetof(PacketCoopWorldState, entries)
+        || pkt->count < 0 || pkt->count > COOP_WORLD_CHUNK
+        || size != coop_lite_world_state_size(pkt->count)) {
+        return false;
+    }
+    for (i = 0; i < pkt->count; i++) {
+        if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_GROUND_ITEM) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
+    unsigned int last_req_ms, unsigned int now_ms)
+{
+    if (key != last_key) {
+        /* Let the new map's sectors settle first. */
+        return coop_lite_interval_elapsed(ready_ms, now_ms, 1500u);
+    }
+    return coop_lite_interval_elapsed(last_req_ms, now_ms, 30000u);
+}
+
+void coop_oid_set_reset(CoopOidSet* set)
+{
+    set->count = 0;
+    set->overflow = false;
+}
+
+void coop_oid_set_add(CoopOidSet* set, const uint8_t oid[24])
+{
+    if (coop_oid_set_has(set, oid)) {
+        return;
+    }
+    if (set->count >= COOP_OID_SET_MAX) {
+        set->overflow = true;
+        return;
+    }
+    memcpy(set->oid[set->count++], oid, 24);
+}
+
+bool coop_oid_set_has(const CoopOidSet* set, const uint8_t oid[24])
+{
+    int i;
+
+    for (i = 0; i < set->count; i++) {
+        if (memcmp(set->oid[i], oid, 24) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void coop_char_rx_free(CoopCharRx* rx)
@@ -5685,8 +5761,10 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         return;
     }
     owner = coop_lite_get_oid_obj(pkt->owner_oid);
-    if (owner == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE))) {
-        return;
+    if (owner == OBJ_HANDLE_NULL
+        || (!obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE))
+            && obj_field_int32_get(owner, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER)) {
+        return; /* §7: container contents come as blobs too */
     }
 
     multiplayer_lock();
@@ -5930,9 +6008,13 @@ static void coop_lite_client_apply_inven_batch(void)
     multiplayer_unlock();
     coop_lite_obj_req_flush();
 
-    tig_debug_printf("CoopLite: inven sync: %d owners, %d entries, %d moved, %d created, %d removed, gold %d\n",
-        coop_inv_owner_cnt, coop_inv_entry_cnt, moved, created, num_doomed,
-        local_pc != OBJ_HANDLE_NULL ? item_gold_get(local_pc) : -1);
+    /* §7 sends one batch per container: only log containers that changed. */
+    if (moved != 0 || created != 0 || num_doomed != 0 || coop_inv_owner_cnt != 1 || owner_obj[0] == OBJ_HANDLE_NULL
+        || obj_field_int32_get(owner_obj[0], OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
+        tig_debug_printf("CoopLite: inven sync: %d owners, %d entries, %d moved, %d created, %d removed, gold %d\n",
+            coop_inv_owner_cnt, coop_inv_entry_cnt, moved, created, num_doomed,
+            local_pc != OBJ_HANDLE_NULL ? item_gold_get(local_pc) : -1);
+    }
     ui_update_inven(OBJ_HANDLE_NULL);
 }
 #endif
@@ -7050,3 +7132,580 @@ uint16_t coop_lite_map_gen(void)
 {
     return coop_map_gen;
 }
+
+/* ---- §7 subset: world state on join / map change ------------------------ */
+
+#ifndef COOP_LITE_TEST_STUBS
+COOP_STATIC_ASSERT(OF_SEE_THROUGH_BIT == OF_SEE_THROUGH, "OF_SEE_THROUGH bit");
+COOP_STATIC_ASSERT(OF_SHOOT_THROUGH_BIT == OF_SHOOT_THROUGH, "OF_SHOOT_THROUGH bit");
+COOP_STATIC_ASSERT(OF_NO_BLOCK_BIT == OF_NO_BLOCK, "OF_NO_BLOCK bit");
+COOP_STATIC_ASSERT(OF_OFF_BIT == OF_OFF, "OF_OFF bit");
+COOP_STATIC_ASSERT(OF_FLAT_BIT == OF_FLAT, "OF_FLAT bit");
+
+#define COOP_WORLD_MAX_CONTAINERS 64
+#define COOP_WORLD_NPC_DEAD 0x1
+
+static unsigned int coop_world_req_host_ms[8];
+static bool coop_world_req_host_seen[8];
+static ObjectID coop_dev_mutate_dagger;
+static bool coop_dev_mutate_dagger_valid;
+
+static void coop_lite_world_flush(PacketCoopWorldState* out, int slot, bool last, bool* first)
+{
+    out->flags = (*first ? COOP_WORLD_F_FIRST : 0u) | (last ? COOP_WORLD_F_LAST : 0u);
+    tig_net_send_app(out, coop_lite_world_state_size(out->count), slot);
+    *first = false;
+    out->count = 0;
+}
+#endif
+
+void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    PacketCoopWorldState* out;
+    int64_t containers[COOP_WORLD_MAX_CONTAINERS];
+    int num_containers = 0;
+    int64_t pc;
+    int64_t center;
+    int64_t obj;
+    int iter;
+    int slot;
+    int key;
+    bool first = true;
+    int n_portal = 0;
+    int n_container = 0;
+    int n_npc = 0;
+    int n_item = 0;
+
+    if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
+    if (pkt->map != key) {
+        tig_debug_printf("CoopLite: world req from slot %d for map %d (host %d) — ignored\n", slot, pkt->map, key);
+        return;
+    }
+    if (coop_world_req_host_seen[slot]
+        && !coop_lite_interval_elapsed(coop_world_req_host_ms[slot], coop_obj_now_ms, 3000u)) {
+        return;
+    }
+    coop_world_req_host_seen[slot] = true;
+    coop_world_req_host_ms[slot] = coop_obj_now_ms;
+
+    center = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
+    memset(out, 0, offsetof(PacketCoopWorldState, entries));
+    out->type = PACKET_COOP_WORLD_STATE;
+    out->map = key;
+
+    if (obj_inst_first(&obj, &iter)) {
+        do {
+            unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
+            int type;
+            int64_t loc;
+            CoopWorldEntry* e;
+            ObjectID oid;
+
+            if ((flags & (OF_DESTROYED | OF_INVENTORY)) != 0) {
+                continue;
+            }
+            type = obj_field_int32_get(obj, OBJ_F_TYPE);
+            if (type != OBJ_TYPE_PORTAL && type != OBJ_TYPE_CONTAINER && type != OBJ_TYPE_NPC
+                && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
+                continue;
+            }
+            if (type == OBJ_TYPE_NPC && !critter_is_dead(obj) && (flags & OF_OFF) == 0) {
+                continue; /* the living follow NPC_POS / their own sync */
+            }
+            loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+            if (location_dist(loc, center) > COOP_WORLD_RADIUS) {
+                continue;
+            }
+            e = &out->entries[out->count];
+            memset(e, 0, sizeof(*e));
+            oid = obj_get_id(obj);
+            memcpy(e->oid, &oid, sizeof(oid));
+            e->aid = (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
+            e->loc = loc;
+            switch (type) {
+            case OBJ_TYPE_PORTAL:
+                e->kind = COOP_WORLD_PORTAL;
+                e->of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
+                e->kind_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS);
+                n_portal++;
+                break;
+            case OBJ_TYPE_CONTAINER:
+                e->kind = COOP_WORLD_CONTAINER;
+                e->of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
+                e->kind_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS);
+                if (num_containers < COOP_WORLD_MAX_CONTAINERS) {
+                    containers[num_containers++] = obj;
+                }
+                n_container++;
+                break;
+            case OBJ_TYPE_NPC:
+                e->kind = COOP_WORLD_NPC;
+                e->of_flags = flags & COOP_WORLD_NPC_OF_MASK;
+                e->kind_flags = critter_is_dead(obj) ? COOP_WORLD_NPC_DEAD : 0u;
+                e->hp_damage = obj_field_int32_get(obj, OBJ_F_HP_DAMAGE);
+                n_npc++;
+                break;
+            default:
+                e->kind = COOP_WORLD_GROUND_ITEM;
+                e->proto = sub_49B290(obj);
+                e->kind_flags = coop_lite_is_stackable(obj) ? 1u : 0u;
+                n_item++;
+                if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+                    char oid_str[80];
+
+                    objid_id_to_str(oid_str, oid);
+                    tig_debug_printf("CoopLite: world trace: host ground item %s at %d,%d (client PC %d,%d)\n",
+                        oid_str, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
+                        (int)LOCATION_GET_X(center), (int)LOCATION_GET_Y(center));
+                }
+                break;
+            }
+            if (++out->count == COOP_WORLD_CHUNK) {
+                coop_lite_world_flush(out, slot, false, &first);
+            }
+        } while (obj_inst_next(&obj, &iter));
+    }
+    coop_lite_world_flush(out, slot, true, &first);
+    FREE(out);
+    if (coop_dev_mutate_dagger_valid && getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+        int64_t d = obj_pool_perm_lookup(coop_dev_mutate_dagger);
+        int64_t parent = OBJ_HANDLE_NULL;
+
+        if (d == OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: world trace: dev dagger: no handle\n");
+        } else {
+            item_parent(d, &parent);
+            tig_debug_printf("CoopLite: world trace: dev dagger: flags 0x%x parent %s\n",
+                obj_field_int32_get(d, OBJ_F_FLAGS), parent == OBJ_HANDLE_NULL ? "none" : "yes");
+        }
+    }
+
+    /* Contents after the list: the client knows the containers by then. */
+    {
+        int i;
+
+        for (i = 0; i < num_containers; i++) {
+            coop_lite_host_send_inven_batch(slot, &containers[i], 1);
+        }
+    }
+    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items\n",
+        slot, n_portal, n_container, n_npc, n_item);
+#else
+    (void)pkt;
+#endif
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static CoopOidSet* coop_world_seen;
+static bool coop_world_rx_active;
+static int coop_world_rx_map;
+static int coop_world_stats[5]; /* per kind: applied changes */
+static int coop_world_req_key = -1;
+static unsigned int coop_world_req_ms;
+static unsigned int coop_world_ready_ms;
+static bool coop_world_was_ready;
+static int coop_world_ready_key = -1;
+
+static void coop_lite_world_apply_flags(int64_t obj, unsigned int want, unsigned int mask, int kind)
+{
+    unsigned int have = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & mask;
+
+    if (have == (want & mask)) {
+        return;
+    }
+    if ((want & mask & ~have) != 0) {
+        object_flags_set(obj, want & mask & ~have);
+    }
+    if ((have & ~want) != 0) {
+        object_flags_unset(obj, have & ~want);
+    }
+    coop_world_stats[kind]++;
+}
+
+static const CoopWorldEntry* coop_world_want[COOP_WORLD_CHUNK];
+static int coop_world_want_cnt;
+
+static void coop_lite_world_apply(const CoopWorldEntry* e)
+{
+    int64_t obj = coop_lite_get_oid_obj(e->oid);
+    int type;
+
+    if (e->kind == COOP_WORLD_GROUND_ITEM) {
+        coop_oid_set_add(coop_world_seen, e->oid);
+    }
+    if (obj == OBJ_HANDLE_NULL) {
+        /* Unknown ground item: asked for after the batch (a request sent
+           while packets are suspended would be lost). */
+        if (e->kind == COOP_WORLD_GROUND_ITEM && e->kind_flags == 0
+            && coop_world_want_cnt < COOP_WORLD_CHUNK) {
+            coop_world_want[coop_world_want_cnt++] = e;
+        }
+        return;
+    }
+    if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+        return;
+    }
+    type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    switch (e->kind) {
+    case COOP_WORLD_PORTAL:
+    case COOP_WORLD_CONTAINER:
+        if (type != (e->kind == COOP_WORLD_PORTAL ? OBJ_TYPE_PORTAL : OBJ_TYPE_CONTAINER)) {
+            return;
+        }
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != e->aid) {
+            object_set_current_aid(obj, (tig_art_id_t)e->aid);
+            coop_world_stats[e->kind]++;
+        }
+        coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_PORTAL_OF_MASK, e->kind);
+        if (type == OBJ_TYPE_PORTAL
+            && (unsigned int)obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS) != e->kind_flags) {
+            obj_field_int32_set(obj, OBJ_F_PORTAL_FLAGS, (int)e->kind_flags);
+            coop_world_stats[e->kind]++;
+        } else if (type == OBJ_TYPE_CONTAINER
+            && (unsigned int)obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS) != e->kind_flags) {
+            obj_field_int32_set(obj, OBJ_F_CONTAINER_FLAGS, (int)e->kind_flags);
+            coop_world_stats[e->kind]++;
+        }
+        break;
+    case COOP_WORLD_NPC:
+        if (type != OBJ_TYPE_NPC) {
+            return;
+        }
+        if ((e->kind_flags & COOP_WORLD_NPC_DEAD) != 0 && !critter_is_dead(obj)) {
+            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage > 0 ? e->hp_damage : 32000);
+            object_set_current_aid(obj, (tig_art_id_t)e->aid);
+            sub_432D90(obj);
+            coop_world_stats[e->kind]++;
+        }
+        coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_NPC_OF_MASK, e->kind);
+        break;
+    case COOP_WORLD_GROUND_ITEM:
+        if (!item_is_item(obj) || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_INVENTORY) != 0) {
+            /* Locally carried, on the ground at the host: the next
+               INVEN_SYNC of the carrier settles it. */
+            return;
+        }
+        if (obj_field_int64_get(obj, OBJ_F_LOCATION) != e->loc) {
+            sub_43E770(obj, e->loc, 0, 0);
+            coop_world_stats[e->kind]++;
+        }
+        break;
+    }
+}
+
+/* LAST chunk: ground items near our PC the host did not list are gone. */
+static int coop_lite_world_prune(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    int64_t center;
+    int64_t doomed[256];
+    int num = 0;
+    int64_t obj;
+    int iter;
+    int i;
+
+    if (pc == OBJ_HANDLE_NULL || coop_world_seen->overflow) {
+        return 0;
+    }
+    center = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    if (obj_inst_first(&obj, &iter)) {
+        do {
+            unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
+            ObjectID oid;
+
+            if ((flags & (OF_DESTROYED | OF_INVENTORY)) != 0 || !item_is_item(obj)) {
+                continue;
+            }
+            if (location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), center) > COOP_WORLD_PRUNE_RADIUS) {
+                continue;
+            }
+            oid = obj_get_id(obj);
+            if (!coop_oid_set_has(coop_world_seen, (const uint8_t*)&oid) && num < 256) {
+                doomed[num++] = obj;
+            }
+        } while (obj_inst_next(&obj, &iter));
+    }
+    for (i = 0; i < num; i++) {
+        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+            char oid_str[80];
+            int64_t l = obj_field_int64_get(doomed[i], OBJ_F_LOCATION);
+
+            objid_id_to_str(oid_str, obj_get_id(doomed[i]));
+            tig_debug_printf("CoopLite: world trace: prune %s at %d,%d\n", oid_str,
+                (int)LOCATION_GET_X(l), (int)LOCATION_GET_Y(l));
+        }
+        object_destroy(doomed[i]);
+    }
+    return num;
+}
+#endif
+
+void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    int i;
+
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return;
+    }
+    if (!coop_lite_world_state_valid(pkt, tig_net_last_message_size())) {
+        tig_debug_printf("CoopLite: world state: malformed chunk dropped\n");
+        return;
+    }
+    if (!coop_lite_client_world_ready()
+        || pkt->map != coop_lite_pose_map_key(map_current_map(), coop_map_gen)) {
+        coop_world_rx_active = false;
+        return;
+    }
+    if (coop_world_seen == NULL) {
+        coop_world_seen = (CoopOidSet*)MALLOC(sizeof(*coop_world_seen));
+        coop_oid_set_reset(coop_world_seen);
+    }
+    if ((pkt->flags & COOP_WORLD_F_FIRST) != 0) {
+        coop_oid_set_reset(coop_world_seen);
+        memset(coop_world_stats, 0, sizeof(coop_world_stats));
+        coop_world_rx_active = true;
+        coop_world_rx_map = pkt->map;
+    }
+    if (!coop_world_rx_active || coop_world_rx_map != pkt->map) {
+        return;
+    }
+
+    multiplayer_lock();
+    tig_net_local_suspend_begin();
+    coop_world_want_cnt = 0;
+    for (i = 0; i < pkt->count; i++) {
+        coop_lite_world_apply(&pkt->entries[i]);
+    }
+    if ((pkt->flags & COOP_WORLD_F_LAST) != 0) {
+        int pruned = coop_lite_world_prune();
+
+        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL && player_get_local_pc_obj() != OBJ_HANDLE_NULL) {
+            int64_t l = obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION);
+
+            tig_debug_printf("CoopLite: world trace: local PC at %d,%d\n",
+                (int)LOCATION_GET_X(l), (int)LOCATION_GET_Y(l));
+        }
+
+        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+            int64_t pc = player_get_local_pc_obj();
+            int64_t obj;
+            int iter;
+
+            /* Dump what the dev mutation touched, as the client sees it. */
+            if (pc != OBJ_HANDLE_NULL && obj_inst_first(&obj, &iter)) {
+                do {
+                    int type = obj_field_int32_get(obj, OBJ_F_TYPE);
+                    char oid_str[80];
+
+                    if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & (OF_DESTROYED | OF_INVENTORY)) != 0
+                        || location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION),
+                               obj_field_int64_get(pc, OBJ_F_LOCATION)) > 15) {
+                        continue;
+                    }
+                    objid_id_to_str(oid_str, obj_get_id(obj));
+                    if (type == OBJ_TYPE_PORTAL) {
+                        tig_debug_printf("CoopLite: world trace: portal %s open=%d flags=0x%x\n", oid_str,
+                            portal_is_open(obj), obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS));
+                    } else if (type == OBJ_TYPE_CONTAINER) {
+                        tig_debug_printf("CoopLite: world trace: container %s flags=0x%x items=%d\n", oid_str,
+                            obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS),
+                            obj_field_int32_get(obj, OBJ_F_CONTAINER_INVENTORY_NUM));
+                    } else if (type == OBJ_TYPE_NPC) {
+                        tig_debug_printf("CoopLite: world trace: npc %s dead=%d\n", oid_str, critter_is_dead(obj));
+                    } else if (item_is_item(obj)) {
+                        int64_t l = obj_field_int64_get(obj, OBJ_F_LOCATION);
+
+                        tig_debug_printf("CoopLite: world trace: ground item %s at %d,%d\n", oid_str,
+                            (int)LOCATION_GET_X(l), (int)LOCATION_GET_Y(l));
+                    }
+                } while (obj_inst_next(&obj, &iter));
+            }
+        }
+
+        coop_world_rx_active = false;
+        tig_debug_printf("CoopLite: world state applied: portals %d, containers %d, npcs %d, ground items %d (%d listed), %d pruned\n",
+            coop_world_stats[COOP_WORLD_PORTAL], coop_world_stats[COOP_WORLD_CONTAINER],
+            coop_world_stats[COOP_WORLD_NPC], coop_world_stats[COOP_WORLD_GROUND_ITEM],
+            coop_world_seen->count, pruned);
+    }
+    tig_net_local_suspend_end();
+    multiplayer_unlock();
+    for (i = 0; i < coop_world_want_cnt; i++) {
+        if (coop_lite_client_want_ground_blob(coop_world_want[i]->oid, coop_world_want[i]->loc,
+                coop_world_want[i]->proto)) {
+            coop_world_stats[COOP_WORLD_GROUND_ITEM]++;
+        }
+    }
+    coop_world_want_cnt = 0;
+    coop_lite_obj_req_flush();
+#else
+    (void)pkt;
+#endif
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_world_state_reset(void)
+{
+    memset(coop_world_req_host_seen, 0, sizeof(coop_world_req_host_seen));
+    coop_world_rx_active = false;
+    coop_world_req_key = -1;
+    coop_world_was_ready = false;
+    coop_world_ready_key = -1;
+}
+
+/* Client tick (world ready): ask after a map load and every 30 s. */
+static void coop_lite_client_world_req_tick(unsigned int now_ms)
+{
+    PacketCoopWorldReq req;
+    int key;
+
+    if (getenv("ARCANUM_COOP_NO_WORLD_STATE") != NULL) {
+        return;
+    }
+    key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
+    if (!coop_world_was_ready || key != coop_world_ready_key) {
+        coop_world_was_ready = true;
+        coop_world_ready_key = key;
+        coop_world_ready_ms = now_ms;
+    }
+    if (!coop_lite_world_req_due(coop_world_req_key, key, coop_world_ready_ms, coop_world_req_ms, now_ms)) {
+        return;
+    }
+    coop_world_req_key = key;
+    coop_world_req_ms = now_ms;
+    req.type = PACKET_COOP_WORLD_REQ;
+    req.map = key;
+    tig_net_send_app(&req, sizeof(req), 0);
+}
+#endif
+
+#ifndef COOP_LITE_TEST_STUBS
+/*
+ * Dev (ARCANUM_DEV_WORLD_MUTATE=1 on the host): 10 s into the host session,
+ * change the world near the host PC without telling anyone (packets
+ * suspended): open a closed door, lock another, lock a container and put a
+ * dagger in it, kill a living NPC, remove one ground item and drop a new
+ * dagger. A client joining (or refreshing) then only learns these through
+ * the §7 world state.
+ */
+static bool coop_dev_mutate_done;
+static unsigned int coop_dev_mutate_ms;
+
+static void coop_lite_dev_log_obj(const char* what, int64_t obj)
+{
+    char oid_str[80];
+
+    objid_id_to_str(oid_str, obj_get_id(obj));
+    tig_debug_printf("CoopLite: dev: world mutate: %s %s\n", what, oid_str);
+}
+
+static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_WORLD_MUTATE");
+    int64_t pc = player_get_local_pc_obj();
+    int64_t center;
+    int64_t obj;
+    int64_t opened = OBJ_HANDLE_NULL;
+    int64_t locked = OBJ_HANDLE_NULL;
+    int64_t container = OBJ_HANDLE_NULL;
+    int64_t npc = OBJ_HANDLE_NULL;
+    int64_t ground = OBJ_HANDLE_NULL;
+    int64_t dagger;
+    int64_t portals[8];
+    int num_portals = 0;
+    int iter;
+    int i;
+
+    if (env == NULL || env[0] != '1' || coop_dev_mutate_done || pc == OBJ_HANDLE_NULL
+        || map_is_clearing_objects()) {
+        return;
+    }
+    if (coop_dev_mutate_ms == 0) {
+        coop_dev_mutate_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_mutate_ms, now_ms, 10000u)) {
+        return;
+    }
+    coop_dev_mutate_done = true;
+    center = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    if (obj_inst_first(&obj, &iter)) {
+        do {
+            unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
+            int type = obj_field_int32_get(obj, OBJ_F_TYPE);
+
+            if ((flags & (OF_DESTROYED | OF_INVENTORY | OF_OFF)) != 0
+                || location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), center) > 20) {
+                continue;
+            }
+            if (type == OBJ_TYPE_PORTAL && !portal_is_open(obj)
+                && (obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS) & OPF_LOCKED) == 0) {
+                if (num_portals < 8) {
+                    portals[num_portals++] = obj;
+                }
+            } else if (type == OBJ_TYPE_CONTAINER && container == OBJ_HANDLE_NULL) {
+                container = obj;
+            } else if (type == OBJ_TYPE_NPC && npc == OBJ_HANDLE_NULL && !critter_is_dead(obj)
+                && critter_pc_leader_get(obj) == OBJ_HANDLE_NULL) {
+                npc = obj;
+            } else if (item_is_item(obj) && !coop_lite_is_stackable(obj) && ground == OBJ_HANDLE_NULL) {
+                ground = obj;
+            }
+        } while (obj_inst_next(&obj, &iter));
+    }
+
+    multiplayer_lock();
+    tig_net_local_suspend_begin();
+    for (i = 0; i < num_portals; i++) {
+        if (opened == OBJ_HANDLE_NULL && portal_open(portals[i])) {
+            opened = portals[i];
+            coop_lite_dev_log_obj("opened door", opened);
+        } else if (locked == OBJ_HANDLE_NULL && portals[i] != opened) {
+            locked = portals[i];
+        }
+    }
+    if (locked != OBJ_HANDLE_NULL) {
+        obj_field_int32_set(locked, OBJ_F_PORTAL_FLAGS, obj_field_int32_get(locked, OBJ_F_PORTAL_FLAGS) | OPF_LOCKED);
+        coop_lite_dev_log_obj("locked door", locked);
+    }
+    if (container != OBJ_HANDLE_NULL) {
+        obj_field_int32_set(container, OBJ_F_CONTAINER_FLAGS,
+            obj_field_int32_get(container, OBJ_F_CONTAINER_FLAGS) ^ OCOF_LOCKED);
+        coop_lite_dev_log_obj("toggled container lock", container);
+        if (object_create(sub_4685A0(BP_DAGGER), obj_field_int64_get(container, OBJ_F_LOCATION), &dagger)) {
+            item_transfer(dagger, container);
+            coop_lite_dev_log_obj("dagger into container", dagger);
+        }
+    }
+    if (npc != OBJ_HANDLE_NULL) {
+        critter_kill(npc);
+        coop_lite_dev_log_obj("killed npc", npc);
+    }
+    if (ground != OBJ_HANDLE_NULL) {
+        coop_lite_dev_log_obj("removed ground item", ground);
+        object_destroy(ground);
+    }
+    if (object_create(sub_4685A0(BP_DAGGER),
+            LOCATION_MAKE(LOCATION_GET_X(center) + 2, LOCATION_GET_Y(center)), &dagger)) {
+        coop_lite_dev_log_obj("dropped dagger", dagger);
+        coop_dev_mutate_dagger = obj_get_id(dagger);
+        coop_dev_mutate_dagger_valid = true;
+    }
+    tig_net_local_suspend_end();
+    multiplayer_unlock();
+}
+#endif

@@ -633,6 +633,7 @@ static int test_packet_hardening(void)
             4, 8, 9, 11, 26, 27, 28, 29, 57, 81, 98, 100, 125,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
             PACKET_COOP_BARTER, PACKET_COOP_OBJ_REQ, PACKET_COOP_CHAR_BUNDLE,
+            PACKET_COOP_WORLD_REQ,
         };
         static const int host_sends[] = {
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
@@ -640,6 +641,7 @@ static int test_packet_hardening(void)
             PACKET_COOP_FOLLOW_HOST, PACKET_COOP_SESSION_SYNC, PACKET_COOP_PC_POS,
             PACKET_COOP_FOLLOWERS, PACKET_COOP_NPC_POS, PACKET_COOP_PARTY_STATE,
             PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_OBJ_BLOB, 54,
+            PACKET_COOP_WORLD_STATE,
         };
         size_t i;
 
@@ -1391,6 +1393,109 @@ static int test_interp(void)
     return 0;
 }
 
+static int test_world_state(void)
+{
+    static PacketCoopWorldState pkt;
+    static CoopOidSet set;
+    uint8_t oid[24];
+    int i;
+
+    if (!coop_lite_packet_allowed(PACKET_COOP_WORLD_REQ, true, 1)
+        || coop_lite_packet_allowed(PACKET_COOP_WORLD_REQ, false, 0)
+        || !coop_lite_packet_allowed(PACKET_COOP_WORLD_STATE, false, 0)
+        || coop_lite_packet_allowed(PACKET_COOP_WORLD_STATE, true, 1)
+        || coop_lite_coop_packet_min_size(PACKET_COOP_WORLD_REQ) != 8
+        || coop_lite_coop_packet_min_size(PACKET_COOP_WORLD_STATE) != 16) {
+        fprintf(stderr, "world: packet role/size\n");
+        return 1;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_WORLD_STATE;
+    pkt.count = 2;
+    pkt.entries[0].kind = COOP_WORLD_PORTAL;
+    pkt.entries[1].kind = COOP_WORLD_GROUND_ITEM;
+    if (!coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))
+        || coop_lite_world_state_size(2) != 16 + 128) {
+        fprintf(stderr, "world: good chunk refused\n");
+        return 1;
+    }
+    if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2) - 1)
+        || coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(3))
+        || coop_lite_world_state_valid(&pkt, 8)
+        || coop_lite_world_state_valid(NULL, 16)) {
+        fprintf(stderr, "world: size mismatch accepted\n");
+        return 1;
+    }
+    pkt.entries[1].kind = 9;
+    if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
+        fprintf(stderr, "world: bad kind accepted\n");
+        return 1;
+    }
+    pkt.entries[1].kind = 0;
+    if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
+        fprintf(stderr, "world: kind 0 accepted\n");
+        return 1;
+    }
+    pkt.count = COOP_WORLD_CHUNK + 1;
+    if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(COOP_WORLD_CHUNK + 1))) {
+        fprintf(stderr, "world: over-long chunk accepted\n");
+        return 1;
+    }
+    pkt.count = -1;
+    if (coop_lite_world_state_valid(&pkt, 16)) {
+        fprintf(stderr, "world: negative count accepted\n");
+        return 1;
+    }
+    pkt.count = 0;
+    pkt.type = PACKET_COOP_INVEN_SYNC;
+    if (coop_lite_world_state_valid(&pkt, 16)) {
+        fprintf(stderr, "world: wrong type accepted\n");
+        return 1;
+    }
+
+    /* Request timing: new map waits 1.5 s settled, same map every 30 s. */
+    if (coop_lite_world_req_due(5, 6, 1000, 0, 2499)
+        || !coop_lite_world_req_due(5, 6, 1000, 0, 2500)
+        || !coop_lite_world_req_due(-1, 6, 0xFFFFFF00u, 0, 1300)
+        || coop_lite_world_req_due(6, 6, 0, 1000, 30999)
+        || !coop_lite_world_req_due(6, 6, 0, 1000, 31000)) {
+        fprintf(stderr, "world: request timing wrong\n");
+        return 1;
+    }
+
+    /* Seen set: dedupe, membership, overflow disables pruning. */
+    coop_oid_set_reset(&set);
+    memset(oid, 0, sizeof(oid));
+    oid[0] = 7;
+    coop_oid_set_add(&set, oid);
+    coop_oid_set_add(&set, oid);
+    if (set.count != 1 || !coop_oid_set_has(&set, oid)) {
+        fprintf(stderr, "world: seen set dedupe\n");
+        return 1;
+    }
+    oid[23] = 1;
+    if (coop_oid_set_has(&set, oid)) {
+        fprintf(stderr, "world: seen set false hit\n");
+        return 1;
+    }
+    for (i = 0; i < COOP_OID_SET_MAX + 5; i++) {
+        memcpy(oid, &i, sizeof(i));
+        oid[20] = 0xAA;
+        coop_oid_set_add(&set, oid);
+    }
+    if (!set.overflow || set.count != COOP_OID_SET_MAX) {
+        fprintf(stderr, "world: seen set overflow\n");
+        return 1;
+    }
+    coop_oid_set_reset(&set);
+    if (set.overflow || set.count != 0) {
+        fprintf(stderr, "world: seen set reset\n");
+        return 1;
+    }
+    printf("world state: validator, timing, seen set OK\n");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -1438,6 +1543,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_interp() != 0) {
+        return 1;
+    }
+    if (test_world_state() != 0) {
         return 1;
     }
     if (coop_lite_host_left_menu_due(false, 1, 99999)

@@ -26,9 +26,11 @@ extern "C" {
 #define PACKET_COOP_OBJ_BLOB 140 /* host → client: one item as an object blob */
 
 #define PACKET_COOP_CHAR_BUNDLE 141 /* client → host: own character bundle, chunked */
+#define PACKET_COOP_WORLD_REQ 142 /* client → host: world state around me, please */
+#define PACKET_COOP_WORLD_STATE 143 /* host → client: doors, containers, NPCs, ground items */
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 142
+#define PACKET_COOP_TYPE_LIMIT 144
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -332,6 +334,86 @@ void coop_char_rx_free(CoopCharRx* rx);
 bool coop_lite_char_plausible(int level, int xp, const int* base_stats, int num_stats,
     int gold, int num_items);
 void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
+
+/*
+ * §7 subset: world state on join and after every map load. The client asks
+ * (WORLD_REQ with its map key); the host answers with the state of what is
+ * around that client's PC: door/window and container state (art frame,
+ * open flags, lock flags), container contents (INVEN_SYNC batches), NPC
+ * death/off state, and every ground item (unknown ones come as blobs). The
+ * last chunk ends the list; the client then removes ground items near it
+ * that the host does not have (picked up, destroyed).
+ */
+#define COOP_WORLD_RADIUS 24 /* tiles around the client PC (host side) */
+#define COOP_WORLD_PRUNE_RADIUS 18 /* client prunes ground items within this */
+#define COOP_WORLD_CHUNK 64
+#define COOP_WORLD_F_FIRST 0x1
+#define COOP_WORLD_F_LAST 0x2
+
+typedef enum CoopWorldKind {
+    COOP_WORLD_PORTAL = 1,
+    COOP_WORLD_CONTAINER = 2,
+    COOP_WORLD_NPC = 3,
+    COOP_WORLD_GROUND_ITEM = 4,
+} CoopWorldKind;
+
+/* Object flags the snapshot may set or clear, per kind. */
+#define COOP_WORLD_PORTAL_OF_MASK (OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT)
+#define OF_SEE_THROUGH_BIT 0x00000010u
+#define OF_SHOOT_THROUGH_BIT 0x00000020u
+#define OF_NO_BLOCK_BIT 0x00000400u
+#define OF_OFF_BIT 0x00000002u
+#define OF_FLAT_BIT 0x00000004u
+#define COOP_WORLD_NPC_OF_MASK (OF_OFF_BIT | OF_FLAT_BIT | OF_NO_BLOCK_BIT)
+
+typedef struct PacketCoopWorldReq {
+    /* 0000 */ int type;
+    /* 0004 */ int map; /* coop_lite_pose_map_key */
+} PacketCoopWorldReq;
+
+typedef struct CoopWorldEntry {
+    /* 0000 */ uint8_t oid[24];
+    /* 0018 */ int kind; /* CoopWorldKind */
+    /* 001C */ unsigned int aid; /* current art (door frame, corpse pose) */
+    /* 0020 */ unsigned int of_flags; /* OBJ_F_FLAGS (masked per kind) */
+    /* 0024 */ unsigned int kind_flags; /* portal/container flags */
+    /* 0028 */ int hp_damage; /* NPC */
+    /* 002C */ int proto; /* ground item */
+    /* 0030 */ int64_t loc;
+    /* 0038 */ uint8_t reserved[8];
+} CoopWorldEntry;
+
+typedef struct PacketCoopWorldState {
+    /* 0000 */ int type;
+    /* 0004 */ int map;
+    /* 0008 */ unsigned int flags; /* COOP_WORLD_F_* */
+    /* 000C */ int count;
+    /* 0010 */ CoopWorldEntry entries[COOP_WORLD_CHUNK];
+} PacketCoopWorldState;
+
+COOP_STATIC_ASSERT(sizeof(CoopWorldEntry) == 0x40, "CoopWorldEntry size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopWorldState, entries) == 0x10, "PacketCoopWorldState layout");
+
+bool coop_lite_world_state_valid(const PacketCoopWorldState* pkt, int size);
+int coop_lite_world_state_size(int count);
+/* Client: ask again after a map load (key change, once settled) and every
+   30 s for sectors loaded since. */
+bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
+    unsigned int last_req_ms, unsigned int now_ms);
+
+/* Set of OIDs listed by the snapshot (client prune). */
+#define COOP_OID_SET_MAX 1024
+typedef struct CoopOidSet {
+    int count;
+    bool overflow;
+    uint8_t oid[COOP_OID_SET_MAX][24];
+} CoopOidSet;
+void coop_oid_set_reset(CoopOidSet* set);
+void coop_oid_set_add(CoopOidSet* set, const uint8_t oid[24]);
+bool coop_oid_set_has(const CoopOidSet* set, const uint8_t oid[24]);
+
+void coop_lite_handle_world_req(PacketCoopWorldReq* pkt);
+void coop_lite_handle_world_state(PacketCoopWorldState* pkt);
 bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size);
 void coop_lite_handle_obj_req(PacketCoopObjReq* pkt);
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);
