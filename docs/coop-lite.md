@@ -1485,3 +1485,27 @@ Headless with real xdotool clicks (`pt18-gui-flow.sh`, `logs/pt18-h3/`): bin loo
 - **Plant logged as steal.** The client sent only one request in that session, `asked the host to steal`, and the host stole the host PC's own Crude Lockpicks (the Merwin pregen carries some; 6 + 7 from the bin − 1 dropped = 12 items). Headless plants are sent and logged as plants (`plants 'Bandages' into target: succeeded`).
 - **Host steal from a client.** Headless host pickpocket of the client PC (100 gold, then a ring planted and stolen back) logs `inventory changed on the host ... resync` every time, and the client applies it (`1 removed`). The live host log has no host steal at all, so nothing moved on the host there.
 - **PT18 GUI session 3 (12:1x): "client pickpocket on Merwin opens nothing", "no logs".** The windows were the other way round this time: the host window at (891,29), the client's at (5,29). The actions ran in the HOST window. The host log has the bin click (`Intgame: click: object type 2 ... goal 81`, `Worn Boots ... to Merwin`) and `Intgame: click: on own PC, ignored` for the click on Merwin. The host's pickpocket of the Blacksmith is vanilla and local, so it logs no `loot:` line, only vanilla "You succeed.". The client log has no clicks at all. Logs are not buffered. Headless (`logs/pt18-p2`): the client pickpocket on Merwin opens (`opened pickpocket window on 'Merwin Tumblebrook'`). After `kill-host` the corpse hovers as "Merwin Tumblebrook / Dead" on the client and a click loots it. Fix for the confusion: coop windows are now titled "Arcanum CE - CO-OP HOST" / "Arcanum CE - CO-OP CLIENT".
+
+### PT18 GUI run 3 (build 33f2e1dc): "direction inverted for a PC target"
+
+- **BUG A — not a code bug, a panel mix-up.** The client's own engine log
+  (`UI: InvenItemTransfer - Bandages(G_38A9…) going from Godfrey Castleburger
+  to Merwin Tumblebrook`) shows the drag really went from the client's PC to
+  Merwin: those Bandages were Godfrey's starting kit (Merwin never had any).
+  In the loot / pickpocket window the **left** panel (portrait at the top) is
+  the target, the **right** panel (gold / stat column) is your own PC. The
+  "gold at 0 → refused" was the client's own gold with the quantity box left
+  at 0; the host correctly refuses a 0 transfer and resyncs. Headless real
+  drags (pt18-pc1/pc2) in both directions against Merwin dead (loot) and
+  alive (steal/plant) and against the Blacksmith all log the right verb, and
+  `inven` dumps on both sides agree on every item's owner.
+- **BUG B — same mix-up**: after planting its Bandages the client's own grid
+  holds only gold (the suit is worn) — that was the "Merwin panel with only a
+  gold icon". Merwin's panel shows gold, ring, lockpicks headless.
+- **BUG C — fixed**: the host now sends the thief `COOP_PARTY_STEAL_OK`
+  ("You succeed.", green) or `COOP_PARTY_STEAL_FAILED` for every pickpocket
+  roll (NPC and PC victims); "Caught pickpocketing!" is unchanged.
+- The client log line now names the item and direction:
+  `loot: asked the host to plant an item ('Bandages' from my PC into 'Merwin Tumblebrook')`.
+- New trigger command `inven` (`ARCANUM_DEV_TRIGGER`): dumps every slot PC's
+  inventory with owner checks on that side.

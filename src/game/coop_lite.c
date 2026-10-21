@@ -3990,6 +3990,9 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
     case COOP_PARTY_STEAL_FAILED:
         snprintf(buf, size, "%s", "Your pickpocket attempt failed.");
         break;
+    case COOP_PARTY_STEAL_OK:
+        snprintf(buf, size, "%s", "You succeed.");
+        break;
     default:
         buf[0] = '\0';
         break;
@@ -4011,7 +4014,7 @@ static void coop_lite_host_party_notice(int kind, int slot, unsigned int countdo
 
     coop_lite_party_notice_text(kind, countdown_ms, true, str, sizeof(str));
     if (str[0] != '\0') {
-        coop_lite_show_notice(str, kind == COOP_PARTY_HOST_UP ? TF_TYPE_GREEN : TF_TYPE_RED);
+        coop_lite_show_notice(str, coop_lite_party_notice_is_good(kind) ? TF_TYPE_GREEN : TF_TYPE_RED);
     }
 }
 
@@ -4328,7 +4331,7 @@ void coop_lite_handle_party_state(PacketCoopPartyState* pkt)
     }
     coop_lite_party_notice_text(pkt->kind, pkt->countdown_ms, false, str, sizeof(str));
     if (str[0] != '\0') {
-        coop_lite_show_notice(str, pkt->kind == COOP_PARTY_HOST_UP ? TF_TYPE_GREEN : TF_TYPE_RED);
+        coop_lite_show_notice(str, coop_lite_party_notice_is_good(pkt->kind) ? TF_TYPE_GREEN : TF_TYPE_RED);
     }
 }
 
@@ -5274,6 +5277,11 @@ int coop_lite_target_kind(bool is_container, bool locked, bool is_critter, bool 
     return COOP_TARGET_NONE;
 }
 
+bool coop_lite_party_notice_is_good(int kind)
+{
+    return kind == COOP_PARTY_HOST_UP || kind == COOP_PARTY_STEAL_OK;
+}
+
 bool coop_lite_target_transfer_ok(int kind, unsigned int flags, bool from_target, bool worn)
 {
     bool steal_bits = (flags & (COOP_XFER_STEAL | COOP_XFER_PLANT)) != 0;
@@ -6055,7 +6063,7 @@ static void coop_lite_host_slot_notice(int slot, int kind)
     if (slot == 0) {
         coop_lite_party_notice_text(kind, 0, true, str, sizeof(str));
         if (str[0] != '\0') {
-            coop_lite_show_notice(str, TF_TYPE_RED);
+            coop_lite_show_notice(str, coop_lite_party_notice_is_good(kind) ? TF_TYPE_GREEN : TF_TYPE_RED);
         }
         return;
     }
@@ -6122,9 +6130,9 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         skill_invocation_run(&si);
         ok = (si.flags & SKILL_INVOCATION_SUCCESS) != 0;
         result = ok ? "succeeded" : "failed";
-        if (!ok) {
-            coop_lite_host_slot_notice(slot, COOP_PARTY_STEAL_FAILED);
-        }
+        /* gui3 BUG C: the roll ran here, so the thief's own "You succeed." /
+           failure line has to be sent (vanilla prints it on the host only). */
+        coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_STEAL_FAILED);
     } else {
         SkillInvocation si;
         int effectiveness;
@@ -6148,6 +6156,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
                 ok = item_transfer(item, to);
             }
             result = ok ? "succeeded" : "failed";
+            coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_STEAL_FAILED);
         } else {
             result = "caught";
             coop_lite_host_slot_notice(slot, COOP_PARTY_CAUGHT_THIEF);
@@ -6375,7 +6384,17 @@ void coop_lite_client_request_steal(int64_t pc_obj, int64_t target_obj, int64_t 
     depth = tig_net_local_suspend_pause();
     tig_net_send_app_all(&pkt, sizeof(pkt));
     tig_net_local_suspend_resume(depth);
-    tig_debug_printf("CoopLite: loot: asked the host to %s an item\n", plant ? "plant" : "steal");
+    {
+        char iname[128];
+        char tname[128];
+
+        iname[0] = tname[0] = '\0';
+        object_examine(item_obj, pc_obj, iname);
+        object_examine(target_obj, pc_obj, tname);
+        /* gui3: name the item and the direction, so a panel mix-up is visible. */
+        tig_debug_printf("CoopLite: loot: asked the host to %s an item ('%s' %s '%s')\n",
+            plant ? "plant" : "steal", iname, plant ? "from my PC into" : "into my PC from", tname);
+    }
 #else
     (void)pc_obj;
     (void)target_obj;
@@ -9445,6 +9464,14 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
         coop_lite_dev_list_near("trigger");
     } else if (strcmp(cmd, "items") == 0) {
         coop_lite_dev_list_ground_items();
+    } else if (strcmp(cmd, "inven") == 0) {
+        for (slot = 0; slot < 8; slot++) {
+            char tag[48];
+
+            snprintf(tag, sizeof(tag), "slot %d PC%s", slot,
+                sub_4A2B60(slot) == player_get_local_pc_obj() ? " (mine)" : "");
+            coop_lite_dev_inven_dump(tag, sub_4A2B60(slot));
+        }
     } else if (strcmp(cmd, "kill-host") == 0 && tig_net_is_host()) {
         int64_t pc = player_get_local_pc_obj();
 

@@ -671,6 +671,10 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_NO_SAVE 7 /* nothing to reload: everyone is brought back */
 #define COOP_PARTY_CAUGHT_THIEF 8 /* PT18: slot = the thief's slot */
 #define COOP_PARTY_STEAL_FAILED 9 /* PT18: unnoticed failure, to the thief */
+#define COOP_PARTY_STEAL_OK 10 /* PT18 gui3: steal/plant succeeded, to the thief */
+
+/* Notice kinds shown as a green (good-news) float rather than red. */
+bool coop_lite_party_notice_is_good(int kind);
 
 /* Starting kit for a coop-created/offered PC, generated locally (suspended). */
 void coop_lite_generate_start_inventory(int64_t pc_obj);

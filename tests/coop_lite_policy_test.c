@@ -778,6 +778,14 @@ static int test_packet_hardening(void)
             fprintf(stderr, "target transfer policy wrong\n");
             return 1;
         }
+        if (!coop_lite_party_notice_is_good(COOP_PARTY_STEAL_OK)
+            || !coop_lite_party_notice_is_good(COOP_PARTY_HOST_UP)
+            || coop_lite_party_notice_is_good(COOP_PARTY_STEAL_FAILED)
+            || coop_lite_party_notice_is_good(COOP_PARTY_CAUGHT_THIEF)
+            || coop_lite_party_notice_is_good(COOP_PARTY_HOST_DOWN)) {
+            fprintf(stderr, "party notice colour policy wrong\n");
+            return 1;
+        }
         if (coop_lite_coop_packet_min_size(PACKET_COOP_BARTER) != sizeof(PacketCoopBarter)
             || coop_lite_coop_packet_min_size(PACKET_COOP_INVEN_SYNC) != offsetof(PacketCoopInvenSync, entries)
             || coop_lite_coop_packet_min_size(PACKET_COOP_ROSTER) != sizeof(PacketCoopRoster)) {
