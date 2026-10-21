@@ -246,6 +246,13 @@ int main(int argc, char** argv)
     // Specify window name.
     init_info.flags |= TIG_INITIALIZE_SET_WINDOW_NAME;
     init_info.window_name = "Arcanum: Of Steamworks & Magick Obscura - Community Edition";
+    /* Coop: say which side this window is (PT18 GUI: a desktop tester
+       drove the host window believing it was the client's). */
+    if (strstr(lpCmdLine, "-coop") != NULL && strstr(lpCmdLine, "-host") != NULL) {
+        init_info.window_name = "Arcanum CE - CO-OP HOST";
+    } else if (strstr(lpCmdLine, "-coop") != NULL && strstr(lpCmdLine, "-join") != NULL) {
+        init_info.window_name = "Arcanum CE - CO-OP CLIENT";
+    }
 
     if (tig_init(&init_info) != TIG_OK) {
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
