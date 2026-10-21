@@ -1421,3 +1421,43 @@ Review #3, verified against the code:
 - Hotbar quirk (slot click looted the corpse): not reproduced. A mouse
   click on the slot and the "1" key both call intgame_hotkey_activate.
   The dev click logs whether the button under the slot centre is the slot.
+
+## 31. PT17c results and PT18: corpse looting, pickpocketing, victim resync (Argon review, relayed 2026-10-21)
+
+The review text is in `/workspace/review/argon-review-3-pt18.md`, outside the repo. Every claim was checked against the code before anything was changed.
+
+### PT17c findings
+- **Hotbar.** The Resurrect icon *is* drawn on slot 0. It is the blue tile right of the round button (headless screenshots with and without `ARCANUM_DEV_GRANT_RESURRECT`; the user's `bar.png` shows it too). Slots are left buttons: TIG `RELEASED` calls `intgame_hotkey_activate`, and dragging uses the right button. A mouse click on slot 0 arms spell mode in every headless run. The GUI log has no hotkey line, so the failed GUI click cannot be explained from the data yet. New coop-only trace: `HotkeyUI: click: slot N (type T, data D) activate|empty (consumed)|ends a drag` and `Intgame: click: hotkey: ...`, including why an activation was ignored (dead, stunned, dragged). The dev grant re-asserts the hotbar entry every tick, which is a no-op while it is there; `HotkeyUI: spell 64 put on hotbar slot 0` is logged when it is (re)placed. An empty slot is already consumed: `hotkey_ui_process_event` returns true, and world clicks need the iso window (`sub_5517A0`). Argon's "empty slot falls through" is **rejected**.
+- **Missing lockpicks.** These were not a desync. The host looted the client's corpse, which is vanilla `inven_ui` loot on the host. The items moved to the host PC, and the client saw them leave through the host PC's party sync, which moves items by OID. What was missing was the **victim's own resync**: gold, and anything not re-homed, stayed on the client. Reproduced headless with `ARCANUM_DEV_AUTO_RESURRECT=5lh`: after the host's Take All the host had slot 1 at gold 0 while the client kept gold 400. Fixed by the victim watch below.
+- **"slot 1 transfer done (weapon now '')".** That line is the gold-pile *pickup* (op 28, same OID as the client's `pickup queued`). `weapon now` is the wielded weapon after the op, and it was empty because the host had already looted the dagger. The drag of a worn item to the drop box never reached the host: there is no `UI: InvenItemTransfer` in the client log.
+- **"0 ground items".** That world-state line came just before the drop. The next one says `1 ground items`, and the client listed 1. Timing only.
+- **No "Intgame: click" lines on the client.** They are there (client log lines 606–610). The trace runs on both sides.
+
+### Argon #3 verdicts
+1. Equipped-weapon drop: **rejected** (both parts). `item_drop` already does `item_remove` (unwield) + `sub_466E50`. `mp_handle_packet70` already moves an existing inventory copy to the ground (`item_remove` + `object_drop` under lock/suspend) instead of skipping it. Headless `ARCANUM_DEV_OPEN_INVEN=3` (new: drop a worn item through the drop-box Packet81) dropped the worn suit (loc 1006): host `drop done`, client inventory without it, `1 ground items listed`, nothing destroyed. New guard: a dead PC's transfers are refused (a corpse could drop its things).
+2. Gold drop missing from world state: **rejected.** `item_gold_create` → `mp_object_create` sends Packet70 regardless of `multiplayer_lock` (the lock does not gate it). `pile != item` therefore skips nothing. The GUI client log shows `obj blob: ground item loaded` right after the drop, and the next world state lists it.
+3. NPC pickup: **done as proposed**, and this replaces the earlier "revert". `coop_lite_mark_player_drop` acts only with `ARCANUM_DEV_GOLD_PILE` / `ARCANUM_DEV_CLIENT_ITEMS`, so NPCs take player drops as in vanilla. The immediate Packet72 when anything takes a ground item (`coop_lite_host_ground_item_taken` in `sub_42AA70`) stays.
+4. Looting / pickpocket: **implemented, with corrections**:
+   - Pickpocket is `INVEN_UI_MODE_STEAL` = 3; mode 4 is IDENTIFY.
+   - Packet81 0x04 is "take to cursor/use" and 0x10 is gamble, so pickpocket gets its own bits: `COOP_XFER_STEAL` 0x40 / `COOP_XFER_PLANT` 0x80, only as 0x41 / 0x81.
+   - Client: `coop_lite_client_opens_inven_locally` accepts modes 0–3. The client's own use-container goal (anim.c, container and critter branches) and the pickpocket skill open the window locally. `inven_ui_open` sends `COOP_BARTER_OPEN_LOOT` / `_OPEN_STEAL` with the target. In a pickpocket window the drag (`sub_575180` / `sub_575100`) asks the host (`coop_lite_client_request_steal`) instead of running the skill locally.
+   - Host: `coop_lite_target_kind_of` → `coop_lite_target_kind`, which is pure and unit-tested. Within `COOP_TARGET_REACH` 4, the target can be an unlocked container or a dead critter (NPC corpse, host or client corpse) = LOOT, or a living critter other than yourself (NPC or PC) = STEAL. The session lives in `coop_barter[slot]` (`target_valid/kind/target`). It ends like barter (close, disconnect, map change, watch: gone / died / locked / too far), and `coop_lite_host_sync_slot_inven` sends [pc, target].
+   - Transfers inside a session go to `coop_lite_host_target_transfer`, which checks `coop_lite_target_transfer_ok` (unit-tested). Loot: no steal bits, the window's own `sub_578EA0` at price 0. Steal: only 0x41 out of the target and never a worn item (vanilla refuses those drags); plant: 0x81 into it.
+   - NPC victim: the vanilla `skill_invocation_run(SKILL_PICK_POCKET)` (transfer, alignment, OCF2_ITEM_STOLEN, detection with `ai_attack`). PC victim: the same odds (`basic_skill_effectiveness` vs `skill_invocation_difficulty` + d100; gold ≤ 100, ammo ≤ 20). A failure gives both players a red "Caught pickpocketing!" and nothing moves. A thief whose attempt failed unnoticed against an NPC gets "Your pickpocket attempt failed."
+   - Victim resync (4c): the host keeps a signature (gold, ammo, item OIDs + locations) of what it last sent each slot about its own PC. `coop_lite_host_victim_watch` (every 250 ms) resyncs the slot as soon as the host's copy differs: host loot of a client corpse, host or other-client pickpocket, scripts, NPC theft. Log: `inven: slot N PC's inventory changed on the host (loot / steal / script) - resync, gold G`. This is a signature check, not a hook in `item_transfer`, so every path is covered, including stacks.
+5. Hotbar: see above. The icon and arming work in-process, a click on an empty slot is already consumed, and a trace was added for the next GUI run.
+
+### Headless evidence (`logs/pt17c-dev/`)
+- `loot2`: host Take All on the client corpse moved the items. Before the fix the client kept gold 400 while the host had 0.
+- `loot3`: with the fix, `changed on the host ... resync, gold 0`. The client ends with 0 items and gold 0. Hotbar trace `HotkeyUI: click: slot 0 (type 3, data 64) activate` → spell mode → resurrect. Worn suit dropped.
+- `steal1`: the client pickpockets the host PC without skill → `caught`, notice on both sides, nothing moved.
+- `steal-h` / `steal-n` / `steal-c` (`ARCANUM_DEV_STEAL_FORCE=1`): steal from the host PC (ring moves), from the Blacksmith (key moves), and loot of a rubbish bin (Take All, 7 items).
+
+### New dev switches
+- Host `ARCANUM_DEV_AUTO_RESURRECT=Nlh`: `l` first loots the corpse the GUI way (click, Take All, close).
+- `ARCANUM_DEV_INVEN_DUMP=N` (both sides): every N s, the PC inventories as the UI sees them, with flags and a parent check.
+- Client `ARCANUM_DEV_CLIENT_LOOT=c|n|h`: 25 s in, walk to the nearest container / living NPC / the host PC, open the window through `inven_ui_open`, Take All or one pickpocket drag, close.
+- Client `ARCANUM_DEV_OPEN_INVEN=3`: drop a worn item (the weapon if any) through the drop-box Packet81.
+- Host `ARCANUM_DEV_STEAL_FORCE=1`: pickpocket always succeeds (tests the success path).
+
+Known noise: `ASSERTION anim.c:4105 priority_level < PRIORITY_HIGHEST` on a client when its PC falls. Vanilla callers (`multiplayer.c`) also pass PRIORITY_HIGHEST, the original check was `<=`, and the CE assertion is stricter. Harmless.
