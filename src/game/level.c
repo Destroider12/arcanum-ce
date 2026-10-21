@@ -1239,3 +1239,15 @@ void record_attribute_change(const char* str, int score)
         auto_level_log_size++;
     }
 }
+
+/**
+ * Experience points a PC needs to be at `level` (xp_level.mes; 0 for
+ * level 1 and for levels outside the table).
+ */
+int level_xp_required(int level)
+{
+    if (level_xp_tbl == NULL || level < 1 || level > LEVEL_MAX) {
+        return 0;
+    }
+    return level_xp_tbl[level - 1];
+}

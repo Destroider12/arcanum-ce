@@ -50,6 +50,8 @@ bool tig_net_join_configured(void);
 
 void tig_net_configure_host(int port);
 void tig_net_configure_join(const char* host, int port);
+/* Client: the host was refused for a protocol mismatch (no rejoin). */
+bool tig_net_host_refused(void);
 
 int tig_net_start_client(void);
 void tig_net_start_server(void);

@@ -1339,6 +1339,9 @@ static int test_char_rx(void)
     stats[3] = 8;
     if (coop_lite_char_plausible(0, 0, stats, 8, 0, 0)
         || coop_lite_char_plausible(500, 0, stats, 8, 0, 0)
+        || coop_lite_char_plausible(52, 0, stats, 8, 0, 0)
+        || coop_lite_char_plausible(127, 0, stats, 8, 0, 0)
+        || coop_lite_char_plausible(10, 2147483647, stats, 8, 0, 0)
         || coop_lite_char_plausible(1, -1, stats, 8, 0, 0)
         || coop_lite_char_plausible(1, 0, stats, 8, 2000000, 0)
         || coop_lite_char_plausible(1, 0, stats, 8, 0, COOP_CHAR_MAX_ITEMS + 1)) {

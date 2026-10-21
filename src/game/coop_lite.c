@@ -2366,9 +2366,17 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
         ok = coop_lite_char_plausible(stat_level_get(pc, STAT_LEVEL),
             stat_level_get(pc, STAT_EXPERIENCE_POINTS), stats, 8, item_gold_get(pc),
             obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
+        if (ok && stat_base_get(pc, STAT_EXPERIENCE_POINTS) < level_xp_required(stat_base_get(pc, STAT_LEVEL))) {
+            /* A level needs its XP (xp_level.mes); more XP than the level
+               is fine (the engine levels up on the next award). */
+            tig_debug_printf("CoopLite: v2 offer: slot %d level %d with only %d XP (needs %d)\n",
+                slot, stat_base_get(pc, STAT_LEVEL), stat_base_get(pc, STAT_EXPERIENCE_POINTS),
+                level_xp_required(stat_base_get(pc, STAT_LEVEL)));
+            ok = false;
+        }
         if (!ok) {
-            tig_debug_printf("CoopLite: v2 offer: slot %d character implausible (level %d)\n",
-                slot, stat_level_get(pc, STAT_LEVEL));
+            tig_debug_printf("CoopLite: v2 offer: slot %d character implausible (level %d, xp %d)\n",
+                slot, stat_level_get(pc, STAT_LEVEL), stat_level_get(pc, STAT_EXPERIENCE_POINTS));
         }
     }
     if (!ok) {
@@ -5206,7 +5214,8 @@ bool coop_lite_char_plausible(int level, int xp, const int* base_stats, int num_
 {
     int i;
 
-    if (level < 1 || level > 127 || xp < 0 || gold < 0 || gold > 1000000
+    /* The engine's caps: STAT_LEVEL max 51, STAT_EXPERIENCE_POINTS 2e9. */
+    if (level < 1 || level > COOP_CHAR_MAX_LEVEL || xp < 0 || xp > 2000000000 || gold < 0 || gold > 1000000
         || num_items < 0 || num_items > COOP_CHAR_MAX_ITEMS) {
         return false;
     }

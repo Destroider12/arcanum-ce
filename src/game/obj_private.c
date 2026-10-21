@@ -980,6 +980,10 @@ void obj_data_write_mem(ObjDataDescriptor* descr, WriteBuffer* wb)
         write_buffer_append(&presence, sizeof(presence), wb);
         if (presence) {
             size = sa_total_byte_size((SizeableArray**)descr->ptr);
+            /* No result to check: write_buffer_ensure_size returns void
+               and grows the buffer itself (REALLOC, engine convention).
+               Every other case goes through write_buffer_append, which
+               calls it before each memcpy. */
             write_buffer_ensure_size(wb, size);
             sa_write_mem((SizeableArray**)descr->ptr, (SizeableArray*)wb->curr);
             wb->curr += size;

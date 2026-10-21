@@ -1620,3 +1620,22 @@ Party XP (host-authoritative):
   logged ("protocol X != ours Y ... refusing") and the peer is
   disconnected, so mismatched builds no longer corrupt each other. Bump it
   whenever a packet layout changes.
+
+## 35. PT22: protocol refusal hardening (DeepSeek follow-up)
+
+- Host: a refused peer (NAME too short or with the wrong protocol) is
+  marked `refused`. Its app packets, such as a CHAR_OFFER queued behind
+  the NAME, are dropped until the disconnect lands.
+- Client: a refused host sets a sticky `host_refused`. From then on the
+  client sends nothing to that host and drops everything it receives.
+  `tig_net_start_client` won't rejoin it, which matters because the
+  automatic New Game rejoin sends its CHAR_OFFER before WELCOME; a live
+  run of an old host against the new client showed exactly that (logs/pt22
+  vs pt22b). Only `tig_net_configure_join` clears the flag.
+- The refusal logs tell an old peer (packet too short, no protocol field)
+  apart from a real version mismatch.
+- Char bundles: level must be 1..51 (`COOP_CHAR_MAX_LEVEL`, the STAT_LEVEL
+  max) and XP 0..2e9. The PC must also have at least the XP its level
+  needs, per the new helper `level_xp_required` (from xp_level.mes).
+- Unit test: an old NAME followed by a CHAR_OFFER leaves the offer
+  undelivered and the peer disconnected.

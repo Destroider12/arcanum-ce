@@ -50,6 +50,7 @@ typedef struct TigNetClient {
     bool active;
     bool waiting;
     bool loading;
+    bool refused; /* host: protocol mismatch, disconnect pending */
     char name[TIG_NET_MAX_NAME];
 } TigNetClient;
 
@@ -132,6 +133,10 @@ static int last_message_size;
 static int local_suspend_depth;
 /* Client: host connection dropped during this pump; tear down after it. */
 static bool lost_host;
+/* Client: the host's protocol doesn't match ours. Sticky until the join
+   target is configured again: the automatic rejoin (New Game) sends its
+   CHAR_OFFER before WELCOME, so it must not reconnect at all. */
+static bool host_refused;
 
 static TigNetMessageFunc message_func;
 static TigNetMessageValidationFunc validation_func;
@@ -146,6 +151,7 @@ static void tig_net_clear_clients(void)
         clients[i].active = false;
         clients[i].waiting = false;
         clients[i].loading = false;
+        clients[i].refused = false;
         clients[i].name[0] = '\0';
     }
 }
@@ -262,11 +268,19 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
         memset(&welcome_copy, 0, sizeof(welcome_copy));
         memcpy(&welcome_copy, data, size < sizeof(welcome_copy) ? size : sizeof(welcome_copy));
         if (size < sizeof(TigNetCtrlWelcome) || welcome->protocol != TIG_NET_PROTOCOL) {
-            /* An older host sends a shorter WELCOME (no protocol field). */
-            tig_debug_printf("tig_net: host protocol %d != ours %d (WELCOME %zu bytes) - refusing; run the same build on both\n",
-                size < sizeof(TigNetCtrlWelcome) ? 0 : welcome->protocol, TIG_NET_PROTOCOL, size);
-            if (clients[0].peer != NULL && local_slot == 0) {
-                enet_peer_disconnect(clients[0].peer, 0);
+            if (size < sizeof(TigNetCtrlWelcome)) {
+                /* An older host sends a shorter WELCOME. */
+                tig_debug_printf("tig_net: refusing old host (WELCOME %zu bytes, no protocol field; ours is %d) - run the same build on both\n",
+                    size, TIG_NET_PROTOCOL);
+            } else {
+                tig_debug_printf("tig_net: refusing host: protocol %d != ours %d - run the same build on both\n",
+                    welcome->protocol, TIG_NET_PROTOCOL);
+            }
+            if (local_slot == 0) {
+                host_refused = true; /* never welcomed: no app traffic either */
+                if (clients[0].peer != NULL) {
+                    enet_peer_disconnect(clients[0].peer, 0);
+                }
             }
             return;
         }
@@ -311,9 +325,17 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
         memset(&name_pkt, 0, sizeof(name_pkt));
         memcpy(&name_pkt, data, size < sizeof(name_pkt) ? size : sizeof(name_pkt));
         if (size < sizeof(TigNetCtrlName) || name_pkt.protocol != TIG_NET_PROTOCOL) {
-            /* An older client sends a shorter NAME (no protocol field). */
-            tig_debug_printf("tig_net: slot %d protocol %d != ours %d (NAME %zu bytes) - refusing; run the same build on both\n",
-                from_slot, size < sizeof(TigNetCtrlName) ? 0 : name_pkt.protocol, TIG_NET_PROTOCOL, size);
+            if (size < sizeof(TigNetCtrlName)) {
+                /* An older client sends a shorter NAME. */
+                tig_debug_printf("tig_net: refusing old client in slot %d (NAME %zu bytes, no protocol field; ours is %d) - run the same build on both\n",
+                    from_slot, size, TIG_NET_PROTOCOL);
+            } else {
+                tig_debug_printf("tig_net: refusing slot %d: protocol %d != ours %d - run the same build on both\n",
+                    from_slot, name_pkt.protocol, TIG_NET_PROTOCOL);
+            }
+            /* Its CHAR_OFFER etc. may already be queued behind the NAME:
+               drop everything from it until the disconnect lands. */
+            clients[from_slot].refused = true;
             if (clients[from_slot].peer != NULL) {
                 enet_peer_disconnect(clients[from_slot].peer, 0);
             }
@@ -358,6 +380,7 @@ void tig_net_configure_join(const char* host, int port)
 {
     want_join = true;
     want_host = false;
+    host_refused = false; /* a new join target gets a fresh check */
     if (host != NULL) {
         strncpy(join_host, host, sizeof(join_host) - 1);
         join_host[sizeof(join_host) - 1] = '\0';
@@ -394,6 +417,11 @@ int tig_net_start_client(void)
     }
 
     if (want_join) {
+        if (host_refused) {
+            tig_debug_printf("tig_net: not rejoining %s:%d - its protocol doesn't match ours (%d); restart with the same build on both\n",
+                join_host, join_port, TIG_NET_PROTOCOL);
+            return TIG_ERR_GENERIC;
+        }
         return tig_net_connect_configured();
     }
 
@@ -598,6 +626,8 @@ void tig_net_pump(void)
                     /* Rejected / unassigned peer: drop everything it sends. */
                 } else if (event.channelID == TIG_NET_CHANNEL_CTRL) {
                     tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
+                } else if (is_host ? clients[from].refused : host_refused) {
+                    /* Protocol mismatch: disconnect pending, drop it. */
                 } else if (!is_host && from != 0) {
                     /* Clients only accept app traffic from the host. */
                 } else if (is_host && from == 0) {
@@ -619,6 +649,7 @@ void tig_net_pump(void)
                 clients[slot].active = false;
                 clients[slot].waiting = false;
                 clients[slot].loading = false;
+                clients[slot].refused = false;
                 clients[slot].name[0] = '\0';
                 tig_net_fire_event(TIG_NET_EVENT_DISCONNECT, slot, NULL, 0);
             }
@@ -717,6 +748,9 @@ static void tig_net_send_raw_ex(void* data, int size, int client_id, bool all, b
 
     if (!tig_net_is_active() || data == NULL || size <= 0 || size > TIG_NET_MAX_PACKET) {
         return;
+    }
+    if (!is_host && host_refused) {
+        return; /* refused host (protocol): nothing of ours reaches it */
     }
 
     /* Review L3: one packet for every recipient; ENet takes a reference per
@@ -955,4 +989,9 @@ void sub_52A9E0(int client_id)
         clients[client_id].loading = false;
         clients[client_id].waiting = false;
     }
+}
+
+bool tig_net_host_refused(void)
+{
+    return host_refused;
 }

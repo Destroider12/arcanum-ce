@@ -356,6 +356,7 @@ bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size);
 #define COOP_CHAR_CHUNK 1024
 #define COOP_CHAR_WIRE_MAX (64 * 1024)
 #define COOP_CHAR_MAX_ITEMS 64
+#define COOP_CHAR_MAX_LEVEL 51 /* stat.c: STAT_LEVEL max */
 
 typedef struct PacketCoopCharChunk {
     /* 0000 */ int type;

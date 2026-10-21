@@ -251,6 +251,26 @@ static int phase_host(void)
     CHECK(g_disconnect_slot0 == 0, "rejected peer did not disconnect slot 0");
     CHECK(tig_net_client_is_active(0) && tig_net_client_is_active(1), "slots intact after reject");
 
+    /* (12) PT22: an old client (NAME without the protocol field), then
+       a CHAR_OFFER right behind it: the host refuses the peer and drops
+       the offer instead of spawning it. */
+    {
+        int before = g_delivered[PACKET_COOP_CHAR_OFFER];
+
+        memset(&name, 0, sizeof(name));
+        name.magic = 2;
+        snprintf(name.name, sizeof(name.name), "Old");
+        raw_send(rogue, 1, &name, sizeof(name) - sizeof(int));
+        offer.slot = 1;
+        offer.basic_prototype = 16067;
+        raw_send(rogue, 0, &offer, sizeof(offer));
+        for (i = 0; i < 2000 && tig_net_client_is_active(1); i++) {
+            pump(rogue_host, 1);
+        }
+        CHECK(g_delivered[PACKET_COOP_CHAR_OFFER] == before, "offer after an old NAME dropped");
+        CHECK(!tig_net_client_is_active(1), "old-protocol client disconnected");
+    }
+
     /* (4) disconnect clears the pending offer. */
     enet_peer_disconnect_now(rogue, 0);
     enet_host_flush(rogue_host);
