@@ -35,12 +35,14 @@ typedef struct TigNetCtrlWelcome {
     int magic; /* TIG_NET_CTRL_WELCOME */
     int slot;
     int max_players;
+    int protocol; /* TIG_NET_PROTOCOL */
 } TigNetCtrlWelcome;
 
 typedef struct TigNetCtrlName {
     int magic; /* TIG_NET_CTRL_NAME */
     int slot;
     char name[TIG_NET_MAX_NAME];
+    int protocol; /* TIG_NET_PROTOCOL */
 } TigNetCtrlName;
 
 typedef struct TigNetClient {
@@ -232,7 +234,9 @@ static void tig_net_send_ctrl_to_peer(ENetPeer* peer, const void* data, size_t s
     if (packet == NULL) {
         return;
     }
-    enet_peer_send(peer, TIG_NET_CHANNEL_CTRL, packet);
+    if (enet_peer_send(peer, TIG_NET_CHANNEL_CTRL, packet) != 0) {
+        enet_packet_destroy(packet); /* not queued: still ours */
+    }
 }
 
 static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
@@ -250,12 +254,22 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
 
         /* Only a client accepts WELCOME, only from the host, only once,
            and only with a sane client slot (never 0 = host). */
-        if (is_host || from_slot != 0 || size < sizeof(TigNetCtrlWelcome)) {
+        if (is_host || from_slot != 0) {
             tig_debug_printf("tig_net: ignoring WELCOME (host=%d from=%d size=%zu)\n",
                 is_host ? 1 : 0, from_slot, size);
             return;
         }
-        memcpy(&welcome_copy, data, sizeof(welcome_copy));
+        memset(&welcome_copy, 0, sizeof(welcome_copy));
+        memcpy(&welcome_copy, data, size < sizeof(welcome_copy) ? size : sizeof(welcome_copy));
+        if (size < sizeof(TigNetCtrlWelcome) || welcome->protocol != TIG_NET_PROTOCOL) {
+            /* An older host sends a shorter WELCOME (no protocol field). */
+            tig_debug_printf("tig_net: host protocol %d != ours %d (WELCOME %zu bytes) - refusing; run the same build on both\n",
+                size < sizeof(TigNetCtrlWelcome) ? 0 : welcome->protocol, TIG_NET_PROTOCOL, size);
+            if (clients[0].peer != NULL && local_slot == 0) {
+                enet_peer_disconnect(clients[0].peer, 0);
+            }
+            return;
+        }
         if (!tig_net_welcome_slot_valid(welcome->slot)) {
             tig_debug_printf("tig_net: ignoring WELCOME with bad slot %d\n", welcome->slot);
             return;
@@ -281,19 +295,30 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
             name_pkt.magic = TIG_NET_CTRL_NAME;
             name_pkt.slot = local_slot;
             strncpy(name_pkt.name, local_name, TIG_NET_MAX_NAME - 1);
+            name_pkt.protocol = TIG_NET_PROTOCOL;
             tig_net_send_ctrl_to_peer(clients[0].peer, &name_pkt, sizeof(name_pkt));
         }
         return;
     }
 
-    if (magic == TIG_NET_CTRL_NAME && size >= sizeof(TigNetCtrlName)) {
+    if (magic == TIG_NET_CTRL_NAME) {
         TigNetCtrlName name_pkt;
 
         /* Host only; the slot is the authenticated sender, not the payload. */
         if (!is_host || from_slot <= 0 || from_slot >= TIG_NET_MAX_PLAYERS) {
             return;
         }
-        memcpy(&name_pkt, data, sizeof(name_pkt));
+        memset(&name_pkt, 0, sizeof(name_pkt));
+        memcpy(&name_pkt, data, size < sizeof(name_pkt) ? size : sizeof(name_pkt));
+        if (size < sizeof(TigNetCtrlName) || name_pkt.protocol != TIG_NET_PROTOCOL) {
+            /* An older client sends a shorter NAME (no protocol field). */
+            tig_debug_printf("tig_net: slot %d protocol %d != ours %d (NAME %zu bytes) - refusing; run the same build on both\n",
+                from_slot, size < sizeof(TigNetCtrlName) ? 0 : name_pkt.protocol, TIG_NET_PROTOCOL, size);
+            if (clients[from_slot].peer != NULL) {
+                enet_peer_disconnect(clients[from_slot].peer, 0);
+            }
+            return;
+        }
         name_pkt.name[TIG_NET_MAX_NAME - 1] = '\0';
         strncpy(clients[from_slot].name, name_pkt.name, TIG_NET_MAX_NAME - 1);
         clients[from_slot].name[TIG_NET_MAX_NAME - 1] = '\0';
@@ -554,6 +579,7 @@ void tig_net_pump(void)
                 welcome.magic = TIG_NET_CTRL_WELCOME;
                 welcome.slot = slot;
                 welcome.max_players = max_players;
+                welcome.protocol = TIG_NET_PROTOCOL;
                 tig_net_send_ctrl_to_peer(event.peer, &welcome, sizeof(welcome));
                 enet_host_flush(enet_host);
 

@@ -1606,3 +1606,17 @@ Party XP (host-authoritative):
   (336f9bea). With the client dead, 100 XP went to the host alone and the
   corpse got 0. The combat per-hit path was not hit: the host's attacks
   on the dev rat all missed.
+
+## 34. PT21: DeepSeek review fixes
+
+- `coop_lite_write_char_bundle`: the buffer starts zeroed. A failed build
+  (bad inventory count) used to free an uninitialised pointer.
+- `tig_net_send_ctrl_to_peer`: if `enet_peer_send` fails, the packet is
+  destroyed instead of leaked.
+- `coop_lite_client_map_stack_oid`: the 24-byte wire OIDs are read with
+  memcpy (`coop_lite_oid_bytes_set`), not an unaligned `ObjectID*` cast.
+- Protocol check: `TIG_NET_PROTOCOL` (21) travels in WELCOME (host to
+  client) and NAME (client to host). A missing or different value is
+  logged ("protocol X != ours Y ... refusing") and the peer is
+  disconnected, so mismatched builds no longer corrupt each other. Bump it
+  whenever a packet layout changes.

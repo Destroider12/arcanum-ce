@@ -40,11 +40,13 @@ typedef struct CtrlWelcome {
     int magic;
     int slot;
     int max_players;
+    int protocol;
 } CtrlWelcome;
 typedef struct CtrlName {
     int magic;
     int slot;
     char name[TIG_NET_MAX_NAME];
+    int protocol;
 } CtrlName;
 
 static int g_delivered[256];
@@ -190,6 +192,7 @@ static int phase_host(void)
     name.magic = 2;
     name.slot = 0;
     memset(name.name, 'E', sizeof(name.name)); /* unterminated */
+    name.protocol = TIG_NET_PROTOCOL;
     raw_send(rogue, 1, &name, sizeof(name));
     pump(rogue_host, 100);
     CHECK(strcmp(tig_net_client_info_get_name(0), "Host") == 0, "host name not spoofed");
@@ -313,6 +316,7 @@ static int phase_client(void)
                     welcome.magic = 1;
                     welcome.slot = 0;
                     welcome.max_players = 8;
+                    welcome.protocol = TIG_NET_PROTOCOL;
                     raw_send(peer, 1, &welcome, sizeof(welcome));
                     welcome.slot = 1;
                     raw_send(peer, 1, &welcome, sizeof(welcome));

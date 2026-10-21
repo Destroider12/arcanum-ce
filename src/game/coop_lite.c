@@ -238,7 +238,7 @@ static bool coop_lite_build_char_bundle(int64_t pc, CoopCharBundleBuf* out)
 
 static bool coop_lite_write_char_bundle(int64_t pc, const char* path)
 {
-    CoopCharBundleBuf buf;
+    CoopCharBundleBuf buf = { 0 }; /* build may fail before writing it */
     TigFile* stream;
     bool ok;
 
@@ -7350,6 +7350,15 @@ static void coop_lite_client_remember_stacks(int64_t owner, const uint8_t* gold,
     memcpy(e->ammo, ammo, sizeof(e->ammo));
 }
 
+/* A 24-byte wire OID is set (memcpy: the byte arrays are not aligned). */
+static bool coop_lite_oid_bytes_set(const uint8_t* bytes)
+{
+    ObjectID oid;
+
+    memcpy(&oid, bytes, sizeof(oid));
+    return oid.type != OID_TYPE_NULL;
+}
+
 void coop_lite_client_map_stack_oid(void* oid_ptr)
 {
     ObjectID* oid = (ObjectID*)oid_ptr;
@@ -7366,14 +7375,14 @@ void coop_lite_client_map_stack_oid(void* oid_ptr)
         return;
     }
     if (obj == obj_field_handle_get(pc, OBJ_F_CRITTER_GOLD)) {
-        if (((const ObjectID*)coop_host_gold_oid)->type != OID_TYPE_NULL) {
+        if (coop_lite_oid_bytes_set(coop_host_gold_oid)) {
             memcpy(oid, coop_host_gold_oid, sizeof(*oid));
         }
         return;
     }
     for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
         if (obj == obj_field_handle_get(pc, coop_ammo_fld[t])) {
-            if (((const ObjectID*)coop_host_ammo_oid[t])->type != OID_TYPE_NULL) {
+            if (coop_lite_oid_bytes_set(coop_host_ammo_oid[t])) {
                 memcpy(oid, coop_host_ammo_oid[t], sizeof(*oid));
             }
             return;
@@ -7405,7 +7414,7 @@ void coop_lite_client_map_stack_oid(void* oid_ptr)
                     }
                 }
             }
-            if (src != NULL && ((const ObjectID*)src)->type != OID_TYPE_NULL) {
+            if (src != NULL && coop_lite_oid_bytes_set(src)) {
                 memcpy(oid, src, sizeof(*oid));
             }
             return;
