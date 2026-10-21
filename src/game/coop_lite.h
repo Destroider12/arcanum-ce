@@ -459,6 +459,16 @@ typedef struct PacketCoopPcStats {
    rise, each costing one unspent point; nothing may fall; caps 20 / 20 / 5 /
    7. Host-authoritative fields (level, XP, ...) are not compared. */
 bool coop_lite_pc_build_spend_ok(const CoopPcBuild* have, const CoopPcBuild* want);
+
+/*
+ * PT20 party XP. Splits `xp` among `n` living party PCs: each gets
+ * (xp + carry[i]) / n and keeps the rest in carry[i] (XP owed in n-ths), so
+ * tiny per-hit awards still reach everyone evenly. Returns n (0 = none).
+ */
+int coop_lite_xp_split(int xp, int n, int carry[8], int out[8]);
+/* Host: critter_give_xp hook (xp already difficulty-adjusted). True when
+   handled (shared or nobody alive); false = the vanilla single-PC award. */
+bool coop_lite_host_share_xp(int64_t earner, int xp);
 unsigned int coop_lite_pc_build_sig(const CoopPcBuild* b);
 void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt);
 

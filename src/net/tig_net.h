@@ -26,7 +26,9 @@ extern "C" {
 #define TIG_NET_MAX_PLAYERS 8
 #define TIG_NET_DEFAULT_PORT 7777
 #define TIG_NET_MAX_NAME 32
-#define TIG_NET_MAX_PACKET 4096
+/* PT20 (review): a full world-state chunk is 0x10 + 64 * 0x40 = 4112 bytes and
+   an object blob carries up to 8 KB; ENet fragments larger packets. */
+#define TIG_NET_MAX_PACKET 16384
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

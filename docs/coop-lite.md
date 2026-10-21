@@ -1562,3 +1562,47 @@ host-only (the corpse pose matches).
   already sends Packet70 subtype 5, which the client handles; nothing filters it. The client's
   pool sat on frame 0 while the host's grows through AG_ANIMATE, so the client now sets the last
   frame. Log line: `MP: blood pool at x,y (4 frames)`.
+
+## 33. PT20: Gemini review fixes and party XP
+
+Review fixes (verified against the code; full list in the review notes):
+
+- `TIG_NET_MAX_PACKET` 4096 → 16384. A full world-state chunk
+  (0x10 + 64 × 0x40 = 4112 bytes) and any object blob over ~4 KB were
+  silently dropped by `tig_net_send_raw_ex`. ENet fragments large packets;
+  static asserts now check that the world chunk, obj blob and PC stats fit.
+- Co-op: `critter_kill` no longer schedules body decay for PCs. Before,
+  a fallen player lying for a game day (world-map travel, resting) would
+  have been destroyed by `critter_decay_timeevent_process`.
+- `coop_lite_pc_build_spend_ok`: skills compare points (low 6 bits) with
+  the training bits held equal, so a trained skill can take a point (it
+  used to be refused as over the cap of 20). Training and the mastery
+  college (index 16, never checked before) can't change through a spend.
+- Identify service (packet 125): the host charges
+  `spell_money(SPELL_DIVINE_MAGICK)` as `inven_ui` does and ignores the
+  client's `cost`, which let a client identify for free.
+
+Party XP (host-authoritative):
+
+- `critter_give_xp` (kill bonus, per-hit combat XP, quest, dialog and
+  script XP) applies the difficulty first. In co-op, clients then return
+  (XP is the host's), and the host calls `coop_lite_host_share_xp`, which
+  splits the XP among living, connected slot PCs. Coop-lite keeps every PC
+  on the host's map. Each PC gets `(xp + carry) / n` and keeps the rest
+  as a per-slot carry, so tiny per-hit awards still even out. The award
+  goes through the vanilla tail (`critter_award_xp`:
+  `effect_adjust_xp_gain`, `stat_base_set` → `level_recalc`). Dead PCs
+  get nothing. A PC that is alone, or an earner who is not a party PC,
+  uses the vanilla path.
+- Level-ups run on the host and reach the owner through packet 144. If
+  the owner sees a higher level, it takes the whole build, because the
+  host may have run an auto-level scheme (pregens have one). It also shows
+  the vanilla level-up message and lights the character button.
+- Dev: the `give-xp N` trigger (host) calls `critter_give_xp(host PC, N)`.
+  The `hp` trigger now also prints lvl, xp and unspent points.
+- Headless runs (logs/pt20, pt20b, pt20c) checked the following. 20000 XP
+  gave each PC 10000, and both reached level 4. The client logged
+  `level up 1 -> 4` and its build signature matched the host's
+  (336f9bea). With the client dead, 100 XP went to the host alone and the
+  corpse got 0. The combat per-hit path was not hit: the host's attacks
+  on the dev rat all missed.

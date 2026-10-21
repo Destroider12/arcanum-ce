@@ -835,6 +835,61 @@ static int test_packet_hardening(void)
                 fprintf(stderr, "pc build: negative points accepted\n");
                 return 1;
             }
+            /* PT20: a trained skill (bits 6-7) still takes a point; the
+               training itself and the mastery college are not spends. */
+            have.stats[COOP_PCB_STAT_UNSPENT] = 3;
+            have.basic[5] = (1 << 6) | 7; /* apprentice, 7 points */
+            want = have;
+            want.basic[5] = (1 << 6) | 8;
+            want.stats[COOP_PCB_STAT_UNSPENT] = 2;
+            if (!coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: trained skill spend refused\n");
+                return 1;
+            }
+            want = have;
+            want.basic[5] = (2 << 6) | 7; /* self-promoted to expert */
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: training change accepted\n");
+                return 1;
+            }
+            want = have;
+            want.tech[1] = 1 << 6;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: tech training change accepted\n");
+                return 1;
+            }
+            want = have;
+            want.spell_tech[COOP_PCB_MASTERY] = 3;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: mastery change accepted\n");
+                return 1;
+            }
+            {
+                /* PT20 party XP split, with the per-PC carry. */
+                int out[8];
+                int carry[8] = { 0 };
+                int total[3] = { 0, 0, 0 };
+                int k;
+
+                if (coop_lite_xp_split(100, 2, carry, out) != 2 || out[0] != 50 || out[1] != 50
+                    || carry[0] != 0 || carry[1] != 0
+                    || coop_lite_xp_split(50, 0, carry, out) != 0
+                    || coop_lite_xp_split(-5, 2, carry, out) != 0
+                    || coop_lite_xp_split(10, 9, carry, out) != 0) {
+                    fprintf(stderr, "party xp split wrong\n");
+                    return 1;
+                }
+                for (k = 0; k < 9; k++) { /* nine 1-XP hits, three PCs */
+                    coop_lite_xp_split(1, 3, carry, out);
+                    total[0] += out[0];
+                    total[1] += out[1];
+                    total[2] += out[2];
+                }
+                if (total[0] != 3 || total[1] != 3 || total[2] != 3) {
+                    fprintf(stderr, "party xp carry wrong (%d %d %d)\n", total[0], total[1], total[2]);
+                    return 1;
+                }
+            }
             if (!coop_lite_packet_allowed(PACKET_COOP_PC_STATS, true, 1)
                 || !coop_lite_packet_allowed(PACKET_COOP_PC_STATS, false, 0)
                 || coop_lite_packet_allowed(PACKET_COOP_PC_STATS, false, 2)

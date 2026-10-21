@@ -5335,15 +5335,22 @@ bool coop_lite_pc_build_spend_ok(const CoopPcBuild* have, const CoopPcBuild* wan
             return false;
         }
     }
+    /* Skills: points in the low 6 bits, training above (host/dialog only). */
     for (i = 0; i < COOP_PCB_BASIC; i++) {
-        if (!coop_lite_pcb_rise(have->basic[i], want->basic[i], 20, &cost)) {
+        if ((have->basic[i] & ~63) != (want->basic[i] & ~63)
+            || !coop_lite_pcb_rise(have->basic[i] & 63, want->basic[i] & 63, 20, &cost)) {
             return false;
         }
     }
     for (i = 0; i < COOP_PCB_TECH; i++) {
-        if (!coop_lite_pcb_rise(have->tech[i], want->tech[i], 20, &cost)) {
+        if ((have->tech[i] & ~63) != (want->tech[i] & ~63)
+            || !coop_lite_pcb_rise(have->tech[i] & 63, want->tech[i] & 63, 20, &cost)) {
             return false;
         }
+    }
+    /* The mastery college comes from a quest (host), never a spend. */
+    if (have->spell_tech[COOP_PCB_MASTERY] != want->spell_tech[COOP_PCB_MASTERY]) {
+        return false;
     }
     for (i = 0; i < COOP_PCB_COLLEGES; i++) {
         if (!coop_lite_pcb_rise(have->spell_tech[i], want->spell_tech[i], 5, &cost)) {
@@ -5360,6 +5367,22 @@ bool coop_lite_pc_build_spend_ok(const CoopPcBuild* have, const CoopPcBuild* wan
         return false;
     }
     return true;
+}
+
+int coop_lite_xp_split(int xp, int n, int carry[8], int out[8])
+{
+    int i;
+
+    if (n <= 0 || n > 8 || xp <= 0) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        int owed = xp + carry[i];
+
+        out[i] = owed / n;
+        carry[i] = owed % n;
+    }
+    return n;
 }
 
 bool coop_lite_party_notice_is_good(int kind)
@@ -5655,6 +5678,9 @@ static unsigned int coop_lite_pc_inven_sig(int64_t pc)
 
 /* ---- PT19: PC build sync (PACKET_COOP_PC_STATS) -------------------------- */
 
+COOP_STATIC_ASSERT(sizeof(PacketCoopWorldState) <= TIG_NET_MAX_PACKET, "world chunk fits a packet");
+COOP_STATIC_ASSERT(sizeof(PacketCoopObjBlob) <= TIG_NET_MAX_PACKET, "obj blob fits a packet");
+COOP_STATIC_ASSERT(sizeof(PacketCoopPcStats) <= TIG_NET_MAX_PACKET, "PC stats fit a packet");
 COOP_STATIC_ASSERT(COOP_PCB_STATS == STAT_COUNT, "PCB stats");
 COOP_STATIC_ASSERT(COOP_PCB_BASIC == BASIC_SKILL_COUNT, "PCB basic skills");
 COOP_STATIC_ASSERT(COOP_PCB_TECH == TECH_SKILL_COUNT, "PCB tech skills");
@@ -5750,6 +5776,66 @@ static void coop_lite_pc_build_apply(int64_t pc, const CoopPcBuild* b, int mode)
     }
 }
 
+/*
+ * PT20 party XP (host). Kill, damage and quest XP all go through
+ * critter_give_xp; split it among the living, connected slot PCs (all on
+ * the host's map in coop-lite: map travel takes everyone). Dead PCs get
+ * nothing, as in vanilla. Level-ups happen here (level_recalc) and reach
+ * the owners with the PC build sync (packet 144).
+ */
+bool coop_lite_host_share_xp(int64_t earner, int xp)
+{
+    static int carry_by_slot[8]; /* XP owed in n-ths (per-hit XP is tiny) */
+    int64_t pcs[8];
+    int slots[8];
+    int carry[8];
+    int amounts[8];
+    int n = 0;
+    bool in_party = false;
+    int slot;
+    int i;
+
+    if (!tig_net_is_host() || xp <= 0) {
+        return false;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc == OBJ_HANDLE_NULL || (slot > 0 && !tig_net_client_is_active(slot))) {
+            continue;
+        }
+        if (pc == earner) {
+            in_party = true;
+        }
+        if (critter_is_dead(pc)
+            || (obj_field_int32_get(pc, OBJ_F_FLAGS) & (OF_OFF | OF_DESTROYED)) != 0) {
+            continue;
+        }
+        slots[n] = slot;
+        carry[n] = carry_by_slot[slot];
+        pcs[n++] = pc;
+    }
+    if (!in_party) {
+        return false; /* not a party PC: vanilla */
+    }
+    if (n == 0) {
+        tig_debug_printf("CoopLite: party xp: %d XP, nobody alive — dropped\n", xp);
+        return true;
+    }
+    if (n == 1 && pcs[0] == earner) {
+        return false; /* alone: vanilla */
+    }
+    coop_lite_xp_split(xp, n, carry, amounts);
+    for (i = 0; i < n; i++) {
+        carry_by_slot[slots[i]] = carry[i];
+        critter_award_xp(pcs[i], amounts[i]);
+        tig_debug_printf("CoopLite: party xp: %d of %d XP -> slot %d (xp now %d, lvl %d)\n", amounts[i], xp,
+            slots[i], stat_base_get(pcs[i], STAT_EXPERIENCE_POINTS),
+            stat_base_get(pcs[i], STAT_LEVEL));
+    }
+    return true;
+}
+
 static void coop_lite_pc_stats_send(int slot, int64_t pc, unsigned int flags, int to_slot)
 {
     PacketCoopPcStats pkt;
@@ -5810,9 +5896,9 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
         }
         coop_pcs_sig[slot] = sig;
         coop_lite_pc_stats_send(slot, pc, 0, -1);
-        tig_debug_printf("CoopLite: PC stats: slot %d build sent (lvl %d, xp %d, unspent %d, max hp %d)\n",
+        tig_debug_printf("CoopLite: PC stats: slot %d build sent (lvl %d, xp %d, unspent %d, max hp %d, sig %08x)\n",
             slot, b.stats[STAT_LEVEL], b.stats[STAT_EXPERIENCE_POINTS], b.stats[STAT_UNSPENT_POINTS],
-            object_hp_max(pc));
+            object_hp_max(pc), sig);
     }
 }
 
@@ -6174,14 +6260,18 @@ void coop_lite_host_handle_item_op(int type, void* msg)
     case 125: {
         PacketPerformIdentifyService* pkt = (PacketPerformIdentifyService*)msg;
         int64_t npc = obj_pool_perm_lookup(pkt->npc_oid);
+        /* PT20 review: the price is the host's (inven_ui sub_5786C0), never
+           the client's number (cost 0 identified for free). */
+        int price = spell_money(SPELL_DIVINE_MAGICK);
 
         what = "identify";
         item = obj_pool_perm_lookup(pkt->item_oid);
         if (item != OBJ_HANDLE_NULL && obj_pool_perm_lookup(pkt->pc_oid) == pc
             && item_parent(item, &parent) && parent == pc
+            && !item_is_identified(item)
             && coop_lite_barter_partner_ok(pc, npc)
-            && pkt->cost >= 0 && pkt->cost <= item_gold_get(pc)) {
-            item_perform_identify_service(item, npc, pc, pkt->cost);
+            && price > 0 && price <= item_gold_get(pc)) {
+            item_perform_identify_service(item, npc, pc, price);
             ok = true;
         }
         break;
@@ -8809,7 +8899,11 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
     {
         bool own = pkt->slot == sub_529520() && pc == player_get_local_pc_obj();
         bool force = (pkt->flags & COOP_PC_STATS_F_FORCE) != 0;
-        int mode = own && !force ? COOP_PCB_APPLY_OWNER : COOP_PCB_APPLY_FULL;
+        int old_level = stat_base_get(pc, STAT_LEVEL);
+        /* PT20: a level-up on the host may have run an auto-level scheme
+           (pregens have one) that spent the new points there; take it all. */
+        bool levelled = own && pkt->build.stats[STAT_LEVEL] > old_level;
+        int mode = own && !force && !levelled ? COOP_PCB_APPLY_OWNER : COOP_PCB_APPLY_FULL;
         CoopPcBuild now;
 
         multiplayer_lock();
@@ -8820,9 +8914,28 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
         if (own) {
             coop_lite_pc_build_fill(pc, &now);
             coop_client_pcs_sig = coop_lite_pc_build_sig(&now); /* not a spend of ours */
+            if (stat_base_get(pc, STAT_LEVEL) > old_level) {
+                /* PT20: the host levelled us (level_recalc ran there); the
+                   vanilla level-up notice and the character button. */
+                UiMessage ui_message;
+                char str[1] = { '\0' };
+
+                ui_message.type = UI_MSG_TYPE_LEVEL;
+                ui_message.str = str;
+                ui_message.field_8 = stat_base_get(pc, STAT_LEVEL);
+                ui_message.field_C = auto_level_scheme_get(pc) != 0 ? -1 : stat_base_get(pc, STAT_UNSPENT_POINTS);
+                ui_display_msg(&ui_message);
+                ui_toggle_primary_button(UI_PRIMARY_BUTTON_CHAR, true);
+                ui_refresh_health_bar(pc);
+                ui_refresh_fatigue_bar(pc);
+                tig_debug_printf("CoopLite: PC stats: level up %d -> %d (unspent %d)\n", old_level,
+                    stat_base_get(pc, STAT_LEVEL), stat_base_get(pc, STAT_UNSPENT_POINTS));
+            }
         }
-        tig_debug_printf("CoopLite: PC stats: slot %d applied (%s), STR %d unspent %d, max hp %d\n",
-            pkt->slot, force ? "forced" : (own ? "owner fields" : "full"),
+        coop_lite_pc_build_fill(pc, &now);
+        tig_debug_printf("CoopLite: PC stats: slot %d applied (%s), sig %08x, STR %d unspent %d, max hp %d\n",
+            pkt->slot, force ? "forced" : (levelled ? "level-up, full" : (own ? "owner fields" : "full")),
+            coop_lite_pc_build_sig(&now),
             stat_base_get(pc, STAT_STRENGTH), stat_base_get(pc, STAT_UNSPENT_POINTS), object_hp_max(pc));
     }
 #else
@@ -9789,8 +9902,10 @@ static void coop_lite_dev_hp_line(const char* tag, int64_t obj)
             object_examine(focus, focus, fname);
         }
     }
-    tig_debug_printf("CoopLite: dev hp: %s '%s' @%d,%d STR %d hp %d/%d%s%s%s%s\n", tag, name,
+    tig_debug_printf("CoopLite: dev hp: %s '%s' @%d,%d STR %d lvl %d xp %d unspent %d hp %d/%d%s%s%s%s\n", tag, name,
         (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), stat_base_get(obj, STAT_STRENGTH),
+        stat_base_get(obj, STAT_LEVEL), stat_base_get(obj, STAT_EXPERIENCE_POINTS),
+        stat_base_get(obj, STAT_UNSPENT_POINTS),
         object_hp_current(obj), object_hp_max(obj),
         critter_is_dead(obj) ? " DEAD" : "",
         focus != OBJ_HANDLE_NULL ? " fighting '" : "", fname, focus != OBJ_HANDLE_NULL ? "'" : "");
@@ -9922,6 +10037,14 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         }
         tig_debug_printf("CoopLite: dev %s: STR %d -> %d, unspent %d -> %d\n", cmd, str,
             stat_base_get(pc, STAT_STRENGTH), pts, stat_base_get(pc, STAT_UNSPENT_POINTS));
+        return true;
+    }
+    if (strcmp(cmd, "give-xp") == 0 && tig_net_is_host()) {
+        /* PT20: vanilla XP award to the host PC (the party split applies). */
+        int xp = atoi(arg) > 0 ? atoi(arg) : 100;
+
+        tig_debug_printf("CoopLite: dev: critter_give_xp(host PC, %d)\n", xp);
+        critter_give_xp(player_get_local_pc_obj(), xp);
         return true;
     }
     if (strcmp(cmd, "give-points") == 0 && tig_net_is_host()) {

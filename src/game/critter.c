@@ -6,6 +6,7 @@
 #include "game/anim.h"
 #include "game/background.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/effect.h"
 #include "game/gamelib.h"
 #include "game/item.h"
@@ -30,6 +31,7 @@
 #include "game/stat.h"
 #include "game/tf.h"
 #include "game/ui.h"
+#include "net/tig_net.h"
 #include "game/coop_lite.h"
 
 typedef enum FatigueEventType {
@@ -759,8 +761,10 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
     // Play dying animation.
     anim_goal_dying(victim_obj, anim);
 
-    // Schedule body decay.
-    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0) {
+    // Schedule body decay. Co-op: a fallen player's body waits for a
+    // resurrect or the party reload; it never decays away.
+    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0
+        && !(tig_net_is_coop_enabled() && obj_field_int32_get(victim_obj, OBJ_F_TYPE) == OBJ_TYPE_PC)) {
         critter_decay_timeevent_schedule(victim_obj);
     }
 
@@ -1862,8 +1866,6 @@ int critter_xp_worth(int64_t obj)
  */
 void critter_give_xp(int64_t obj, int xp_gain)
 {
-    int xp;
-
     if (obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return;
     }
@@ -1881,6 +1883,25 @@ void critter_give_xp(int64_t obj, int xp_gain)
         xp_gain -= xp_gain / 2;
         break;
     }
+
+    // Co-op: XP is the host's (clients get it with the PC build sync), and
+    // the host splits it among the living party.
+    if (tig_net_is_active() && tig_net_is_coop_enabled()) {
+        if (!tig_net_is_host() || coop_lite_host_share_xp(obj, xp_gain)) {
+            return;
+        }
+    }
+
+    critter_award_xp(obj, xp_gain);
+}
+
+/**
+ * Adds already difficulty-adjusted XP to a living PC (the vanilla tail of
+ * critter_give_xp, also used by the co-op party split).
+ */
+void critter_award_xp(int64_t obj, int xp_gain)
+{
+    int xp;
 
     // Single-player game - just give all reward to the local PC.
     if (!critter_is_dead(obj)) {
