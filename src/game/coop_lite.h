@@ -31,7 +31,8 @@ extern "C" {
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
 #define PACKET_COOP_PC_STATS 144 /* PT19: PC build, host → clients and owner → host */
-#define PACKET_COOP_TYPE_LIMIT 145
+#define PACKET_COOP_SWING 145 /* PT25: host → owner: your PC swung at this target */
+#define PACKET_COOP_TYPE_LIMIT 146
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -49,6 +50,15 @@ typedef struct PacketCoopAttackIntent {
     /* 0008 */ unsigned char attacker_oid[24]; /* ObjectID */
     /* 0020 */ unsigned char target_oid[24]; /* ObjectID */
 } PacketCoopAttackIntent;
+
+/* PT25 PACKET_COOP_SWING: the host resolved one strike of a client PC
+   (continuous AG_ATTACK); the owner plays the swing animation. */
+typedef struct PacketCoopSwing {
+    /* 0000 */ int type;
+    /* 0004 */ int hit; /* 0 = strike (play the swing), 2 = out of reach: re-approach */
+    /* 0008 */ unsigned char attacker_oid[24]; /* ObjectID */
+    /* 0020 */ unsigned char target_oid[24]; /* ObjectID */
+} PacketCoopSwing;
 
 typedef struct PacketCoopFollowHost {
     /* 0000 */ int type;
@@ -475,6 +485,15 @@ int coop_lite_xp_split(int xp, int n, int carry[8], int out[8]);
 bool coop_lite_host_share_xp(int64_t earner, int xp);
 unsigned int coop_lite_pc_build_sig(const CoopPcBuild* b);
 void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt);
+void coop_lite_handle_swing(PacketCoopSwing* pkt);
+/* Host: one strike of `attacker` resolved (anim.c sub_42A630). */
+void coop_lite_host_strike(int64_t attacker, int64_t target);
+/* Host: a client PC's repeating attack lost reach of its target; true =
+   stop here, the owner was told to walk after it (PACKET_COOP_SWING hit=2). */
+bool coop_lite_host_chase_to_owner(int64_t attacker, int64_t target);
+/* Host: an NPC sound (aggro growl, attack cry) the host played locally;
+   clients whose PC is near the NPC play it too (Packet106). */
+void coop_lite_host_npc_sound(int sound_id, int64_t npc);
 
 typedef struct PacketCoopWorldReq {
     /* 0000 */ int type;
@@ -735,6 +754,9 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_CAUGHT_THIEF 8 /* PT18: slot = the thief's slot */
 #define COOP_PARTY_STEAL_FAILED 9 /* PT18: unnoticed failure, to the thief */
 #define COOP_PARTY_STEAL_OK 10 /* PT18 gui3: steal/plant succeeded, to the thief */
+#define COOP_PARTY_REST_BEGIN 11 /* PT25: host sleeps/waits: clients fade out */
+#define COOP_PARTY_REST_END 12 /* PT25: host woke up: clients fade in */
+#define COOP_PARTY_WORLD_DIRTY 13 /* PT25: host dropped an item: refresh world state soon */
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
@@ -792,6 +814,18 @@ void coop_lite_local_teleport_finished(void);
 int coop_lite_take_dev_autostart_rearm(void);
 /* Cached env read; ARCANUM_DEV_* only with ARCANUM_DEV=1 (review PT24). */
 const char* coop_lite_env(const char* name);
+/* PT25: both on the co-op party side (PCs + their followers): no hostility. */
+bool coop_lite_party_friendly(int64_t a, int64_t b);
+/* Host: obj is a co-op client's PC (slot 1-7), i.e. owner-driven. */
+bool coop_lite_is_remote_slot_pc(int64_t obj);
+/* PT25 rest/sleep/wait: clients may not skip time (true = refused, message
+   shown); the host's rest fades every client and heals every co-op PC. */
+bool coop_lite_client_rest_refused(void);
+void coop_lite_host_rest_begin(void);
+void coop_lite_host_rest_end(void);
+void coop_lite_host_rest_heal(int hours);
+/* Host: a PC dropped an item - clients refresh their world state soon. */
+void coop_lite_host_world_dirty(void);
 
 /* Dispatch helper for PACKET_COOP_FOLLOW_HOST (from multiplayer_handle_message). */
 void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt);

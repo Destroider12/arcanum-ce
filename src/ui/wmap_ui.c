@@ -1264,8 +1264,19 @@ void wmap_ui_open_internal(void)
 
     if (wmap_ui_townmap != TOWNMAP_NONE) {
         wmap_ui_mode_set(WMAP_UI_MODE_TOWN);
-    } else if (tig_net_is_active()) {
+    } else if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
+        /* Vanilla MP: no world map outside town mode. PT25: this used to
+           fall through into refresh() on the just-destroyed window - the
+           coop host's crash when clicking "exit to world map" (log ends in
+           "tig_window_fill: Attempt to reference Empty WinID"). Coop: the
+           host keeps the world map (travel ends in teleport_do, whose
+           follow broadcast carries every client PC). */
         wmap_ui_close();
+        return;
+    }
+
+    if (!wmap_ui_created) {
+        return;
     }
 
     wmap_ui_mode_info[wmap_ui_mode].refresh();

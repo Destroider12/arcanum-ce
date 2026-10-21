@@ -1557,7 +1557,12 @@ void timeevent_sync(DateTime* game_time, DateTime* anim_time)
 {
     dword_5E8628 = 0;
 
-    if (datetime_compare(game_time, &timeevent_game_time) > 0) {
+    // PT25 co-op: the host owns game time. A client that got ahead (it used
+    // to be able to rest on its own) never re-synced, since this only moved
+    // forward; follow the host both ways there.
+    if (datetime_compare(game_time, &timeevent_game_time) > 0
+        || (tig_net_is_coop_enabled() && !tig_net_is_host()
+            && datetime_compare(game_time, &timeevent_game_time) != 0)) {
         timeevent_game_time = *game_time;
     }
 

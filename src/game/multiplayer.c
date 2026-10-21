@@ -1125,6 +1125,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_PARTY_STATE:
         coop_lite_handle_party_state((PacketCoopPartyState*)msg);
         break;
+    case PACKET_COOP_SWING:
+        coop_lite_handle_swing((PacketCoopSwing*)msg);
+        break;
     case PACKET_COOP_BARTER:
         coop_lite_handle_barter((PacketCoopBarter*)msg);
         break;

@@ -3890,6 +3890,15 @@ bool combat_auto_attack_get(int64_t obj)
         return false;
     }
 
+    // PT25 co-op: the host runs a client PC's AG_ATTACK; it used the
+    // host's own setting. A peer's PC keeps swinging until the target dies.
+    if (tig_net_is_active() && tig_net_is_coop_enabled()
+        && obj != OBJ_HANDLE_NULL
+        && !player_is_local_pc_obj(obj)
+        && multiplayer_find_slot_from_obj(obj) != -1) {
+        return true;
+    }
+
     return settings_get_value(&settings, AUTO_ATTACK_KEY);
 }
 

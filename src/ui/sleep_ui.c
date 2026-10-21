@@ -1,6 +1,7 @@
 #include "ui/sleep_ui.h"
 
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/gfade.h"
 #include "game/hrp.h"
@@ -251,6 +252,11 @@ void sleep_ui_toggle(int64_t bed_obj)
     // Close sleep UI if it's currently visible.
     if (sleep_ui_active) {
         sleep_ui_close();
+        return;
+    }
+
+    // PT25 co-op: only the host owns game time; a client may not rest/wait.
+    if (coop_lite_client_rest_refused()) {
         return;
     }
 
@@ -616,6 +622,9 @@ bool sleep_ui_process_callback(TimeEvent* timeevent)
             node = node->next;
         }
         object_list_destroy(&objects);
+
+        // PT25 co-op: every other co-op PC (and its followers) rests too.
+        coop_lite_host_rest_heal(hours);
     }
 
     if (critter_is_dead(sleep_ui_obj)) {
@@ -680,6 +689,8 @@ void sleep_ui_fall_asleep(void)
     fade_data.duration = 2.0f;
     fade_data.steps = 48;
     fade_data.color = tig_color_make(0, 0, 0);
+    // PT25 co-op: clients fade out with us.
+    coop_lite_host_rest_begin();
     gfade_run(&fade_data);
 
     // Disable ambient lighting updates.
@@ -704,6 +715,9 @@ void sleep_ui_wake_up(void)
     // Close the sleep UI.
     is_sleeping = false;
     sleep_ui_close();
+
+    // PT25 co-op: send the new game time and fade the clients back in.
+    coop_lite_host_rest_end();
 
     // Re-enable ambient lighting updates.
     ambient_lighting_enable();

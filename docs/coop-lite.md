@@ -24,7 +24,7 @@ that (full object/script sanitising of an uploaded character, per-slot rate
 limiting, authenticated sessions) is deliberately out of scope; do not
 expose a Coop Lite host to strangers on the Internet.
 
-**Wire (protocol 22, PT24).** The client's first packet on the reliable app
+**Wire (protocol 23, PT25; HELLO since 22).** The client's first packet on the reliable app
 channel is HELLO (name + protocol); ENet orders it before CHAR_OFFER etc. on
 that channel. The host drops app packets from a slot until a valid HELLO,
 fires the game's CONNECT for the slot only then, and disconnects a peer that
@@ -1658,3 +1658,26 @@ Party XP (host-authoritative):
   needs, per the new helper `level_xp_required` (from xp_level.mes).
 - Unit test: an old NAME followed by a CHAR_OFFER leaves the offer
   undelivered and the peer disconnected.
+
+## PT25 behaviour notes
+
+- **Game time** belongs to the host. A client cannot open the sleep/wait UI
+  ("Only the party leader can rest or wait."). When the host rests, clients
+  fade out with it (PARTY_STATE REST_BEGIN/END), every co-op PC and its
+  followers get the engine's hourly resting heal on the host, and the new
+  time is pushed (Packet3). Clients follow the host's clock both ways.
+- **Party peace:** co-op PCs and their followers never become each other's
+  enemies (`ai_attack`/shitlist gate); a caught pickpocket between players
+  only shows the notice. The host never auto-counter-attacks with a client's
+  PC (`sub_4A9AD0`); its owner drives it.
+- **Client melee:** the host runs the client PC's AG_ATTACK; its pose stream
+  no longer overwrites the attack art, and every strike is echoed to the
+  owner (PACKET_COOP_SWING) so the swing animates there. When the target
+  steps away the owner walks after it itself (SWING hit=2), never the host.
+- **Auto-attack / always-run** are switched on once per run on a client;
+  peers' PCs on the host always run and keep attacking.
+- **Ground items:** no junk piles in co-op (clients never learned the new
+  pile containers); a PC drop on the host asks clients to refresh the
+  world state within ~4 s.
+- **NPCs** attacking in co-op run (vanilla did so only offline); their aggro
+  growl / attack cry is forwarded to clients near them (Packet106).

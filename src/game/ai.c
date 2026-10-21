@@ -940,6 +940,13 @@ void ai_attack(int64_t source_obj, int64_t target_obj, int loudness, unsigned in
         return;
     }
 
+    /* Coop Lite PT25: no aggression inside the co-op party (a host caught
+       pickpocketing a client PC made that PC and Virgil fight the host). */
+    if (coop_lite_party_friendly(source_obj, target_obj)) {
+        tig_debug_printf("AI: coop party members never fight - aggression ignored\n");
+        return;
+    }
+
     source_obj_type = obj_field_int32_get(source_obj, OBJ_F_TYPE);
     if (obj_type_is_critter(source_obj_type)) {
         if ((flags & 0x04) != 0) {
@@ -1070,6 +1077,14 @@ void sub_4A9AD0(int64_t attacker_obj, int64_t target_obj)
         if (combat_turn_based_is_active()) {
             combat_turn_based_whos_turn_set(target_obj);
         }
+    }
+
+    // PT25 co-op: a client's PC is never driven by the host - no automatic
+    // counter-attack here (with the host's auto-attack setting it chased
+    // whoever hit it, the host's PC included, and the owner only saw FORCE
+    // position snaps). Its owner attacks by itself.
+    if (coop_lite_is_remote_slot_pc(attacker_obj)) {
+        return;
     }
 
     if (!sub_423300(attacker_obj, NULL) || anim_is_idle(attacker_obj)) {
@@ -4262,6 +4277,10 @@ void ai_shitlist_add(int64_t npc_obj, int64_t shit_obj)
 {
     int idx;
     int64_t obj;
+
+    if (coop_lite_party_friendly(npc_obj, shit_obj)) {
+        return; /* PT25: a co-op follower never blacklists a co-op PC */
+    }
 
     if (obj_field_int32_get(shit_obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         obj = critter_pc_leader_get(shit_obj);

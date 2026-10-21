@@ -4080,6 +4080,10 @@ bool sub_424070(int64_t obj, int priority_level, bool a3, bool a4)
 {
     bool rc;
 
+    if (coop_lite_is_remote_slot_pc(obj) && anim_is_current_goal_type(obj, AG_ATTACK, NULL)) {
+        tig_debug_printf("CoopLite: slot PC attack interrupted (priority %d)\n", priority_level);
+    }
+
     if (coop_lite_client_drives_obj(obj)) {
         tig_net_local_suspend_begin();
         rc = sub_424070_impl(obj, priority_level, a3, a4);
@@ -7116,6 +7120,8 @@ bool sub_4296D0(AnimRunInfo* run_info)
 
     if (run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data != -1) {
         gsound_play_sfx_on_obj(run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data, 1, self_obj);
+        // PT25 co-op: the aggro growl, also for clients near this NPC.
+        coop_lite_host_npc_sound(run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data, self_obj);
         for (goal = 0; goal <= run_info->current_goal; goal++) {
             run_info->goals[goal].params[AGDATA_SCRATCH_VAL5].data = -1;
         }
@@ -7125,7 +7131,21 @@ bool sub_4296D0(AnimRunInfo* run_info)
 }
 
 // 0x429760
+static bool sub_429760_impl(AnimRunInfo* run_info, const char** why);
+
 bool sub_429760(AnimRunInfo* run_info)
+{
+    const char* why = NULL;
+    bool ok = sub_429760_impl(run_info, &why);
+
+    // PT25 co-op diagnostics: why a client PC's attack stopped repeating.
+    if (!ok && coop_lite_is_remote_slot_pc(run_info->params[0].obj)) {
+        tig_debug_printf("CoopLite: slot PC attack stops: %s\n", why != NULL ? why : "target gone/dead");
+    }
+    return ok;
+}
+
+static bool sub_429760_impl(AnimRunInfo* run_info, const char** why)
 {
     int64_t source_obj;
     int64_t target_obj;
@@ -7145,6 +7165,7 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if (!combat_critter_is_combat_mode_active(source_obj)) {
+        *why = "not in combat mode";
         return false;
     }
 
@@ -7153,6 +7174,7 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if (!combat_auto_attack_get(source_obj)) {
+        *why = "auto attack off";
         return false;
     }
 
@@ -7169,18 +7191,29 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if ((run_info->flags & 0x800) != 0) {
+        *why = "goal flag 0x800";
         return false;
     }
 
     if (combat_turn_based_is_active()) {
+        *why = "turn-based";
         return false;
     }
 
     if ((obj_field_int32_get(source_obj, OBJ_F_CRITTER_FLAGS) & OCF_NON_LETHAL_COMBAT) != 0) {
+        *why = "non-lethal";
         return false;
     }
 
     if ((obj_field_int32_get(source_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_USING_BOOMERANG) != 0) {
+        return false;
+    }
+
+    // PT25 co-op: the target moved away from a client PC. Chasing it here
+    // reached the owner only as FORCE snaps (sliding, through walls); the
+    // owner walks after it itself and asks again.
+    if (coop_lite_host_chase_to_owner(source_obj, target_obj)) {
+        *why = "target out of reach - owner re-approaches";
         return false;
     }
 
@@ -7823,6 +7856,8 @@ bool sub_42A630(AnimRunInfo* run_info)
     }
 
     if ((obj_field_int32_get(target_obj, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) == 0) {
+        // PT25 co-op: a client PC's strike - its owner draws the swing.
+        coop_lite_host_strike(source_obj, target_obj);
         sub_4B3BB0(source_obj, target_obj, hit_loc);
     }
 
@@ -8682,6 +8717,9 @@ bool sub_42B9C0(AnimRunInfo* run_info)
     }
 
     if (!combat_critter_is_combat_mode_active(source_obj)) {
+        if (coop_lite_is_remote_slot_pc(source_obj)) {
+            tig_debug_printf("CoopLite: slot PC attack stops: combat mode off on the host\n");
+        }
         return false;
     }
 
@@ -11479,7 +11517,15 @@ bool get_always_run(int64_t obj)
     int client_id;
     bool always_run;
 
-    if (tig_net_is_active()) {
+    if (tig_net_is_active() && tig_net_is_coop_enabled()) {
+        // PT25 co-op: our own PC follows our own setting (+Ctrl), as in
+        // single player. A peer's PC always runs: its owner drives its
+        // movement, and the slot flags table (Packet98) was never reliably
+        // filled for coop slots, so host-driven approaches walked.
+        if (!player_is_local_pc_obj(obj)) {
+            return multiplayer_find_slot_from_obj(obj) != -1;
+        }
+    } else if (tig_net_is_active()) {
         client_id = multiplayer_find_slot_from_obj(obj);
         if (client_id != -1) {
             return (multiplayer_flags_get(client_id) & MULTIPLAYER_ALWAYS_RUN) != 0;
@@ -12927,6 +12973,9 @@ bool AGbeginAnimAttack(AnimRunInfo* run_info)
 
     action_points = combat_attack_cost(source_obj);
     if (!combat_consume_action_points(source_obj, action_points)) {
+        if (coop_lite_is_remote_slot_pc(source_obj)) {
+            tig_debug_printf("CoopLite: slot PC attack stops: no action points\n");
+        }
         anim_interrupt(&(run_info->id), PRIORITY_HIGHEST);
         return false;
     }
@@ -12969,6 +13018,7 @@ bool AGbeginAnimAttack(AnimRunInfo* run_info)
     if (obj_type_is_critter(source_obj_type) && random_between(1, 4) == 1) {
         sound_id = sfx_critter_sound(source_obj, CRITTER_SOUND_ATTACKING);
         gsound_play_sfx_on_obj(sound_id, 1, source_obj);
+        coop_lite_host_npc_sound(sound_id, source_obj);
     }
 
     mt_item_notify_parent_attacks_obj(source_obj, target_obj);
@@ -14264,7 +14314,9 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
     }
 
     if (obj_field_int32_get(attacker_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
-        if (!tig_net_is_active()
+        // PT25 co-op: attacking NPCs ran only in single player, so in a
+        // co-op session they walked at the PCs (the host resolves it).
+        if ((!tig_net_is_active() || tig_net_is_coop_enabled())
             && critter_fatigue_current(attacker_obj) > 8) {
             turn_on_running(stru_5A1908);
         }
