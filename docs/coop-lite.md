@@ -1350,3 +1350,35 @@ Review #3, verified against the code:
   REJOINED, so the client adopts the host's copy even with the same OID
   (party-wipe reload). Limit: a save from before the player joined has no
   copy of them, so their bundle is used.
+
+## 29. PT17: Resurrect crash, re-entry, ground review (Argon #2)
+
+- Crash: Packet57/58 carried the sender's raw object handles; the client
+  dereferenced the host's handle in sub_454700. Both paths now go through
+  `mp_magictech_resolve_invocation`: spell range check, then every
+  FollowerInfo (source/parent/target required, attacker optional) is
+  resolved by OID via `sub_443F80` and checked valid / not destroyed; on
+  failure the cast is logged and dropped. Applies to every spell.
+- "Process function is NOT Re-Entrant" (host): not coop code; it is an
+  identical second cast (same caster, spell, target) arriving while the
+  first is still in BEGIN. magictech now logs the asked/running run and,
+  with coop enabled on host/SP, drops such duplicates.
+- Client resurrect: when the party watch sees a PC rise it re-sets hp
+  damage unlocked so Packet100/13 reaches the client; the client stands
+  its PC up when it stops being dead.
+- Dev hooks: `ARCANUM_DEV_AUTO_RESURRECT=N[f][d]` (host casts Resurrect
+  on a dead client PC after N s; f = free, d = double cast),
+  `ARCANUM_DEV_GOLD_PILE` (host =N creates a 37-gold pile at the client PC;
+  client =1 picks it up then drops 10).
+- Argon review #2 (ground items), checked against current code:
+  1. invisible gold/ammo piles: already fixed (4c15738e).
+  2. pose vs Packet28 ordering: already fixed (f898ea2a; fresh PcPos on
+     the app channel right before Packet28, no timer).
+  3. ghost pile for the picker: confirmed, fixed (Packet72 to all for
+     stacks).
+  4. gold/ammo drop blocked in Packet81: confirmed, fixed (host split +
+     client stack OID mapping).
+  5. gold-pile dev check: added.
+- Limit: if a ground stack's blob request times out, the fallback pile
+  uses the proto quantity; pickup still goes through the host, so totals
+  stay right.
