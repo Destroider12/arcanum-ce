@@ -742,6 +742,8 @@ void coop_lite_terminate_name(char* name, size_t size);
  * is replicated with PC_POS.
  */
 bool coop_lite_client_drives_obj(int64_t obj);
+/* Client applying host state: object scripts must not run (review P0-3). */
+bool coop_lite_scripts_muted(void);
 /* Ground pickup: client queues a host request (sent from the coop tick);
    host resyncs a client PC that gained an item outside the item-op path. */
 void coop_lite_client_queue_pickup(int64_t item);

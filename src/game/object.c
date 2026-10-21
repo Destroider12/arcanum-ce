@@ -1,4 +1,5 @@
 #include "game/object.h"
+#include "game/coop_lite.h"
 
 #include <inttypes.h>
 
@@ -3886,6 +3887,11 @@ bool object_script_execute(int64_t triggerer_obj, int64_t attachee_obj, int64_t 
     bool rc;
 
     if (object_editor) {
+        return true;
+    }
+
+    /* Coop client applying the host's state: the host ran these. */
+    if (coop_lite_scripts_muted()) {
         return true;
     }
 

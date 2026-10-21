@@ -914,6 +914,8 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
 static void coop_lite_world_reset(void);
 static void coop_lite_keep_sector(int slot, int64_t loc);
 static void coop_lite_barter_reset(void);
+static void coop_lite_barter_end(int slot, const char* why);
+static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
@@ -983,9 +985,67 @@ static unsigned int coop_lite_pc_build_hash(int64_t pc)
    menu character, that one has no PC on the host to report for. */
 static bool coop_rejoin_pc_wanted;
 
+/*
+ * Review P0-3: client-side application of host state (inventory syncs,
+ * blobs, world state). Packets stay locally suspended as before, and object
+ * scripts are muted: item_insert / item_remove / object_destroy would run
+ * SAP_INSERT_ITEM / SAP_REMOVE_ITEM / SAP_DESTROY here, effects the host
+ * already had. end() restores the exact suspend depth begin() saw, so an
+ * unbalanced call inside cannot leak suspension past the scope.
+ */
+#define COOP_APPLY_STACK 8
+static int coop_apply_depth[COOP_APPLY_STACK];
+static int coop_apply_top;
+static int coop_script_mute;
+
+bool coop_lite_scripts_muted(void)
+{
+    return coop_script_mute > 0;
+}
+
+static void coop_lite_apply_begin(void)
+{
+    if (coop_apply_top < COOP_APPLY_STACK) {
+        coop_apply_depth[coop_apply_top] = tig_net_local_suspend_pause();
+        tig_net_local_suspend_resume(coop_apply_depth[coop_apply_top]);
+    }
+    coop_apply_top++;
+    tig_net_local_suspend_begin();
+    coop_script_mute++;
+}
+
+static void coop_lite_apply_end(void)
+{
+    if (coop_script_mute > 0) {
+        coop_script_mute--;
+    }
+    if (coop_apply_top <= 0) {
+        tig_debug_printf("CoopLite: apply scope underflow\n");
+        tig_net_local_suspend_end();
+        return;
+    }
+    coop_apply_top--;
+    if (coop_apply_top < COOP_APPLY_STACK) {
+        int want = coop_apply_depth[coop_apply_top];
+        int have = tig_net_local_suspend_pause();
+
+        if (have != want + 1) {
+            tig_debug_printf("CoopLite: apply scope: suspend depth %d, expected %d — restored\n", have, want + 1);
+        }
+        tig_net_local_suspend_resume(want);
+    } else {
+        tig_net_local_suspend_end();
+    }
+}
+
+static void coop_lite_char_rx_reset_all(void);
+
 void coop_lite_session_reset(void)
 {
     int i;
+
+    /* Review P0-1: half-received bundles must not survive a session. */
+    coop_lite_char_rx_reset_all();
 
     for (i = 0; i < 8; i++) {
         coop_interp_reset(&coop_interp[i]);
@@ -1672,12 +1732,24 @@ bool coop_lite_sender_owns_obj(int64_t obj)
 
 static CoopCharRx coop_char_rx[8];
 
+static void coop_lite_char_rx_reset_all(void)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        coop_char_rx_free(&coop_char_rx[i]);
+    }
+}
+
 void coop_lite_host_on_client_disconnect(int slot)
 {
     if (slot <= 0 || slot >= 8) {
         return;
     }
     coop_char_rx_free(&coop_char_rx[slot]);
+#ifndef COOP_LITE_TEST_STUBS
+    coop_lite_barter_end(slot, "disconnected");
+#endif
     coop_pending_offers[slot].valid = false;
     coop_pending_offers[slot].has_oid = false;
     coop_last_pc_pos_valid[slot] = false;
@@ -2158,6 +2230,44 @@ static bool coop_lite_bundle_blob_ok(const uint8_t* blob, bool want_pc, const Ob
 
 /* Host: the client's own character from its v2 bundle, at loc. NULL when
    there is none or it does not pass the checks (proto offer then). */
+/*
+ * Review P0-1: undo a refused bundle. object_destroy of a PC does not
+ * destroy its inventory (sub_4639E0 only drops invulnerable items), so the
+ * old loop was no double free, but it destroyed the PC before items that
+ * still named it as parent, and ran object_destroy on items that were read
+ * but never postprocessed (handle fields still ids). Now: placed (PC in a
+ * sector, items postprocessed) = items first through the normal path, then
+ * the PC; otherwise the objects were only read into the pool and are
+ * deallocated as they are.
+ */
+static void coop_lite_bundle_rollback(int64_t* objs, int n, bool placed)
+{
+    int i;
+
+    if (n > COOP_CHAR_MAX_ITEMS + 1) {
+        n = COOP_CHAR_MAX_ITEMS + 1;
+    }
+    if (placed || objs[0] != OBJ_HANDLE_NULL) {
+        for (i = 1; i < n; i++) {
+            if (objs[i] != OBJ_HANDLE_NULL) {
+                object_destroy(objs[i]);
+                objs[i] = OBJ_HANDLE_NULL;
+            }
+        }
+        if (objs[0] != OBJ_HANDLE_NULL) {
+            object_destroy(objs[0]);
+            objs[0] = OBJ_HANDLE_NULL;
+        }
+        return;
+    }
+    for (i = 1; i < n; i++) {
+        if (objs[i] != OBJ_HANDLE_NULL) {
+            obj_deallocate(objs[i]);
+            objs[i] = OBJ_HANDLE_NULL;
+        }
+    }
+}
+
 static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const ObjectID* want_oid)
 {
     CoopCharRx* rx = &coop_char_rx[slot];
@@ -2168,6 +2278,7 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
     int count = 0;
     int i;
     bool ok;
+    bool placed = false;
 
     if (!rx->complete) {
         return OBJ_HANDLE_NULL;
@@ -2200,6 +2311,7 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
     for (i = 1; ok && i < blobs.n; i++) {
         obj_load_postprocess(objs[i]);
     }
+    placed = ok; /* PC in its sector, items postprocessed (parent = PC) */
     if (ok) {
         for (i = 0; i < 8; i++) {
             stats[i] = stat_base_get(pc, STAT_STRENGTH + i);
@@ -2213,11 +2325,7 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
         }
     }
     if (!ok) {
-        for (i = 0; i <= COOP_CHAR_MAX_ITEMS; i++) {
-            if (objs[i] != OBJ_HANDLE_NULL) {
-                object_destroy(objs[i]);
-            }
-        }
+        coop_lite_bundle_rollback(objs, blobs.n, placed);
         tig_net_local_suspend_end();
         coop_char_rx_free(rx);
         return OBJ_HANDLE_NULL;
@@ -4381,6 +4489,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_give_weapon_tick(now_ms);
     coop_lite_host_dev_world_mutate_tick(now_ms);
     coop_lite_host_dev_kill_client_tick(now_ms);
+    coop_lite_host_barter_watch(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -4809,6 +4918,35 @@ static void coop_lite_barter_reset(void)
 {
     memset(coop_barter, 0, sizeof(coop_barter));
     coop_inv_active = false;
+}
+
+/* Review P1-1: a barter session ends with the dialog, but also when the
+   client disconnects, the map changes, either side dies or they part. */
+static void coop_lite_barter_end(int slot, const char* why)
+{
+    if (slot > 0 && slot < 8 && coop_barter[slot].valid) {
+        coop_barter[slot].valid = false;
+        tig_debug_printf("CoopLite: barter: slot %d session ended (%s)\n", slot, why);
+    }
+}
+
+static unsigned int coop_barter_watch_ms;
+static bool coop_lite_barter_partner_ok(int64_t pc, int64_t npc);
+
+static void coop_lite_host_barter_watch(unsigned int now_ms)
+{
+    int slot;
+
+    if (!coop_lite_interval_elapsed(coop_barter_watch_ms, now_ms, 1000u)) {
+        return;
+    }
+    coop_barter_watch_ms = now_ms;
+    for (slot = 1; slot < 8; slot++) {
+        if (coop_barter[slot].valid
+            && !coop_lite_barter_partner_ok(sub_4A2B60(slot), obj_pool_perm_lookup(coop_barter[slot].npc))) {
+            coop_lite_barter_end(slot, "partner gone, dead or too far");
+        }
+    }
 }
 
 static const int coop_ammo_fld[COOP_INVEN_AMMO_TYPES] = {
@@ -5658,9 +5796,9 @@ static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms)
         }
         tig_debug_printf("CoopLite: obj blob: ground item timed out, using the proto\n");
         multiplayer_lock();
-        tig_net_local_suspend_begin();
+        coop_lite_apply_begin();
         object_create_ex(proto_obj, p->ground_loc, oid, &obj);
-        tig_net_local_suspend_end();
+        coop_lite_apply_end();
         multiplayer_unlock();
     }
 }
@@ -5756,13 +5894,13 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
     }
     loc = obj_field_int64_get(old_pc, OBJ_F_LOCATION);
     multiplayer_lock();
-    tig_net_local_suspend_begin();
+    coop_lite_apply_begin();
     if (!sub_4420D0(pkt->data, &pc, loc) || pc == OBJ_HANDLE_NULL
         || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         if (pc != OBJ_HANDLE_NULL) {
             object_destroy(pc);
         }
-        tig_net_local_suspend_end();
+        coop_lite_apply_end();
         multiplayer_unlock();
         tig_debug_printf("CoopLite: rejoin: PC blob rejected — keeping the menu character\n");
         coop_lite_client_request_barter(old_pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
@@ -5780,7 +5918,7 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
     sub_40DAF0(pc);
     multiplayer_bind_slot_pc(slot, pc);
     object_destroy(old_pc);
-    tig_net_local_suspend_end();
+    coop_lite_apply_end();
     multiplayer_unlock();
 
     coop_client_pos_valid = false;
@@ -5826,14 +5964,14 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     }
     if (ground) {
         multiplayer_lock();
-        tig_net_local_suspend_begin();
+        coop_lite_apply_begin();
         if (!sub_4420D0(pkt->data, &item, ground_loc) || item == OBJ_HANDLE_NULL || !item_is_item(item)) {
             if (item != OBJ_HANDLE_NULL) {
                 object_destroy(item);
             }
             item = OBJ_HANDLE_NULL;
         }
-        tig_net_local_suspend_end();
+        coop_lite_apply_end();
         multiplayer_unlock();
         tig_debug_printf("CoopLite: obj blob: ground item %s (%d bytes)\n",
             item != OBJ_HANDLE_NULL ? "loaded" : "rejected", pkt->size);
@@ -5852,7 +5990,7 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     }
 
     multiplayer_lock();
-    tig_net_local_suspend_begin();
+    coop_lite_apply_begin();
     if (obj_read_mem(pkt->data, &item) && item != OBJ_HANDLE_NULL) {
         obj_load_postprocess(item);
         if (!item_is_item(item) || coop_lite_is_stackable(item)) {
@@ -5893,7 +6031,7 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
             snprintf(name, sizeof(name), "%s", buf);
         }
     }
-    tig_net_local_suspend_end();
+    coop_lite_apply_end();
     multiplayer_unlock();
     {
         char oid_str[40];
@@ -5929,7 +6067,7 @@ static void coop_lite_client_apply_inven_batch(void)
     int t;
 
     multiplayer_lock();
-    tig_net_local_suspend_begin();
+    coop_lite_apply_begin();
 
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         owner_obj[o] = coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid);
@@ -6088,7 +6226,7 @@ static void coop_lite_client_apply_inven_batch(void)
         }
     }
 
-    tig_net_local_suspend_end();
+    coop_lite_apply_end();
     multiplayer_unlock();
     coop_lite_obj_req_flush();
 
@@ -7205,6 +7343,13 @@ int coop_lite_pose_map_key(int map, uint16_t gen)
 void coop_lite_on_map_opened(void)
 {
     if (tig_net_is_host()) {
+#ifndef COOP_LITE_TEST_STUBS
+        int slot;
+
+        for (slot = 1; slot < 8; slot++) {
+            coop_lite_barter_end(slot, "map change");
+        }
+#endif
         coop_map_gen = (uint16_t)(coop_map_gen + 1);
         if (coop_map_gen == 0) {
             coop_map_gen = 1;
@@ -7395,7 +7540,10 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
 }
 
 #ifndef COOP_LITE_TEST_STUBS
-static CoopOidSet* coop_world_seen;
+/* Review P0-3: was MALLOC'd once and reused (never freed at exit). Static
+   now; 24 KB. */
+static CoopOidSet coop_world_seen_set;
+static CoopOidSet* const coop_world_seen = &coop_world_seen_set;
 static bool coop_world_rx_active;
 static int coop_world_rx_map;
 static int coop_world_stats[5]; /* per kind: applied changes */
@@ -7559,10 +7707,6 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         coop_world_rx_active = false;
         return;
     }
-    if (coop_world_seen == NULL) {
-        coop_world_seen = (CoopOidSet*)MALLOC(sizeof(*coop_world_seen));
-        coop_oid_set_reset(coop_world_seen);
-    }
     if ((pkt->flags & COOP_WORLD_F_FIRST) != 0) {
         coop_oid_set_reset(coop_world_seen);
         memset(coop_world_stats, 0, sizeof(coop_world_stats));
@@ -7575,7 +7719,7 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
     }
 
     multiplayer_lock();
-    tig_net_local_suspend_begin();
+    coop_lite_apply_begin();
     coop_world_want_cnt = 0;
     for (i = 0; i < pkt->count; i++) {
         coop_lite_world_apply(&pkt->entries[i]);
@@ -7630,7 +7774,7 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         coop_world_log_pending = true;
         coop_world_pruned = pruned;
     }
-    tig_net_local_suspend_end();
+    coop_lite_apply_end();
     multiplayer_unlock();
     for (i = 0; i < coop_world_want_cnt; i++) {
         if (coop_lite_client_want_ground_blob(coop_world_want[i]->oid, coop_world_want[i]->loc,
