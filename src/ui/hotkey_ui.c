@@ -9,6 +9,7 @@
 #include "game/object.h"
 #include "game/player.h"
 #include "game/sfx.h"
+#include "game/coop_lite.h"
 #include "game/spell.h"
 #include "ui/intgame.h"
 #include "ui/inven_ui.h"
@@ -110,6 +111,8 @@ bool hotkey_ui_init(GameInitInfo* init_info)
         hotkey->data = sub_557B50(index);
         intgame_recent_action_button_get(index)->art_num = sub_579F70(hotkey->data);
     }
+
+    coop_lite_set_hotkey_spell_hook(hotkey_ui_assign_spell);
 
     for (index = 0; index < 10; index++) {
         hotkey = &(stru_6835E0[index]);
@@ -1305,4 +1308,35 @@ void intgame_hotkeys_recover(void)
             }
         }
     }
+}
+
+/* Put a spell on the first free hotbar slot (coop dev: Resurrect granted).
+   Already there = that slot. Returns the slot index, or -1 if the bar is
+   full. */
+int hotkey_ui_assign_spell(int spell)
+{
+    int index;
+    Hotkey* hotkey;
+
+    for (index = 0; index < 10; index++) {
+        if (stru_6835E0[index].type == HOTKEY_SPELL && stru_6835E0[index].data == spell) {
+            return index;
+        }
+    }
+    for (index = 0; index < 10; index++) {
+        hotkey = &(stru_6835E0[index]);
+        if (hotkey->type != HOTKEY_NONE) {
+            continue;
+        }
+        sub_4440E0(OBJ_HANDLE_NULL, &(hotkey->item_obj));
+        hotkey->flags = 0;
+        hotkey->type = HOTKEY_SPELL;
+        hotkey->data = spell;
+        hotkey->info.art_num = spell_icon(spell);
+        tig_art_interface_id_create(hotkey->info.art_num, 0, 0, 0, &(hotkey->art_id));
+        hotkey->count = -1;
+        intgame_hotkey_refresh(index);
+        return index;
+    }
+    return -1;
 }

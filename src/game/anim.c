@@ -3873,6 +3873,7 @@ static bool anim_goal_type_is_client_local(int goal_type)
     case AG_RUN_NEAR_OBJ:
     case AG_ATTEMPT_MOVE_NEAR:
     case AG_TALK:
+    case AG_PICKUP_ITEM: /* walk there locally; the pickup itself goes to the host */
         return true;
     default:
         return false;
@@ -7981,17 +7982,24 @@ bool sub_42AA70(int64_t source_obj, int64_t target_obj)
         gsound_play_sfx_on_obj(sound_id, 1, source_obj);
     }
 
-    if (!tig_net_is_active()
-        || tig_net_is_host()) {
-        return item_transfer(target_obj, source_obj);
+    /* Coop client, own PC: this goal runs locally with packets suspended,
+       so tig_net_is_active() is false here and the code below would pick
+       the item up locally only (PT16: host and client then disagree). The
+       host does the pickup; the request goes out from the coop tick. */
+    if (coop_lite_client_local_goal_obj(source_obj)) {
+        coop_lite_client_queue_pickup(target_obj);
+        return true;
     }
 
-    /* Coop: the host does not run this client's goals (PT15: clicking a
-       ground item did nothing). Ask the host (Packet28); it checks reach
-       and moves the item, then resyncs our inventory. */
-    if (coop_lite_client_drives_obj(source_obj)) {
-        tig_debug_printf("CoopLite: pickup request sent to host\n");
-        return item_transfer(target_obj, source_obj);
+    if (!tig_net_is_active()
+        || tig_net_is_host()) {
+        if (!item_transfer(target_obj, source_obj)) {
+            return false;
+        }
+        /* Coop: a goal run for a client's PC must tell that client
+           (PT16: the item went into the host's copy only). */
+        coop_lite_host_item_gained(source_obj);
+        return true;
     }
 
     return true;
@@ -14526,6 +14534,26 @@ bool anim_goal_use_item_on_loc(int64_t obj, int64_t target_loc, int64_t item_obj
     }
 
     return true;
+}
+
+/* Dev: the pickup exactly as an in-game click adds it (intgame.c:
+   sub_44D500 + anim_goal_add_ex with the MP run flag). */
+bool anim_goal_pickup_item_as_click(int64_t obj, int64_t item_obj)
+{
+    AnimGoalData goal_data;
+    AnimID anim_id;
+
+    if (obj == OBJ_HANDLE_NULL || item_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (!sub_44D500(&goal_data, obj, AG_PICKUP_ITEM)) {
+        return false;
+    }
+    goal_data.params[AGDATA_TARGET_OBJ].obj = item_obj;
+    if (!sub_424070(obj, 3, 0, 0)) {
+        return false;
+    }
+    return anim_goal_add_ex(&goal_data, &anim_id, tig_net_is_active() ? 0x40 : 0);
 }
 
 // 0x4356C0

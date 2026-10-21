@@ -941,6 +941,9 @@ static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
 static void coop_lite_world_state_reset(void);
 static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms);
+static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms);
+static void coop_lite_client_pickup_tick(unsigned int now_ms);
+static void coop_lite_client_pickup_reset(void);
 #endif
 
 #ifndef COOP_LITE_TEST_STUBS
@@ -2764,6 +2767,13 @@ static void coop_lite_dev_go_to_merchant(void)
  * grants every bound PC (its copies are the ones that cast); the client
  * grants its own PC so its spell bar shows it.
  */
+static int (*coop_hotkey_spell_hook)(int spell);
+
+void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell))
+{
+    coop_hotkey_spell_hook = hook;
+}
+
 static ObjectID coop_dev_granted[8];
 static bool coop_dev_granted_valid[8];
 
@@ -2793,6 +2803,11 @@ static void coop_lite_dev_grant_resurrect(int slot, int64_t pc)
     tig_net_local_suspend_end();
     tig_debug_printf("CoopLite: dev: slot %d PC knows Resurrect (fatigue max %d, cost %d)\n",
         slot, critter_fatigue_max(pc), spell_cast_cost(SPELL_RESURRECT, pc));
+    /* PT16: and on our hotbar, so a playtest does not need the spell book. */
+    if (pc == player_get_local_pc_obj() && coop_hotkey_spell_hook != NULL) {
+        tig_debug_printf("CoopLite: dev: Resurrect on hotbar slot %d\n",
+            coop_hotkey_spell_hook(SPELL_RESURRECT));
+    }
 }
 
 static void coop_lite_dev_tick(unsigned int now_ms)
@@ -3087,8 +3102,8 @@ static void coop_lite_client_dev_items_tick(unsigned int now_ms)
         if (item != OBJ_HANDLE_NULL) {
             if (env[0] == '2') {
                 /* =2: the way a click does it (AG_PICKUP_ITEM goal). */
-                tig_debug_printf("CoopLite: dev items: pickup goal %s\n",
-                    anim_goal_pickup_item(pc, item) ? "started" : "refused");
+                tig_debug_printf("CoopLite: dev items: pickup goal (as a click) %s\n",
+                    anim_goal_pickup_item_as_click(pc, item) ? "started" : "refused");
             } else {
                 item_transfer(item, pc); /* client: Packet28 */
             }
@@ -4292,6 +4307,8 @@ void coop_lite_ping(unsigned int now_ms)
         }
 
         if (!coop_lite_client_world_ready()) {
+            /* Map load / teleport: queued pickups are for the old place. */
+            coop_lite_client_pickup_reset();
             return;
         }
 
@@ -4312,6 +4329,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_combat_tick(now_ms);
             coop_lite_client_dev_items_tick(now_ms);
             coop_lite_client_world_req_tick(now_ms);
+            coop_lite_client_pickup_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -4362,6 +4380,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_party_inven_tick(now_ms);
     coop_lite_host_dev_give_weapon_tick(now_ms);
     coop_lite_host_dev_world_mutate_tick(now_ms);
+    coop_lite_host_dev_kill_client_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -7638,6 +7657,7 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_world_state_reset(void)
 {
+    coop_lite_client_pickup_reset();
     memset(coop_world_req_host_seen, 0, sizeof(coop_world_req_host_seen));
     coop_world_rx_active = false;
     coop_world_req_key = -1;
@@ -7785,5 +7805,203 @@ static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms)
     }
     tig_net_local_suspend_end();
     multiplayer_unlock();
+}
+#endif
+
+/* ---- ground pickup (PT16) ------------------------------------------------ */
+
+/*
+ * The pickup goal runs inside our locally simulated goal (packets
+ * suspended), so it only queues; the coop tick then sends a fresh pose and
+ * the Packet28 requests on the reliable channel (in order, so the host's
+ * reach check sees where we are now). Review P0-2: up to
+ * COOP_PICKUP_QUEUE_MAX requests (fast clicks no longer overwrite each
+ * other), each tagged with the map key; the queue is dropped on session /
+ * world reset and stale entries (other map) are discarded.
+ */
+#ifndef COOP_LITE_TEST_STUBS
+static CoopPickupQueue coop_pickup_q;
+#endif
+
+void coop_pickup_queue_reset(CoopPickupQueue* q)
+{
+    q->count = 0;
+}
+
+bool coop_pickup_queue_push(CoopPickupQueue* q, const uint8_t oid[24], int map_key)
+{
+    int i;
+
+    for (i = 0; i < q->count; i++) {
+        if (memcmp(q->oid[i], oid, 24) == 0) {
+            q->map_key[i] = map_key;
+            return true; /* same item clicked twice: one request */
+        }
+    }
+    if (q->count >= COOP_PICKUP_QUEUE_MAX) {
+        return false;
+    }
+    memcpy(q->oid[q->count], oid, 24);
+    q->map_key[q->count] = map_key;
+    q->count++;
+    return true;
+}
+
+int coop_pickup_queue_take(CoopPickupQueue* q, int map_key, uint8_t out[][24], int max)
+{
+    int n = 0;
+    int i;
+
+    for (i = 0; i < q->count; i++) {
+        if (q->map_key[i] == map_key && n < max) {
+            memcpy(out[n++], q->oid[i], 24);
+        }
+    }
+    q->count = 0;
+    return n;
+}
+
+void coop_lite_client_queue_pickup(int64_t item)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    char oid_str[80];
+    ObjectID oid;
+
+    if (item == OBJ_HANDLE_NULL) {
+        return;
+    }
+    oid = obj_get_id(item);
+    objid_id_to_str(oid_str, oid);
+    if (!coop_pickup_queue_push(&coop_pickup_q, (const uint8_t*)&oid,
+            coop_lite_pose_map_key(map_current_map(), coop_map_gen))) {
+        tig_debug_printf("CoopLite: pickup queue full, %s dropped\n", oid_str);
+        return;
+    }
+    tig_debug_printf("CoopLite: pickup queued %s\n", oid_str);
+#else
+    (void)item;
+#endif
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_client_pickup_reset(void)
+{
+    coop_pickup_queue_reset(&coop_pickup_q);
+}
+
+static void coop_lite_client_pickup_tick(unsigned int now_ms)
+{
+    int64_t pc = player_get_local_pc_obj();
+    uint8_t oids[COOP_PICKUP_QUEUE_MAX][24];
+    PacketCoopPcPos pos;
+    Packet28 pkt;
+    int n;
+    int i;
+
+    (void)now_ms;
+    if (coop_pickup_q.count == 0) {
+        return;
+    }
+    n = coop_pickup_queue_take(&coop_pickup_q, coop_lite_pose_map_key(map_current_map(), coop_map_gen),
+        oids, COOP_PICKUP_QUEUE_MAX);
+    if (pc == OBJ_HANDLE_NULL || n == 0 || critter_is_dead(pc) || coop_rejoin_pc_wanted) {
+        return;
+    }
+    /* Where we stand now, ahead of the requests on the same channel. */
+    coop_lite_fill_pc_pos(&pos, sub_529520(), pc);
+    pos.epoch = coop_own_pose_epoch;
+    pos.seq = ++coop_own_pose_seq;
+    coop_client_pos = pos;
+    coop_client_pos_valid = true;
+    tig_net_send_app_all(&pos, sizeof(pos));
+    for (i = 0; i < n; i++) {
+        int64_t item = coop_lite_get_oid_obj(oids[i]);
+
+        if (item == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 28;
+        sub_4F0640(item, &(pkt.item_oid));
+        sub_4F0640(pc, &(pkt.critter_oid));
+        pkt.inventory_location = -1;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_debug_printf("CoopLite: pickup request sent to host (%d)\n", n);
+}
+#endif
+
+bool coop_lite_client_local_goal_obj(int64_t obj)
+{
+    int depth = tig_net_local_suspend_pause();
+    bool r = coop_lite_client_drives_obj(obj);
+
+    tig_net_local_suspend_resume(depth);
+    return r;
+}
+
+void coop_lite_host_item_gained(int64_t pc)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    slot = coop_lite_slot_of_obj(pc);
+    if (slot <= 0) {
+        return;
+    }
+    tig_debug_printf("CoopLite: slot %d PC picked up an item host-side — resyncing it\n", slot);
+    coop_lite_host_sync_slot_and(slot, OBJ_HANDLE_NULL);
+#else
+    (void)pc;
+#endif
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+/*
+ * Dev (ARCANUM_DEV_KILL_CLIENT=N on the host, default 15): N s after a
+ * client PC is first bound, the host kills it once (corpse carry and
+ * Resurrect tests without a fight). The normal death path replicates it.
+ */
+static unsigned int coop_dev_kill_ms[8];
+static bool coop_dev_kill_done[8];
+
+static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_KILL_CLIENT");
+    int secs;
+    int slot;
+
+    if (env == NULL || env[0] == '\0') {
+        return;
+    }
+    secs = atoi(env);
+    if (secs <= 0) {
+        secs = 15;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        char oid_str[80];
+
+        if (pc == OBJ_HANDLE_NULL || coop_dev_kill_done[slot]) {
+            continue;
+        }
+        if (coop_dev_kill_ms[slot] == 0) {
+            coop_dev_kill_ms[slot] = now_ms != 0 ? now_ms : 1;
+            continue;
+        }
+        if (!coop_lite_interval_elapsed(coop_dev_kill_ms[slot], now_ms, (unsigned int)secs * 1000u)) {
+            continue;
+        }
+        coop_dev_kill_done[slot] = true;
+        if (critter_is_dead(pc)) {
+            continue;
+        }
+        objid_id_to_str(oid_str, obj_get_id(pc));
+        tig_debug_printf("CoopLite: dev: killing slot %d PC %s\n", slot, oid_str);
+        critter_kill(pc);
+    }
 }
 #endif

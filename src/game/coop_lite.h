@@ -536,6 +536,8 @@ bool coop_lite_parked_deserialize(const uint8_t* in, int len);
 struct TigFile;
 bool coop_lite_save_appendix(struct TigFile* stream);
 bool coop_lite_load_appendix(struct TigFile* stream);
+/* hotkey_ui_assign_spell (dev: Resurrect on the hotbar). */
+void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell));
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
@@ -740,6 +742,25 @@ void coop_lite_terminate_name(char* name, size_t size);
  * is replicated with PC_POS.
  */
 bool coop_lite_client_drives_obj(int64_t obj);
+/* Ground pickup: client queues a host request (sent from the coop tick);
+   host resyncs a client PC that gained an item outside the item-op path. */
+void coop_lite_client_queue_pickup(int64_t item);
+
+#define COOP_PICKUP_QUEUE_MAX 8
+typedef struct CoopPickupQueue {
+    int count;
+    int map_key[COOP_PICKUP_QUEUE_MAX];
+    uint8_t oid[COOP_PICKUP_QUEUE_MAX][24];
+} CoopPickupQueue;
+void coop_pickup_queue_reset(CoopPickupQueue* q);
+/* false = full; the same OID twice is one entry. */
+bool coop_pickup_queue_push(CoopPickupQueue* q, const uint8_t oid[24], int map_key);
+/* Empties the queue; returns the entries for map_key (others are stale). */
+int coop_pickup_queue_take(CoopPickupQueue* q, int map_key, uint8_t out[][24], int max);
+/* coop_lite_client_drives_obj, also while packets are locally suspended
+   (inside our own PC's locally simulated goals). */
+bool coop_lite_client_local_goal_obj(int64_t obj);
+void coop_lite_host_item_gained(int64_t pc);
 
 /* Host: a client disconnected — clear its offer / replication state. */
 void coop_lite_host_on_client_disconnect(int slot);
