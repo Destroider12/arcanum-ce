@@ -1308,3 +1308,45 @@ Virgil behind. The dev hook causes this; it is not a coop bug.
   - Not covered yet: objects outside the radius until the next refresh, revived NPCs, and stackable ground piles the client has never seen.
   - Kill switch: `ARCANUM_COOP_NO_WORLD_STATE=1`.
   - Dev hooks: `ARCANUM_DEV_WORLD_MUTATE=1` (host) opens a door, locks one, toggles a container lock and puts a dagger in it, kills an NPC, removes a ground item and drops a dagger, all silently 10 s in. `ARCANUM_COOP_WORLD_TRACE=1` logs both sides.
+
+## 28. PT16 and review #3 (Argon)
+
+PT16: a GUI ground pickup on a client (AG_PICKUP_ITEM, `sub_42AA70`) is
+queued (`CoopPickupQueue`, 8 entries, map-key tagged, deduped) and sent to
+the host as Packet28 after a fresh reliable pose; the host does the transfer
+and resyncs. Dev hooks: host `ARCANUM_DEV_KILL_CLIENT=N` (kill each client
+PC once, N s after it binds), `ARCANUM_DEV_GRANT_RESURRECT=1` (also puts
+Resurrect on the hotbar), client `ARCANUM_DEV_CLIENT_ITEMS=2` (pickup as a
+real click goal).
+
+Review #3, verified against the code:
+
+- P0-1 (bundle rollback): partly rejected. `object_destroy` of a PC does
+  not destroy its inventory (sub_4639E0 only drops invulnerable items) and
+  destroying a destroyed object returns early, so there was no double free.
+  Confirmed: the PC was destroyed before items still parented to it, and
+  objects that were never postprocessed went through object_destroy. Now
+  `coop_lite_bundle_rollback` (items first; read-only objects deallocated).
+  Half-received bundles are freed on session reset.
+- P0-2 (single pickup slot): confirmed, fixed by the queue above.
+- P0-3 (suspend): no early return inside the brackets (rejected), but
+  scripts did run while packets were suspended (confirmed). Host state is
+  applied in `coop_lite_apply_begin/end`: suspended, scripts muted
+  (`coop_lite_scripts_muted`, checked in object_script_execute), depth
+  restored exactly. `coop_world_seen` was a one-time allocation, not a
+  growing leak; it is static now.
+- P1-1 (barter lifecycle): sessions end on disconnect, map change and a 1 s
+  partner check (alive, merchant, <= 12 tiles).
+- P1-2: NPC_POS writes OBJ_F_HP_DAMAGE; host-alive / client-corpse NPCs are
+  revived; ground stacks are fetched as blobs.
+- P1-3: INVEN_SYNC entries carry HP_DAMAGE, mana stores and a key-ring hash
+  (entry 0x38, 64 per chunk).
+- P1-4: every network object blob (OBJ_BLOB, rejoin PC, v2 bundle) passes
+  `obj_mem_layout` (bounded header + the field list from the bitmap) and
+  `coop_lite_blob_walk` (bounded presence/length walk, exact size, element
+  sizes, string terminators, bitset <= count) before obj_read_mem.
+- P1-5: when the host holds the player's PC (parked, save-bound, leftover)
+  it wins: the client's bundle is discarded and SESSION_SYNC carries
+  REJOINED, so the client adopts the host's copy even with the same OID
+  (party-wipe reload). Limit: a save from before the player joined has no
+  copy of them, so their bundle is used.
