@@ -227,15 +227,23 @@ typedef struct PacketCoopBarter {
  */
 #define COOP_INVEN_BATCH_FIRST 0x1
 #define COOP_INVEN_BATCH_LAST 0x2
-#define COOP_INVEN_CHUNK_ENTRIES 90
+#define COOP_INVEN_CHUNK_ENTRIES 64 /* 0xB0 + 64 * 0x38 <= TIG_NET_MAX_PACKET */
 #define COOP_INVEN_AMMO_TYPES 4
+
+/* Review P1-3: an item the client already has is brought up to date too
+   (durability, charges, keys), not only moved. */
+#define COOP_INVEN_E_STATE 0x1 /* hp_damage / mana fields are valid */
 
 typedef struct PacketCoopInvenEntry {
     /* 0000 */ uint8_t oid[24];
     /* 0018 */ int proto;
     /* 001C */ int inventory_location;
-    /* 0020 */ int reserved;
+    /* 0020 */ unsigned int keyring_hash; /* key ids on a key ring, else 0 */
     /* 0024 */ unsigned int item_flags;
+    /* 0028 */ int hp_damage;
+    /* 002C */ int mana_store;
+    /* 0030 */ int spell_mana_store;
+    /* 0034 */ unsigned int state_flags; /* COOP_INVEN_E_* */
 } PacketCoopInvenEntry;
 
 typedef struct PacketCoopInvenSync {
@@ -252,7 +260,10 @@ typedef struct PacketCoopInvenSync {
 } PacketCoopInvenSync;
 
 COOP_STATIC_ASSERT(sizeof(PacketCoopBarter) == 0x38, "PacketCoopBarter size");
-COOP_STATIC_ASSERT(sizeof(PacketCoopInvenEntry) == 0x28, "PacketCoopInvenEntry size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenEntry) == 0x38, "PacketCoopInvenEntry size");
+COOP_STATIC_ASSERT(0xB0 + COOP_INVEN_CHUNK_ENTRIES * 0x38 <= 4096, "INVEN_SYNC chunk fits a packet");
+/* FNV-1a over a key ring's key ids (order matters, as on the host). */
+unsigned int coop_lite_keyring_hash(const unsigned int* keys, int count);
 COOP_STATIC_ASSERT(offsetof(PacketCoopInvenSync, entries) == 0xB0, "PacketCoopInvenSync layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fits a net packet");
 

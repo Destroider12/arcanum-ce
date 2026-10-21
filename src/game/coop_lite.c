@@ -3736,6 +3736,11 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
         } else if ((flags & OF_FLAT) != 0) {
             object_flags_unset(obj, OF_FLAT | OF_NO_BLOCK);
         }
+        /* Review P1-2: the host's HP is the truth (health bars, the
+           locally-dead check, and a revive on the host shows up here). */
+        if (e->hp_damage >= 0 && obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != e->hp_damage) {
+            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage);
+        }
         hp = coop_lite_npc_hp_slot(obj);
         if (hp->obj == obj && e->hp_damage > hp->hp_damage) {
             coop_lite_float_damage(obj, e->hp_damage - hp->hp_damage);
@@ -4727,6 +4732,21 @@ size_t coop_lite_inven_sync_size(int count)
     return offsetof(PacketCoopInvenSync, entries) + (size_t)count * sizeof(PacketCoopInvenEntry);
 }
 
+unsigned int coop_lite_keyring_hash(const unsigned int* keys, int count)
+{
+    unsigned int h = 2166136261u;
+    int i;
+
+    if (count <= 0) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        h = (h ^ keys[i]) * 16777619u;
+    }
+    h = (h ^ (unsigned int)count) * 16777619u;
+    return h != 0 ? h : 1;
+}
+
 int coop_lite_world_state_size(int count)
 {
     return (int)offsetof(PacketCoopWorldState, entries) + count * (int)sizeof(CoopWorldEntry);
@@ -4996,6 +5016,34 @@ static int64_t coop_lite_store_of(int64_t npc)
 /* Host → one client: the owners' inventories as one batch. */
 static bool coop_party_inven_dirty;
 
+static unsigned int coop_lite_item_keyring_hash(int64_t item)
+{
+    unsigned int keys[64];
+    int n;
+    int i;
+
+    if (obj_field_int32_get(item, OBJ_F_TYPE) != OBJ_TYPE_KEY_RING) {
+        return 0;
+    }
+    n = obj_arrayfield_length_get(item, OBJ_F_KEY_RING_LIST_IDX);
+    if (n > 64) {
+        n = 64;
+    }
+    for (i = 0; i < n; i++) {
+        keys[i] = obj_arrayfield_uint32_get(item, OBJ_F_KEY_RING_LIST_IDX, i);
+    }
+    return coop_lite_keyring_hash(keys, n);
+}
+
+static void coop_lite_fill_item_state(PacketCoopInvenEntry* e, int64_t item)
+{
+    e->keyring_hash = coop_lite_item_keyring_hash(item);
+    e->hp_damage = obj_field_int32_get(item, OBJ_F_HP_DAMAGE);
+    e->mana_store = obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE);
+    e->spell_mana_store = obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE);
+    e->state_flags = COOP_INVEN_E_STATE;
+}
+
 static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int num_owners)
 {
     PacketCoopInvenSync* pkt;
@@ -5052,8 +5100,8 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                 coop_lite_put_oid(e->oid, items[idx]);
                 e->proto = sub_49B290(items[idx]);
                 e->inventory_location = item_inventory_location_get(items[idx]);
-                e->reserved = 0;
                 e->item_flags = (unsigned int)obj_field_int32_get(items[idx], OBJ_F_ITEM_FLAGS);
+                coop_lite_fill_item_state(e, items[idx]);
                 if (getenv("ARCANUM_DEV_INVEN_TRACE") != NULL) {
                     char oid_str[40];
 
@@ -5828,9 +5876,10 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
         if (item != OBJ_HANDLE_NULL && item == sub_4A2B60(slot)) {
             /* Rejoin: the sender's own (restored) PC. */
             parent = OBJ_HANDLE_NULL;
-        } else if (item != OBJ_HANDLE_NULL && item_is_item(item) && !coop_lite_is_stackable(item)
+        } else if (item != OBJ_HANDLE_NULL && item_is_item(item)
             && (obj_field_int32_get(item, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED)) == 0) {
-            /* A ground item (Packet70 announcement). */
+            /* A ground item (Packet70 announcement), stacks included:
+               on the ground nothing merges them (review P1-2). */
             parent = OBJ_HANDLE_NULL;
         } else if (item == OBJ_HANDLE_NULL || !item_is_item(item) || coop_lite_is_stackable(item)
             || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0
@@ -6055,6 +6104,9 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
 
 static void coop_lite_client_apply_inven_batch(void)
 {
+    int64_t rings[16];
+    int num_rings = 0;
+    int refreshed = 0;
     int64_t owner_obj[COOP_INV_BUF_OWNERS];
     int64_t doomed[256];
     int64_t doomed_parent[256];
@@ -6182,7 +6234,39 @@ static void coop_lite_client_apply_inven_batch(void)
                 obj_field_int32_set(item, OBJ_F_ITEM_FLAGS,
                     obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) | OIF_IDENTIFIED);
             }
+            /* Review P1-3: durability and charges follow the host. */
+            if ((e->state_flags & COOP_INVEN_E_STATE) != 0) {
+                if (obj_field_int32_get(item, OBJ_F_HP_DAMAGE) != e->hp_damage) {
+                    obj_field_int32_set(item, OBJ_F_HP_DAMAGE, e->hp_damage);
+                    refreshed++;
+                }
+                if (obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE) != e->mana_store) {
+                    obj_field_int32_set(item, OBJ_F_ITEM_MANA_STORE, e->mana_store);
+                    refreshed++;
+                }
+                if (obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE) != e->spell_mana_store) {
+                    obj_field_int32_set(item, OBJ_F_ITEM_SPELL_MANA_STORE, e->spell_mana_store);
+                    refreshed++;
+                }
+                /* Keys added to (or taken off) a ring: fetch the host's ring. */
+                if (coop_lite_item_keyring_hash(item) != e->keyring_hash && num_rings < 16) {
+                    rings[num_rings++] = item;
+                }
+            }
         }
+    }
+
+    /* Rings whose keys differ: drop ours, the host's comes as a blob. */
+    for (i = 0; i < num_rings; i++) {
+        int64_t parent = OBJ_HANDLE_NULL;
+        ObjectID oid = obj_get_id(rings[i]);
+
+        if (item_parent(rings[i], &parent) && parent != OBJ_HANDLE_NULL) {
+            item_remove(rings[i]);
+        }
+        obj_deallocate(rings[i]);
+        coop_lite_obj_blob_defer((const uint8_t*)&oid);
+        refreshed++;
     }
 
     /* Doomed items nobody re-homed. */
@@ -6231,6 +6315,9 @@ static void coop_lite_client_apply_inven_batch(void)
     coop_lite_obj_req_flush();
 
     /* §7 sends one batch per container: only log containers that changed. */
+    if (refreshed != 0) {
+        tig_debug_printf("CoopLite: inven sync: %d item fields refreshed (durability/charges/keys)\n", refreshed);
+    }
     if (moved != 0 || created != 0 || num_doomed != 0 || coop_inv_owner_cnt != 1 || owner_obj[0] == OBJ_HANDLE_NULL
         || obj_field_int32_get(owner_obj[0], OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
         tig_debug_printf("CoopLite: inven sync: %d owners, %d entries, %d moved, %d created, %d removed, gold %d\n",
@@ -7586,7 +7673,7 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
     if (obj == OBJ_HANDLE_NULL) {
         /* Unknown ground item: asked for after the batch (a request sent
            while packets are suspended would be lost). */
-        if (e->kind == COOP_WORLD_GROUND_ITEM && e->kind_flags == 0
+        if (e->kind == COOP_WORLD_GROUND_ITEM
             && coop_world_want_cnt < COOP_WORLD_CHUNK) {
             coop_world_want[coop_world_want_cnt++] = e;
         }
@@ -7625,6 +7712,12 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
             obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage > 0 ? e->hp_damage : 32000);
             object_set_current_aid(obj, (tig_art_id_t)e->aid);
             sub_432D90(obj);
+            coop_world_stats[e->kind]++;
+        } else if ((e->kind_flags & COOP_WORLD_NPC_DEAD) == 0 && critter_is_dead(obj)) {
+            /* Review P1-2: alive (resurrected) at the host, a corpse here. */
+            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage > 0 ? e->hp_damage : 0);
+            object_flags_unset(obj, OF_FLAT | OF_NO_BLOCK);
+            object_set_current_aid(obj, (tig_art_id_t)e->aid);
             coop_world_stats[e->kind]++;
         }
         coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_NPC_OF_MASK, e->kind);
