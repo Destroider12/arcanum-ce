@@ -37,5 +37,6 @@ bool sub_57F260(void);
 void hotkey_ui_notify_spell_removed(int spell);
 void intgame_hotkeys_recover(void);
 int hotkey_ui_assign_spell(int spell);
+bool hotkey_ui_dev_click_slot(int index);
 
 #endif /* ARCANUM_UI_HOTKEY_UI_H_ */

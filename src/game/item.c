@@ -2,6 +2,7 @@
 
 #include "game/anim.h"
 #include "game/background.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/description.h"
 #include "game/descriptions.h"
@@ -750,6 +751,9 @@ bool item_drop_ex(int64_t item_obj, int distance)
 
     item_remove(item_obj);
     sub_466E50(item_obj, loc);
+    if (obj_type == OBJ_TYPE_PC) {
+        coop_lite_mark_player_drop(item_obj);
+    }
 
     if (obj_type == OBJ_TYPE_NPC) {
         switch (obj_field_int32_get(item_obj, OBJ_F_TYPE)) {

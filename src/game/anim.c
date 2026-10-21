@@ -4086,6 +4086,14 @@ bool sub_424070(int64_t obj, int priority_level, bool a3, bool a4)
         tig_net_local_suspend_end();
         return rc;
     }
+    /* PT17b: a coop client interrupts another player's PC here only (e.g.
+       the caster of a spell it applies from Packet58); asking the host to
+       interrupt a PC this client does not own is refused there anyway
+       ("Packet9 ... does not own — dropped"). */
+    if (!a4 && tig_net_is_coop_enabled() && tig_net_is_active() && !tig_net_is_host()
+        && coop_lite_is_client_role()) {
+        a4 = true;
+    }
     return sub_424070_impl(obj, priority_level, a3, a4);
 }
 
@@ -7993,8 +8001,36 @@ bool sub_42AA70(int64_t source_obj, int64_t target_obj)
 
     if (!tig_net_is_active()
         || tig_net_is_host()) {
+        bool from_ground = tig_net_is_coop_enabled()
+            && (obj_field_int32_get(target_obj, OBJ_F_FLAGS) & OF_INVENTORY) == 0;
+        bool npc_from_ground = from_ground
+            && obj_field_int32_get(source_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC;
+        int item_type = obj_field_int32_get(target_obj, OBJ_F_TYPE);
+        int item_proto = sub_49B290(target_obj);
+        ObjectID item_oid = obj_get_id(target_obj);
+
         if (!item_transfer(target_obj, source_obj)) {
             return false;
+        }
+        if (from_ground) {
+            /* PT17b: clients drop their copy now (not at the next world
+               state); a PC's pickup makes the item NPC-takeable again. */
+            coop_lite_host_ground_item_taken(source_obj, &item_oid,
+                item_type == OBJ_TYPE_GOLD || item_type == OBJ_TYPE_AMMO);
+            if (!npc_from_ground && item_type != OBJ_TYPE_GOLD && item_type != OBJ_TYPE_AMMO) {
+                coop_lite_clear_player_drop(target_obj); /* stacks merge away */
+            }
+        }
+        if (npc_from_ground) {
+            /* PT17b: vanilla AI (ai_look_for_item_func) lets NPCs take
+               items lying around — say so, a player's drop can vanish. */
+            char npc_str[80];
+            char item_str[80];
+
+            objid_id_to_str(npc_str, obj_get_id(source_obj));
+            objid_id_to_str(item_str, item_oid);
+            tig_debug_printf("Anim: coop: NPC %s picked up ground item %s (proto %d)\n",
+                npc_str, item_str, item_proto);
         }
         /* Coop: a goal run for a client's PC must tell that client
            (PT16: the item went into the host's copy only). */

@@ -2,7 +2,9 @@
 
 #include "game/coop_lite.h"
 
+#include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "game/ai.h"
 #include "game/anim.h"
@@ -167,6 +169,8 @@ static void intgame_force_fullscreen(void);
 static void intgame_unforce_fullscreen(void);
 static void sub_551F80(void);
 static bool sub_552050(int x, int y, TargetDescriptor* td);
+static bool intgame_dev_click_obj(int64_t obj, int button);
+static void intgame_coop_click_trace(const char* fmt, ...);
 static void sub_5520D0(RotatingWindowType window_type, int step);
 static void iso_interface_window_swap(RotatingWindowType window_type);
 static void intgame_clock_refresh(void);
@@ -971,6 +975,7 @@ bool intgame_init(GameInitInfo* init_info)
     TigFont font;
 
     (void)init_info;
+    coop_lite_set_dev_click_obj_hook(intgame_dev_click_obj);
 
     if (!mes_load("mes\\intgame.mes", &intgame_mes_file)) {
         return false;
@@ -3274,8 +3279,11 @@ void sub_54ED30(TargetDescriptor* td)
 
     target_type = obj_field_int32_get(td->obj, OBJ_F_TYPE);
     if (!td->is_loc && td->obj == pc_obj) {
+        intgame_coop_click_trace("on own PC, ignored");
         return;
     }
+    intgame_coop_click_trace("object type %d, combat mode %d, auto attack %d",
+        target_type, combat_critter_is_combat_mode_active(pc_obj), combat_auto_attack_get(pc_obj));
 
     spell_flags = obj_field_int32_get(pc_obj, OBJ_F_SPELL_FLAGS);
     critter_flags = obj_field_int32_get(pc_obj, OBJ_F_CRITTER_FLAGS);
@@ -3506,8 +3514,10 @@ void sub_54ED30(TargetDescriptor* td)
 
     // 0x54F25B
     if (!sub_44D500(&goal_data, pc_obj, anim)) {
+        intgame_coop_click_trace("goal %d refused (sub_44D500)", anim);
         return;
     }
+    intgame_coop_click_trace("goal %d", anim);
 
     goal_data.params[AGDATA_TARGET_OBJ].obj = td->obj;
 
@@ -3551,8 +3561,12 @@ void sub_54ED30(TargetDescriptor* td)
     }
 
     if (combat_auto_attack_get(pc_obj)) {
-        if (sub_44E6F0(pc_obj, &goal_data)
-            || !sub_424070(pc_obj, 3, 0, 0)) {
+        if (sub_44E6F0(pc_obj, &goal_data)) {
+            intgame_coop_click_trace("goal %d: already running (sub_44E6F0)", anim);
+            return;
+        }
+        if (!sub_424070(pc_obj, 3, 0, 0)) {
+            intgame_coop_click_trace("goal %d: current anim not interruptible", anim);
             return;
         }
 
@@ -3572,14 +3586,18 @@ void sub_54ED30(TargetDescriptor* td)
         }
 
         if (!anim_goal_add_ex(&goal_data, &anim_id, flags)) {
+            intgame_coop_click_trace("goal %d: add failed", anim);
             return;
         }
+        intgame_coop_click_trace("goal %d added (auto-attack path)", anim);
 
         if (tig_net_is_active()) {
             return;
         }
     } else if (sub_423300(pc_obj, &anim_id)) {
         // 0x54F68E
+        intgame_coop_click_trace("goal %d: PC busy, %s path", anim,
+            combat_turn_based_is_active() ? "turn-based fidget" : "subgoal/interrupt");
         if (combat_turn_based_is_active()) {
             AnimID fidget_anim_id;
             if (anim_is_current_goal_type(pc_obj, AG_ANIM_FIDGET, &fidget_anim_id)
@@ -5151,6 +5169,92 @@ bool sub_552050(int x, int y, TargetDescriptor* td)
 {
     sub_551F80();
     return target_pick_at_screen_xy(x, y, td, intgame_fullscreen);
+}
+
+/* Coop: one line per world click, so a playtest log shows what a click on
+   an object turned into (PT17b: ground pickups that never started). */
+static void intgame_coop_click_trace(const char* fmt, ...)
+{
+    char buf[256];
+    va_list args;
+
+    if (!tig_net_is_coop_enabled()) {
+        return;
+    }
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    tig_debug_printf("Intgame: click: %s\n", buf);
+}
+
+/*
+ * Coop dev: a real mouse click on an object. The button down/up messages are
+ * queued the way SDL input is, so they go through tig buttons, the window
+ * message filters and intgame_process_event exactly like a player's click.
+ * button: 0 = left, 1 = right, 2 = probe only (find the spot, queue
+ * nothing). Returns false when no spot on the object picks it.
+ */
+static bool intgame_dev_click_obj(int64_t obj, int button)
+{
+    TigRect rect;
+    TigWindowData window_data;
+    TigMessage msg;
+    TargetDescriptor td;
+    int x;
+    int y;
+    int dx;
+    int dy;
+    bool found = false;
+
+    if (obj == OBJ_HANDLE_NULL || tig_window_data(dword_64C52C, &window_data) != TIG_OK) {
+        return false;
+    }
+    object_get_rect(obj, 0, &rect);
+    if (rect.width <= 0 || rect.height <= 0) {
+        tig_debug_printf("Intgame: dev click: object has no screen rect\n");
+        return false;
+    }
+    /* Centre first, then a small grid over the art: the first spot that
+       picks this object is where a player would click. */
+    for (dy = 0; dy < 5 && !found; dy++) {
+        for (dx = 0; dx < 5 && !found; dx++) {
+            static const int order[5] = { 2, 1, 3, 0, 4 };
+
+            x = rect.x + rect.width * (1 + 2 * order[dx]) / 10 + window_data.rect.x;
+            y = rect.y + rect.height * (1 + 2 * order[dy]) / 10 + (intgame_fullscreen ? 0 : window_data.rect.y);
+            if (sub_552050(x, y, &td) && !td.is_loc && td.obj == obj) {
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        x = rect.x + rect.width / 2 + window_data.rect.x;
+        y = rect.y + rect.height / 2 + (intgame_fullscreen ? 0 : window_data.rect.y);
+        if (sub_552050(x, y, &td)) {
+            tig_debug_printf("Intgame: dev click: no spot on the object picks it; centre (%d,%d) picks %s type %d\n",
+                x, y, td.is_loc ? "a tile" : "an object",
+                td.is_loc ? -1 : obj_field_int32_get(td.obj, OBJ_F_TYPE));
+        } else {
+            tig_debug_printf("Intgame: dev click: no spot on the object picks anything (rect %d,%d %dx%d)\n",
+                rect.x, rect.y, rect.width, rect.height);
+        }
+        return false;
+    }
+    tig_debug_printf("Intgame: dev click: %s at (%d,%d), mode %d\n",
+        button == 0 ? "left" : (button == 1 ? "right" : "probe ok"), x, y, intgame_mode_get());
+    if (button == 2) {
+        return true;
+    }
+    memset(&msg, 0, sizeof(msg));
+    tig_timer_now(&(msg.timestamp));
+    msg.type = TIG_MESSAGE_MOUSE;
+    msg.data.mouse.x = x;
+    msg.data.mouse.y = y;
+    msg.data.mouse.event = button == 0 ? TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN : TIG_MESSAGE_MOUSE_RIGHT_BUTTON_DOWN;
+    tig_message_enqueue(&msg);
+    msg.data.mouse.event = button == 0 ? TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP : TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP;
+    tig_message_enqueue(&msg);
+    return true;
 }
 
 // 0x552070

@@ -1,5 +1,7 @@
 #include "ui/hotkey_ui.h"
 
+#include <string.h>
+
 #include "game/gamelib.h"
 #include "game/gsound.h"
 #include "game/hrp.h"
@@ -113,6 +115,7 @@ bool hotkey_ui_init(GameInitInfo* init_info)
     }
 
     coop_lite_set_hotkey_spell_hook(hotkey_ui_assign_spell);
+    coop_lite_set_dev_click_hotkey_hook(hotkey_ui_dev_click_slot);
 
     for (index = 0; index < 10; index++) {
         hotkey = &(stru_6835E0[index]);
@@ -1313,6 +1316,44 @@ void intgame_hotkeys_recover(void)
 /* Put a spell on the first free hotbar slot (coop dev: Resurrect granted).
    Already there = that slot. Returns the slot index, or -1 if the bar is
    full. */
+/*
+ * Coop dev: a real left click on hotbar slot `index` — mouse down/up queued
+ * at the slot button's screen centre, so tig buttons and the window filters
+ * handle it exactly like a player's click.
+ */
+bool hotkey_ui_dev_click_slot(int index)
+{
+    TigButtonData button_data;
+    TigWindowData window_data;
+    TigMessage msg;
+    tig_button_handle_t at;
+    int x;
+    int y;
+
+    if (index < 0 || index >= 10
+        || stru_6835E0[index].info.button_handle == TIG_BUTTON_HANDLE_INVALID
+        || tig_button_data(stru_6835E0[index].info.button_handle, &button_data) != TIG_OK
+        || tig_window_data(button_data.window_handle, &window_data) != TIG_OK) {
+        return false;
+    }
+    x = window_data.rect.x + button_data.x + button_data.width / 2;
+    y = window_data.rect.y + button_data.y + button_data.height / 2;
+    at = tig_button_get_at_position(x, y);
+    tig_debug_printf("HotkeyUI: dev click: slot %d (type %d) at (%d,%d), button there %s\n",
+        index, stru_6835E0[index].type, x, y,
+        at == stru_6835E0[index].info.button_handle ? "is the slot" : "is NOT the slot");
+    memset(&msg, 0, sizeof(msg));
+    tig_timer_now(&(msg.timestamp));
+    msg.type = TIG_MESSAGE_MOUSE;
+    msg.data.mouse.x = x;
+    msg.data.mouse.y = y;
+    msg.data.mouse.event = TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN;
+    tig_message_enqueue(&msg);
+    msg.data.mouse.event = TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP;
+    tig_message_enqueue(&msg);
+    return true;
+}
+
 int hotkey_ui_assign_spell(int spell)
 {
     int index;

@@ -2923,6 +2923,21 @@ void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell))
 static ObjectID coop_dev_granted[8];
 static bool coop_dev_granted_valid[8];
 
+/* intgame_dev_click_obj (dev: a real mouse click on an object). */
+static bool (*coop_dev_click_obj_hook)(int64_t obj, int button);
+
+void coop_lite_set_dev_click_obj_hook(bool (*hook)(int64_t obj, int button))
+{
+    coop_dev_click_obj_hook = hook;
+}
+
+static bool (*coop_dev_click_hotkey_hook)(int index);
+
+void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index))
+{
+    coop_dev_click_hotkey_hook = hook;
+}
+
 static void coop_lite_dev_grant_resurrect(int slot, int64_t pc)
 {
     const char* env = getenv("ARCANUM_DEV_GRANT_RESURRECT");
@@ -5158,6 +5173,60 @@ static bool coop_lite_is_stackable(int64_t item)
     return type == OBJ_TYPE_GOLD || type == OBJ_TYPE_AMMO;
 }
 
+/*
+ * PT17b: vanilla AI (ai_look_for_item_func) lets any nearby NPC take items
+ * lying around. In a coop session that ate players' drops (the clients'
+ * copies lingered, clicks on them got nothing back), so on the host an item
+ * a PC drops is marked NPC-proof until a PC picks it up again.
+ */
+void coop_lite_mark_player_drop(int64_t item)
+{
+    if (item == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled()
+        || (tig_net_is_active() && !tig_net_is_host())
+        || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+        return;
+    }
+    obj_field_int32_set(item, OBJ_F_ITEM_FLAGS,
+        obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) | (int)OIF_NO_NPC_PICKUP);
+}
+
+void coop_lite_clear_player_drop(int64_t item)
+{
+    if (item == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled()
+        || !obj_handle_is_valid(item)
+        || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0
+        || (obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) & (int)OIF_NO_NPC_PICKUP) == 0) {
+        return;
+    }
+    obj_field_int32_set(item, OBJ_F_ITEM_FLAGS,
+        obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) & ~(int)OIF_NO_NPC_PICKUP);
+}
+
+/*
+ * PT17b: an item left the ground at the host through a pickup goal (an NPC,
+ * the host's PC). Clients drop their copy now instead of at the next world
+ * state (up to 10 s of a clickable ghost). A client PC's own pickup keeps
+ * its copy for its INVEN_SYNC, unless it is a stack (totals only).
+ */
+void coop_lite_host_ground_item_taken(int64_t taker, const void* oid_ptr, bool stack)
+{
+    PacketObjectDestroy gone;
+    int slot;
+
+    if (oid_ptr == NULL || !tig_net_is_coop_enabled() || !tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+    memset(&gone, 0, sizeof(gone));
+    gone.type = 72;
+    memcpy(&gone.oid, oid_ptr, sizeof(gone.oid));
+    slot = taker != OBJ_HANDLE_NULL ? coop_lite_slot_of_obj(taker) : -1;
+    if (slot > 0 && !stack) {
+        tig_net_send_app_except(&gone, sizeof(gone), slot);
+    } else {
+        tig_net_send_app_all(&gone, sizeof(gone));
+    }
+}
+
 static int64_t coop_lite_store_of(int64_t npc)
 {
     if (npc == OBJ_HANDLE_NULL || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
@@ -5527,6 +5596,9 @@ void coop_lite_host_handle_item_op(int type, void* msg)
     if (ok && was_on_ground) {
         PacketObjectDestroy gone;
 
+        if (!ground_stack) {
+            coop_lite_clear_player_drop(item); /* back in a PC's hands */
+        }
         memset(&gone, 0, sizeof(gone));
         gone.type = 72;
         gone.oid = picked_oid;
@@ -5666,6 +5738,7 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
                     && item_gold_transfer(pc, OBJ_HANDLE_NULL, qty, item)) {
                     pile = item_gold_create(qty, loc);
                     ok = pile != OBJ_HANDLE_NULL;
+                    coop_lite_mark_player_drop(pile);
                 }
             } else if (t == OBJ_TYPE_AMMO) {
                 int ammo_type = obj_field_int32_get(item, OBJ_F_AMMO_TYPE);
@@ -5674,6 +5747,7 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
                     && item_ammo_transfer(pc, OBJ_HANDLE_NULL, qty, ammo_type, item)) {
                     pile = item_ammo_create(qty, ammo_type, loc);
                     ok = pile != OBJ_HANDLE_NULL;
+                    coop_lite_mark_player_drop(pile);
                 }
             } else {
                 ok = item_drop(item);
@@ -7702,6 +7776,62 @@ COOP_STATIC_ASSERT(OF_FLAT_BIT == OF_FLAT, "OF_FLAT bit");
 
 static unsigned int coop_world_req_host_ms[8];
 static bool coop_world_req_host_seen[8];
+
+/* PT17b: ground items each slot was last told about, to say where one went
+   when it drops out of the list (picked up by whom, destroyed, moved). */
+#define COOP_WORLD_GONE_MAX 64
+static ObjectID coop_world_prev_ground[8][COOP_WORLD_GONE_MAX];
+static int coop_world_prev_ground_cnt[8];
+static int coop_world_prev_ground_key[8];
+static ObjectID coop_world_cur_ground[COOP_WORLD_GONE_MAX];
+static int coop_world_cur_ground_cnt;
+
+static void coop_lite_host_world_ground_report(int slot, int64_t center, int key)
+{
+    int i;
+    int j;
+
+    if (coop_world_prev_ground_key[slot] != key) {
+        coop_world_prev_ground_cnt[slot] = 0; /* another map: nothing to compare */
+        coop_world_prev_ground_key[slot] = key;
+    }
+
+    for (i = 0; i < coop_world_prev_ground_cnt[slot]; i++) {
+        bool still = false;
+        int64_t obj;
+        int64_t parent = OBJ_HANDLE_NULL;
+        char oid_str[80];
+        char who_str[80];
+
+        for (j = 0; j < coop_world_cur_ground_cnt; j++) {
+            if (objid_is_equal(coop_world_prev_ground[slot][i], coop_world_cur_ground[j])) {
+                still = true;
+                break;
+            }
+        }
+        if (still) {
+            continue;
+        }
+        objid_id_to_str(oid_str, coop_world_prev_ground[slot][i]);
+        obj = obj_pool_perm_lookup(coop_world_prev_ground[slot][i]);
+        if (obj == OBJ_HANDLE_NULL || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+            tig_debug_printf("CoopLite: ground item %s left the ground: destroyed\n", oid_str);
+        } else if (item_parent(obj, &parent) && parent != OBJ_HANDLE_NULL) {
+            int ps = coop_lite_slot_of_obj(parent);
+
+            objid_id_to_str(who_str, obj_get_id(parent));
+            tig_debug_printf("CoopLite: ground item %s left the ground: now carried by %s %s%s\n", oid_str,
+                obj_field_int32_get(parent, OBJ_F_TYPE) == OBJ_TYPE_NPC ? "NPC" : (ps >= 0 ? "PC" : "container"),
+                who_str, ps == 0 ? " (host PC)" : "");
+        } else {
+            tig_debug_printf("CoopLite: ground item %s left the list: %d tiles from slot %d's PC, flags 0x%x\n",
+                oid_str, (int)location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), center), slot,
+                obj_field_int32_get(obj, OBJ_F_FLAGS));
+        }
+    }
+    memcpy(coop_world_prev_ground[slot], coop_world_cur_ground, sizeof(ObjectID) * (size_t)coop_world_cur_ground_cnt);
+    coop_world_prev_ground_cnt[slot] = coop_world_cur_ground_cnt;
+}
 static ObjectID coop_dev_mutate_dagger;
 static bool coop_dev_mutate_dagger_valid;
 
@@ -7762,6 +7892,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     memset(out, 0, offsetof(PacketCoopWorldState, entries));
     out->type = PACKET_COOP_WORLD_STATE;
     out->map = key;
+    coop_world_cur_ground_cnt = 0;
 
     if (obj_inst_first(&obj, &iter)) {
         do {
@@ -7818,6 +7949,9 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             default:
                 e->kind = COOP_WORLD_GROUND_ITEM;
                 e->proto = sub_49B290(obj);
+                if (coop_world_cur_ground_cnt < COOP_WORLD_GONE_MAX) {
+                    coop_world_cur_ground[coop_world_cur_ground_cnt++] = oid;
+                }
                 e->kind_flags = coop_lite_is_stackable(obj) ? 1u : 0u;
                 n_item++;
                 if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
@@ -7837,6 +7971,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     }
     coop_lite_world_flush(out, slot, true, &first);
     FREE(out);
+    coop_lite_host_world_ground_report(slot, center, key);
     if (coop_dev_mutate_dagger_valid && getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
         int64_t d = obj_pool_perm_lookup(coop_dev_mutate_dagger);
         int64_t parent = OBJ_HANDLE_NULL;
@@ -8554,26 +8689,141 @@ static void coop_lite_host_dev_gold_pile_tick(unsigned int now_ms)
             continue;
         }
         coop_dev_gold_done[slot] = true;
-        pile = item_gold_create(37, obj_field_int64_get(pc, OBJ_F_LOCATION));
-        if (pile != OBJ_HANDLE_NULL) {
-            objid_id_to_str(oid_str, obj_get_id(pile));
-            tig_debug_printf("CoopLite: dev: gold pile of 37 %s at slot %d PC (host gold piles near it: %d)\n",
-                oid_str, slot, coop_lite_dev_count_gold_piles(pc));
+        {
+            int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+
+            /* "15o": two tiles off the PC, so a click picks the pile and
+               not the PC standing on it; "15oi": a dagger too (not a stack). */
+            if (strchr(env, 'o') != NULL) {
+                loc = location_make(LOCATION_GET_X(loc) + 2, LOCATION_GET_Y(loc));
+            }
+            pile = item_gold_create(37, loc);
+            if (pile != OBJ_HANDLE_NULL) {
+                objid_id_to_str(oid_str, obj_get_id(pile));
+                tig_debug_printf("CoopLite: dev: gold pile of 37 %s at slot %d PC%s (host gold piles near it: %d)\n",
+                    oid_str, slot, strchr(env, 'o') != NULL ? " +2 tiles" : "", coop_lite_dev_count_gold_piles(pc));
+            }
+            if (strchr(env, 'i') != NULL) {
+                int64_t dagger;
+
+                multiplayer_lock();
+                if (object_create(sub_4685A0(BP_DAGGER),
+                        location_make(LOCATION_GET_X(loc), LOCATION_GET_Y(loc) + 2), &dagger)) {
+                    multiplayer_unlock();
+                    coop_lite_host_announce_ground_item(dagger);
+                    tig_debug_printf("CoopLite: dev: dagger on the ground near slot %d PC\n", slot);
+                } else {
+                    multiplayer_unlock();
+                }
+            }
         }
     }
 }
 
 static int coop_dev_cgold_stage;
 static unsigned int coop_dev_cgold_ms;
+static ObjectID coop_dev_cgold_weapon; /* the ground weapon the UI click took */
 
+/* Dev: that weapon, when it is in our PC's inventory. */
+static int64_t coop_lite_dev_carried_weapon(int64_t pc)
+{
+    int64_t obj;
+    int64_t parent = OBJ_HANDLE_NULL;
+
+    if (coop_dev_cgold_weapon.type == OID_TYPE_NULL) {
+        return OBJ_HANDLE_NULL;
+    }
+    obj = obj_pool_perm_lookup(coop_dev_cgold_weapon);
+    if (obj == OBJ_HANDLE_NULL || !item_parent(obj, &parent) || parent != pc) {
+        return OBJ_HANDLE_NULL;
+    }
+    return obj;
+}
+
+/* Dev: nearest ground object of a type mask within `radius` tiles. */
+static int64_t coop_lite_dev_ground_near(int64_t pc, unsigned int tm, int radius, int* count)
+{
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t best = OBJ_HANDLE_NULL;
+    int64_t best_d = 0;
+    int n = 0;
+
+    object_list_vicinity(pc, tm, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        int64_t d;
+
+        if ((obj_field_int32_get(node->obj, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED | OF_OFF)) != 0) {
+            continue;
+        }
+        d = location_dist(obj_field_int64_get(node->obj, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION));
+        if (d > radius) {
+            continue;
+        }
+        n++;
+        if (best == OBJ_HANDLE_NULL || d < best_d) {
+            best = node->obj;
+            best_d = d;
+        }
+    }
+    object_list_destroy(&objects);
+    if (count != NULL) {
+        *count = n;
+    }
+    return best;
+}
+
+/* Dev: the Packet81 the inventory drop box sends (inven_ui sub_578B80). */
+static void coop_lite_dev_send_drop(int64_t pc, int64_t item, int qty)
+{
+    Packet81 pkt;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = 81;
+    pkt.field_8 = 0x02;
+    pkt.field_10 = obj_get_id(item);
+    coop_lite_client_map_stack_oid(&pkt.field_10);
+    pkt.field_28 = obj_get_id(pc);
+    pkt.field_40.type = OID_TYPE_NULL;
+    pkt.field_58 = -1;
+    pkt.field_5C = -1;
+    pkt.field_60 = qty;
+    pkt.field_68 = sub_529520();
+    pkt.field_70.type = OID_TYPE_NULL;
+    pkt.field_88.type = OID_TYPE_NULL;
+    pkt.field_A0 = obj_get_id(pc);
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+static const char* coop_lite_dev_ui_click(int64_t obj)
+{
+    return obj != OBJ_HANDLE_NULL && coop_dev_click_obj_hook != NULL && coop_dev_click_obj_hook(obj, 0)
+        ? "queued"
+        : "not possible";
+}
+
+/*
+ * ARCANUM_DEV_GOLD_PILE on a client:
+ *   =1  pickup goal + drop-box gold drop (PT17).
+ *   =2  the same through real UI clicks (queued mouse messages), plus a
+ *       weapon: click it up, drop it, walk off 6 tiles, click both back.
+ */
 static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
 {
     const char* env = getenv("ARCANUM_DEV_GOLD_PILE");
     int64_t pc = player_get_local_pc_obj();
     int64_t pile;
+    int64_t weapon;
     int depth;
+    int n;
+    int n2;
+    bool ui;
 
-    if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL || coop_dev_cgold_stage >= 4) {
+    if (env == NULL || (env[0] != '1' && env[0] != '2') || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    ui = env[0] == '2';
+    if (coop_dev_cgold_stage >= (ui ? 9 : 4)) {
         return;
     }
     if (coop_dev_cgold_stage == 0) {
@@ -8587,7 +8837,8 @@ static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
         coop_dev_cgold_stage = 1;
         return;
     }
-    if (!coop_lite_interval_elapsed(coop_dev_cgold_ms, now_ms, coop_dev_cgold_stage == 1 ? 3000u : 4000u)) {
+    if (!coop_lite_interval_elapsed(coop_dev_cgold_ms, now_ms,
+            coop_dev_cgold_stage == 1 ? 3000u : (coop_dev_cgold_stage >= 6 ? 7000u : 4000u))) {
         return;
     }
     coop_dev_cgold_ms = now_ms != 0 ? now_ms : 1;
@@ -8595,38 +8846,79 @@ static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
     switch (coop_dev_cgold_stage) {
     case 1:
         pile = coop_lite_dev_find_gold_pile(pc);
-        tig_debug_printf("CoopLite: dev gold: pickup goal (as a click) %s\n",
-            pile != OBJ_HANDLE_NULL && anim_goal_pickup_item_as_click(pc, pile) ? "started" : "refused");
+        if (ui) {
+            tig_debug_printf("CoopLite: dev gold: UI click on the pile %s\n", coop_lite_dev_ui_click(pile));
+        } else {
+            tig_debug_printf("CoopLite: dev gold: pickup goal (as a click) %s\n",
+                pile != OBJ_HANDLE_NULL && anim_goal_pickup_item_as_click(pc, pile) ? "started" : "refused");
+        }
         break;
     case 2: {
         int64_t gold = obj_field_handle_get(pc, OBJ_F_CRITTER_GOLD);
-        Packet81 pkt;
 
         tig_debug_printf("CoopLite: dev gold: after pickup my gold %d, piles here %d\n",
             item_gold_get(pc), coop_lite_dev_count_gold_piles(pc));
         if (gold != OBJ_HANDLE_NULL && item_gold_get(pc) >= 10) {
-            memset(&pkt, 0, sizeof(pkt));
-            pkt.type = 81;
-            pkt.field_8 = 0x02;
-            pkt.field_10 = obj_get_id(gold);
-            coop_lite_client_map_stack_oid(&pkt.field_10);
-            pkt.field_28 = obj_get_id(pc);
-            pkt.field_40.type = OID_TYPE_NULL;
-            pkt.field_58 = -1;
-            pkt.field_5C = -1;
-            pkt.field_60 = 10;
-            pkt.field_68 = sub_529520();
-            pkt.field_70.type = OID_TYPE_NULL;
-            pkt.field_88.type = OID_TYPE_NULL;
-            pkt.field_A0 = obj_get_id(pc);
-            tig_net_send_app_all(&pkt, sizeof(pkt));
+            coop_lite_dev_send_drop(pc, gold, 10);
             tig_debug_printf("CoopLite: dev gold: dropping 10 gold (drop box)\n");
         }
         break;
     }
-    default:
+    case 3:
         tig_debug_printf("CoopLite: dev gold: after drop my gold %d, piles here %d\n",
             item_gold_get(pc), coop_lite_dev_count_gold_piles(pc));
+        if (ui) {
+            weapon = coop_lite_dev_ground_near(pc, OBJ_TM_WEAPON, 4, NULL);
+            if (weapon != OBJ_HANDLE_NULL) {
+                coop_dev_cgold_weapon = obj_get_id(weapon);
+                tig_debug_printf("CoopLite: dev gold: UI click on the ground weapon %s\n", coop_lite_dev_ui_click(weapon));
+            }
+        }
+        break;
+    case 4:
+        weapon = coop_lite_dev_carried_weapon(pc);
+        tig_debug_printf("CoopLite: dev gold: picked-up weapon %s; dropping it (drop box)\n",
+            weapon != OBJ_HANDLE_NULL ? "in my inventory" : "NOT in my inventory");
+        if (weapon == OBJ_HANDLE_NULL) {
+            /* An NPC got the ground one first: drop one of our own. */
+            weapon = item_find_first_of_type(pc, OBJ_TYPE_WEAPON);
+            if (weapon != OBJ_HANDLE_NULL) {
+                coop_dev_cgold_weapon = obj_get_id(weapon);
+                tig_debug_printf("CoopLite: dev gold: dropping my own weapon instead\n");
+            }
+        }
+        if (weapon != OBJ_HANDLE_NULL) {
+            coop_lite_dev_send_drop(pc, weapon, 1);
+        }
+        break;
+    case 5: {
+        int64_t l = obj_field_int64_get(pc, OBJ_F_LOCATION);
+
+        weapon = coop_lite_dev_ground_near(pc, OBJ_TM_WEAPON, 0, &n);
+        if (weapon != OBJ_HANDLE_NULL && coop_dev_click_obj_hook != NULL) {
+            tig_debug_printf("CoopLite: dev gold: the dropped weapon under my feet is %s\n",
+                coop_dev_click_obj_hook(weapon, 2) ? "clickable" : "NOT clickable (the PC covers it)");
+        }
+        tig_debug_printf("CoopLite: dev gold: weapons at my feet %d, dagger in inventory %d; walking 6 tiles away (%s)\n",
+            n, coop_lite_dev_carried_weapon(pc) != OBJ_HANDLE_NULL,
+            anim_goal_move_to_tile(pc, location_make(LOCATION_GET_X(l) - 6, LOCATION_GET_Y(l))) ? "ok" : "refused");
+        break;
+    }
+    case 6:
+        weapon = coop_lite_dev_ground_near(pc, OBJ_TM_WEAPON, 12, &n);
+        coop_lite_dev_ground_near(pc, OBJ_TM_GOLD, 12, &n2);
+        tig_debug_printf("CoopLite: dev gold: after walking: weapons within 12 tiles %d, piles %d\n", n, n2);
+        tig_debug_printf("CoopLite: dev gold: UI click on the far weapon %s\n", coop_lite_dev_ui_click(weapon));
+        break;
+    case 7:
+        tig_debug_printf("CoopLite: dev gold: dagger in inventory %d\n", coop_lite_dev_carried_weapon(pc) != OBJ_HANDLE_NULL);
+        pile = coop_lite_dev_ground_near(pc, OBJ_TM_GOLD, 12, NULL);
+        tig_debug_printf("CoopLite: dev gold: UI click on the far pile %s\n", coop_lite_dev_ui_click(pile));
+        break;
+    default:
+        tig_debug_printf("CoopLite: dev gold: end: my gold %d, dagger in inventory %d, piles here %d\n",
+            item_gold_get(pc), coop_lite_dev_carried_weapon(pc) != OBJ_HANDLE_NULL,
+            coop_lite_dev_count_gold_piles(pc));
         break;
     }
     tig_net_local_suspend_resume(depth);
@@ -8640,6 +8932,7 @@ static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
  */
 static unsigned int coop_dev_res_ms[8];
 static bool coop_dev_res_done[8];
+static int coop_dev_res_ui_stage[8];
 
 static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
 {
@@ -8661,6 +8954,7 @@ static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
 
         if (pc == OBJ_HANDLE_NULL || coop_dev_res_done[slot] || !critter_is_dead(pc)) {
             coop_dev_res_ms[slot] = 0;
+            coop_dev_res_ui_stage[slot] = 0;
             continue;
         }
         if (coop_dev_res_ms[slot] == 0) {
@@ -8668,6 +8962,25 @@ static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
             continue;
         }
         if (!coop_lite_interval_elapsed(coop_dev_res_ms[slot], now_ms, (unsigned int)secs * 1000u)) {
+            continue;
+        }
+        if (strchr(env, 'h') != NULL) {
+            /* "5h": the GUI way — a real click on the Resurrect hotbar slot,
+               then (another N s later) a real click on the corpse. */
+            if (coop_dev_res_ui_stage[slot] == 0) {
+                int idx = coop_hotkey_spell_hook != NULL ? coop_hotkey_spell_hook(SPELL_RESURRECT) : -1;
+
+                tig_debug_printf("CoopLite: dev: UI click on hotbar slot %d (Resurrect) %s\n", idx,
+                    idx >= 0 && coop_dev_click_hotkey_hook != NULL && coop_dev_click_hotkey_hook(idx)
+                        ? "queued"
+                        : "not possible");
+                coop_dev_res_ui_stage[slot] = 1;
+                coop_dev_res_ms[slot] = now_ms != 0 ? now_ms : 1;
+                continue;
+            }
+            coop_dev_res_done[slot] = true;
+            tig_debug_printf("CoopLite: dev: UI click on slot %d's corpse %s\n", slot,
+                coop_dev_click_obj_hook != NULL && coop_dev_click_obj_hook(pc, 0) ? "queued" : "not possible");
             continue;
         }
         coop_dev_res_done[slot] = true;

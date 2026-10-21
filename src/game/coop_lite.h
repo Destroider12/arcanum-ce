@@ -566,6 +566,10 @@ bool coop_lite_save_appendix(struct TigFile* stream);
 bool coop_lite_load_appendix(struct TigFile* stream);
 /* hotkey_ui_assign_spell (dev: Resurrect on the hotbar). */
 void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell));
+/* intgame_dev_click_obj (dev: a real mouse click on an object; 0 = left). */
+void coop_lite_set_dev_click_obj_hook(bool (*hook)(int64_t obj, int button));
+/* hotkey_ui_dev_click_slot (dev: a real mouse click on a hotbar slot). */
+void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index));
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
@@ -793,6 +797,11 @@ int coop_pickup_queue_take(CoopPickupQueue* q, int map_key, uint8_t out[][24], i
    (inside our own PC's locally simulated goals). */
 bool coop_lite_client_local_goal_obj(int64_t obj);
 void coop_lite_host_item_gained(int64_t pc);
+/* PT17b: PC drops are NPC-proof on the host until a PC picks them up. */
+void coop_lite_mark_player_drop(int64_t item);
+void coop_lite_clear_player_drop(int64_t item);
+/* PT17b: host — an item left the ground via a pickup goal; oid_ptr: ObjectID*. */
+void coop_lite_host_ground_item_taken(int64_t taker, const void* oid_ptr, bool stack);
 
 /* Host: a client disconnected — clear its offer / replication state. */
 void coop_lite_host_on_client_disconnect(int slot);

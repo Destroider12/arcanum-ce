@@ -4096,7 +4096,6 @@ void sub_578B80(int a1)
 
     pkt->field_60 = a1;
     pkt->field_68 = sub_529520();
-    coop_lite_client_map_stack_oid(&(pkt->field_10));
 
     if (tig_net_is_active()) {
         object_examine(obj_pool_perm_lookup(pkt->field_10),
@@ -4172,6 +4171,9 @@ bool sub_578EA0(Packet81* pkt)
 
     if (tig_net_is_active()
         && !tig_net_is_host()) {
+        /* Coop: the host knows our gold/ammo stack by its own OID; map
+           the sent copy only (v2 above is our local stack). */
+        coop_lite_client_map_stack_oid(&(pkt->field_10));
         tig_net_send_app_all(pkt, sizeof(*pkt));
     }
 
@@ -4218,6 +4220,9 @@ bool sub_578EA0(Packet81* pkt)
                     } else if ((flags & 0x02) != 0) {
                         object_pickup(gold_obj, v1);
                         sub_466E50(gold_obj, loc);
+                        if (obj_field_int32_get(v1, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                            coop_lite_mark_player_drop(gold_obj);
+                        }
                     }
                 }
             } else {
@@ -4248,6 +4253,9 @@ bool sub_578EA0(Packet81* pkt)
                     } else if ((flags & 0x02) != 0) {
                         object_pickup(ammo_obj, v1);
                         sub_466E50(ammo_obj, loc);
+                        if (obj_field_int32_get(v1, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                            coop_lite_mark_player_drop(ammo_obj);
+                        }
                     }
                 }
             } else {
