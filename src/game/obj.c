@@ -1303,6 +1303,120 @@ bool obj_read_mem(uint8_t* data, int64_t* obj_ptr)
     return ret;
 }
 
+/*
+ * Coop (review P1-4): the layout of an instance blob from the network,
+ * parsed with bounds and without allocating: header bytes, and per
+ * overridden field its encoding (OBJ_MEM_K_*) and, for arrays, the element
+ * size the game would use. -1 when the header is out of range.
+ */
+static uint8_t* obj_mem_layout_kinds;
+static int* obj_mem_layout_elem;
+static int obj_mem_layout_max;
+static int obj_mem_layout_n;
+static int obj_mem_layout_num_fields;
+
+static bool obj_mem_layout_field(Object* object, int idx, ObjectFieldInfo* info)
+{
+    uint8_t kind;
+    int elem = 0;
+
+    (void)object;
+    if (idx < 0 || idx >= obj_mem_layout_num_fields || obj_mem_layout_n >= obj_mem_layout_max) {
+        return false;
+    }
+    switch (info->type) {
+    case OD_TYPE_INT32:
+        kind = OBJ_MEM_K_I32;
+        break;
+    case OD_TYPE_INT64:
+        kind = OBJ_MEM_K_I64;
+        break;
+    case OD_TYPE_HANDLE:
+        kind = OBJ_MEM_K_HANDLE;
+        break;
+    case OD_TYPE_STRING:
+        kind = OBJ_MEM_K_STRING;
+        break;
+    case OD_TYPE_INT32_ARRAY:
+    case OD_TYPE_UINT32_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(int);
+        break;
+    case OD_TYPE_INT64_ARRAY:
+    case OD_TYPE_UINT64_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(int64_t);
+        break;
+    case OD_TYPE_SCRIPT_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(Script);
+        break;
+    case OD_TYPE_QUEST_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(PcQuestState);
+        break;
+    case OD_TYPE_HANDLE_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(ObjectID);
+        break;
+    default:
+        return false; /* PTR / PTR_ARRAY are never serialized */
+    }
+    obj_mem_layout_kinds[obj_mem_layout_n] = kind;
+    obj_mem_layout_elem[obj_mem_layout_n] = elem;
+    obj_mem_layout_n++;
+    return true;
+}
+
+int obj_mem_layout(const uint8_t* data, int size, uint8_t* kinds, int* elem, int max, int* count_out)
+{
+    Object tmp;
+    ObjectID oid;
+    int type;
+    int16_t num_fields;
+    int bitmap[64];
+    int cnt;
+    int at;
+
+    *count_out = 0;
+    if (data == NULL || size < 4 + 24 + 24 + 4 + 2) {
+        return -1;
+    }
+    memcpy(&oid, data + 4 + 24, sizeof(oid));
+    if (oid.type == OID_TYPE_BLOCKED) {
+        return -1; /* prototypes never travel */
+    }
+    memcpy(&type, data + 4 + 24 + 24, sizeof(type));
+    if (type < 0 || type >= OBJ_TYPE_COUNT) {
+        return -1;
+    }
+    memcpy(&num_fields, data + 4 + 24 + 24 + 4, sizeof(num_fields));
+    if (num_fields < 0 || num_fields > object_fields_count_per_type[type]) {
+        return -1;
+    }
+    at = 4 + 24 + 24 + 4 + (int)sizeof(num_fields);
+    cnt = sub_40C030(type);
+    if (cnt <= 0 || cnt > 64 || size - at < 4 * cnt) {
+        return -1;
+    }
+    memcpy(bitmap, data + at, (size_t)(4 * cnt));
+    at += 4 * cnt;
+
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.type = type;
+    tmp.field_48 = bitmap;
+    obj_mem_layout_kinds = kinds;
+    obj_mem_layout_elem = elem;
+    obj_mem_layout_max = max;
+    obj_mem_layout_n = 0;
+    obj_mem_layout_num_fields = num_fields;
+    if (!object_inst_enumerate_overridden_fields(&tmp, obj_mem_layout_field)) {
+        return -1;
+    }
+    *count_out = obj_mem_layout_n;
+    return at;
+}
+
 // 0x4067C0
 int obj_is_modified(int64_t obj)
 {

@@ -2228,6 +2228,30 @@ static bool coop_lite_bundle_blob_ok(const uint8_t* blob, bool want_pc, const Ob
     return obj_pool_perm_lookup(proto_oid) != OBJ_HANDLE_NULL;
 }
 
+/* Review P1-4: an object blob is read only when all its inner lengths stay
+   inside the bytes received (obj_read_mem itself trusts them). */
+static bool coop_lite_obj_blob_bounded(const uint8_t* data, int size)
+{
+    static uint8_t kinds[1024];
+    static int elem[1024];
+    int count = 0;
+    int hdr;
+    int body;
+
+    hdr = obj_mem_layout(data, size, kinds, elem, 1024, &count);
+    if (hdr < 0) {
+        tig_debug_printf("CoopLite: blob refused: bad header (%d bytes)\n", size);
+        return false;
+    }
+    body = coop_lite_blob_walk(data + hdr, size - hdr, kinds, elem, count);
+    if (body < 0 || hdr + body != size) {
+        tig_debug_printf("CoopLite: blob refused: inner lengths (%d fields, %d+%d of %d bytes)\n",
+            count, hdr, body, size);
+        return false;
+    }
+    return true;
+}
+
 /* Host: the client's own character from its v2 bundle, at loc. NULL when
    there is none or it does not pass the checks (proto offer then). */
 /*
@@ -2289,7 +2313,8 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
              &count, NULL, NULL)
         && blobs.n >= 1 && blobs.n == count;
     for (i = 0; ok && i < blobs.n; i++) {
-        ok = coop_lite_bundle_blob_ok(blobs.blob[i], i == 0, i == 0 ? want_oid : NULL);
+        ok = coop_lite_bundle_blob_ok(blobs.blob[i], i == 0, i == 0 ? want_oid : NULL)
+            && coop_lite_obj_blob_bounded(blobs.blob[i], (int)blobs.size[i]);
     }
     if (!ok) {
         tig_debug_printf("CoopLite: v2 offer: slot %d bundle refused (layout/objects)\n", slot);
@@ -2436,7 +2461,16 @@ static bool coop_lite_host_spawn_client(int slot)
         /* v2: the client's own character (stats, skills, spells, gear). */
         client_obj = coop_lite_host_pc_from_bundle(slot, spawn_loc, &client_oid);
     } else {
+        /* Review P1-5: we hold this player's PC (parked, or bound by a
+           loaded save / a reconnect): ours wins, their bundle is dropped,
+           and the client is told to take our copy even when the OIDs
+           match (party-wipe reload: the client still has its pre-death
+           PC). */
+        if (coop_char_rx[slot].complete || coop_char_rx[slot].data != NULL) {
+            tig_debug_printf("CoopLite: slot %d: host copy of the PC wins — client bundle discarded\n", slot);
+        }
         coop_char_rx_free(&coop_char_rx[slot]);
+        rejoined = true;
     }
     if (client_obj == OBJ_HANDLE_NULL) {
         /* Adopt the client's own OID so attack/dialog OIDs match. */
@@ -2566,11 +2600,11 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     mp_flush_deferred_packet70();
     tig_debug_printf("CoopLite: SESSION_SYNC applied map=%d (after map load)\n", pkt->map);
 
-    if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0
-        && memcmp(&local_oid, pkt->client_pc_oid, sizeof(local_oid)) != 0) {
+    if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
         /* Rejoin: the host kept our PC. Take its copy (stats, level, XP)
            instead of the character picked in the menu; the inventory
-           follows once it is in place. */
+           follows once it is in place. Also with the same OID (review
+           P1-5: after a host reload our live PC is the pre-death one). */
         coop_lite_client_request_own_pc(pkt->client_pc_oid);
         return;
     }
@@ -4732,6 +4766,113 @@ size_t coop_lite_inven_sync_size(int count)
     return offsetof(PacketCoopInvenSync, entries) + (size_t)count * sizeof(PacketCoopInvenEntry);
 }
 
+static int coop_lite_popcount32(unsigned int v)
+{
+    int n = 0;
+
+    while (v != 0) {
+        v &= v - 1;
+        n++;
+    }
+    return n;
+}
+
+int coop_lite_blob_walk(const uint8_t* p, int size, const uint8_t* kinds, const int* elem, int n)
+{
+    int at = 0;
+    int i;
+
+#define COOP_NEED(k) \
+    do { \
+        if ((k) < 0 || size - at < (k)) { \
+            return -1; \
+        } \
+    } while (0)
+
+    if (p == NULL || size < 0 || n < 0) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        uint8_t presence;
+
+        if (kinds[i] == OBJ_MEM_K_I32) {
+            COOP_NEED(4);
+            at += 4;
+            continue;
+        }
+        COOP_NEED(1);
+        presence = p[at++];
+        if (presence == 0) {
+            continue;
+        }
+        switch (kinds[i]) {
+        case OBJ_MEM_K_I64:
+            COOP_NEED(8);
+            at += 8;
+            break;
+        case OBJ_MEM_K_HANDLE:
+            COOP_NEED(24);
+            at += 24;
+            break;
+        case OBJ_MEM_K_STRING: {
+            int len;
+
+            COOP_NEED(4);
+            memcpy(&len, p + at, 4);
+            at += 4;
+            if (len < 0 || len > COOP_BLOB_STR_MAX) {
+                return -1;
+            }
+            COOP_NEED(len + 1);
+            if (p[at + len] != 0) {
+                return -1;
+            }
+            at += len + 1;
+            break;
+        }
+        case OBJ_MEM_K_ARRAY: {
+            int hdr[3]; /* element size, count, bitset id */
+            int words;
+            int bits = 0;
+            int w;
+
+            COOP_NEED(12);
+            memcpy(hdr, p + at, 12);
+            at += 12;
+            if (hdr[0] != elem[i] || hdr[0] <= 0 || hdr[1] < 0
+                || hdr[1] > COOP_BLOB_SA_MAX_BYTES / hdr[0]) {
+                return -1;
+            }
+            COOP_NEED(hdr[0] * hdr[1]);
+            at += hdr[0] * hdr[1];
+            COOP_NEED(4);
+            memcpy(&words, p + at, 4);
+            at += 4;
+            if (words < 0 || words > COOP_BLOB_BITSET_MAX) {
+                return -1;
+            }
+            COOP_NEED(4 * words);
+            for (w = 0; w < words; w++) {
+                unsigned int v;
+
+                memcpy(&v, p + at + 4 * w, 4);
+                bits += coop_lite_popcount32(v);
+            }
+            at += 4 * words;
+            /* Each set bit names a stored element. */
+            if (bits > hdr[1]) {
+                return -1;
+            }
+            break;
+        }
+        default:
+            return -1;
+        }
+    }
+#undef COOP_NEED
+    return at;
+}
+
 unsigned int coop_lite_keyring_hash(const unsigned int* keys, int count)
 {
     unsigned int h = 2166136261u;
@@ -6008,8 +6149,16 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
            lists it; a ground item just isn't there any more. */
         return;
     }
-    if (!coop_lite_client_world_ready() || coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL) {
+    if (!coop_lite_client_world_ready()) {
         return;
+    }
+    if (coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL
+        && !(coop_rejoin_pc_wanted && memcmp(pkt->oid, coop_rejoin_pc_oid, 24) == 0
+            && coop_lite_get_oid_obj(pkt->oid) == local_pc)) {
+        return;
+    }
+    if (!coop_lite_obj_blob_bounded(pkt->data, pkt->size)) {
+        return; /* review P1-4 */
     }
     if (ground) {
         multiplayer_lock();

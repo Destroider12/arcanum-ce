@@ -1496,6 +1496,163 @@ static int test_world_state(void)
     return 0;
 }
 
+/* Argon review: pickup queue (P0-2), item state (P1-3), blob walk (P1-4). */
+static int test_review_fixes(void)
+{
+    CoopPickupQueue q;
+    uint8_t oid[24];
+    uint8_t out[COOP_PICKUP_QUEUE_MAX][24];
+    unsigned int keys_a[3] = { 11, 22, 33 };
+    unsigned int keys_b[3] = { 11, 33, 22 };
+    uint8_t buf[256];
+    uint8_t kinds[8];
+    int elem[8];
+    int at;
+    int v;
+    int i;
+
+    /* P0-2: several pickups queue, dedupe, map-tagged, bounded. */
+    coop_pickup_queue_reset(&q);
+    for (i = 0; i < COOP_PICKUP_QUEUE_MAX; i++) {
+        memset(oid, 0, sizeof(oid));
+        oid[0] = (uint8_t)(i + 1);
+        if (!coop_pickup_queue_push(&q, oid, i < 5 ? 0x10002 : 0x10003)) {
+            fprintf(stderr, "pickup: push %d refused\n", i);
+            return 1;
+        }
+    }
+    memset(oid, 0, sizeof(oid));
+    oid[0] = 1;
+    if (!coop_pickup_queue_push(&q, oid, 0x10002) || q.count != COOP_PICKUP_QUEUE_MAX) {
+        fprintf(stderr, "pickup: duplicate not merged\n");
+        return 1;
+    }
+    oid[0] = 99;
+    if (coop_pickup_queue_push(&q, oid, 0x10002)) {
+        fprintf(stderr, "pickup: overflow accepted\n");
+        return 1;
+    }
+    if (coop_pickup_queue_take(&q, 0x10002, out, COOP_PICKUP_QUEUE_MAX) != 5 || out[4][0] != 5
+        || q.count != 0 || coop_pickup_queue_take(&q, 0x10002, out, COOP_PICKUP_QUEUE_MAX) != 0) {
+        fprintf(stderr, "pickup: take by map key wrong\n");
+        return 1;
+    }
+
+    /* P1-3: key ring hash is order sensitive, empty = 0, sizes fit. */
+    if (coop_lite_keyring_hash(keys_a, 0) != 0
+        || coop_lite_keyring_hash(keys_a, 3) == 0
+        || coop_lite_keyring_hash(keys_a, 3) == coop_lite_keyring_hash(keys_b, 3)
+        || coop_lite_keyring_hash(keys_a, 3) != coop_lite_keyring_hash(keys_a, 3)
+        || coop_lite_keyring_hash(keys_a, 2) == coop_lite_keyring_hash(keys_a, 3)) {
+        fprintf(stderr, "item state: keyring hash\n");
+        return 1;
+    }
+    if (sizeof(PacketCoopInvenEntry) != 0x38
+        || coop_lite_inven_sync_size(COOP_INVEN_CHUNK_ENTRIES) > 4096) {
+        fprintf(stderr, "item state: entry/packet size\n");
+        return 1;
+    }
+
+    /* P1-4: i32, i64 (present), string "ab", int array of 2 with bitset 0b11. */
+    memset(buf, 0, sizeof(buf));
+    at = 0;
+    v = 7;
+    memcpy(buf + at, &v, 4);
+    at += 4;
+    buf[at++] = 1;
+    at += 8;
+    buf[at++] = 1;
+    v = 2;
+    memcpy(buf + at, &v, 4);
+    at += 4;
+    memcpy(buf + at, "ab", 3);
+    at += 3;
+    buf[at++] = 1;
+    v = 4;
+    memcpy(buf + at, &v, 4);
+    v = 2;
+    memcpy(buf + at + 4, &v, 4);
+    at += 12 + 8;
+    v = 1;
+    memcpy(buf + at, &v, 4);
+    v = 3;
+    memcpy(buf + at + 4, &v, 4);
+    at += 8;
+    kinds[0] = OBJ_MEM_K_I32;
+    kinds[1] = OBJ_MEM_K_I64;
+    kinds[2] = OBJ_MEM_K_STRING;
+    kinds[3] = OBJ_MEM_K_ARRAY;
+    memset(elem, 0, sizeof(elem));
+    elem[3] = 4;
+    if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != at) {
+        fprintf(stderr, "blob walk: valid blob refused (%d)\n", coop_lite_blob_walk(buf, at, kinds, elem, 4));
+        return 1;
+    }
+    for (i = 0; i < at; i++) {
+        if (coop_lite_blob_walk(buf, i, kinds, elem, 4) != -1) {
+            fprintf(stderr, "blob walk: truncated at %d accepted\n", i);
+            return 1;
+        }
+    }
+    /* Huge string length. */
+    v = 0x7FFFFFF0;
+    memcpy(buf + 4 + 9 + 1, &v, 4);
+    if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+        fprintf(stderr, "blob walk: huge string accepted\n");
+        return 1;
+    }
+    v = 2;
+    memcpy(buf + 4 + 9 + 1, &v, 4);
+    /* Unterminated string. */
+    buf[4 + 9 + 1 + 4 + 2] = 'x';
+    if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+        fprintf(stderr, "blob walk: unterminated string accepted\n");
+        return 1;
+    }
+    buf[4 + 9 + 1 + 4 + 2] = 0;
+    /* Wrong element size, then count overflow, then bitset > count. */
+    elem[3] = 8;
+    if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+        fprintf(stderr, "blob walk: element size mismatch accepted\n");
+        return 1;
+    }
+    elem[3] = 4;
+    {
+        int sa_at = 4 + 9 + 1 + 4 + 3 + 1;
+
+        v = 0x40000000;
+        memcpy(buf + sa_at + 4, &v, 4);
+        if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+            fprintf(stderr, "blob walk: huge array accepted\n");
+            return 1;
+        }
+        v = 2;
+        memcpy(buf + sa_at + 4, &v, 4);
+        /* 2 elements but the bitset names 3 */
+        v = 7;
+        memcpy(buf + sa_at + 12 + 8 + 4, &v, 4);
+        if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+            fprintf(stderr, "blob walk: bitset beyond count accepted\n");
+            return 1;
+        }
+        v = 3;
+        memcpy(buf + sa_at + 12 + 8 + 4, &v, 4);
+        v = 0x7FFFFFFF;
+        memcpy(buf + sa_at + 12 + 8, &v, 4);
+        if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+            fprintf(stderr, "blob walk: huge bitset accepted\n");
+            return 1;
+        }
+    }
+    kinds[0] = 77;
+    if (coop_lite_blob_walk(buf, at, kinds, elem, 4) != -1) {
+        fprintf(stderr, "blob walk: unknown kind accepted\n");
+        return 1;
+    }
+    printf("review fixes: pickup queue, keyring hash, blob walk OK\n");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -1525,6 +1682,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_obj_blob() != 0) {
+        return 1;
+    }
+    if (test_review_fixes() != 0) {
         return 1;
     }
     if (test_parked() != 0) {

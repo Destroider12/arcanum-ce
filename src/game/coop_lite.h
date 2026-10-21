@@ -264,6 +264,23 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopInvenEntry) == 0x38, "PacketCoopInvenEntry s
 COOP_STATIC_ASSERT(0xB0 + COOP_INVEN_CHUNK_ENTRIES * 0x38 <= 4096, "INVEN_SYNC chunk fits a packet");
 /* FNV-1a over a key ring's key ids (order matters, as on the host). */
 unsigned int coop_lite_keyring_hash(const unsigned int* keys, int count);
+
+/*
+ * Review P1-4: bounded walk of a blob's serialized fields (kinds are
+ * OBJ_MEM_K_*, elem the expected array element size). Returns the bytes
+ * consumed, -1 when a length runs past size or out of range. Pure.
+ */
+#ifndef OBJ_MEM_K_I32
+#define OBJ_MEM_K_I32 1
+#define OBJ_MEM_K_I64 2 /* presence byte [+ 8] */
+#define OBJ_MEM_K_HANDLE 3 /* presence byte [+ 24] */
+#define OBJ_MEM_K_STRING 4 /* presence byte [+ int len + len + 1] */
+#define OBJ_MEM_K_ARRAY 5 /* presence byte [+ sa header + data + bitset] */
+#endif
+#define COOP_BLOB_STR_MAX 4096
+#define COOP_BLOB_SA_MAX_BYTES 16384
+#define COOP_BLOB_BITSET_MAX 512
+int coop_lite_blob_walk(const uint8_t* p, int size, const uint8_t* kinds, const int* elem, int n);
 COOP_STATIC_ASSERT(offsetof(PacketCoopInvenSync, entries) == 0xB0, "PacketCoopInvenSync layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fits a net packet");
 
