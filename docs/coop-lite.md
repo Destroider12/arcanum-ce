@@ -1534,3 +1534,31 @@ Known, not fixed: the host PC's stat changes (dev CON grant, and so likely
 level-ups) don't reach clients. The client shows Merwin at 24 max HP while
 the host has 34; current damage matches. The NPC blood pool decal is
 host-only (the corpse pose matches).
+
+## 32. PT19: PC build sync and client blood pools (Argon review #4)
+
+- **`PACKET_COOP_PC_STATS` (144, two-way; type limit now 145).** The payload is raw copies of the
+  base stats (all 28, including level, XP, alignment, fate and unspent points), 12 basic skills,
+  4 tech skills, `OBJ_F_CRITTER_SPELL_TECH_IDX` (16 college levels, which are the known spells, the
+  mastery slot and 8 tech degrees) and up to 32 found schematics. Argon said 16 basic skills and a
+  separate known-spell bitmask. Neither exists: there are 12 basic skills, and the college levels
+  are the known spells.
+  - **Host to clients:** each slot PC has a signature, checked every 500 ms. When it changes, the
+    host broadcasts the build. When the roster changes, it resends every slot.
+    - A non-owner client applies the full build. The client now shows the host PC at 34/34 max HP,
+      not 24.
+    - The owner takes only level, XP, alignment and fate. It also takes the unspent count, but only
+      once the host has every spend of its own, or on a level-up.
+  - **Owner to host:** when the local build signature changes (a charedit spend), the owner sends
+    it. Vanilla charedit sends nothing in MP, so nothing is applied twice.
+    - The host checks the sender is the slot owner.
+    - It then runs `coop_lite_pc_build_spend_ok`. Only rises are allowed, each costing one point,
+      with caps of 20 for stats and skills, 5 for colleges and 7 for degrees.
+    - On success it applies the spend and the 500 ms watch rebroadcasts. On failure it logs
+      `spend REJECTED` and sends its own copy to the owner with `COOP_PC_STATS_F_FORCE`.
+  - **Dev triggers:** host `give-points N`; client `spend` (+1 STR, -1 point) and `inflate`
+    (+5 STR, no points).
+- **Blood pools:** Argon's diagnosis was wrong. `sub_432D90` returns early on a client. The host
+  already sends Packet70 subtype 5, which the client handles; nothing filters it. The client's
+  pool sat on frame 0 while the host's grows through AG_ANIMATE, so the client now sets the last
+  frame. Log line: `MP: blood pool at x,y (4 frames)`.

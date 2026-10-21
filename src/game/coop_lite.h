@@ -30,7 +30,8 @@ extern "C" {
 #define PACKET_COOP_WORLD_STATE 143 /* host → client: doors, containers, NPCs, ground items */
 
 /* multiplayer_validate_message must allow up to this (exclusive). */
-#define PACKET_COOP_TYPE_LIMIT 144
+#define PACKET_COOP_PC_STATS 144 /* PT19: PC build, host → clients and owner → host */
+#define PACKET_COOP_TYPE_LIMIT 145
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -412,6 +413,54 @@ typedef enum CoopWorldKind {
 #define OF_OFF_BIT 0x00000002u
 #define OF_FLAT_BIT 0x00000004u
 #define COOP_WORLD_NPC_OF_MASK (OF_OFF_BIT | OF_FLAT_BIT | OF_NO_BLOCK_BIT)
+
+/*
+ * PT19 PC build (PACKET_COOP_PC_STATS). Raw copies of the object arrays:
+ * base stats (STAT_COUNT), basic skills, tech skills, and
+ * OBJ_F_CRITTER_SPELL_TECH_IDX (16 college levels = known spells, the
+ * mastery slot, 8 tech degrees), plus found schematics.
+ */
+#define COOP_PCB_STATS 28
+#define COOP_PCB_BASIC 12
+#define COOP_PCB_TECH 4
+#define COOP_PCB_SPELL_TECH 25
+#define COOP_PCB_COLLEGES 16
+#define COOP_PCB_MASTERY 16
+#define COOP_PCB_DEGREE0 17
+#define COOP_PCB_SCHEMATICS 32
+#define COOP_PCB_PRIMARY 8 /* STR..CHA = stats 0..7 */
+#define COOP_PCB_STAT_LEVEL 17
+#define COOP_PCB_STAT_XP 18
+#define COOP_PCB_STAT_ALIGNMENT 19
+#define COOP_PCB_STAT_FATE 20
+#define COOP_PCB_STAT_UNSPENT 21
+
+typedef struct CoopPcBuild {
+    int stats[COOP_PCB_STATS];
+    int basic[COOP_PCB_BASIC];
+    int tech[COOP_PCB_TECH];
+    int spell_tech[COOP_PCB_SPELL_TECH];
+    int num_schematics;
+    int schematics[COOP_PCB_SCHEMATICS];
+} CoopPcBuild;
+
+#define COOP_PC_STATS_F_FORCE 0x1 /* host → owner: take all of it (a rejected spend) */
+
+typedef struct PacketCoopPcStats {
+    /* 0000 */ int type;
+    /* 0004 */ int slot;
+    /* 0008 */ unsigned int flags;
+    /* 000C */ unsigned char oid[24];
+    /* 0024 */ CoopPcBuild build;
+} PacketCoopPcStats;
+
+/* Owner → host: is `want` a legal character-point spend from `have` (the
+   host's copy)? Only primaries, skills, college levels and tech degrees may
+   rise, each costing one unspent point; nothing may fall; caps 20 / 20 / 5 /
+   7. Host-authoritative fields (level, XP, ...) are not compared. */
+bool coop_lite_pc_build_spend_ok(const CoopPcBuild* have, const CoopPcBuild* want);
+unsigned int coop_lite_pc_build_sig(const CoopPcBuild* b);
+void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt);
 
 typedef struct PacketCoopWorldReq {
     /* 0000 */ int type;

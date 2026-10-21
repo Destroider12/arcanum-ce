@@ -778,6 +778,72 @@ static int test_packet_hardening(void)
             fprintf(stderr, "target transfer policy wrong\n");
             return 1;
         }
+        {
+            /* PT19 PC build: legal spend, inflation, decreases, caps. */
+            CoopPcBuild have;
+            CoopPcBuild want;
+
+            memset(&have, 0, sizeof(have));
+            have.stats[0] = 8;
+            have.stats[COOP_PCB_STAT_UNSPENT] = 3;
+            have.basic[2] = 4;
+            want = have;
+            if (!coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: no-op spend refused\n");
+                return 1;
+            }
+            want.stats[0] = 9; /* +1 STR */
+            want.basic[2] = 5; /* +1 melee */
+            want.spell_tech[3] = 1; /* first Earth spell */
+            want.stats[COOP_PCB_STAT_UNSPENT] = 0;
+            if (!coop_lite_pc_build_spend_ok(&have, &want)
+                || coop_lite_pc_build_sig(&have) == coop_lite_pc_build_sig(&want)) {
+                fprintf(stderr, "pc build: legal spend refused\n");
+                return 1;
+            }
+            want = have;
+            want.stats[0] = 13; /* inflated: +5 STR, no points spent */
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: inflation accepted\n");
+                return 1;
+            }
+            want = have;
+            want.basic[2] = 3; /* a skill fell, a point came back */
+            want.stats[COOP_PCB_STAT_UNSPENT] = 4;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: refund accepted\n");
+                return 1;
+            }
+            have.stats[COOP_PCB_STAT_UNSPENT] = 30;
+            want = have;
+            want.stats[0] = 21; /* over the 20 cap */
+            want.stats[COOP_PCB_STAT_UNSPENT] = 17;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: stat cap ignored\n");
+                return 1;
+            }
+            want = have;
+            want.spell_tech[0] = 6; /* 6 spells in a college */
+            want.stats[COOP_PCB_STAT_UNSPENT] = 24;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: college cap ignored\n");
+                return 1;
+            }
+            want = have;
+            want.stats[COOP_PCB_STAT_UNSPENT] = -1;
+            if (coop_lite_pc_build_spend_ok(&have, &want)) {
+                fprintf(stderr, "pc build: negative points accepted\n");
+                return 1;
+            }
+            if (!coop_lite_packet_allowed(PACKET_COOP_PC_STATS, true, 1)
+                || !coop_lite_packet_allowed(PACKET_COOP_PC_STATS, false, 0)
+                || coop_lite_packet_allowed(PACKET_COOP_PC_STATS, false, 2)
+                || coop_lite_coop_packet_min_size(PACKET_COOP_PC_STATS) != sizeof(PacketCoopPcStats)
+                || PACKET_COOP_TYPE_LIMIT <= PACKET_COOP_PC_STATS) {
+                fprintf(stderr, "pc stats packet policy wrong\n");
+                return 1;
+            }
+        }
         if (!coop_lite_party_notice_is_good(COOP_PARTY_STEAL_OK)
             || !coop_lite_party_notice_is_good(COOP_PARTY_HOST_UP)
             || coop_lite_party_notice_is_good(COOP_PARTY_STEAL_FAILED)

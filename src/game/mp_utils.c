@@ -816,7 +816,20 @@ void mp_handle_packet70(Packet70* pkt)
     case 5:
         /* Blood pool FX at death location (art animate is best-effort). */
         if (object_create(sub_4685A0(BP_POOL_OF_BLOOD), pkt->s5.loc, &blood_obj)) {
+            tig_art_id_t aid = obj_field_int32_get(blood_obj, OBJ_F_CURRENT_AID);
+            TigArtAnimData anim_data;
+
             sub_43E770(blood_obj, pkt->s5.loc, pkt->s5.offset_x, pkt->s5.offset_y);
+            /* PT19: the host grows its pool with an AG_ANIMATE; here it sat
+               on frame 0. Show the spread pool. */
+            if (tig_art_anim_data(aid, &anim_data) == TIG_OK && anim_data.num_frames > 1) {
+                object_set_current_aid(blood_obj, tig_art_id_frame_set(aid, anim_data.num_frames - 1));
+            }
+            tig_debug_printf("MP: blood pool at %d,%d (%d frames)\n",
+                (int)LOCATION_GET_X(pkt->s5.loc), (int)LOCATION_GET_Y(pkt->s5.loc),
+                tig_art_anim_data(aid, &anim_data) == TIG_OK ? anim_data.num_frames : -1);
+        } else {
+            tig_debug_printf("MP: blood pool create failed\n");
         }
         break;
     default:

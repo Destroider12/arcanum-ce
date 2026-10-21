@@ -85,6 +85,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/obj_id.h"
 #include "game/proto.h"
 #include "game/ui.h"
+#include "game/tech.h"
 #include "game/mp_utils.h"
 #include "game/script.h"
 #include "game/teleport.h"
@@ -918,6 +919,8 @@ static void coop_lite_keep_sector(int slot, int64_t loc);
 static void coop_lite_barter_reset(void);
 static void coop_lite_barter_end(int slot, const char* why);
 static void coop_lite_host_victim_watch(unsigned int now_ms);
+static void coop_lite_host_pc_stats_tick(unsigned int now_ms);
+static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 void coop_lite_client_dev_loot_tick(unsigned int now_ms);
@@ -1269,6 +1272,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
                its own goal is legal vanilla MP traffic (host ignores it) */
     case 98: /* multiplayer flags change */
     case PACKET_COOP_PC_POS: /* owner PC pos: client→host, host→others */
+    case PACKET_COOP_PC_STATS: /* PT19 PC build: owner→host, host→all */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -1693,6 +1697,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopWorldReq);
     case PACKET_COOP_WORLD_STATE:
         return offsetof(PacketCoopWorldState, entries);
+    case PACKET_COOP_PC_STATS:
+        return sizeof(PacketCoopPcStats);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -4660,6 +4666,9 @@ void coop_lite_ping(unsigned int now_ms)
         coop_lite_client_follow_own_pc(coop_lite_camera_target());
         coop_lite_client_watch_vitals();
         coop_lite_keep_remote_sectors();
+        if (coop_lite_client_in_session) {
+            coop_lite_client_pc_stats_tick(now_ms);
+        }
         if (coop_lite_client_in_session
             && coop_lite_interval_elapsed(coop_roster_reconcile_ms, now_ms, 1000u)) {
             coop_roster_reconcile_ms = now_ms;
@@ -4734,6 +4743,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_dev_inven_dump_tick(now_ms);
     coop_lite_host_barter_watch(now_ms);
     coop_lite_host_victim_watch(now_ms);
+    coop_lite_host_pc_stats_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -5286,6 +5296,72 @@ int coop_lite_target_kind(bool is_container, bool locked, bool is_critter, bool 
     return COOP_TARGET_NONE;
 }
 
+unsigned int coop_lite_pc_build_sig(const CoopPcBuild* b)
+{
+    const unsigned char* p = (const unsigned char*)b;
+    unsigned int h = 2166136261u;
+    size_t i;
+
+    for (i = 0; i < sizeof(*b); i++) {
+        h = (h ^ p[i]) * 16777619u;
+    }
+    return h;
+}
+
+static bool coop_lite_pcb_rise(int have, int want, int cap, int* cost)
+{
+    if (want < have) {
+        return false;
+    }
+    if (want > have) {
+        if (want > cap) {
+            return false;
+        }
+        *cost += want - have;
+    }
+    return true;
+}
+
+bool coop_lite_pc_build_spend_ok(const CoopPcBuild* have, const CoopPcBuild* want)
+{
+    int cost = 0;
+    int i;
+
+    if (have == NULL || want == NULL) {
+        return false;
+    }
+    for (i = 0; i < COOP_PCB_PRIMARY; i++) {
+        if (!coop_lite_pcb_rise(have->stats[i], want->stats[i], 20, &cost)) {
+            return false;
+        }
+    }
+    for (i = 0; i < COOP_PCB_BASIC; i++) {
+        if (!coop_lite_pcb_rise(have->basic[i], want->basic[i], 20, &cost)) {
+            return false;
+        }
+    }
+    for (i = 0; i < COOP_PCB_TECH; i++) {
+        if (!coop_lite_pcb_rise(have->tech[i], want->tech[i], 20, &cost)) {
+            return false;
+        }
+    }
+    for (i = 0; i < COOP_PCB_COLLEGES; i++) {
+        if (!coop_lite_pcb_rise(have->spell_tech[i], want->spell_tech[i], 5, &cost)) {
+            return false;
+        }
+    }
+    for (i = COOP_PCB_DEGREE0; i < COOP_PCB_SPELL_TECH; i++) {
+        if (!coop_lite_pcb_rise(have->spell_tech[i], want->spell_tech[i], 7, &cost)) {
+            return false;
+        }
+    }
+    if (want->stats[COOP_PCB_STAT_UNSPENT] < 0
+        || have->stats[COOP_PCB_STAT_UNSPENT] - want->stats[COOP_PCB_STAT_UNSPENT] != cost) {
+        return false;
+    }
+    return true;
+}
+
 bool coop_lite_party_notice_is_good(int kind)
 {
     return kind == COOP_PARTY_HOST_UP || kind == COOP_PARTY_STEAL_OK;
@@ -5575,6 +5651,198 @@ static unsigned int coop_lite_pc_inven_sig(int64_t pc)
     }
 #undef COOP_SIG_INT
     return h;
+}
+
+/* ---- PT19: PC build sync (PACKET_COOP_PC_STATS) -------------------------- */
+
+COOP_STATIC_ASSERT(COOP_PCB_STATS == STAT_COUNT, "PCB stats");
+COOP_STATIC_ASSERT(COOP_PCB_BASIC == BASIC_SKILL_COUNT, "PCB basic skills");
+COOP_STATIC_ASSERT(COOP_PCB_TECH == TECH_SKILL_COUNT, "PCB tech skills");
+COOP_STATIC_ASSERT(COOP_PCB_COLLEGES == COLLEGE_COUNT, "PCB colleges");
+COOP_STATIC_ASSERT(COOP_PCB_SPELL_TECH == COLLEGE_COUNT + 1 + TECH_COUNT, "PCB spell/tech");
+COOP_STATIC_ASSERT(COOP_PCB_STAT_LEVEL == STAT_LEVEL && COOP_PCB_STAT_XP == STAT_EXPERIENCE_POINTS
+        && COOP_PCB_STAT_ALIGNMENT == STAT_ALIGNMENT && COOP_PCB_STAT_FATE == STAT_FATE_POINTS
+        && COOP_PCB_STAT_UNSPENT == STAT_UNSPENT_POINTS,
+    "PCB stat indices");
+
+static void coop_lite_pc_build_fill(int64_t pc, CoopPcBuild* b)
+{
+    int i;
+    int n;
+
+    memset(b, 0, sizeof(*b));
+    for (i = 0; i < COOP_PCB_STATS; i++) {
+        b->stats[i] = obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_STAT_BASE_IDX, i);
+    }
+    for (i = 0; i < COOP_PCB_BASIC; i++) {
+        b->basic[i] = obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_BASIC_SKILL_IDX, i);
+    }
+    for (i = 0; i < COOP_PCB_TECH; i++) {
+        b->tech[i] = obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_TECH_SKILL_IDX, i);
+    }
+    for (i = 0; i < COOP_PCB_SPELL_TECH; i++) {
+        b->spell_tech[i] = (int)obj_arrayfield_uint32_get(pc, OBJ_F_CRITTER_SPELL_TECH_IDX, i);
+    }
+    if (obj_field_int32_get(pc, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        n = obj_arrayfield_length_get(pc, OBJ_F_PC_SCHEMATICS_FOUND_IDX);
+        if (n > COOP_PCB_SCHEMATICS) {
+            n = COOP_PCB_SCHEMATICS;
+        }
+        b->num_schematics = n;
+        for (i = 0; i < n; i++) {
+            b->schematics[i] = (int)obj_arrayfield_uint32_get(pc, OBJ_F_PC_SCHEMATICS_FOUND_IDX, i);
+        }
+    }
+}
+
+#define COOP_PCB_APPLY_FULL 0
+#define COOP_PCB_APPLY_OWNER 1 /* host → owner: host-authoritative fields only */
+#define COOP_PCB_APPLY_SPEND 2 /* owner → host: an accepted spend */
+
+static void coop_lite_pc_build_apply(int64_t pc, const CoopPcBuild* b, int mode)
+{
+    int i;
+
+    if (mode == COOP_PCB_APPLY_OWNER) {
+        int local_level = obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_LEVEL);
+        static const int host_stats[] = { STAT_LEVEL, STAT_EXPERIENCE_POINTS, STAT_ALIGNMENT, STAT_FATE_POINTS };
+
+        for (i = 0; i < (int)(sizeof(host_stats) / sizeof(host_stats[0])); i++) {
+            obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, host_stats[i], b->stats[host_stats[i]]);
+        }
+        {
+            CoopPcBuild mine;
+            bool caught_up;
+
+            coop_lite_pc_build_fill(pc, &mine);
+            /* The host's unspent count is the truth once it has every spend
+               of ours (same primaries, skills, spells, degrees); while one
+               is in flight, keep ours. A level-up always brings its points. */
+            caught_up = memcmp(mine.stats, b->stats, sizeof(int) * COOP_PCB_PRIMARY) == 0
+                && memcmp(mine.basic, b->basic, sizeof(mine.basic)) == 0
+                && memcmp(mine.tech, b->tech, sizeof(mine.tech)) == 0
+                && memcmp(mine.spell_tech, b->spell_tech, sizeof(mine.spell_tech)) == 0;
+            if (caught_up || b->stats[STAT_LEVEL] > local_level) {
+                obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_UNSPENT_POINTS, b->stats[STAT_UNSPENT_POINTS]);
+            }
+        }
+        return;
+    }
+    for (i = 0; i < COOP_PCB_STATS; i++) {
+        if (mode == COOP_PCB_APPLY_SPEND && i >= COOP_PCB_PRIMARY && i != STAT_UNSPENT_POINTS) {
+            continue;
+        }
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, i, b->stats[i]);
+    }
+    for (i = 0; i < COOP_PCB_BASIC; i++) {
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_BASIC_SKILL_IDX, i, b->basic[i]);
+    }
+    for (i = 0; i < COOP_PCB_TECH; i++) {
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_TECH_SKILL_IDX, i, b->tech[i]);
+    }
+    for (i = 0; i < COOP_PCB_SPELL_TECH; i++) {
+        obj_arrayfield_uint32_set(pc, OBJ_F_CRITTER_SPELL_TECH_IDX, i, (unsigned int)b->spell_tech[i]);
+    }
+    if (mode == COOP_PCB_APPLY_FULL && obj_field_int32_get(pc, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        for (i = 0; i < b->num_schematics && i < COOP_PCB_SCHEMATICS; i++) {
+            obj_arrayfield_uint32_set(pc, OBJ_F_PC_SCHEMATICS_FOUND_IDX, i, (unsigned int)b->schematics[i]);
+        }
+    }
+}
+
+static void coop_lite_pc_stats_send(int slot, int64_t pc, unsigned int flags, int to_slot)
+{
+    PacketCoopPcStats pkt;
+    ObjectID oid = obj_get_id(pc);
+    int depth;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PC_STATS;
+    pkt.slot = slot;
+    pkt.flags = flags;
+    memcpy(pkt.oid, &oid, sizeof(pkt.oid));
+    coop_lite_pc_build_fill(pc, &pkt.build);
+    depth = tig_net_local_suspend_pause();
+    if (to_slot >= 0) {
+        tig_net_send_app(&pkt, sizeof(pkt), to_slot);
+    } else {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static unsigned int coop_pcs_sig[8];
+static int64_t coop_pcs_obj[8];
+static unsigned int coop_pcs_ms;
+
+/* Host: every 500 ms, broadcast any slot PC whose build changed (and all of
+   them when the roster changes, so a new client gets everyone). */
+static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
+{
+    int slot;
+    bool roster_changed = false;
+
+    if (!coop_lite_interval_elapsed(coop_pcs_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_pcs_ms = now_ms;
+    for (slot = 0; slot < 8; slot++) {
+        if (sub_4A2B60(slot) != coop_pcs_obj[slot]) {
+            roster_changed = true;
+        }
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        CoopPcBuild b;
+        unsigned int sig;
+
+        if (roster_changed) {
+            coop_pcs_obj[slot] = pc;
+            coop_pcs_sig[slot] = 0;
+        }
+        if (pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        coop_lite_pc_build_fill(pc, &b);
+        sig = coop_lite_pc_build_sig(&b);
+        if (sig == coop_pcs_sig[slot]) {
+            continue;
+        }
+        coop_pcs_sig[slot] = sig;
+        coop_lite_pc_stats_send(slot, pc, 0, -1);
+        tig_debug_printf("CoopLite: PC stats: slot %d build sent (lvl %d, xp %d, unspent %d, max hp %d)\n",
+            slot, b.stats[STAT_LEVEL], b.stats[STAT_EXPERIENCE_POINTS], b.stats[STAT_UNSPENT_POINTS],
+            object_hp_max(pc));
+    }
+}
+
+static unsigned int coop_client_pcs_sig;
+static unsigned int coop_client_pcs_ms;
+
+/* Client: our own build changed (character points spent) → tell the host. */
+static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
+{
+    int64_t pc = player_get_local_pc_obj();
+    CoopPcBuild b;
+    unsigned int sig;
+
+    if (pc == OBJ_HANDLE_NULL || !coop_lite_interval_elapsed(coop_client_pcs_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_client_pcs_ms = now_ms;
+    coop_lite_pc_build_fill(pc, &b);
+    sig = coop_lite_pc_build_sig(&b);
+    if (coop_client_pcs_sig == 0) {
+        coop_client_pcs_sig = sig; /* the join bundle carried this one */
+        return;
+    }
+    if (sig == coop_client_pcs_sig) {
+        return;
+    }
+    coop_client_pcs_sig = sig;
+    coop_lite_pc_stats_send(sub_529520(), pc, 0, -1);
+    tig_debug_printf("CoopLite: PC stats: my build changed — sent to the host (unspent %d)\n",
+        b.stats[STAT_UNSPENT_POINTS]);
 }
 
 static unsigned int coop_victim_watch_ms;
@@ -8498,6 +8766,70 @@ static void coop_lite_world_flush(PacketCoopWorldState* out, int slot, bool last
 }
 #endif
 
+void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    ObjectID oid;
+    int64_t pc;
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_PC_STATS || pkt->slot < 0 || pkt->slot >= 8
+        || !tig_net_is_active() || map_is_clearing_objects()) {
+        return;
+    }
+    memcpy(&oid, pkt->oid, sizeof(oid));
+    pc = obj_pool_perm_lookup(oid);
+    if (pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return;
+    }
+    if (tig_net_is_host()) {
+        CoopPcBuild have;
+        int sender = sub_52A530();
+
+        if (sender != pkt->slot || sub_4A2B60(sender) != pc) {
+            tig_debug_printf("CoopLite: PC stats: from slot %d for slot %d's PC — dropped\n", sender, pkt->slot);
+            return;
+        }
+        coop_lite_pc_build_fill(pc, &have);
+        if (memcmp(&have, &pkt->build, sizeof(have)) == 0) {
+            return;
+        }
+        if (!coop_lite_pc_build_spend_ok(&have, &pkt->build)) {
+            tig_debug_printf("CoopLite: PC stats: slot %d spend REJECTED (unspent %d -> %d, STR %d -> %d) — resending ours\n",
+                sender, have.stats[STAT_UNSPENT_POINTS], pkt->build.stats[STAT_UNSPENT_POINTS],
+                have.stats[STAT_STRENGTH], pkt->build.stats[STAT_STRENGTH]);
+            coop_lite_pc_stats_send(sender, pc, COOP_PC_STATS_F_FORCE, sender);
+            return;
+        }
+        coop_lite_pc_build_apply(pc, &pkt->build, COOP_PCB_APPLY_SPEND);
+        tig_debug_printf("CoopLite: PC stats: slot %d spend accepted (unspent %d -> %d, STR %d, max hp %d)\n",
+            sender, have.stats[STAT_UNSPENT_POINTS], stat_base_get(pc, STAT_UNSPENT_POINTS),
+            stat_base_get(pc, STAT_STRENGTH), object_hp_max(pc));
+        return; /* the 500 ms watch rebroadcasts it */
+    }
+    {
+        bool own = pkt->slot == sub_529520() && pc == player_get_local_pc_obj();
+        bool force = (pkt->flags & COOP_PC_STATS_F_FORCE) != 0;
+        int mode = own && !force ? COOP_PCB_APPLY_OWNER : COOP_PCB_APPLY_FULL;
+        CoopPcBuild now;
+
+        multiplayer_lock();
+        coop_lite_apply_begin();
+        coop_lite_pc_build_apply(pc, &pkt->build, mode);
+        coop_lite_apply_end();
+        multiplayer_unlock();
+        if (own) {
+            coop_lite_pc_build_fill(pc, &now);
+            coop_client_pcs_sig = coop_lite_pc_build_sig(&now); /* not a spend of ours */
+        }
+        tig_debug_printf("CoopLite: PC stats: slot %d applied (%s), STR %d unspent %d, max hp %d\n",
+            pkt->slot, force ? "forced" : (own ? "owner fields" : "full"),
+            stat_base_get(pc, STAT_STRENGTH), stat_base_get(pc, STAT_UNSPENT_POINTS), object_hp_max(pc));
+    }
+#else
+    (void)pkt;
+#endif
+}
+
 void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -9457,8 +9789,8 @@ static void coop_lite_dev_hp_line(const char* tag, int64_t obj)
             object_examine(focus, focus, fname);
         }
     }
-    tig_debug_printf("CoopLite: dev hp: %s '%s' @%d,%d hp %d/%d%s%s%s%s\n", tag, name,
-        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
+    tig_debug_printf("CoopLite: dev hp: %s '%s' @%d,%d STR %d hp %d/%d%s%s%s%s\n", tag, name,
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), stat_base_get(obj, STAT_STRENGTH),
         object_hp_current(obj), object_hp_max(obj),
         critter_is_dead(obj) ? " DEAD" : "",
         focus != OBJ_HANDLE_NULL ? " fighting '" : "", fname, focus != OBJ_HANDLE_NULL ? "'" : "");
@@ -9564,6 +9896,45 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         }
         tig_debug_printf("CoopLite: dev attack: click on '%s' (combat mode %d): %s\n", name,
             combat_critter_is_combat_mode_active(pc) ? 1 : 0, coop_lite_dev_ui_click(target));
+        return true;
+    }
+    if (!tig_net_is_host() && (strcmp(cmd, "spend") == 0 || strcmp(cmd, "inflate") == 0)) {
+        /* PT19: what charedit does (spend: +1 STR, -1 point), or a cheat
+           (inflate: +5 STR, no points) the host must refuse. */
+        int64_t pc = player_get_local_pc_obj();
+        int str;
+        int pts;
+
+        if (pc == OBJ_HANDLE_NULL) {
+            return true;
+        }
+        str = stat_base_get(pc, STAT_STRENGTH);
+        pts = stat_base_get(pc, STAT_UNSPENT_POINTS);
+        if (strcmp(cmd, "spend") == 0) {
+            if (pts <= 0) {
+                tig_debug_printf("CoopLite: dev spend: no unspent points\n");
+                return true;
+            }
+            obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_STRENGTH, str + 1);
+            obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_UNSPENT_POINTS, pts - 1);
+        } else {
+            obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_STRENGTH, str + 5);
+        }
+        tig_debug_printf("CoopLite: dev %s: STR %d -> %d, unspent %d -> %d\n", cmd, str,
+            stat_base_get(pc, STAT_STRENGTH), pts, stat_base_get(pc, STAT_UNSPENT_POINTS));
+        return true;
+    }
+    if (strcmp(cmd, "give-points") == 0 && tig_net_is_host()) {
+        for (slot = 0; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+
+            if (pc != OBJ_HANDLE_NULL) {
+                obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_UNSPENT_POINTS,
+                    stat_base_get(pc, STAT_UNSPENT_POINTS) + (atoi(arg) > 0 ? atoi(arg) : 1));
+                tig_debug_printf("CoopLite: dev: slot %d unspent points now %d\n", slot,
+                    stat_base_get(pc, STAT_UNSPENT_POINTS));
+            }
+        }
         return true;
     }
     if (strcmp(cmd, "loot") == 0) {
