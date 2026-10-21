@@ -744,6 +744,40 @@ static int test_packet_hardening(void)
             fprintf(stderr, "transfer flag policy wrong\n");
             return 1;
         }
+        /* PT18: pickpocket bits only as 0x41 / 0x81. */
+        if (!coop_lite_client_transfer_flags_allowed(0x01 | COOP_XFER_STEAL)
+            || !coop_lite_client_transfer_flags_allowed(0x01 | COOP_XFER_PLANT)
+            || coop_lite_client_transfer_flags_allowed(COOP_XFER_STEAL)
+            || coop_lite_client_transfer_flags_allowed(0x21 | COOP_XFER_STEAL)
+            || coop_lite_client_transfer_flags_allowed(0x01 | COOP_XFER_STEAL | COOP_XFER_PLANT)
+            || coop_lite_client_transfer_flags_allowed(0x02 | COOP_XFER_STEAL)) {
+            fprintf(stderr, "pickpocket flag policy wrong\n");
+            return 1;
+        }
+        /* PT18 target sessions. */
+        if (coop_lite_target_kind(true, false, false, false, false, 2) != COOP_TARGET_LOOT
+            || coop_lite_target_kind(true, true, false, false, false, 2) != COOP_TARGET_NONE
+            || coop_lite_target_kind(false, false, true, true, false, 1) != COOP_TARGET_LOOT
+            || coop_lite_target_kind(false, false, true, false, false, 1) != COOP_TARGET_STEAL
+            || coop_lite_target_kind(false, false, true, false, true, 0) != COOP_TARGET_NONE
+            || coop_lite_target_kind(false, false, true, true, false, COOP_TARGET_REACH + 1) != COOP_TARGET_NONE
+            || coop_lite_target_kind(false, false, false, false, false, 1) != COOP_TARGET_NONE) {
+            fprintf(stderr, "target kind policy wrong\n");
+            return 1;
+        }
+        if (!coop_lite_target_transfer_ok(COOP_TARGET_LOOT, 0x01, true, true)
+            || !coop_lite_target_transfer_ok(COOP_TARGET_LOOT, 0x21, false, false)
+            || coop_lite_target_transfer_ok(COOP_TARGET_LOOT, 0x01 | COOP_XFER_STEAL, true, false)
+            || coop_lite_target_transfer_ok(COOP_TARGET_LOOT, 0x02, false, false)
+            || !coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01 | COOP_XFER_STEAL, true, false)
+            || coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01 | COOP_XFER_STEAL, true, true)
+            || coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01, true, false)
+            || !coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01 | COOP_XFER_PLANT, false, false)
+            || coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01 | COOP_XFER_STEAL, false, false)
+            || coop_lite_target_transfer_ok(COOP_TARGET_NONE, 0x01, true, false)) {
+            fprintf(stderr, "target transfer policy wrong\n");
+            return 1;
+        }
         if (coop_lite_coop_packet_min_size(PACKET_COOP_BARTER) != sizeof(PacketCoopBarter)
             || coop_lite_coop_packet_min_size(PACKET_COOP_INVEN_SYNC) != offsetof(PacketCoopInvenSync, entries)
             || coop_lite_coop_packet_min_size(PACKET_COOP_ROSTER) != sizeof(PacketCoopRoster)) {

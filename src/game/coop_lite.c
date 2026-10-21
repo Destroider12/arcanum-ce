@@ -105,6 +105,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/portrait.h"
 #include "game/portal.h"
 #include "game/skill.h"
+#include "game/random.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
 {
@@ -916,8 +917,10 @@ static void coop_lite_world_reset(void);
 static void coop_lite_keep_sector(int slot, int64_t loc);
 static void coop_lite_barter_reset(void);
 static void coop_lite_barter_end(int slot, const char* why);
+static void coop_lite_host_victim_watch(unsigned int now_ms);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
+void coop_lite_client_dev_loot_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
 static void coop_lite_host_party_inven_tick(unsigned int now_ms);
@@ -2932,6 +2935,79 @@ void coop_lite_set_dev_click_obj_hook(bool (*hook)(int64_t obj, int button))
 }
 
 static bool (*coop_dev_click_hotkey_hook)(int index);
+static bool (*coop_dev_loot_hook)(int op);
+
+void coop_lite_set_dev_loot_hook(bool (*hook)(int op))
+{
+    coop_dev_loot_hook = hook;
+}
+
+/* Dev (ARCANUM_DEV_INVEN_DUMP=N): every N s log a PC's inventory list as the
+   UI sees it (OBJ_F_CRITTER_INVENTORY_LIST_IDX) with the flags that hide an
+   item, and whether each item's parent agrees. */
+static void coop_lite_dev_inven_dump(const char* tag, int64_t pc)
+{
+    int cnt;
+    int i;
+    int64_t viewer = player_get_local_pc_obj();
+    bool box;
+
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    box = obj_field_int32_get(pc, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER;
+
+    cnt = obj_field_int32_get(pc, box ? OBJ_F_CONTAINER_INVENTORY_NUM : OBJ_F_CRITTER_INVENTORY_NUM);
+    tig_debug_printf("CoopLite: dev: inven dump %s: %d items, gold %d%s\n", tag, cnt, item_gold_get(pc),
+        !box && critter_is_dead(pc) ? " (dead)" : "");
+    for (i = 0; i < cnt; i++) {
+        int64_t item = obj_arrayfield_handle_get(pc, box ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX : OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        int64_t parent = OBJ_HANDLE_NULL;
+        char name[128];
+        char oid_str[40];
+
+        name[0] = '\0';
+        if (item == OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev:   [%d] NULL handle\n", i);
+            continue;
+        }
+        object_examine(item, viewer != OBJ_HANDLE_NULL ? viewer : pc, name);
+        objid_id_to_str(oid_str, obj_get_id(item));
+        item_parent(item, &parent);
+        tig_debug_printf("CoopLite: dev:   [%d] '%s' %s loc %d flags 0x%x item flags 0x%x parent %s\n",
+            i, name, oid_str, item_inventory_location_get(item),
+            (unsigned int)obj_field_int32_get(item, OBJ_F_FLAGS),
+            (unsigned int)obj_field_int32_get(item, OBJ_F_ITEM_FLAGS),
+            parent == pc ? "ok" : "MISMATCH");
+    }
+}
+
+static unsigned int coop_dev_inven_dump_ms;
+
+static void coop_lite_dev_inven_dump_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_INVEN_DUMP");
+    int secs;
+    int slot;
+
+    if (env == NULL || (secs = atoi(env)) <= 0) {
+        return;
+    }
+    if (coop_dev_inven_dump_ms != 0 && !coop_lite_interval_elapsed(coop_dev_inven_dump_ms, now_ms, (unsigned int)secs * 1000u)) {
+        return;
+    }
+    coop_dev_inven_dump_ms = now_ms != 0 ? now_ms : 1;
+    if (tig_net_is_host()) {
+        for (slot = 0; slot < 8; slot++) {
+            char tag[32];
+
+            snprintf(tag, sizeof(tag), "host's slot %d PC", slot);
+            coop_lite_dev_inven_dump(tag, sub_4A2B60(slot));
+        }
+    } else {
+        coop_lite_dev_inven_dump("my PC", player_get_local_pc_obj());
+    }
+}
 
 void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index))
 {
@@ -2948,6 +3024,11 @@ static void coop_lite_dev_grant_resurrect(int slot, int64_t pc)
     }
     oid = obj_get_id(pc);
     if (coop_dev_granted_valid[slot] && objid_is_equal(coop_dev_granted[slot], oid)) {
+        /* PT18: keep it on the bar (an interface reset / map load clears
+           the hotkeys; assigning is a no-op while it is there). */
+        if (pc == player_get_local_pc_obj() && coop_hotkey_spell_hook != NULL && spell_is_known(pc, SPELL_RESURRECT)) {
+            coop_hotkey_spell_hook(SPELL_RESURRECT);
+        }
         return;
     }
     coop_dev_granted[slot] = oid;
@@ -3851,6 +3932,12 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
     case COOP_PARTY_NO_SAVE:
         snprintf(buf, size, "%s", "No save to reload - the party gets back up.");
         break;
+    case COOP_PARTY_CAUGHT_THIEF:
+        snprintf(buf, size, "%s", "Caught pickpocketing!");
+        break;
+    case COOP_PARTY_STEAL_FAILED:
+        snprintf(buf, size, "%s", "Your pickpocket attempt failed.");
+        break;
     default:
         buf[0] = '\0';
         break;
@@ -4500,6 +4587,8 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_combat_tick(now_ms);
             coop_lite_client_dev_items_tick(now_ms);
             coop_lite_client_dev_gold_pile_tick(now_ms);
+            coop_lite_dev_inven_dump_tick(now_ms);
+            coop_lite_client_dev_loot_tick(now_ms);
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
         }
@@ -4555,7 +4644,9 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_kill_client_tick(now_ms);
     coop_lite_host_dev_auto_resurrect_tick(now_ms);
     coop_lite_host_dev_gold_pile_tick(now_ms);
+    coop_lite_dev_inven_dump_tick(now_ms);
     coop_lite_host_barter_watch(now_ms);
+    coop_lite_host_victim_watch(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -5088,7 +5179,46 @@ bool coop_lite_client_transfer_flags_allowed(unsigned int flags)
     if ((flags & 0x02u) != 0) {
         return (flags & ~0x22u) == 0;
     }
+    if ((flags & (COOP_XFER_STEAL | COOP_XFER_PLANT)) != 0) {
+        return flags == (0x01u | COOP_XFER_STEAL) || flags == (0x01u | COOP_XFER_PLANT);
+    }
     return (flags & 0x01u) != 0 && (flags & ~0x21u) == 0;
+}
+
+int coop_lite_target_kind(bool is_container, bool locked, bool is_critter, bool dead, bool is_self, int dist)
+{
+    if (is_self || dist < 0 || dist > COOP_TARGET_REACH) {
+        return COOP_TARGET_NONE;
+    }
+    if (is_container) {
+        return locked ? COOP_TARGET_NONE : COOP_TARGET_LOOT;
+    }
+    if (is_critter) {
+        return dead ? COOP_TARGET_LOOT : COOP_TARGET_STEAL;
+    }
+    return COOP_TARGET_NONE;
+}
+
+bool coop_lite_target_transfer_ok(int kind, unsigned int flags, bool from_target, bool worn)
+{
+    bool steal_bits = (flags & (COOP_XFER_STEAL | COOP_XFER_PLANT)) != 0;
+
+    if (!coop_lite_client_transfer_flags_allowed(flags) || (flags & 0x02u) != 0) {
+        return false;
+    }
+    switch (kind) {
+    case COOP_TARGET_LOOT:
+        return !steal_bits;
+    case COOP_TARGET_STEAL:
+        /* Vanilla: worn items cannot be pickpocketed (inven_ui refuses the
+           drag); stealing takes out of the target, planting puts in. */
+        if (from_target) {
+            return flags == (0x01u | COOP_XFER_STEAL) && !worn;
+        }
+        return flags == (0x01u | COOP_XFER_PLANT);
+    default:
+        return false;
+    }
 }
 
 #ifndef COOP_LITE_TEST_STUBS
@@ -5097,6 +5227,10 @@ bool coop_lite_client_transfer_flags_allowed(unsigned int flags)
 typedef struct CoopBarterSession {
     bool valid;
     ObjectID npc;
+    /* PT18: a loot / pickpocket window (same lifecycle as barter). */
+    bool target_valid;
+    int target_kind;
+    ObjectID target;
 } CoopBarterSession;
 static CoopBarterSession coop_barter[8];
 
@@ -5116,6 +5250,41 @@ static void coop_lite_barter_end(int slot, const char* why)
         coop_barter[slot].valid = false;
         tig_debug_printf("CoopLite: barter: slot %d session ended (%s)\n", slot, why);
     }
+    if (slot > 0 && slot < 8 && coop_barter[slot].target_valid) {
+        coop_barter[slot].target_valid = false;
+        tig_debug_printf("CoopLite: loot: slot %d %s window ended (%s)\n", slot,
+            coop_barter[slot].target_kind == COOP_TARGET_STEAL ? "pickpocket" : "loot", why);
+    }
+}
+
+/* PT18: what `pc` may open on `target` right now (COOP_TARGET_*). */
+static int coop_lite_target_kind_of(int64_t pc, int64_t target)
+{
+    int type;
+    bool is_container;
+    bool is_critter;
+
+    if (pc == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL || critter_is_dead(pc)
+        || (obj_field_int32_get(target, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
+        return COOP_TARGET_NONE;
+    }
+    type = obj_field_int32_get(target, OBJ_F_TYPE);
+    is_container = type == OBJ_TYPE_CONTAINER;
+    is_critter = obj_type_is_critter(type);
+    return coop_lite_target_kind(is_container,
+        is_container && object_locked_get(target),
+        is_critter,
+        is_critter && critter_is_dead(target),
+        target == pc,
+        (int)location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(target, OBJ_F_LOCATION)));
+}
+
+static int64_t coop_lite_target_obj(int slot)
+{
+    if (slot <= 0 || slot >= 8 || !coop_barter[slot].target_valid) {
+        return OBJ_HANDLE_NULL;
+    }
+    return obj_pool_perm_lookup(coop_barter[slot].target);
 }
 
 static unsigned int coop_barter_watch_ms;
@@ -5133,6 +5302,10 @@ static void coop_lite_host_barter_watch(unsigned int now_ms)
         if (coop_barter[slot].valid
             && !coop_lite_barter_partner_ok(sub_4A2B60(slot), obj_pool_perm_lookup(coop_barter[slot].npc))) {
             coop_lite_barter_end(slot, "partner gone, dead or too far");
+        }
+        if (coop_barter[slot].target_valid
+            && coop_lite_target_kind_of(sub_4A2B60(slot), coop_lite_target_obj(slot)) != coop_barter[slot].target_kind) {
+            coop_lite_barter_end(slot, "target gone, changed (died / locked) or too far");
         }
     }
 }
@@ -5181,6 +5354,11 @@ static bool coop_lite_is_stackable(int64_t item)
  */
 void coop_lite_mark_player_drop(int64_t item)
 {
+    /* PT18 (user decision + Argon #3 pt 3): vanilla again — NPCs may take
+       what players drop. Only the dev item tests keep their piles. */
+    if (getenv("ARCANUM_DEV_GOLD_PILE") == NULL && getenv("ARCANUM_DEV_CLIENT_ITEMS") == NULL) {
+        return;
+    }
     if (item == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled()
         || (tig_net_is_active() && !tig_net_is_host())
         || (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
@@ -5266,6 +5444,74 @@ static void coop_lite_fill_item_state(PacketCoopInvenEntry* e, int64_t item)
     e->state_flags = COOP_INVEN_E_STATE;
 }
 
+/* PT18 (Argon #3 pt 4c): what the host last told slot N about its own PC.
+   Anything else that changes that PC's inventory on the host (the host
+   looting its corpse or picking its pocket, another client's steal, a
+   script) differs from it, and the slot gets a resync — gold included. */
+static unsigned int coop_slot_inven_sig[8];
+static bool coop_slot_inven_sig_valid[8];
+
+static unsigned int coop_lite_pc_inven_sig(int64_t pc)
+{
+    unsigned int h = 2166136261u;
+    int cnt;
+    int i;
+    int t;
+
+#define COOP_SIG_INT(x) do { h = (h ^ (unsigned int)(x)) * 16777619u; } while (0)
+    COOP_SIG_INT(item_gold_get(pc));
+    for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
+        COOP_SIG_INT(item_ammo_quantity_get(pc, t));
+    }
+    cnt = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    COOP_SIG_INT(cnt);
+    for (i = 0; i < cnt; i++) {
+        int64_t item = obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        ObjectID oid;
+        const unsigned char* p;
+        size_t k;
+
+        if (item == OBJ_HANDLE_NULL || coop_lite_is_stackable(item)) {
+            continue;
+        }
+        oid = obj_get_id(item);
+        p = (const unsigned char*)&oid;
+        for (k = 0; k < sizeof(oid); k++) {
+            COOP_SIG_INT(p[k]);
+        }
+        COOP_SIG_INT(item_inventory_location_get(item));
+    }
+#undef COOP_SIG_INT
+    return h;
+}
+
+static unsigned int coop_victim_watch_ms;
+
+static void coop_lite_host_sync_slot_inven(int slot);
+
+static void coop_lite_host_victim_watch(unsigned int now_ms)
+{
+    int slot;
+
+    if (!coop_lite_interval_elapsed(coop_victim_watch_ms, now_ms, 250u)) {
+        return;
+    }
+    coop_victim_watch_ms = now_ms;
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc == OBJ_HANDLE_NULL) {
+            coop_slot_inven_sig_valid[slot] = false;
+            continue;
+        }
+        if (coop_slot_inven_sig_valid[slot] && coop_lite_pc_inven_sig(pc) != coop_slot_inven_sig[slot]) {
+            tig_debug_printf("CoopLite: inven: slot %d PC's inventory changed on the host (loot / steal / script) - resync, gold %d\n",
+                slot, item_gold_get(pc));
+            coop_lite_host_sync_slot_inven(slot);
+        }
+    }
+}
+
 static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int num_owners)
 {
     PacketCoopInvenSync* pkt;
@@ -5282,6 +5528,12 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
     }
     /* Anything that resyncs a slot may have changed what its PC wears. */
     coop_party_inven_dirty = true;
+    for (o = 0; o < num_owners; o++) {
+        if (owners[o] != OBJ_HANDLE_NULL && owners[o] == sub_4A2B60(slot)) {
+            coop_slot_inven_sig[slot] = coop_lite_pc_inven_sig(owners[o]);
+            coop_slot_inven_sig_valid[slot] = true;
+        }
+    }
     pkt = (PacketCoopInvenSync*)MALLOC(sizeof(*pkt));
     for (o = 0; o < num_owners; o++) {
         int64_t owner = owners[o];
@@ -5356,10 +5608,11 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
 /* Host: re-send what a slot's barter window shows. */
 static void coop_lite_host_sync_slot_inven(int slot)
 {
-    int64_t owners[3];
+    int64_t owners[4];
     int n = 0;
     int64_t pc = sub_4A2B60(slot);
     int64_t npc = OBJ_HANDLE_NULL;
+    int64_t target = coop_lite_target_obj(slot);
 
     if (pc == OBJ_HANDLE_NULL) {
         return;
@@ -5373,6 +5626,9 @@ static void coop_lite_host_sync_slot_inven(int slot)
         if (coop_lite_store_of(npc) != OBJ_HANDLE_NULL) {
             owners[n++] = coop_lite_store_of(npc);
         }
+    }
+    if (target != OBJ_HANDLE_NULL && target != pc && target != npc) {
+        owners[n++] = target;
     }
     coop_lite_host_send_inven_batch(slot, owners, n);
 }
@@ -5637,10 +5893,43 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
     }
     if (pkt->kind == COOP_BARTER_CLOSE) {
         coop_barter[slot].valid = false;
+        coop_barter[slot].target_valid = false;
         return;
     }
     if (pkt->kind == COOP_BARTER_SYNC) {
         coop_barter[slot].valid = false;
+        coop_barter[slot].target_valid = false;
+        coop_lite_host_sync_slot_inven(slot);
+        return;
+    }
+    if (pkt->kind == COOP_BARTER_OPEN_LOOT || pkt->kind == COOP_BARTER_OPEN_STEAL) {
+        /* PT18: loot (container, any corpse) / pickpocket (living critter,
+           NPC or PC) window. Inventory, not dialog: no merchant rule. */
+        int64_t target = coop_lite_get_oid_obj(pkt->npc_oid);
+        int want = pkt->kind == COOP_BARTER_OPEN_LOOT ? COOP_TARGET_LOOT : COOP_TARGET_STEAL;
+        int kind = coop_lite_target_kind_of(pc, target);
+        char tname[128];
+
+        coop_barter[slot].valid = false;
+        coop_barter[slot].target_valid = false;
+        tname[0] = '\0';
+        if (target != OBJ_HANDLE_NULL) {
+            object_examine(target, pc, tname);
+        }
+        if (kind != want) {
+            tig_debug_printf("CoopLite: loot: slot %d refused %s window on '%s' (allowed: %d)\n", slot,
+                want == COOP_TARGET_STEAL ? "pickpocket" : "loot", tname, kind);
+            coop_lite_host_sync_slot_inven(slot);
+            return;
+        }
+        coop_barter[slot].target_valid = true;
+        coop_barter[slot].target_kind = kind;
+        coop_barter[slot].target = obj_get_id(target);
+        tig_debug_printf("CoopLite: loot: slot %d opened %s window on '%s' (%d items)\n", slot,
+            kind == COOP_TARGET_STEAL ? "pickpocket" : "loot", tname,
+            obj_field_int32_get(target, obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+                    ? OBJ_F_CONTAINER_INVENTORY_NUM
+                    : OBJ_F_CRITTER_INVENTORY_NUM));
         coop_lite_host_sync_slot_inven(slot);
         return;
     }
@@ -5682,6 +5971,127 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
 #endif
 }
 
+#ifndef COOP_LITE_TEST_STUBS
+/* PT18: a notice for one slot (0 = the host itself). */
+static void coop_lite_host_slot_notice(int slot, int kind)
+{
+    PacketCoopPartyState pkt;
+    char str[160];
+
+    if (slot == 0) {
+        coop_lite_party_notice_text(kind, 0, true, str, sizeof(str));
+        if (str[0] != '\0') {
+            coop_lite_show_notice(str, TF_TYPE_RED);
+        }
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_STATE;
+    pkt.kind = kind;
+    pkt.slot = slot;
+    tig_net_send_app(&pkt, sizeof(pkt), slot);
+}
+
+/*
+ * PT18: Packet81 between a client PC and its loot / pickpocket target.
+ * Loot (container, corpse): the inventory window's own transfer, like
+ * barter at price 0. Pickpocket: the host rolls — against an NPC the vanilla
+ * skill invocation (item move, alignment, detection and ai_attack); against
+ * a PC the same odds, and a failure is "Caught pickpocketing!" for both.
+ */
+static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target, struct Packet81* pkt,
+    int64_t item, int64_t from, int64_t to, int qty)
+{
+    int kind = coop_barter[slot].target_kind;
+    bool from_target = from == target;
+    int64_t parent = OBJ_HANDLE_NULL;
+    bool ok = false;
+    const char* result = "refused";
+    int victim_slot = coop_lite_slot_of_obj(target);
+    char iname[128];
+
+    iname[0] = '\0';
+    if (item != OBJ_HANDLE_NULL) {
+        object_examine(item, pc, iname);
+    }
+    if (coop_lite_target_kind_of(pc, target) != kind
+        || item == OBJ_HANDLE_NULL
+        || !item_parent(item, &parent) || parent != from
+        || qty <= 0
+        || !coop_lite_target_transfer_ok(kind, (unsigned int)pkt->field_8, from_target,
+            IS_WEAR_INV_LOC(item_inventory_location_get(item)))) {
+        /* refused */
+    } else if (kind == COOP_TARGET_LOOT) {
+        Packet81* copy = (Packet81*)MALLOC(sizeof(*copy));
+
+        *copy = *pkt;
+        copy->field_5C = 0;
+        copy->field_70 = obj_get_id(target);
+        copy->field_88 = obj_get_id(target);
+        sub_460960(copy); /* inven_ui's transfer (sub_578EA0); frees `copy` */
+        ok = coop_lite_is_stackable(item) || (item_parent(item, &parent) && parent == to);
+        result = ok ? "done" : "failed";
+    } else if (obj_field_int32_get(target, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        SkillInvocation si;
+
+        skill_invocation_init(&si);
+        sub_4440E0(pc, &(si.source));
+        sub_4440E0(target, &(si.target));
+        sub_4440E0(item, &(si.item));
+        si.skill = SKILL_PICK_POCKET;
+        if (!from_target) {
+            si.flags |= SKILL_INVOCATION_0x02; /* plant */
+        }
+        if (getenv("ARCANUM_DEV_STEAL_FORCE") != NULL) {
+            si.flags |= SKILL_INVOCATION_FORCED; /* dev: test the success path */
+        }
+        skill_invocation_run(&si);
+        ok = (si.flags & SKILL_INVOCATION_SUCCESS) != 0;
+        result = ok ? "succeeded" : "failed";
+        if (!ok) {
+            coop_lite_host_slot_notice(slot, COOP_PARTY_STEAL_FAILED);
+        }
+    } else {
+        SkillInvocation si;
+        int effectiveness;
+        int difficulty;
+
+        skill_invocation_init(&si);
+        sub_4440E0(pc, &(si.source));
+        sub_4440E0(target, &(si.target));
+        sub_4440E0(item, &(si.item));
+        si.skill = SKILL_PICK_POCKET;
+        effectiveness = basic_skill_effectiveness(pc, BASIC_SKILL_PICK_POCKET, target);
+        difficulty = skill_invocation_difficulty(&si);
+        if (difficulty + random_between(1, 100) <= effectiveness || getenv("ARCANUM_DEV_STEAL_FORCE") != NULL) {
+            int t = obj_field_int32_get(item, OBJ_F_TYPE);
+
+            if (t == OBJ_TYPE_GOLD) {
+                ok = item_gold_transfer(from, to, qty > 100 ? 100 : qty, item);
+            } else if (t == OBJ_TYPE_AMMO) {
+                ok = item_ammo_transfer(from, to, qty > 20 ? 20 : qty, obj_field_int32_get(item, OBJ_F_AMMO_TYPE), item);
+            } else {
+                ok = item_transfer(item, to);
+            }
+            result = ok ? "succeeded" : "failed";
+        } else {
+            result = "caught";
+            coop_lite_host_slot_notice(slot, COOP_PARTY_CAUGHT_THIEF);
+            if (victim_slot >= 0 && victim_slot != slot) {
+                coop_lite_host_slot_notice(victim_slot, COOP_PARTY_CAUGHT_THIEF);
+            }
+        }
+    }
+    tig_debug_printf("CoopLite: loot: slot %d %s '%s' %s target: %s\n", slot,
+        kind == COOP_TARGET_STEAL ? (from_target ? "steals" : "plants") : (from_target ? "takes" : "puts"),
+        iname, from_target ? "from" : "into", result);
+    coop_lite_host_sync_slot_inven(slot);
+    if (victim_slot > 0 && victim_slot != slot) {
+        coop_lite_host_sync_slot_inven(victim_slot);
+    }
+}
+#endif
+
 void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -5707,6 +6117,12 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
     pc = sub_4A2B60(slot);
     if (pc == OBJ_HANDLE_NULL || obj_pool_perm_lookup(pkt->field_A0) != pc) {
         tig_debug_printf("CoopLite: inven: slot %d transfer for a PC it does not own\n", slot);
+        return;
+    }
+    if (critter_is_dead(pc)) {
+        /* PT18: a corpse does not rearrange or drop its things. */
+        tig_debug_printf("CoopLite: inven: slot %d transfer refused (PC is dead)\n", slot);
+        coop_lite_host_sync_slot_inven(slot);
         return;
     }
     npc = coop_barter[slot].valid ? obj_pool_perm_lookup(coop_barter[slot].npc) : OBJ_HANDLE_NULL;
@@ -5763,7 +6179,16 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
         coop_lite_host_sync_slot_inven(slot);
         return;
     }
+    {
+        int64_t target = coop_lite_target_obj(slot);
+
+        if (target != OBJ_HANDLE_NULL && ((from == target && to == pc) || (from == pc && to == target))) {
+            coop_lite_host_target_transfer(slot, pc, target, pkt, item, from, to, qty);
+            return;
+        }
+    }
     if (!coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
+        || (((unsigned int)pkt->field_8) & (COOP_XFER_STEAL | COOP_XFER_PLANT)) != 0
         || item == OBJ_HANDLE_NULL
         || !COOP_SIDE_OK(from) || !COOP_SIDE_OK(to)
         || (from != pc && to != pc)
@@ -5845,14 +6270,66 @@ void coop_lite_client_request_barter(int64_t pc_obj, int64_t npc_obj, int kind)
 #endif
 }
 
+void coop_lite_client_request_steal(int64_t pc_obj, int64_t target_obj, int64_t item_obj, bool plant)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    Packet81 pkt;
+    int depth;
+    int t;
+
+    if (pc_obj == OBJ_HANDLE_NULL || target_obj == OBJ_HANDLE_NULL || item_obj == OBJ_HANDLE_NULL
+        || !tig_net_is_active() || tig_net_is_host()) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = 81;
+    pkt.field_8 = (int)(0x01u | (plant ? COOP_XFER_PLANT : COOP_XFER_STEAL));
+    pkt.field_10 = obj_get_id(item_obj);
+    coop_lite_client_map_stack_oid(&(pkt.field_10));
+    pkt.field_28 = obj_get_id(plant ? pc_obj : target_obj);
+    pkt.field_40 = obj_get_id(plant ? target_obj : pc_obj);
+    pkt.field_58 = -1;
+    pkt.field_5C = -1;
+    t = obj_field_int32_get(item_obj, OBJ_F_TYPE);
+    pkt.field_60 = t == OBJ_TYPE_GOLD
+        ? item_gold_get(item_obj)
+        : (t == OBJ_TYPE_AMMO ? obj_field_int32_get(item_obj, OBJ_F_AMMO_QUANTITY) : 1);
+    pkt.field_68 = sub_529520();
+    pkt.field_70 = obj_get_id(target_obj);
+    pkt.field_88 = obj_get_id(target_obj);
+    pkt.field_A0 = obj_get_id(pc_obj);
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: loot: asked the host to %s an item\n", plant ? "plant" : "steal");
+#else
+    (void)pc_obj;
+    (void)target_obj;
+    (void)item_obj;
+    (void)plant;
+#endif
+}
+
+bool coop_lite_client_local_loot(int64_t source_obj)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    return coop_lite_is_client_role() && source_obj != OBJ_HANDLE_NULL && source_obj == player_get_local_pc_obj();
+#else
+    (void)source_obj;
+    return false;
+#endif
+}
+
 bool coop_lite_client_opens_inven_locally(int mode, int64_t pc_obj)
 {
 #ifndef COOP_LITE_TEST_STUBS
-    /* INVEN_UI_MODE_INVENTORY = 0, INVEN_UI_MODE_BARTER = 1 */
+    /* INVEN_UI_MODE_INVENTORY = 0, INVEN_UI_MODE_BARTER = 1, PT18:
+       INVEN_UI_MODE_LOOT = 2, INVEN_UI_MODE_STEAL = 3 (the host validates
+       the target with COOP_BARTER_OPEN_LOOT / _STEAL). */
     if (!coop_lite_is_client_role()) {
         return false;
     }
-    if (mode != 0 && mode != 1) {
+    if (mode < 0 || mode > 3) {
         return false;
     }
     return pc_obj != OBJ_HANDLE_NULL && pc_obj == player_get_local_pc_obj();
@@ -7059,10 +7536,10 @@ static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
     const char* env = getenv("ARCANUM_DEV_OPEN_INVEN");
     int64_t pc = player_get_local_pc_obj();
 
-    if (env == NULL || (env[0] != '1' && env[0] != '2') || pc == OBJ_HANDLE_NULL) {
+    if (env == NULL || (env[0] != '1' && env[0] != '2' && env[0] != '3') || pc == OBJ_HANDLE_NULL) {
         return;
     }
-    if (coop_dev_open_inven_done && env[0] == '2' && !coop_dev_dropbox_done
+    if (coop_dev_open_inven_done && (env[0] == '2' || env[0] == '3') && !coop_dev_dropbox_done
         && coop_lite_interval_elapsed(coop_dev_open_inven_ms, now_ms, 24000u)) {
         int64_t* items;
         int64_t pick = OBJ_HANDLE_NULL;
@@ -7072,9 +7549,14 @@ static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
         coop_dev_dropbox_done = true;
         cnt = item_list_get(pc, &items);
         for (i = 0; i < cnt && pick == OBJ_HANDLE_NULL; i++) {
-            if (!coop_lite_is_stackable(items[i]) && !IS_WEAR_INV_LOC(item_inventory_location_get(items[i]))) {
+            /* =3 (PT18): a worn item instead, the weapon if there is one. */
+            if (!coop_lite_is_stackable(items[i])
+                && (env[0] == '3') == IS_WEAR_INV_LOC(item_inventory_location_get(items[i]))) {
                 pick = items[i];
             }
+        }
+        if (env[0] == '3' && item_wield_get(pc, ITEM_INV_LOC_WEAPON) != OBJ_HANDLE_NULL) {
+            pick = item_wield_get(pc, ITEM_INV_LOC_WEAPON);
         }
         item_list_free(items);
         if (pick != OBJ_HANDLE_NULL) {
@@ -7097,8 +7579,8 @@ static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
             depth = tig_net_local_suspend_pause();
             tig_net_send_app_all(&pkt, sizeof(pkt));
             tig_net_local_suspend_resume(depth);
-            tig_debug_printf("CoopLite: dev: drop box: dropping one item (%d carried)\n",
-                obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
+            tig_debug_printf("CoopLite: dev: drop box: dropping one item, loc %d (%d carried)\n",
+                item_inventory_location_get(pick), obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM));
         }
         return;
     }
@@ -8623,6 +9105,116 @@ static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms)
  * and whether a pile is still here, then drop 10 gold through the
  * inventory window's Packet81 (flag 0x02), +4 s log again.
  */
+/*
+ * Dev (ARCANUM_DEV_CLIENT_LOOT, client, PT18): 25 s in, open a loot /
+ * pickpocket window the way the UI does (inven_ui_open), then Take All
+ * (loot) or one pickpocket drag, then close; inventory dumps between.
+ *   c = nearest container   h = the host's PC (loot if dead, else pickpocket)
+ *   n = nearest living NPC (pickpocket)
+ */
+static int coop_dev_loot_stage;
+static unsigned int coop_dev_loot_ms;
+static ObjectID coop_dev_loot_target;
+
+static int64_t coop_lite_dev_nearest(int64_t pc, unsigned int tm, bool living)
+{
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t best = OBJ_HANDLE_NULL;
+    int64_t best_d = 0;
+
+    object_list_vicinity(pc, tm, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        int64_t d;
+
+        if (node->obj == pc || (obj_field_int32_get(node->obj, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
+            continue;
+        }
+        if (living && critter_is_dead(node->obj)) {
+            continue;
+        }
+        d = location_dist(obj_field_int64_get(node->obj, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION));
+        if (best == OBJ_HANDLE_NULL || d < best_d) {
+            best = node->obj;
+            best_d = d;
+        }
+    }
+    object_list_destroy(&objects);
+    return best;
+}
+
+void coop_lite_client_dev_loot_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_CLIENT_LOOT");
+    int64_t pc = player_get_local_pc_obj();
+    int64_t target;
+    char name[128];
+
+    if (env == NULL || env[0] == '\0' || pc == OBJ_HANDLE_NULL || coop_dev_loot_stage > 5) {
+        return;
+    }
+    if (coop_dev_loot_ms == 0) {
+        coop_dev_loot_ms = now_ms != 0 ? now_ms : 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_loot_ms, now_ms, coop_dev_loot_stage == 0 ? 25000u : 4000u)) {
+        return;
+    }
+    coop_dev_loot_ms = now_ms != 0 ? now_ms : 1;
+    name[0] = '\0';
+    switch (coop_dev_loot_stage++) {
+    case 0:
+        target = env[0] == 'c' ? coop_lite_dev_nearest(pc, OBJ_TM_CONTAINER, false)
+            : env[0] == 'n' ? coop_lite_dev_nearest(pc, OBJ_TM_NPC, true)
+            : sub_4A2B60(0);
+        if (target == OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev loot: no target\n");
+            coop_dev_loot_stage = 99;
+            return;
+        }
+        coop_dev_loot_target = obj_get_id(target);
+        object_examine(target, pc, name);
+        tig_debug_printf("CoopLite: dev loot: target '%s' %d tiles away; walking next to it\n", name,
+            (int)location_dist(obj_field_int64_get(target, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION)));
+        coop_lite_dev_inven_dump("my PC", pc);
+        if (location_dist(obj_field_int64_get(target, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION)) > 1) {
+            anim_goal_move_to_tile(pc, obj_field_int64_get(target, OBJ_F_LOCATION));
+        }
+        return;
+    case 1: {
+        int mode;
+
+        target = obj_pool_perm_lookup(coop_dev_loot_target);
+        if (target == OBJ_HANDLE_NULL || coop_inven_open_hook == NULL) {
+            coop_dev_loot_stage = 99;
+            return;
+        }
+        mode = obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE)) && !critter_is_dead(target)
+            ? 3 /* INVEN_UI_MODE_STEAL */
+            : 2 /* INVEN_UI_MODE_LOOT */;
+        tig_debug_printf("CoopLite: dev loot: opening the %s window (%d tiles)\n", mode == 3 ? "pickpocket" : "loot",
+            (int)location_dist(obj_field_int64_get(target, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION)));
+        coop_inven_open_hook(pc, target, mode);
+        return;
+    }
+    case 2:
+        coop_lite_dev_inven_dump("loot target", obj_pool_perm_lookup(coop_dev_loot_target));
+        tig_debug_printf("CoopLite: dev loot: %s\n",
+            coop_dev_loot_hook == NULL ? "no hook"
+                : coop_dev_loot_hook(0) ? "take all"
+                : coop_dev_loot_hook(2) ? "pickpocket drag sent"
+                : "nothing to take");
+        return;
+    case 3:
+        coop_lite_dev_inven_dump("my PC", pc);
+        tig_debug_printf("CoopLite: dev loot: close %s\n", coop_dev_loot_hook != NULL && coop_dev_loot_hook(1) ? "done" : "not possible");
+        return;
+    default:
+        coop_lite_dev_inven_dump("my PC", pc);
+        return;
+    }
+}
+
 static int64_t coop_lite_dev_gold_piles(int64_t pc, int* count)
 {
     ObjectList objects;
@@ -8964,17 +9556,34 @@ static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
         if (!coop_lite_interval_elapsed(coop_dev_res_ms[slot], now_ms, (unsigned int)secs * 1000u)) {
             continue;
         }
+        if (strchr(env, 'l') != NULL && coop_dev_res_ui_stage[slot] < 3) {
+            /* "5lh": first loot the corpse the GUI way (click it, take all,
+               close the window), then go on. */
+            if (coop_dev_res_ui_stage[slot] == 0) {
+                tig_debug_printf("CoopLite: dev: UI click on slot %d's corpse to loot it %s\n", slot,
+                    coop_dev_click_obj_hook != NULL && coop_dev_click_obj_hook(pc, 0) ? "queued" : "not possible");
+            } else if (coop_dev_res_ui_stage[slot] == 1) {
+                tig_debug_printf("CoopLite: dev: loot window: take all %s\n",
+                    coop_dev_loot_hook != NULL && coop_dev_loot_hook(0) ? "done" : "not possible (window not open)");
+            } else {
+                tig_debug_printf("CoopLite: dev: loot window: close %s\n",
+                    coop_dev_loot_hook != NULL && coop_dev_loot_hook(1) ? "done" : "not possible");
+            }
+            coop_dev_res_ui_stage[slot]++;
+            coop_dev_res_ms[slot] = now_ms != 0 ? now_ms : 1;
+            continue;
+        }
         if (strchr(env, 'h') != NULL) {
             /* "5h": the GUI way — a real click on the Resurrect hotbar slot,
                then (another N s later) a real click on the corpse. */
-            if (coop_dev_res_ui_stage[slot] == 0) {
+            if (coop_dev_res_ui_stage[slot] == (strchr(env, 'l') != NULL ? 3 : 0)) {
                 int idx = coop_hotkey_spell_hook != NULL ? coop_hotkey_spell_hook(SPELL_RESURRECT) : -1;
 
                 tig_debug_printf("CoopLite: dev: UI click on hotbar slot %d (Resurrect) %s\n", idx,
                     idx >= 0 && coop_dev_click_hotkey_hook != NULL && coop_dev_click_hotkey_hook(idx)
                         ? "queued"
                         : "not possible");
-                coop_dev_res_ui_stage[slot] = 1;
+                coop_dev_res_ui_stage[slot]++;
                 coop_dev_res_ms[slot] = now_ms != 0 ? now_ms : 1;
                 continue;
             }

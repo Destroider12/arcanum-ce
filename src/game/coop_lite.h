@@ -209,6 +209,25 @@ bool coop_lite_roster_slot_ok(int slot, int local_slot);
 #define COOP_BARTER_OPEN 0
 #define COOP_BARTER_CLOSE 1
 #define COOP_BARTER_SYNC 2 /* just send me my inventory (after joining) */
+#define COOP_BARTER_OPEN_LOOT 3 /* PT18: loot window on npc_oid (container / corpse) */
+#define COOP_BARTER_OPEN_STEAL 4 /* PT18: pickpocket window on npc_oid (living critter) */
+
+/* PT18: Packet81 flag bits a client sets in a pickpocket window (vanilla
+   runs the skill locally; in coop the host rolls). Always with 0x01. */
+#define COOP_XFER_STEAL 0x40u
+#define COOP_XFER_PLANT 0x80u
+
+/* PT18 target sessions: what a client may open on a target. */
+#define COOP_TARGET_NONE 0
+#define COOP_TARGET_LOOT 1
+#define COOP_TARGET_STEAL 2
+#define COOP_TARGET_REACH 4
+
+int coop_lite_target_kind(bool is_container, bool locked, bool is_critter, bool dead, bool is_self, int dist);
+
+/* A Packet81 inside a target session: `from_target` = taken out of the
+   target, `worn` = the item sits in a wear slot of its current owner. */
+bool coop_lite_target_transfer_ok(int kind, unsigned int flags, bool from_target, bool worn);
 
 typedef struct PacketCoopBarter {
     /* 0000 */ int type;
@@ -451,8 +470,9 @@ bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc,
 /*
  * Which barter/inventory transfers a client may ask the host to perform
  * (Packet81 flags): plain moves between its PC and the merchant it is
- * bartering with. Drop (0x02), take-to-cursor/use (0x04), gamble (0x08) and
- * steal (0x10) are refused.
+ * bartering with, or a loot / pickpocket target (PT18: 0x41 steal, 0x81
+ * plant). Drop (0x02) only alone; take-to-cursor/use (0x04) and gamble
+ * (0x08 / 0x10) are refused.
  */
 bool coop_lite_client_transfer_flags_allowed(unsigned int flags);
 
@@ -522,6 +542,12 @@ void coop_lite_client_request_barter(int64_t pc_obj, int64_t npc_obj, int kind);
 /* Client: open barter / own inventory locally (vanilla MP round-trip is
    broken: the host's phase-1 reply is ignored by clients). */
 bool coop_lite_client_opens_inven_locally(int mode, int64_t pc_obj);
+
+/* PT18: client pickpocket window: ask the host to steal / plant `item`. */
+void coop_lite_client_request_steal(int64_t pc_obj, int64_t target_obj, int64_t item_obj, bool plant);
+
+/* PT18: the client's own use-container / loot goal opens the window here. */
+bool coop_lite_client_local_loot(int64_t source_obj);
 /* inven_ui_open, for the headless barter dev hook (game code can't call UI). */
 /* dialog_ui registers dialog_ui_end_dialog (game/ cannot include ui/). */
 void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2));
@@ -570,6 +596,7 @@ void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell));
 void coop_lite_set_dev_click_obj_hook(bool (*hook)(int64_t obj, int button));
 /* hotkey_ui_dev_click_slot (dev: a real mouse click on a hotbar slot). */
 void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index));
+void coop_lite_set_dev_loot_hook(bool (*hook)(int op));
 void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_obj, int mode));
 
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
@@ -641,6 +668,8 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_RELOADING 5
 #define COOP_PARTY_RESYNC 6 /* host loaded its save: re-offer your PC */
 #define COOP_PARTY_NO_SAVE 7 /* nothing to reload: everyone is brought back */
+#define COOP_PARTY_CAUGHT_THIEF 8 /* PT18: slot = the thief's slot */
+#define COOP_PARTY_STEAL_FAILED 9 /* PT18: unnoticed failure, to the thief */
 
 /* Starting kit for a coop-created/offered PC, generated locally (suspended). */
 void coop_lite_generate_start_inventory(int64_t pc_obj);

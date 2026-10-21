@@ -6701,6 +6701,9 @@ bool sub_428A10(AnimRunInfo* run_info)
             if (tig_net_is_active()) {
                 sub_424070(source_obj, 2, false, false);
             }
+        } else if (coop_lite_client_local_loot(source_obj)) {
+            /* PT18: a coop client opens its loot window itself. */
+            mp_ui_show_inven_loot(source_obj, target_obj);
         }
         return true;
     case OBJ_TYPE_SCENERY:
@@ -6729,6 +6732,8 @@ bool sub_428A10(AnimRunInfo* run_info)
             if (tig_net_is_active()) {
                 sub_424070(source_obj, 2, false, false);
             }
+        } else if (coop_lite_client_local_loot(source_obj)) {
+            mp_ui_show_inven_loot(source_obj, target_obj);
         }
         return true;
     default:
