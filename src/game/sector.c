@@ -1,5 +1,7 @@
 #include "game/sector.h"
 
+#include "net/tig_net.h"
+
 #include <inttypes.h>
 #include <stdio.h>
 
@@ -225,7 +227,8 @@ bool sector_init(GameInitInfo* init_info)
 
     sector_limits_set(0x4000000, 0x4000000);
 
-    if (!sector_cache_init(16)) {
+    /* PT23: coop keeps up to 4 sectors around every remote PC locked. */
+    if (!sector_cache_init(tig_net_is_coop_enabled() ? 48 : 16)) {
         return false;
     }
 

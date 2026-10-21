@@ -110,6 +110,7 @@ bool anim_goal_follow_obj(int64_t source_obj, int64_t target_obj);
 bool sub_4348E0(int64_t obj, int action_points);
 bool anim_goal_flee(int64_t obj, int64_t flee_from);
 bool anim_goal_attack(int64_t attacker_obj, int64_t target_obj);
+int anim_debug_active_runs(void);
 bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id);
 bool anim_goal_get_up(int64_t obj);
 bool anim_goal_knockback(int64_t target_obj, int rot, int range, int64_t source_obj);

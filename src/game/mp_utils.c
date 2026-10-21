@@ -731,6 +731,11 @@ void mp_handle_packet29(Packet29* pkt)
 static Packet70 mp_deferred_packet70[MP_DEFERRED_PACKET70_MAX];
 static int mp_deferred_packet70_count;
 
+int mp_deferred_packet70_pending(void)
+{
+    return mp_deferred_packet70_count;
+}
+
 void mp_clear_deferred_packet70(void)
 {
     mp_deferred_packet70_count = 0;

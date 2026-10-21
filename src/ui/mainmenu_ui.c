@@ -1841,11 +1841,20 @@ static void mainmenu_ui_dev_autostart_tick(void)
 {
     static int frames;
     static bool done;
+    static int rearm_idx;
     const char* env;
     int idx;
 
     if (done) {
-        return;
+        int r = coop_lite_take_dev_autostart_rearm();
+
+        if (r <= 0) {
+            return;
+        }
+        /* PT23 dev: main menu -> New Game again without a restart. */
+        done = false;
+        frames = 0;
+        rearm_idx = r;
     }
 
     env = getenv("ARCANUM_DEV_AUTOSTART_PREGEN");
@@ -1863,7 +1872,8 @@ static void mainmenu_ui_dev_autostart_tick(void)
     }
 
     done = true;
-    idx = atoi(env);
+    idx = rearm_idx > 0 ? rearm_idx : atoi(env);
+    rearm_idx = 0;
     if (idx < 1 || idx >= mainmenu_ui_pregen_char_cnt) {
         idx = 1;
     }

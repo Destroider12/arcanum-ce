@@ -2961,7 +2961,8 @@ bool sub_4AD420(int64_t obj)
         return false;
     }
 
-    if (object_dist(player_get_local_pc_obj(), obj) <= 30) {
+    /* PT23: any coop PC keeps NPCs awake, not just the host's. */
+    if (coop_lite_ai_nearest_pc_dist(obj) <= 30) {
         return true;
     }
 
@@ -3019,7 +3020,7 @@ int ai_distance_to_nearest_player(int64_t obj)
 {
     int64_t nearest_dist;
 
-    nearest_dist = object_dist(player_get_local_pc_obj(), obj);
+    nearest_dist = coop_lite_ai_nearest_pc_dist(obj);
 
     return nearest_dist >= 0 && nearest_dist <= 30 ? (int)nearest_dist : 30;
 }

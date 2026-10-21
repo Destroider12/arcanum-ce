@@ -161,6 +161,8 @@ bool timeevent_clear_all_typed(int list);
 bool timeevent_clear_one_typed(int list);
 bool timeevent_clear_all_ex(int list, TimeEventEnumerateFunc callback);
 bool timeevent_clear_one_ex(int list, TimeEventEnumerateFunc callback);
+int timeevent_debug_count(void);
+void timeevent_debug_types(char* buf, size_t size);
 bool sub_45C0E0(int list);
 bool timeevent_any(int list, TimeEventEnumerateFunc callback);
 bool timeevent_inc_milliseconds(unsigned int milliseconds);

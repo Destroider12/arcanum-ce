@@ -83,6 +83,8 @@ static void tig_net_stat_count(unsigned int* table, const void* data, size_t siz
     table[(unsigned int)type & 0xFFu]++;
 }
 
+static bool tig_net_stat_logged;
+
 static void tig_net_stat_maybe_log(void)
 {
     unsigned int now;
@@ -116,6 +118,7 @@ static void tig_net_stat_maybe_log(void)
         }
         tig_debug_printf("%s\n", line);
     }
+    tig_net_stat_logged = true;
     memset(tig_net_stat_sent, 0, sizeof(tig_net_stat_sent));
     memset(tig_net_stat_recv, 0, sizeof(tig_net_stat_recv));
     tig_net_stat_window_start = now;
@@ -574,6 +577,26 @@ int sub_5280F0(void)
     return was_active ? 0 : 1;
 }
 
+static void tig_net_peer_diag_log(void)
+{
+    int i;
+
+    /* PT23: queue depth / RTT per peer — a growing outgoing queue means
+       latency that grows over a session ("everything gets laggy"). */
+    for (i = 0; i < max_players; i++) {
+        ENetPeer* p = clients[i].peer;
+
+        if (p == NULL || (is_host && i == 0) || (!is_host && i != 0)) {
+            continue;
+        }
+        tig_debug_printf("tig_net: peer %d rtt=%u ms lost=%u throttle=%u inflight=%u q_out=%u q_rel=%u q_sent=%u\n",
+            i, p->roundTripTime, p->packetsLost, p->packetThrottle, p->reliableDataInTransit,
+            (unsigned int)enet_list_size(&p->outgoingCommands),
+            (unsigned int)enet_list_size(&p->outgoingSendReliableCommands),
+            (unsigned int)enet_list_size(&p->sentReliableCommands));
+    }
+}
+
 void tig_net_pump(void)
 {
     ENetEvent event;
@@ -676,6 +699,10 @@ void tig_net_pump(void)
         tig_net_reset_connection();
     }
     tig_net_stat_maybe_log();
+    if (tig_net_stat_logged) {
+        tig_net_stat_logged = false;
+        tig_net_peer_diag_log();
+    }
 }
 
 bool tig_net_is_active(void)

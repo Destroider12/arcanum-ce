@@ -14195,32 +14195,14 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
         && !tig_net_is_host()
         && !multiplayer_is_locked()
         && player_is_local_pc_obj(attacker_obj)) {
-        PacketCoopAttackIntent pkt;
-        ObjectID attacker_oid;
-        ObjectID target_oid;
-        pkt.type = PACKET_COOP_ATTACK_INTENT;
-        pkt.attack_kind = 0;
-        attacker_oid = obj_get_id(attacker_obj);
-        target_oid = obj_get_id(target_obj);
-        memcpy(pkt.attacker_oid, &attacker_oid, sizeof(attacker_oid));
-        memcpy(pkt.target_oid, &target_oid, sizeof(target_oid));
-        tig_net_send_app_all(&pkt, sizeof(pkt));
-
-        /* Review M6: the host resolves the hit, but its swing never reached
-           the attacker's own screen. Adjacent target: play the swing here
-           (cosmetic AG_ANIMATE only — no hit is resolved locally). */
-        if (location_dist(obj_field_int64_get(attacker_obj, OBJ_F_LOCATION),
-                obj_field_int64_get(target_obj, OBJ_F_LOCATION))
-            <= 1) {
-            tig_art_id_t art_id = obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID);
-
-            tig_net_local_suspend_begin();
-            object_set_current_aid(attacker_obj,
-                tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)));
-            anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
-            tig_net_local_suspend_end();
+        /* PT23: out of reach — walk there ourselves first (we own our
+           movement). Sending the intent now made the host's AG_ATTACK move
+           our PC, which reached us only as FORCE position snaps: the PC
+           floated to the enemy with no walk animation. */
+        if (coop_lite_client_attack_approach(attacker_obj, target_obj)) {
+            return true;
         }
-        return true;
+        return coop_lite_client_send_attack_intent(attacker_obj, target_obj);
     }
 
     weapon_obj = item_wield_get(attacker_obj, ITEM_INV_LOC_WEAPON);
@@ -15949,4 +15931,18 @@ void sub_437D00(AnimRunInfo* run_info)
     }
 
     run_info->current_state = 0;
+}
+
+/* PT23 diagnostics: anim run slots in use (216 max). */
+int anim_debug_active_runs(void)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; i < 216; i++) {
+        if ((anim_run_info[i].flags & 0x01) != 0) {
+            n++;
+        }
+    }
+    return n;
 }

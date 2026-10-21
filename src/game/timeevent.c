@@ -2021,3 +2021,44 @@ void timeevent_debug_node(TimeEventNode* node, int node_index)
 
     tig_debug_printf("\n");
 }
+
+/* PT23 diagnostics: "type:count" of the queued time events, by type. */
+void timeevent_debug_types(char* buf, size_t size)
+{
+    int counts[TIMEEVENT_TYPE_COUNT];
+    int i;
+    size_t len = 0;
+    TimeEventNode* node;
+
+    memset(counts, 0, sizeof(counts));
+    for (i = 0; i < TIME_TYPE_COUNT; i++) {
+        for (node = timeevent_lists[i]; node != NULL; node = node->next) {
+            if (node->te.type >= 0 && node->te.type < TIMEEVENT_TYPE_COUNT) {
+                counts[node->te.type]++;
+            }
+        }
+    }
+    if (size > 0) {
+        buf[0] = '\0';
+    }
+    for (i = 0; i < TIMEEVENT_TYPE_COUNT && len + 12 < size; i++) {
+        if (counts[i] > 0) {
+            len += (size_t)snprintf(buf + len, size - len, "%s%d:%d", len > 0 ? "," : "", i, counts[i]);
+        }
+    }
+}
+
+/* PT23 diagnostics: queued time events (all lists). */
+int timeevent_debug_count(void)
+{
+    int i;
+    int n = 0;
+    TimeEventNode* node;
+
+    for (i = 0; i < TIME_TYPE_COUNT; i++) {
+        for (node = timeevent_lists[i]; node != NULL; node = node->next) {
+            n++;
+        }
+    }
+    return n;
+}

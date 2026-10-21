@@ -756,6 +756,11 @@ bool coop_lite_dialog_option_allowed(const char* actions, int response_code);
 /* True on a coop client, including while running local SP paths under
    tig_net_local_suspend (net reads inactive there). */
 bool coop_lite_is_client_role(void);
+/* PT23: distance from obj to the nearest PC of any slot (host); local PC otherwise. */
+int64_t coop_lite_ai_nearest_pc_dist(int64_t obj);
+/* PT23 client melee: walk into reach locally, then send the attack intent. */
+bool coop_lite_client_attack_approach(int64_t attacker_obj, int64_t target_obj);
+bool coop_lite_client_send_attack_intent(int64_t attacker_obj, int64_t target_obj);
 /* Dialog action code (2 chars) a client must not execute. */
 bool coop_lite_dialog_action_blocked(const char* code);
 /* Client may not open dialog with another player's follower. */
@@ -778,6 +783,10 @@ int64_t coop_lite_follow_loc_for_slot(int64_t host_loc, int slot);
  * so every remote player is relocated near the host (per-slot walkable offset).
  */
 void coop_lite_notify_host_teleported(int map, int64_t loc);
+/* PT23: teleport_ping finished a local PC teleport (any outcome). */
+void coop_lite_local_teleport_finished(void);
+/* PT23 dev: pregen to auto-start after a dev "menu" trigger (0 = none). */
+int coop_lite_take_dev_autostart_rearm(void);
 
 /* Dispatch helper for PACKET_COOP_FOLLOW_HOST (from multiplayer_handle_message). */
 void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt);

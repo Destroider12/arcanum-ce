@@ -105,6 +105,12 @@ void teleport_ping(tig_timestamp_t timestamp)
 
         teleport_pending = false;
 
+        /* PT23: whatever teleport_process did (it can return early), a
+           client's party-carry wait for this travel is over. */
+        if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0) {
+            coop_lite_local_teleport_finished();
+        }
+
         if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0
             && (current_teleport_data.flags & TELEPORT_RENDER_LOCK) != 0) {
             gamelib_renderlock_release();

@@ -91,6 +91,15 @@ int main(int argc, char** argv)
     char lpCmdLine[260];
     build_cmd_line(lpCmdLine, sizeof(lpCmdLine), argc, argv);
 
+    /* PT23: -log <path> mirrors every debug line into a file (from argv:
+       lpCmdLine is lowercased and length-capped). */
+    for (int i = 1; i + 1 < argc; i++) {
+        if (SDL_strcasecmp(argv[i], "-log") == 0) {
+            tig_debug_set_log_file(argv[i + 1]);
+            break;
+        }
+    }
+
     highres_config_load();
     highres_config = highres_config_get();
 
