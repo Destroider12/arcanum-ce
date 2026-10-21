@@ -4096,6 +4096,7 @@ void sub_578B80(int a1)
 
     pkt->field_60 = a1;
     pkt->field_68 = sub_529520();
+    coop_lite_client_map_stack_oid(&(pkt->field_10));
 
     if (tig_net_is_active()) {
         object_examine(obj_pool_perm_lookup(pkt->field_10),

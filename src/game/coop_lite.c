@@ -946,6 +946,8 @@ static void coop_lite_world_state_reset(void);
 static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms);
 static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms);
 static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms);
+static void coop_lite_host_dev_gold_pile_tick(unsigned int now_ms);
+static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_reset(void);
 #endif
@@ -4482,6 +4484,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_dev_export_tick(now_ms);
             coop_lite_client_dev_combat_tick(now_ms);
             coop_lite_client_dev_items_tick(now_ms);
+            coop_lite_client_dev_gold_pile_tick(now_ms);
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
         }
@@ -4536,6 +4539,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_world_mutate_tick(now_ms);
     coop_lite_host_dev_kill_client_tick(now_ms);
     coop_lite_host_dev_auto_resurrect_tick(now_ms);
+    coop_lite_host_dev_gold_pile_tick(now_ms);
     coop_lite_host_barter_watch(now_ms);
 
     {
@@ -5407,8 +5411,11 @@ void coop_lite_host_handle_item_op(int type, void* msg)
     int64_t extra = OBJ_HANDLE_NULL;
     bool ok = false;
     bool was_on_ground = false;
+    bool ground_stack = false;
+    ObjectID picked_oid;
     const char* what = "?";
 
+    memset(&picked_oid, 0, sizeof(picked_oid));
     if (msg == NULL || !tig_net_is_host()) {
         return;
     }
@@ -5462,6 +5469,10 @@ void coop_lite_host_handle_item_op(int type, void* msg)
                 break;
             }
             was_on_ground = true;
+            /* Review #2 pt 3: a stack merges into ours and is destroyed;
+               keep its id, the picker's copy must go too. */
+            picked_oid = obj_get_id(item);
+            ground_stack = coop_lite_is_stackable(item);
         } else if (parent != pc) {
             /* Loot from an unlocked container in reach; never from critters. */
             if (obj_field_int32_get(parent, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER
@@ -5518,8 +5529,15 @@ void coop_lite_host_handle_item_op(int type, void* msg)
 
         memset(&gone, 0, sizeof(gone));
         gone.type = 72;
-        gone.oid = obj_get_id(item);
-        tig_net_send_app_except(&gone, sizeof(gone), slot);
+        gone.oid = picked_oid;
+        if (ground_stack) {
+            /* INVEN_SYNC carries gold/ammo as totals, so nothing would
+               remove the picker's ground copy (a clickable ghost pile). */
+            tig_net_send_app_all(&gone, sizeof(gone));
+        } else {
+            /* The picker's INVEN_SYNC moves its own copy in by OID. */
+            tig_net_send_app_except(&gone, sizeof(gone), slot);
+        }
     }
 }
 #endif
@@ -5631,18 +5649,42 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
         /* Drop from the PC's own inventory onto the ground. */
         bool ok = false;
 
+        int64_t pile = OBJ_HANDLE_NULL;
+        int t = item != OBJ_HANDLE_NULL ? obj_field_int32_get(item, OBJ_F_TYPE) : -1;
+
         if (coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
             && item != OBJ_HANDLE_NULL && from == pc
-            && item_parent(item, &parent) && parent == pc
-            && obj_field_int32_get(item, OBJ_F_TYPE) != OBJ_TYPE_GOLD
-            && obj_field_int32_get(item, OBJ_F_TYPE) != OBJ_TYPE_AMMO) {
+            && item_parent(item, &parent) && parent == pc) {
+            int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+
             multiplayer_lock();
-            ok = item_drop(item);
+            if (t == OBJ_TYPE_GOLD) {
+                /* Review #2 pt 4: a gold pile of qty, as inven_ui does on
+                   the host (transfer out, then a new pile; Packet70 + the
+                   blob give clients the real amount). */
+                if (qty > 0 && qty <= item_gold_get(pc)
+                    && item_gold_transfer(pc, OBJ_HANDLE_NULL, qty, item)) {
+                    pile = item_gold_create(qty, loc);
+                    ok = pile != OBJ_HANDLE_NULL;
+                }
+            } else if (t == OBJ_TYPE_AMMO) {
+                int ammo_type = obj_field_int32_get(item, OBJ_F_AMMO_TYPE);
+
+                if (qty > 0 && qty <= item_ammo_quantity_get(pc, ammo_type)
+                    && item_ammo_transfer(pc, OBJ_HANDLE_NULL, qty, ammo_type, item)) {
+                    pile = item_ammo_create(qty, ammo_type, loc);
+                    ok = pile != OBJ_HANDLE_NULL;
+                }
+            } else {
+                ok = item_drop(item);
+                pile = item;
+            }
             multiplayer_unlock();
         }
-        tig_debug_printf("CoopLite: inven: slot %d drop %s\n", slot, ok ? "done" : "refused");
-        if (ok) {
-            coop_lite_host_announce_ground_item(item);
+        tig_debug_printf("CoopLite: inven: slot %d drop %s%s\n", slot,
+            t == OBJ_TYPE_GOLD ? "gold " : (t == OBJ_TYPE_AMMO ? "ammo " : ""), ok ? "done" : "refused");
+        if (ok && pile == item) {
+            coop_lite_host_announce_ground_item(item); /* stacks: mp_object_create did */
         }
         coop_lite_host_sync_slot_inven(slot);
         return;
@@ -6259,6 +6301,40 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
 #endif
 }
 
+static uint8_t coop_host_gold_oid[24];
+static uint8_t coop_host_ammo_oid[COOP_INVEN_AMMO_TYPES][24];
+
+void coop_lite_client_map_stack_oid(void* oid_ptr)
+{
+    ObjectID* oid = (ObjectID*)oid_ptr;
+    int64_t pc = player_get_local_pc_obj();
+    int64_t obj;
+    int t;
+
+    if (oid == NULL || pc == OBJ_HANDLE_NULL || !tig_net_is_active() || tig_net_is_host()
+        || oid->type == OID_TYPE_NULL) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(*oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if (obj == obj_field_handle_get(pc, OBJ_F_CRITTER_GOLD)) {
+        if (((const ObjectID*)coop_host_gold_oid)->type != OID_TYPE_NULL) {
+            memcpy(oid, coop_host_gold_oid, sizeof(*oid));
+        }
+        return;
+    }
+    for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
+        if (obj == obj_field_handle_get(pc, coop_ammo_fld[t])) {
+            if (((const ObjectID*)coop_host_ammo_oid[t])->type != OID_TYPE_NULL) {
+                memcpy(oid, coop_host_ammo_oid[t], sizeof(*oid));
+            }
+            return;
+        }
+    }
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -6456,6 +6532,12 @@ static void coop_lite_client_apply_inven_batch(void)
             item_gold_transfer(owner, OBJ_HANDLE_NULL, -d, OBJ_HANDLE_NULL);
         }
         coop_lite_inv_destroy_stray(coop_inv_owner[o].head.gold_oid);
+        if (owner == player_get_local_pc_obj()) {
+            /* Review #2 pt 4: our stacks have local OIDs; requests about
+               them must name the host's. */
+            memcpy(coop_host_gold_oid, coop_inv_owner[o].head.gold_oid, 24);
+            memcpy(coop_host_ammo_oid, coop_inv_owner[o].head.ammo_oid, sizeof(coop_host_ammo_oid));
+        }
         for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
             d = coop_inv_owner[o].head.ammo[t] - item_ammo_quantity_get(owner, t);
             if (d > 0) {
@@ -8397,6 +8479,158 @@ static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms)
         tig_debug_printf("CoopLite: dev: killing slot %d PC %s\n", slot, oid_str);
         critter_kill(pc);
     }
+}
+
+/*
+ * Review #2 pt 5 dev: ARCANUM_DEV_GOLD_PILE=N. Host: N s after a client PC
+ * binds, a 37-gold pile appears on its tile. Client (=1): when it sees a
+ * gold pile within 3 tiles, +3 s pick it up like a click, +4 s log its gold
+ * and whether a pile is still here, then drop 10 gold through the
+ * inventory window's Packet81 (flag 0x02), +4 s log again.
+ */
+static int64_t coop_lite_dev_gold_piles(int64_t pc, int* count)
+{
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t first = OBJ_HANDLE_NULL;
+    int n = 0;
+
+    object_list_vicinity(pc, OBJ_TM_GOLD, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        if ((obj_field_int32_get(node->obj, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED | OF_OFF)) != 0
+            || location_dist(obj_field_int64_get(node->obj, OBJ_F_LOCATION),
+                   obj_field_int64_get(pc, OBJ_F_LOCATION)) > 3) {
+            continue;
+        }
+        if (first == OBJ_HANDLE_NULL) {
+            first = node->obj;
+        }
+        n++;
+    }
+    object_list_destroy(&objects);
+    if (count != NULL) {
+        *count = n;
+    }
+    return first;
+}
+
+static int64_t coop_lite_dev_find_gold_pile(int64_t pc)
+{
+    return coop_lite_dev_gold_piles(pc, NULL);
+}
+
+static int coop_lite_dev_count_gold_piles(int64_t pc)
+{
+    int n = 0;
+
+    coop_lite_dev_gold_piles(pc, &n);
+    return n;
+}
+
+static unsigned int coop_dev_gold_ms[8];
+static bool coop_dev_gold_done[8];
+
+static void coop_lite_host_dev_gold_pile_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_GOLD_PILE");
+    int slot;
+
+    if (env == NULL || atoi(env) <= 0) {
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t pile;
+        char oid_str[80];
+
+        if (pc == OBJ_HANDLE_NULL || coop_dev_gold_done[slot]) {
+            continue;
+        }
+        if (coop_dev_gold_ms[slot] == 0) {
+            coop_dev_gold_ms[slot] = now_ms != 0 ? now_ms : 1;
+            continue;
+        }
+        if (!coop_lite_interval_elapsed(coop_dev_gold_ms[slot], now_ms, (unsigned int)atoi(env) * 1000u)) {
+            continue;
+        }
+        coop_dev_gold_done[slot] = true;
+        pile = item_gold_create(37, obj_field_int64_get(pc, OBJ_F_LOCATION));
+        if (pile != OBJ_HANDLE_NULL) {
+            objid_id_to_str(oid_str, obj_get_id(pile));
+            tig_debug_printf("CoopLite: dev: gold pile of 37 %s at slot %d PC (host gold piles near it: %d)\n",
+                oid_str, slot, coop_lite_dev_count_gold_piles(pc));
+        }
+    }
+}
+
+static int coop_dev_cgold_stage;
+static unsigned int coop_dev_cgold_ms;
+
+static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_GOLD_PILE");
+    int64_t pc = player_get_local_pc_obj();
+    int64_t pile;
+    int depth;
+
+    if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL || coop_dev_cgold_stage >= 4) {
+        return;
+    }
+    if (coop_dev_cgold_stage == 0) {
+        pile = coop_lite_dev_find_gold_pile(pc);
+        if (pile == OBJ_HANDLE_NULL) {
+            return;
+        }
+        tig_debug_printf("CoopLite: dev gold: pile of %d seen, my gold %d\n",
+            obj_field_int32_get(pile, OBJ_F_GOLD_QUANTITY), item_gold_get(pc));
+        coop_dev_cgold_ms = now_ms != 0 ? now_ms : 1;
+        coop_dev_cgold_stage = 1;
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_dev_cgold_ms, now_ms, coop_dev_cgold_stage == 1 ? 3000u : 4000u)) {
+        return;
+    }
+    coop_dev_cgold_ms = now_ms != 0 ? now_ms : 1;
+    depth = tig_net_local_suspend_pause();
+    switch (coop_dev_cgold_stage) {
+    case 1:
+        pile = coop_lite_dev_find_gold_pile(pc);
+        tig_debug_printf("CoopLite: dev gold: pickup goal (as a click) %s\n",
+            pile != OBJ_HANDLE_NULL && anim_goal_pickup_item_as_click(pc, pile) ? "started" : "refused");
+        break;
+    case 2: {
+        int64_t gold = obj_field_handle_get(pc, OBJ_F_CRITTER_GOLD);
+        Packet81 pkt;
+
+        tig_debug_printf("CoopLite: dev gold: after pickup my gold %d, piles here %d\n",
+            item_gold_get(pc), coop_lite_dev_count_gold_piles(pc));
+        if (gold != OBJ_HANDLE_NULL && item_gold_get(pc) >= 10) {
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = 81;
+            pkt.field_8 = 0x02;
+            pkt.field_10 = obj_get_id(gold);
+            coop_lite_client_map_stack_oid(&pkt.field_10);
+            pkt.field_28 = obj_get_id(pc);
+            pkt.field_40.type = OID_TYPE_NULL;
+            pkt.field_58 = -1;
+            pkt.field_5C = -1;
+            pkt.field_60 = 10;
+            pkt.field_68 = sub_529520();
+            pkt.field_70.type = OID_TYPE_NULL;
+            pkt.field_88.type = OID_TYPE_NULL;
+            pkt.field_A0 = obj_get_id(pc);
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+            tig_debug_printf("CoopLite: dev gold: dropping 10 gold (drop box)\n");
+        }
+        break;
+    }
+    default:
+        tig_debug_printf("CoopLite: dev gold: after drop my gold %d, piles here %d\n",
+            item_gold_get(pc), coop_lite_dev_count_gold_piles(pc));
+        break;
+    }
+    tig_net_local_suspend_resume(depth);
+    coop_dev_cgold_stage++;
 }
 
 /*
