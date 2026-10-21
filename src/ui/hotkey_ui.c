@@ -332,6 +332,13 @@ bool hotkey_ui_process_event(TigMessage* msg)
             }
             for (index = 0; index < 10; index++) {
                 if (msg->data.button.button_handle == stru_6835E0[index].info.button_handle) {
+                    if (tig_net_is_coop_enabled()) {
+                        tig_debug_printf("HotkeyUI: click: slot %d (type %d, data %d)%s\n", index,
+                            stru_6835E0[index].type, stru_6835E0[index].data,
+                            hotkey_ui_dragging || inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL
+                                ? " ends a drag"
+                                : (stru_6835E0[index].type == HOTKEY_NONE ? " empty (consumed)" : " activate"));
+                    }
                     if (hotkey_ui_dragging || inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
                         if (inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
                             sub_57DC20();
@@ -1377,6 +1384,7 @@ int hotkey_ui_assign_spell(int spell)
         tig_art_interface_id_create(hotkey->info.art_num, 0, 0, 0, &(hotkey->art_id));
         hotkey->count = -1;
         intgame_hotkey_refresh(index);
+        tig_debug_printf("HotkeyUI: spell %d put on hotbar slot %d (art %d)\n", spell, index, hotkey->info.art_num);
         return index;
     }
     return -1;

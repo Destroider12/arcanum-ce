@@ -3729,6 +3729,7 @@ void intgame_hotkey_activate(Hotkey* hotkey)
     int64_t v2;
 
     if ((hotkey->flags & HOTKEY_DRAGGED) != 0) {
+        intgame_coop_click_trace("hotkey: ignored (being dragged)");
         return;
     }
 
@@ -3738,16 +3739,20 @@ void intgame_hotkey_activate(Hotkey* hotkey)
     }
 
     if (critter_is_dead(pc_obj)) {
+        intgame_coop_click_trace("hotkey: ignored (PC dead)");
         return;
     }
 
     if (critter_is_unconscious(pc_obj)) {
+        intgame_coop_click_trace("hotkey: ignored (PC unconscious)");
         return;
     }
 
     if ((obj_field_int32_get(pc_obj, OBJ_F_CRITTER_FLAGS) & (OCF_PARALYZED | OCF_STUNNED)) != 0) {
+        intgame_coop_click_trace("hotkey: ignored (PC paralyzed/stunned)");
         return;
     }
+    intgame_coop_click_trace("hotkey: type %d data %d, mode before %d", hotkey->type, hotkey->data, intgame_mode_get());
 
     switch (hotkey->type) {
     case HOTKEY_NONE:
