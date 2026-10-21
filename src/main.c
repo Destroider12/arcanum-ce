@@ -60,6 +60,36 @@ static void handle_mouse_scroll(void);
 static void handle_keyboard_scroll(void);
 static void build_cmd_line(char* dst, size_t size, int argc, char** argv);
 
+/* 0 = no coop mode, 1 = -host, 2 = -join (window title). */
+static int coop_cli_mode;
+
+/* Exact argv token "name" (value = next token unless it is another switch)
+   or "name=value". */
+static bool coop_arg_find(int argc, char** argv, const char* name, const char** value)
+{
+    size_t len = strlen(name);
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (SDL_strncasecmp(argv[i], name, len) != 0) {
+            continue;
+        }
+        if (argv[i][len] == '\0') {
+            if (value != NULL) {
+                *value = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[i + 1] : NULL;
+            }
+            return true;
+        }
+        if (argv[i][len] == '=') {
+            if (value != NULL) {
+                *value = argv[i][len + 1] != '\0' ? argv[i] + len + 1 : NULL;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x59A040
 static float gamma = 1.0f;
 
@@ -161,39 +191,41 @@ int main(int argc, char** argv)
         gamelib_cheat_level_set(3);
     }
 
-    /* Coop Lite: inactive unless -coop. Optional -host [port] / -join host[:port]. */
-    if (strstr(lpCmdLine, "-coop") != NULL) {
+    /* Coop Lite: inactive unless -coop. Optional -host [port] / -join host[:port].
+       Review PT24: whole argv tokens, not substrings of lpCmdLine (a -log
+       path like D:\\my-coop-host\\x.log must not switch modes). */
+    coop_cli_mode = 0;
+    if (coop_arg_find(argc, argv, "-coop", NULL)) {
+        const char* val = NULL;
+
         tig_net_set_coop_enabled(true);
-        pch = strstr(lpCmdLine, "-host");
-        if (pch != NULL) {
+        if (coop_arg_find(argc, argv, "-host", &val)) {
             int port = TIG_NET_DEFAULT_PORT;
-            pch += 5;
-            while (*pch == ' ' || *pch == '=') {
-                pch++;
-            }
-            if (*pch >= '0' && *pch <= '9') {
-                port = atoi(pch);
+
+            if (val != NULL && *val >= '0' && *val <= '9') {
+                port = atoi(val);
             }
             tig_net_configure_host(port);
+            coop_cli_mode = 1;
             tig_debug_printf("Coop: will host on port %d\n", port);
-        }
-        pch = strstr(lpCmdLine, "-join");
-        if (pch != NULL) {
-            char hostbuf[256];
+        } else if (coop_arg_find(argc, argv, "-join", &val)) {
+            char hostbuf[256] = { 0 };
             int port = TIG_NET_DEFAULT_PORT;
             char* colon;
-            pch += 5;
-            while (*pch == ' ' || *pch == '=') {
-                pch++;
+
+            if (val == NULL || sscanf(val, "%255s", hostbuf) != 1 || hostbuf[0] == '\0') {
+                tig_debug_printf("Coop: -join needs host[:port] - not joining\n");
+            } else {
+                /* IPv4 / hostname only: ENet here has no IPv6. */
+                colon = strchr(hostbuf, ':');
+                if (colon != NULL) {
+                    *colon = '\0';
+                    port = atoi(colon + 1);
+                }
+                tig_net_configure_join(hostbuf, port);
+                coop_cli_mode = 2;
+                tig_debug_printf("Coop: will join %s:%d\n", hostbuf, port);
             }
-            sscanf(pch, "%255s", hostbuf);
-            colon = strchr(hostbuf, ':');
-            if (colon != NULL) {
-                *colon = '\0';
-                port = atoi(colon + 1);
-            }
-            tig_net_configure_join(hostbuf, port);
-            tig_debug_printf("Coop: will join %s:%d\n", hostbuf, port);
         }
     }
 
@@ -257,9 +289,9 @@ int main(int argc, char** argv)
     init_info.window_name = "Arcanum: Of Steamworks & Magick Obscura - Community Edition";
     /* Coop: say which side this window is (PT18 GUI: a desktop tester
        drove the host window believing it was the client's). */
-    if (strstr(lpCmdLine, "-coop") != NULL && strstr(lpCmdLine, "-host") != NULL) {
+    if (coop_cli_mode == 1) {
         init_info.window_name = "Arcanum CE - CO-OP HOST";
-    } else if (strstr(lpCmdLine, "-coop") != NULL && strstr(lpCmdLine, "-join") != NULL) {
+    } else if (coop_cli_mode == 2) {
         init_info.window_name = "Arcanum CE - CO-OP CLIENT";
     }
 

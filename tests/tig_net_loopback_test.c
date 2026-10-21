@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+#include <enet/enet.h>
+
 #include "net/tig_net.h"
 
 #define TEST_TYPE 67
@@ -181,8 +183,81 @@ static int run_host(int port, int wait_client_ms)
     return 0;
 }
 
+/* Review PT24 #1: a raw ENet peer that never sends the HELLO. Its app
+   packet must not reach the game, and the host must drop it after the
+   handshake timeout. Exit 0 = it was disconnected. */
+static int run_rawpeer(int port)
+{
+    ENetHost* h;
+    ENetAddress addr;
+    ENetPeer* peer;
+    ENetEvent ev;
+    TestPacket pkt;
+    int ms;
+    bool sent = false;
+
+    if (enet_initialize() != 0) {
+        return 1;
+    }
+    h = enet_host_create(NULL, 1, 3, 0, 0);
+    enet_address_set_host(&addr, "127.0.0.1");
+    addr.port = (enet_uint16)port;
+    peer = h != NULL ? enet_host_connect(h, &addr, 3, 0) : NULL;
+    if (peer == NULL) {
+        return 1;
+    }
+    for (ms = 0; ms < 9000; ms += 10) {
+        while (enet_host_service(h, &ev, 10) > 0) {
+            if (ev.type == ENET_EVENT_TYPE_CONNECT && !sent) {
+                pkt.type = TEST_TYPE;
+                pkt.field_4 = 0xBAD;
+                enet_peer_send(peer, 0, enet_packet_create(&pkt, sizeof(pkt), ENET_PACKET_FLAG_RELIABLE));
+                enet_host_flush(h);
+                sent = true;
+            } else if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                enet_packet_destroy(ev.packet);
+            } else if (ev.type == ENET_EVENT_TYPE_DISCONNECT) {
+                printf("rawpeer: disconnected by host after %d ms\n", ms);
+                enet_host_destroy(h);
+                return sent ? 0 : 1;
+            }
+        }
+    }
+    fprintf(stderr, "rawpeer: never disconnected\n");
+    return 1;
+}
+
+static int run_gate_host(int port)
+{
+    int ms;
+
+    tig_net_configure_host(port);
+    g_received = 0;
+    g_peer_connected = 0;
+    if (tig_net_start_client() != TIG_OK || !tig_net_is_host()) {
+        fprintf(stderr, "gate host: start failed\n");
+        return 1;
+    }
+    for (ms = 0; ms < 9000; ms++) {
+        tig_net_pump();
+        usleep(1000);
+    }
+    tig_net_reset_connection();
+    if (g_received != 0 || g_peer_connected != 1) {
+        /* 1 = our own hosting CONNECT; the raw peer must not count. */
+        fprintf(stderr, "gate host: pre-handshake traffic leaked (recv=%d connects=%d)\n",
+            g_received, g_peer_connected);
+        return 1;
+    }
+    printf("gate host: un-handshaken peer got no app delivery, no CONNECT event\n");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc >= 3 && strcmp(argv[1], "--rawpeer") == 0) {
+        return run_rawpeer(atoi(argv[2]));
+    }
     if (argc >= 2 && strcmp(argv[1], "--client") == 0) {
         const char* host = argc >= 3 ? argv[2] : "127.0.0.1";
         int port = argc >= 4 ? atoi(argv[3]) : TIG_NET_DEFAULT_PORT;
@@ -233,6 +308,27 @@ int main(int argc, char** argv)
             return 1;
         }
         printf("PASS: host/client connect, slot assign, packet round-trip\n");
+
+        snprintf(port_str, sizeof(port_str), "%d", port + 1);
+        child = fork();
+        if (child < 0) {
+            perror("fork");
+            return 1;
+        }
+        if (child == 0) {
+            usleep(400000);
+            execl(self, self, "--rawpeer", port_str, (char*)NULL);
+            _exit(1);
+        }
+        if (run_gate_host(port + 1) != 0) {
+            return 1;
+        }
+        waitpid(child, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "rawpeer child failed status=%d\n", status);
+            return 1;
+        }
+        printf("PASS: handshake gate + timeout\n");
         return 0;
     }
 }

@@ -355,7 +355,10 @@ bool coop_lite_obj_req_valid(const PacketCoopObjReq* pkt, int size);
  */
 #define COOP_CHAR_CHUNK 1024
 #define COOP_CHAR_WIRE_MAX (64 * 1024)
-#define COOP_CHAR_MAX_ITEMS 64
+/* Review PT24 #12: the one item cap for a client character (bundle builder,
+   host parser and plausibility agree; was 64 here vs 1024 in the builder,
+   so a >64-item character silently fell back to a proto offer). */
+#define COOP_CHAR_MAX_ITEMS 256
 #define COOP_CHAR_MAX_LEVEL 51 /* stat.c: STAT_LEVEL max */
 
 typedef struct PacketCoopCharChunk {
@@ -787,6 +790,8 @@ void coop_lite_notify_host_teleported(int map, int64_t loc);
 void coop_lite_local_teleport_finished(void);
 /* PT23 dev: pregen to auto-start after a dev "menu" trigger (0 = none). */
 int coop_lite_take_dev_autostart_rearm(void);
+/* Cached env read; ARCANUM_DEV_* only with ARCANUM_DEV=1 (review PT24). */
+const char* coop_lite_env(const char* name);
 
 /* Dispatch helper for PACKET_COOP_FOLLOW_HOST (from multiplayer_handle_message). */
 void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt);

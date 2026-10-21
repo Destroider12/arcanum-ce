@@ -6,6 +6,53 @@
 
 #include "net/tig_net.h"
 
+/*
+ * Review PT24 #6: every coop env knob goes through here. Values are read
+ * once and cached (nothing in the game calls setenv), and ARCANUM_DEV_*
+ * switches - some of them change host rolls - are ignored unless the
+ * player explicitly opted in with ARCANUM_DEV=1.
+ */
+const char* coop_lite_env(const char* name)
+{
+    static struct {
+        const char* name;
+        const char* value;
+    } cache[64];
+    static int cached;
+    static int dev = -1;
+    static bool dev_warned;
+    const char* value;
+    int i;
+
+    if (name == NULL) {
+        return NULL;
+    }
+    if (dev < 0) {
+        const char* d = getenv("ARCANUM_DEV");
+
+        dev = d != NULL && d[0] == '1';
+    }
+    for (i = 0; i < cached; i++) {
+        if (strcmp(cache[i].name, name) == 0) {
+            return cache[i].value;
+        }
+    }
+    value = getenv(name);
+    if (value != NULL && !dev && strncmp(name, "ARCANUM_DEV_", 12) == 0) {
+        if (!dev_warned) {
+            dev_warned = true;
+            fprintf(stderr, "CoopLite: %s ignored - dev switches need ARCANUM_DEV=1\n", name);
+        }
+        value = NULL;
+    }
+    if (cached < (int)(sizeof(cache) / sizeof(cache[0]))) {
+        cache[cached].name = name;
+        cache[cached].value = value;
+        cached++;
+    }
+    return value;
+}
+
 #ifdef COOP_LITE_TEST_STUBS
 #include <stdio.h>
 #include <stdint.h>
@@ -191,7 +238,8 @@ static bool coop_lite_build_char_bundle(int64_t pc, CoopCharBundleBuf* out)
     bool ok;
 
     count = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
-    if (count < 0 || count + 1 > COOP_CHAR_BUNDLE_MAX_OBJECTS) {
+    if (count < 0 || count > COOP_CHAR_MAX_ITEMS || count + 1 > COOP_CHAR_BUNDLE_MAX_OBJECTS) {
+        tig_debug_printf("CoopLite: character bundle not built: %d items (max %d)\n", count, COOP_CHAR_MAX_ITEMS);
         return false;
     }
     if (!coop_char_bundle_begin(&buf, count + 1)) {
@@ -1572,7 +1620,7 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
     {
         /* Dev: a custom stat ("STAT:VALUE", e.g. "0:15") to see it carry
            over, or an absurd one to see the host refuse the bundle. */
-        const char* env = getenv("ARCANUM_DEV_OFFER_STAT");
+        const char* env = coop_lite_env("ARCANUM_DEV_OFFER_STAT");
         int stat;
         int value;
         int n;
@@ -1604,7 +1652,7 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
             env++;
         }
     }
-    if (getenv("ARCANUM_COOP_NO_CHAR_BUNDLE") != NULL && getenv("ARCANUM_COOP_NO_CHAR_BUNDLE")[0] == '1') {
+    if (coop_lite_env("ARCANUM_COOP_NO_CHAR_BUNDLE") != NULL && coop_lite_env("ARCANUM_COOP_NO_CHAR_BUNDLE")[0] == '1') {
         tig_debug_printf("CoopLite: v2 offer: disabled (ARCANUM_COOP_NO_CHAR_BUNDLE)\n");
         return;
     }
@@ -2554,6 +2602,20 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
                 level_xp_required(stat_base_get(pc, STAT_LEVEL)));
             ok = false;
         }
+        if (ok) {
+            /* Review PT24 #3: names are strcpy'd into 128-byte buffers by
+               object_examine; chargen allows far less. */
+            char* pname = NULL;
+
+            obj_field_string_get(pc, OBJ_F_PC_PLAYER_NAME, &pname);
+            if (pname != NULL && strlen(pname) >= 64) {
+                tig_debug_printf("CoopLite: v2 offer: slot %d bad player name length\n", slot);
+                ok = false;
+            }
+            if (pname != NULL) {
+                FREE(pname);
+            }
+        }
         if (!ok) {
             tig_debug_printf("CoopLite: v2 offer: slot %d character implausible (level %d, xp %d)\n",
                 slot, stat_level_get(pc, STAT_LEVEL), stat_level_get(pc, STAT_EXPERIENCE_POINTS));
@@ -3281,7 +3343,7 @@ static unsigned int coop_dev_inven_dump_ms;
 
 static void coop_lite_dev_inven_dump_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_INVEN_DUMP");
+    const char* env = coop_lite_env("ARCANUM_DEV_INVEN_DUMP");
     int secs;
     int slot;
 
@@ -3311,7 +3373,7 @@ void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index))
 
 static void coop_lite_dev_grant_resurrect(int slot, int64_t pc)
 {
-    const char* env = getenv("ARCANUM_DEV_GRANT_RESURRECT");
+    const char* env = coop_lite_env("ARCANUM_DEV_GRANT_RESURRECT");
     ObjectID oid;
 
     if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL || slot < 0 || slot >= 8) {
@@ -3358,7 +3420,7 @@ static bool coop_dev_pp_granted_valid[8];
 
 static void coop_lite_dev_grant_pickpocket(int slot, int64_t pc)
 {
-    const char* env = getenv("ARCANUM_DEV_GRANT_PICKPOCKET");
+    const char* env = coop_lite_env("ARCANUM_DEV_GRANT_PICKPOCKET");
     ObjectID oid;
     int points;
 
@@ -3398,7 +3460,7 @@ static void coop_lite_dev_tick(unsigned int now_ms)
     int64_t loc;
 
     if (!coop_dev_start_done) {
-        env = getenv("ARCANUM_DEV_START_LOC");
+        env = coop_lite_env("ARCANUM_DEV_START_LOC");
         if (env == NULL || env[0] == '\0') {
             coop_dev_start_done = true;
         } else if (coop_dev_start_ms == 0) {
@@ -3444,7 +3506,7 @@ static void coop_lite_dev_tick(unsigned int now_ms)
     }
 
     if (!coop_dev_save_done && sub_4A2B60(1) != OBJ_HANDLE_NULL) {
-        env = getenv("ARCANUM_DEV_COOP_SAVE");
+        env = coop_lite_env("ARCANUM_DEV_COOP_SAVE");
         if (env == NULL || env[0] != '1') {
             coop_dev_save_done = true;
         } else if (coop_dev_save_ms == 0) {
@@ -3459,7 +3521,7 @@ static void coop_lite_dev_tick(unsigned int now_ms)
            dev save, load it back (the party-reload path, whoever is
            connected then). */
         static bool coop_dev_load_done;
-        const char* load_env = getenv("ARCANUM_DEV_COOP_LOAD");
+        const char* load_env = coop_lite_env("ARCANUM_DEV_COOP_LOAD");
 
         if (!coop_dev_load_done && coop_dev_save_done && coop_dev_save_ms != 0
             && load_env != NULL && atoi(load_env) > 0
@@ -3476,7 +3538,7 @@ static void coop_lite_dev_tick(unsigned int now_ms)
         }
     }
 
-    env = getenv("ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT");
+    env = coop_lite_env("ARCANUM_DEV_SPAWN_HOSTILE_NEAR_CLIENT");
     if (env == NULL || (env[0] != '1' && env[0] != '2' && env[0] != '3')) {
         return;
     }
@@ -3564,7 +3626,7 @@ static void coop_lite_client_dev_combat_tick(unsigned int now_ms)
     if (coop_dev_combat_stage >= 2) {
         return;
     }
-    env = getenv("ARCANUM_DEV_CLIENT_COMBAT");
+    env = coop_lite_env("ARCANUM_DEV_CLIENT_COMBAT");
     if (env == NULL || env[0] != '1' || pc == OBJ_HANDLE_NULL) {
         return;
     }
@@ -3637,7 +3699,7 @@ static void coop_lite_client_dev_items_tick(unsigned int now_ms)
     if (coop_dev_items_stage >= 5) {
         return;
     }
-    env = getenv("ARCANUM_DEV_CLIENT_ITEMS");
+    env = coop_lite_env("ARCANUM_DEV_CLIENT_ITEMS");
     if (env == NULL || (env[0] != '1' && env[0] != '2') || pc == OBJ_HANDLE_NULL) {
         coop_dev_items_stage = env == NULL || (env[0] != '1' && env[0] != '2') ? 5 : coop_dev_items_stage;
         return;
@@ -3738,7 +3800,7 @@ static void coop_lite_dev_export_tick(unsigned int now_ms)
     if (coop_dev_export_done) {
         return;
     }
-    env = getenv("ARCANUM_DEV_EXPORT_CHAR");
+    env = coop_lite_env("ARCANUM_DEV_EXPORT_CHAR");
     if (env == NULL || env[0] != '1') {
         coop_dev_export_done = true;
         return;
@@ -3800,7 +3862,7 @@ static void coop_lite_host_dev_far_tick(unsigned int now_ms)
     if (coop_dev_far_stage >= 3) {
         return;
     }
-    env = getenv("ARCANUM_DEV_TELEPORT_CLIENT_FAR");
+    env = coop_lite_env("ARCANUM_DEV_TELEPORT_CLIENT_FAR");
     if (env == NULL || env[0] == '\0' || env[0] == '0') {
         coop_dev_far_stage = 3;
         return;
@@ -5914,7 +5976,7 @@ void coop_lite_mark_player_drop(int64_t item)
 {
     /* PT18 (user decision + Argon #3 pt 3): vanilla again — NPCs may take
        what players drop. Only the dev item tests keep their piles. */
-    if (getenv("ARCANUM_DEV_GOLD_PILE") == NULL && getenv("ARCANUM_DEV_CLIENT_ITEMS") == NULL) {
+    if (coop_lite_env("ARCANUM_DEV_GOLD_PILE") == NULL && coop_lite_env("ARCANUM_DEV_CLIENT_ITEMS") == NULL) {
         return;
     }
     if (item == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled()
@@ -6389,7 +6451,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                 e->inventory_location = item_inventory_location_get(items[idx]);
                 e->item_flags = (unsigned int)obj_field_int32_get(items[idx], OBJ_F_ITEM_FLAGS);
                 coop_lite_fill_item_state(e, items[idx]);
-                if (getenv("ARCANUM_DEV_INVEN_TRACE") != NULL) {
+                if (coop_lite_env("ARCANUM_DEV_INVEN_TRACE") != NULL) {
                     char oid_str[40];
 
                     objid_id_to_str(oid_str, obj_get_id(items[idx]));
@@ -6509,7 +6571,7 @@ static bool coop_dev_give_done[8];
 
 static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_CLIENT_ITEMS");
+    const char* env = coop_lite_env("ARCANUM_DEV_CLIENT_ITEMS");
     int slot;
 
     if (env == NULL || env[0] != '1') {
@@ -6868,7 +6930,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         if (!from_target) {
             si.flags |= SKILL_INVOCATION_0x02; /* plant */
         }
-        if (getenv("ARCANUM_DEV_STEAL_FORCE") != NULL) {
+        if (coop_lite_env("ARCANUM_DEV_STEAL_FORCE") != NULL) {
             si.flags |= SKILL_INVOCATION_FORCED; /* dev: test the success path */
         }
         skill_invocation_run(&si);
@@ -6889,7 +6951,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         si.skill = SKILL_PICK_POCKET;
         effectiveness = basic_skill_effectiveness(pc, BASIC_SKILL_PICK_POCKET, target);
         difficulty = skill_invocation_difficulty(&si);
-        if (difficulty + random_between(1, 100) <= effectiveness || getenv("ARCANUM_DEV_STEAL_FORCE") != NULL) {
+        if (difficulty + random_between(1, 100) <= effectiveness || coop_lite_env("ARCANUM_DEV_STEAL_FORCE") != NULL) {
             int t = obj_field_int32_get(item, OBJ_F_TYPE);
 
             if (t == OBJ_TYPE_GOLD) {
@@ -7238,7 +7300,7 @@ static void coop_lite_obj_pending_reset(void)
 
 static bool coop_lite_obj_blobs_enabled(void)
 {
-    const char* env = getenv("ARCANUM_COOP_NO_OBJ_BLOB");
+    const char* env = coop_lite_env("ARCANUM_COOP_NO_OBJ_BLOB");
 
     return env == NULL || env[0] != '1';
 }
@@ -8449,7 +8511,7 @@ static bool coop_dev_dropbox_done;
 
 static void coop_lite_client_dev_open_inven_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_OPEN_INVEN");
+    const char* env = coop_lite_env("ARCANUM_DEV_OPEN_INVEN");
     int64_t pc = player_get_local_pc_obj();
 
     if (env == NULL || (env[0] != '1' && env[0] != '2' && env[0] != '3') || pc == OBJ_HANDLE_NULL) {
@@ -8524,7 +8586,7 @@ static bool coop_dev_step_done;
 
 static void coop_lite_client_dev_step_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_CLIENT_STEP");
+    const char* env = coop_lite_env("ARCANUM_DEV_CLIENT_STEP");
     int64_t pc = player_get_local_pc_obj();
     int64_t loc;
 
@@ -8562,7 +8624,7 @@ void coop_lite_client_dev_barter_tick(unsigned int now_ms)
     if (coop_dev_barter_stage >= 4) {
         return;
     }
-    env = getenv("ARCANUM_DEV_CLIENT_BARTER");
+    env = coop_lite_env("ARCANUM_DEV_CLIENT_BARTER");
     if (env == NULL || env[0] != '1') {
         coop_dev_barter_stage = 4;
         return;
@@ -9439,7 +9501,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
                 }
                 e->kind_flags = coop_lite_is_stackable(obj) ? 1u : 0u;
                 n_item++;
-                if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+                if (coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL) {
                     char oid_str[80];
 
                     objid_id_to_str(oid_str, oid);
@@ -9457,7 +9519,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     coop_lite_world_flush(out, slot, true, &first);
     FREE(out);
     coop_lite_host_world_ground_report(slot, center, key);
-    if (coop_dev_mutate_dagger_valid && getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+    if (coop_dev_mutate_dagger_valid && coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL) {
         int64_t d = obj_pool_perm_lookup(coop_dev_mutate_dagger);
         int64_t parent = OBJ_HANDLE_NULL;
 
@@ -9628,7 +9690,7 @@ static int coop_lite_world_prune(void)
         } while (obj_inst_next(&obj, &iter));
     }
     for (i = 0; i < num; i++) {
-        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+        if (coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL) {
             char oid_str[80];
             int64_t l = obj_field_int64_get(doomed[i], OBJ_F_LOCATION);
 
@@ -9679,14 +9741,14 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
     if ((pkt->flags & COOP_WORLD_F_LAST) != 0) {
         int pruned = coop_lite_world_prune();
 
-        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL && player_get_local_pc_obj() != OBJ_HANDLE_NULL) {
+        if (coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL && player_get_local_pc_obj() != OBJ_HANDLE_NULL) {
             int64_t l = obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION);
 
             tig_debug_printf("CoopLite: world trace: local PC at %d,%d\n",
                 (int)LOCATION_GET_X(l), (int)LOCATION_GET_Y(l));
         }
 
-        if (getenv("ARCANUM_COOP_WORLD_TRACE") != NULL) {
+        if (coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL) {
             int64_t pc = player_get_local_pc_obj();
             int64_t obj;
             int iter;
@@ -9767,7 +9829,7 @@ static void coop_lite_client_world_req_tick(unsigned int now_ms)
     PacketCoopWorldReq req;
     int key;
 
-    if (getenv("ARCANUM_COOP_NO_WORLD_STATE") != NULL) {
+    if (coop_lite_env("ARCANUM_COOP_NO_WORLD_STATE") != NULL) {
         return;
     }
     key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
@@ -9809,7 +9871,7 @@ static void coop_lite_dev_log_obj(const char* what, int64_t obj)
 
 static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_WORLD_MUTATE");
+    const char* env = coop_lite_env("ARCANUM_DEV_WORLD_MUTATE");
     int64_t pc = player_get_local_pc_obj();
     int64_t center;
     int64_t obj;
@@ -10066,7 +10128,7 @@ static bool coop_dev_kill_done[8];
 
 static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_KILL_CLIENT");
+    const char* env = coop_lite_env("ARCANUM_DEV_KILL_CLIENT");
     int secs;
     int slot;
 
@@ -10395,7 +10457,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
                 anim_goal_attack(pc, target) ? "goal started" : "goal refused");
             return true;
         }
-        if (strncmp(arg, "direct:", 7) == 0 || getenv("ARCANUM_DEV_ATTACK_DIRECT") != NULL) {
+        if (strncmp(arg, "direct:", 7) == 0 || coop_lite_env("ARCANUM_DEV_ATTACK_DIRECT") != NULL) {
             /* PT23: what intgame's coop branch does for an attack click. */
             tig_debug_printf("CoopLite: dev attack: direct on '%s' (dist %d)\n", name,
                 (int)object_dist(pc, target));
@@ -10626,7 +10688,7 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
     char arg[64];
     int slot;
 
-    env = getenv("ARCANUM_DEV_LIST_NEAR");
+    env = coop_lite_env("ARCANUM_DEV_LIST_NEAR");
     if (!coop_dev_list_done && env != NULL && env[0] != '\0') {
         if (coop_dev_list_ms == 0) {
             coop_dev_list_ms = now_ms != 0 ? now_ms : 1;
@@ -10637,7 +10699,7 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
         }
     }
 
-    env = getenv("ARCANUM_DEV_TRIGGER");
+    env = coop_lite_env("ARCANUM_DEV_TRIGGER");
     if (env == NULL || env[0] == '\0' || !coop_lite_interval_elapsed(coop_dev_trigger_ms, now_ms, 500u)) {
         return;
     }
@@ -10699,7 +10761,7 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
 
 void coop_lite_client_dev_loot_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_CLIENT_LOOT");
+    const char* env = coop_lite_env("ARCANUM_DEV_CLIENT_LOOT");
     int64_t pc = player_get_local_pc_obj();
     int64_t target;
     char name[128];
@@ -10813,7 +10875,7 @@ static bool coop_dev_gold_done[8];
 
 static void coop_lite_host_dev_gold_pile_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_GOLD_PILE");
+    const char* env = coop_lite_env("ARCANUM_DEV_GOLD_PILE");
     int slot;
 
     if (env == NULL || atoi(env) <= 0) {
@@ -10956,7 +11018,7 @@ static const char* coop_lite_dev_ui_click(int64_t obj)
  */
 static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_GOLD_PILE");
+    const char* env = coop_lite_env("ARCANUM_DEV_GOLD_PILE");
     int64_t pc = player_get_local_pc_obj();
     int64_t pile;
     int64_t weapon;
@@ -11082,7 +11144,7 @@ static int coop_dev_res_ui_stage[8];
 
 static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
 {
-    const char* env = getenv("ARCANUM_DEV_AUTO_RESURRECT");
+    const char* env = coop_lite_env("ARCANUM_DEV_AUTO_RESURRECT");
     int64_t caster = player_get_local_pc_obj();
     int secs;
     int slot;

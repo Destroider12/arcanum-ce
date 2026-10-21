@@ -14,6 +14,25 @@ Runtime testing is currently impossible: game data is not on this box. A clean
 **Steam** install archive is expected soon; ReForged will be installed from that
 (see §4.0 Steam vs GOG).
 
+**Trust model (explicit, PT24).** Coop Lite is a mod for a group of friends
+playing together, not a public server. The host trusts its clients' *intent*
+the way a tabletop group trusts its players: checks exist to keep honest
+desyncs, stale packets, mismatched builds and crashes from corrupting the
+host's world (bounds, ownership, protocol, handshake, plausibility), not to
+stop a determined cheater with a patched client. Anti-cheat work beyond
+that (full object/script sanitising of an uploaded character, per-slot rate
+limiting, authenticated sessions) is deliberately out of scope; do not
+expose a Coop Lite host to strangers on the Internet.
+
+**Wire (protocol 22, PT24).** The client's first packet on the reliable app
+channel is HELLO (name + protocol); ENet orders it before CHAR_OFFER etc. on
+that channel. The host drops app packets from a slot until a valid HELLO,
+fires the game's CONNECT for the slot only then, and disconnects a peer that
+sends none within 5 s. Packet struct sizes are pinned with `_Static_assert`
+(mp_utils.c, tig_net.c). Dev env switches (`ARCANUM_DEV_*`) are ignored unless
+`ARCANUM_DEV=1`; env reads are cached (`coop_lite_env`). `-coop/-host/-join`
+are matched as whole argv tokens. Logging: `-log <file>` or `ARCANUM_LOG_FILE`.
+
 ---
 
 ## 1. What network / multiplayer code exists in arcanum-ce

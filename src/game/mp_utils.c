@@ -529,6 +529,9 @@ void mp_handle_gsound_play_scheme(PacketPlaySound* pkt)
     }
 }
 
+/* A click-to-move is at most a screen or two away. */
+#define MP_PACKET4_MAX_TILES 128
+
 // 0x4EF320 - Packet4: client move intent → host resolves into real anim goals.
 void mp_handle_packet4(Packet4* pkt)
 {
@@ -546,6 +549,20 @@ void mp_handle_packet4(Packet4* pkt)
     if (!coop_lite_sender_owns_obj(obj)) {
         tig_debug_printf("MP: Packet4 from slot %d for an object it does not own — dropped\n", sub_52A530());
         return;
+    }
+    /* Review PT24 #5: a sane destination for a living mover only (the
+       pathfinder still decides walkability). */
+    {
+        int64_t lim_x;
+        int64_t lim_y;
+
+        location_limits_get(&lim_x, &lim_y);
+        if (critter_is_dead(obj)
+            || (int64_t)LOCATION_GET_X(pkt->loc) >= lim_x || (int64_t)LOCATION_GET_Y(pkt->loc) >= lim_y
+            || location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), pkt->loc) > MP_PACKET4_MAX_TILES) {
+            tig_debug_printf("MP: Packet4 from slot %d refused (dead or bad/far destination)\n", sub_52A530());
+            return;
+        }
     }
 
     switch (pkt->subtype) {
@@ -730,6 +747,9 @@ void mp_handle_packet29(Packet29* pkt)
 #define MP_DEFERRED_PACKET70_MAX 64
 static Packet70 mp_deferred_packet70[MP_DEFERRED_PACKET70_MAX];
 static int mp_deferred_packet70_count;
+/* Review PT24 #11: overflow drops are counted (logged first + every 64th
+   and on replay) instead of one line per packet. */
+static int mp_deferred_packet70_dropped;
 
 int mp_deferred_packet70_pending(void)
 {
@@ -739,6 +759,7 @@ int mp_deferred_packet70_pending(void)
 void mp_clear_deferred_packet70(void)
 {
     mp_deferred_packet70_count = 0;
+    mp_deferred_packet70_dropped = 0;
 }
 
 void mp_flush_deferred_packet70(void)
@@ -749,8 +770,10 @@ void mp_flush_deferred_packet70(void)
     count = mp_deferred_packet70_count;
     mp_deferred_packet70_count = 0;
     if (count > 0) {
-        tig_debug_printf("MP: replaying %d deferred Packet70\n", count);
+        tig_debug_printf("MP: replaying %d deferred Packet70 (%d dropped on overflow)\n",
+            count, mp_deferred_packet70_dropped);
     }
+    mp_deferred_packet70_dropped = 0;
     for (index = 0; index < count; index++) {
         mp_handle_packet70(&(mp_deferred_packet70[index]));
     }
@@ -773,7 +796,10 @@ void mp_handle_packet70(Packet70* pkt)
             tig_debug_printf("MP: Packet70 deferred (client waiting for session sync) subtype=%d name=%d\n",
                 pkt->subtype, pkt->subtype == 0 ? pkt->s0.name : -1);
         } else {
-            tig_debug_printf("MP: Packet70 dropped — deferred queue full\n");
+            if (mp_deferred_packet70_dropped++ % 64 == 0) {
+                tig_debug_printf("MP: Packet70 dropped — deferred queue full (%d dropped so far)\n",
+                    mp_deferred_packet70_dropped);
+            }
         }
         return;
     }
@@ -1196,3 +1222,83 @@ void sub_4F0690(ObjectID oid, int64_t* obj_ptr)
         *obj_ptr = OBJ_HANDLE_NULL;
     }
 }
+
+/*
+ * Review PT24 #9: packets go on the wire as raw structs. Pin their sizes
+ * (GCC x86-64 Linux == MinGW-w64, which uses the MS layout, so MSVC builds
+ * should agree); a mismatch here means a layout change -> bump
+ * TIG_NET_PROTOCOL and update the number.
+ */
+_Static_assert(sizeof(Packet10) == 64, "Packet10 wire layout");
+_Static_assert(sizeof(Packet100) == 64, "Packet100 wire layout");
+_Static_assert(sizeof(Packet104) == 32, "Packet104 wire layout");
+_Static_assert(sizeof(Packet118) == 56, "Packet118 wire layout");
+_Static_assert(sizeof(Packet121) == 40, "Packet121 wire layout");
+_Static_assert(sizeof(Packet122) == 32, "Packet122 wire layout");
+_Static_assert(sizeof(Packet123) == 20, "Packet123 wire layout");
+_Static_assert(sizeof(Packet128) == 56, "Packet128 wire layout");
+_Static_assert(sizeof(Packet26) == 40, "Packet26 wire layout");
+_Static_assert(sizeof(Packet27) == 40, "Packet27 wire layout");
+_Static_assert(sizeof(Packet28) == 64, "Packet28 wire layout");
+_Static_assert(sizeof(Packet29) == 32, "Packet29 wire layout");
+_Static_assert(sizeof(Packet4) == 40, "Packet4 wire layout");
+_Static_assert(sizeof(Packet46) == 32, "Packet46 wire layout");
+_Static_assert(sizeof(Packet5) == 424, "Packet5 wire layout");
+_Static_assert(sizeof(Packet54) == 8, "Packet54 wire layout");
+_Static_assert(sizeof(Packet6) == 120, "Packet6 wire layout");
+_Static_assert(sizeof(Packet64) == 288, "Packet64 wire layout");
+_Static_assert(sizeof(Packet67) == 8, "Packet67 wire layout");
+_Static_assert(sizeof(Packet7) == 408, "Packet7 wire layout");
+_Static_assert(sizeof(Packet70) == 104, "Packet70 wire layout");
+_Static_assert(sizeof(Packet74) == 64, "Packet74 wire layout");
+_Static_assert(sizeof(Packet76) == 48, "Packet76 wire layout");
+_Static_assert(sizeof(Packet8) == 80, "Packet8 wire layout");
+_Static_assert(sizeof(Packet80) == 64, "Packet80 wire layout");
+_Static_assert(sizeof(Packet81) == 184, "Packet81 wire layout");
+_Static_assert(sizeof(Packet82) == 88, "Packet82 wire layout");
+_Static_assert(sizeof(Packet83) == 140, "Packet83 wire layout");
+_Static_assert(sizeof(Packet84) == 48, "Packet84 wire layout");
+_Static_assert(sizeof(Packet9) == 104, "Packet9 wire layout");
+_Static_assert(sizeof(Packet92) == 40, "Packet92 wire layout");
+_Static_assert(sizeof(Packet93) == 40, "Packet93 wire layout");
+_Static_assert(sizeof(Packet97) == 56, "Packet97 wire layout");
+_Static_assert(sizeof(Packet99) == 56, "Packet99 wire layout");
+_Static_assert(sizeof(PacketCombatModeSet) == 40, "PacketCombatModeSet wire layout");
+_Static_assert(sizeof(PacketCoopAttackIntent) == 56, "PacketCoopAttackIntent wire layout");
+_Static_assert(sizeof(PacketCoopBarter) == 56, "PacketCoopBarter wire layout");
+_Static_assert(sizeof(PacketCoopCharChunk) == 1040, "PacketCoopCharChunk wire layout");
+_Static_assert(sizeof(PacketCoopCharOffer) == 120, "PacketCoopCharOffer wire layout");
+_Static_assert(sizeof(PacketCoopFollowHost) == 24, "PacketCoopFollowHost wire layout");
+_Static_assert(sizeof(PacketCoopFollowerEntry) == 32, "PacketCoopFollowerEntry wire layout");
+_Static_assert(sizeof(PacketCoopFollowers) == 520, "PacketCoopFollowers wire layout");
+_Static_assert(sizeof(PacketCoopInvenEntry) == 56, "PacketCoopInvenEntry wire layout");
+_Static_assert(sizeof(PacketCoopInvenSync) == 3760, "PacketCoopInvenSync wire layout");
+_Static_assert(sizeof(PacketCoopNpcPos) == 904, "PacketCoopNpcPos wire layout");
+_Static_assert(sizeof(PacketCoopNpcPosEntry) == 56, "PacketCoopNpcPosEntry wire layout");
+_Static_assert(sizeof(PacketCoopObjBlob) == 8256, "PacketCoopObjBlob wire layout");
+_Static_assert(sizeof(PacketCoopObjReq) == 392, "PacketCoopObjReq wire layout");
+_Static_assert(sizeof(PacketCoopPartyState) == 24, "PacketCoopPartyState wire layout");
+_Static_assert(sizeof(PacketCoopPcPos) == 64, "PacketCoopPcPos wire layout");
+_Static_assert(sizeof(PacketCoopPcStats) == 444, "PacketCoopPcStats wire layout");
+_Static_assert(sizeof(PacketCoopRoster) == 112, "PacketCoopRoster wire layout");
+_Static_assert(sizeof(PacketCoopSessionSync) == 224, "PacketCoopSessionSync wire layout");
+_Static_assert(sizeof(PacketCoopWorldReq) == 8, "PacketCoopWorldReq wire layout");
+_Static_assert(sizeof(PacketCoopWorldState) == 4112, "PacketCoopWorldState wire layout");
+_Static_assert(sizeof(PacketGamePlayerList) == 200, "PacketGamePlayerList wire layout");
+_Static_assert(sizeof(PacketGameTime) == 24, "PacketGameTime wire layout");
+_Static_assert(sizeof(PacketMagicTechEyeCandy) == 40, "PacketMagicTechEyeCandy wire layout");
+_Static_assert(sizeof(PacketMagicTechObjFlag) == 120, "PacketMagicTechObjFlag wire layout");
+_Static_assert(sizeof(PacketMultiplayerFlagsChange) == 12, "PacketMultiplayerFlagsChange wire layout");
+_Static_assert(sizeof(PacketNotifyPlayerLagging) == 56, "PacketNotifyPlayerLagging wire layout");
+_Static_assert(sizeof(PacketNotifyPlayerRecovered) == 56, "PacketNotifyPlayerRecovered wire layout");
+_Static_assert(sizeof(PacketObjectDestroy) == 32, "PacketObjectDestroy wire layout");
+_Static_assert(sizeof(PacketPartyUpdate) == 36, "PacketPartyUpdate wire layout");
+_Static_assert(sizeof(PacketPerformIdentifyService) == 88, "PacketPerformIdentifyService wire layout");
+_Static_assert(sizeof(PacketPerformRepairService) == 88, "PacketPerformRepairService wire layout");
+_Static_assert(sizeof(PacketPlaySound) == 40, "PacketPlaySound wire layout");
+_Static_assert(sizeof(PacketPlayerCastSpell) == 232, "PacketPlayerCastSpell wire layout");
+_Static_assert(sizeof(PacketPlayerRequestCastSpell) == 232, "PacketPlayerRequestCastSpell wire layout");
+_Static_assert(sizeof(PacketPlayerSpellMaintainAdd) == 12, "PacketPlayerSpellMaintainAdd wire layout");
+_Static_assert(sizeof(PacketPlayerSpellMaintainEnd) == 12, "PacketPlayerSpellMaintainEnd wire layout");
+_Static_assert(sizeof(PacketSummon) == 224, "PacketSummon wire layout");
+_Static_assert(sizeof(PacketUpdateInven) == 32, "PacketUpdateInven wire layout");

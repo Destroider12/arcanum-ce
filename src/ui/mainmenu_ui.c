@@ -1857,7 +1857,7 @@ static void mainmenu_ui_dev_autostart_tick(void)
         rearm_idx = r;
     }
 
-    env = getenv("ARCANUM_DEV_AUTOSTART_PREGEN");
+    env = coop_lite_env("ARCANUM_DEV_AUTOSTART_PREGEN");
     if (env == NULL || *env == '\0') {
         done = true;
         return;

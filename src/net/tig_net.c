@@ -30,6 +30,13 @@ void tig_debug_printf(const char* fmt, ...)
 
 #define TIG_NET_CTRL_WELCOME 1
 #define TIG_NET_CTRL_NAME 2
+/* Review PT24 #1: the client's NAME/HELLO travels on the APP channel as its
+   very first app packet ("NAME" magic, outside the 0..255 app type range),
+   so ENet's per-channel ordering guarantees it precedes CHAR_OFFER etc.
+   The host drops app packets from a slot until a valid HELLO. */
+#define TIG_NET_APP_HELLO 0x454D414E
+#define TIG_NET_HANDSHAKE_TIMEOUT_MS 5000u
+#define TIG_NET_MAX_EVENTS_PER_PUMP 512
 
 typedef struct TigNetCtrlWelcome {
     int magic; /* TIG_NET_CTRL_WELCOME */
@@ -45,12 +52,17 @@ typedef struct TigNetCtrlName {
     int protocol; /* TIG_NET_PROTOCOL */
 } TigNetCtrlName;
 
+_Static_assert(sizeof(TigNetCtrlWelcome) == 16, "WELCOME wire layout");
+_Static_assert(sizeof(TigNetCtrlName) == 12 + TIG_NET_MAX_NAME, "NAME/HELLO wire layout");
+
 typedef struct TigNetClient {
     ENetPeer* peer;
     bool active;
     bool waiting;
     bool loading;
     bool refused; /* host: protocol mismatch, disconnect pending */
+    bool handshaken; /* host: valid HELLO (protocol) received */
+    unsigned int connect_ms; /* host: for the handshake timeout */
     char name[TIG_NET_MAX_NAME];
 } TigNetClient;
 
@@ -155,6 +167,8 @@ static void tig_net_clear_clients(void)
         clients[i].waiting = false;
         clients[i].loading = false;
         clients[i].refused = false;
+        clients[i].handshaken = false;
+        clients[i].connect_ms = 0;
         clients[i].name[0] = '\0';
     }
 }
@@ -208,9 +222,17 @@ static void tig_net_fire_event(int type, int client_id, void* data, int size)
 
 static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
 {
-    char copy[TIG_NET_MAX_PACKET];
+    /* Review PT24 #10: handlers cast packet structs onto this buffer, so
+       give it the strictest scalar alignment. */
+    union {
+        char bytes[TIG_NET_MAX_PACKET];
+        int64_t i64;
+        double d;
+        void* p;
+    } copy_buf;
+    char* copy = copy_buf.bytes;
 
-    if (size < sizeof(int) || size > sizeof(copy)) {
+    if (size < sizeof(int) || size > sizeof(copy_buf.bytes)) {
         tig_debug_printf("tig_net: dropping oversized/undersized app packet (%zu)\n", size);
         return;
     }
@@ -305,20 +327,11 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
         tig_debug_printf("tig_net: welcomed as slot %d\n", local_slot);
         tig_net_fire_event(TIG_NET_EVENT_CONNECT, local_slot, NULL, 0);
 
-        /* Tell host our name. */
-        if (!is_host && clients[0].peer != NULL) {
-            TigNetCtrlName name_pkt;
-            memset(&name_pkt, 0, sizeof(name_pkt));
-            name_pkt.magic = TIG_NET_CTRL_NAME;
-            name_pkt.slot = local_slot;
-            strncpy(name_pkt.name, local_name, TIG_NET_MAX_NAME - 1);
-            name_pkt.protocol = TIG_NET_PROTOCOL;
-            tig_net_send_ctrl_to_peer(clients[0].peer, &name_pkt, sizeof(name_pkt));
-        }
+        /* Our HELLO already went out on the app channel at CONNECT. */
         return;
     }
 
-    if (magic == TIG_NET_CTRL_NAME) {
+    if (magic == TIG_NET_CTRL_NAME || magic == TIG_NET_APP_HELLO) {
         TigNetCtrlName name_pkt;
 
         /* Host only; the slot is the authenticated sender, not the payload. */
@@ -344,10 +357,39 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
             }
             return;
         }
+        if (clients[from_slot].handshaken) {
+            return; /* duplicate */
+        }
         name_pkt.name[TIG_NET_MAX_NAME - 1] = '\0';
         strncpy(clients[from_slot].name, name_pkt.name, TIG_NET_MAX_NAME - 1);
         clients[from_slot].name[TIG_NET_MAX_NAME - 1] = '\0';
+        clients[from_slot].handshaken = true;
+        tig_debug_printf("tig_net: slot %d handshake ok (protocol %d)\n", from_slot, TIG_NET_PROTOCOL);
+        /* The game hears about the slot only now (player list, slot init). */
+        tig_net_fire_event(TIG_NET_EVENT_CONNECT, from_slot, NULL, 0);
     }
+}
+
+/* Client: first packet on the APP channel, sent the moment ENet connects. */
+static void tig_net_send_hello(ENetPeer* peer)
+{
+    TigNetCtrlName hello;
+    ENetPacket* packet;
+
+    memset(&hello, 0, sizeof(hello));
+    hello.magic = TIG_NET_APP_HELLO;
+    hello.slot = 0; /* the host uses the authenticated peer, not this */
+    strncpy(hello.name, local_name, TIG_NET_MAX_NAME - 1);
+    hello.protocol = TIG_NET_PROTOCOL;
+    packet = enet_packet_create(&hello, sizeof(hello), ENET_PACKET_FLAG_RELIABLE);
+    if (packet == NULL) {
+        return;
+    }
+    if (enet_peer_send(peer, TIG_NET_CHANNEL_APP, packet) != 0) {
+        enet_packet_destroy(packet);
+        return;
+    }
+    enet_host_flush(enet_host);
 }
 
 bool tig_net_welcome_slot_valid(int slot)
@@ -502,7 +544,13 @@ int tig_net_connect_configured(void)
         return TIG_ERR_GENERIC;
     }
 
-    enet_address_set_host(&address, join_host);
+    if (enet_address_set_host(&address, join_host) != 0) {
+        /* Review PT24 #2: unresolvable name - address.host is garbage. */
+        tig_debug_printf("tig_net: cannot resolve join host '%s'\n", join_host);
+        enet_host_destroy(enet_host);
+        enet_host = NULL;
+        return TIG_ERR_GENERIC;
+    }
     address.port = (enet_uint16)join_port;
 
     peer = enet_host_connect(enet_host, &address, TIG_NET_NUM_CHANNELS, 0);
@@ -531,6 +579,7 @@ int tig_net_connect_configured(void)
             tig_net_peer_set_slot(peer, 0);
             active = true;
             tig_debug_printf("tig_net: connected to %s:%d\n", join_host, join_port);
+            tig_net_send_hello(peer);
             /* Slot assignment arrives via WELCOME ctrl packet. */
             return TIG_OK;
         }
@@ -605,7 +654,11 @@ void tig_net_pump(void)
         return;
     }
 
-    while (enet_host_service(enet_host, &event, 0) > 0) {
+    /* Review PT24 #4: bounded work per frame; the rest stays queued in
+       ENet and is handled next frame. */
+    int budget = TIG_NET_MAX_EVENTS_PER_PUMP;
+
+    while (budget-- > 0 && enet_host != NULL && enet_host_service(enet_host, &event, 0) > 0) {
         switch (event.type) {
         case ENET_EVENT_TYPE_CONNECT:
             if (is_host) {
@@ -624,6 +677,9 @@ void tig_net_pump(void)
                 clients[slot].active = true;
                 clients[slot].waiting = false;
                 clients[slot].loading = false;
+                clients[slot].refused = false;
+                clients[slot].handshaken = false;
+                clients[slot].connect_ms = (unsigned int)enet_time_get();
                 snprintf(clients[slot].name, sizeof(clients[slot].name), "Player%d", slot);
 
                 memset(&welcome, 0, sizeof(welcome));
@@ -634,11 +690,11 @@ void tig_net_pump(void)
                 tig_net_send_ctrl_to_peer(event.peer, &welcome, sizeof(welcome));
                 enet_host_flush(enet_host);
 
-                tig_debug_printf("tig_net: client connected -> slot %d\n", slot);
-                tig_net_fire_event(TIG_NET_EVENT_CONNECT, slot, NULL, 0);
+                tig_debug_printf("tig_net: client connected -> slot %d (awaiting handshake)\n", slot);
             } else {
                 clients[0].peer = event.peer;
                 tig_net_peer_set_slot(event.peer, 0);
+                tig_net_send_hello(event.peer);
             }
             break;
 
@@ -649,8 +705,15 @@ void tig_net_pump(void)
                     /* Rejected / unassigned peer: drop everything it sends. */
                 } else if (event.channelID == TIG_NET_CHANNEL_CTRL) {
                     tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
+                } else if (is_host && from > 0
+                    && event.packet->dataLength >= sizeof(int)
+                    && *(const int*)event.packet->data == TIG_NET_APP_HELLO) {
+                    tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
                 } else if (is_host ? clients[from].refused : host_refused) {
                     /* Protocol mismatch: disconnect pending, drop it. */
+                } else if (is_host && from > 0 && !clients[from].handshaken) {
+                    /* No valid HELLO yet: app traffic is not accepted. */
+                    tig_debug_printf("tig_net: dropping app packet from slot %d before handshake\n", from);
                 } else if (!is_host && from != 0) {
                     /* Clients only accept app traffic from the host. */
                 } else if (is_host && from == 0) {
@@ -673,6 +736,7 @@ void tig_net_pump(void)
                 clients[slot].waiting = false;
                 clients[slot].loading = false;
                 clients[slot].refused = false;
+                clients[slot].handshaken = false;
                 clients[slot].name[0] = '\0';
                 tig_net_fire_event(TIG_NET_EVENT_DISCONNECT, slot, NULL, 0);
             }
@@ -689,6 +753,20 @@ void tig_net_pump(void)
         }
     }
 
+    if (is_host && enet_host != NULL) {
+        unsigned int now = (unsigned int)enet_time_get();
+        int i;
+
+        for (i = 1; i < max_players; i++) {
+            if (clients[i].peer != NULL && !clients[i].handshaken && !clients[i].refused
+                && now - clients[i].connect_ms > TIG_NET_HANDSHAKE_TIMEOUT_MS) {
+                tig_debug_printf("tig_net: slot %d sent no valid handshake in %u ms - disconnecting\n",
+                    i, TIG_NET_HANDSHAKE_TIMEOUT_MS);
+                clients[i].refused = true;
+                enet_peer_disconnect(clients[i].peer, 0);
+            }
+        }
+    }
     if (tig_net_send_pending_flush && enet_host != NULL) {
         enet_host_flush(enet_host);
         tig_net_send_pending_flush = false;
