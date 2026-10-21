@@ -378,6 +378,8 @@ void sub_456E00(int mt_id);
 void magictech_fx_add(int64_t obj, int fx);
 void magictech_fx_remove(int64_t obj, int fx);
 void mp_magictech_apply_invocation(MagicTechInvocation* mt_invocation);
+/* Rebuild an invocation's handles from its OIDs; false = drop it. */
+bool mp_magictech_resolve_invocation(MagicTechInvocation* mt_invocation);
 void mp_magictech_apply_eye_candy_ex(int subtype, ObjectID oid, int fx_id, int mt_id);
 void sub_456F70(int mt_id);
 void sub_456FA0(int mt_id, unsigned int flags);

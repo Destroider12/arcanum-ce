@@ -94,6 +94,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/invensource.h"
 #include "game/combat.h"
 #include "game/spell.h"
+#include "game/magictech.h"
 #include "game/tf.h"
 #include "game/gamelib.h"
 #include "game/stat.h"
@@ -944,6 +945,7 @@ static void coop_lite_client_world_req_tick(unsigned int now_ms);
 static void coop_lite_world_state_reset(void);
 static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms);
 static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms);
+static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_reset(void);
 #endif
@@ -3975,7 +3977,12 @@ static void coop_lite_host_watch_party(unsigned int now_ms)
             tf_add(pc, TF_TYPE_RED, str);
             tig_debug_printf("CoopLite: slot %d PC fell — corpse until resurrected\n", slot);
         } else if ((rose & (1u << slot)) != 0) {
-            tig_debug_printf("CoopLite: slot %d PC resurrected\n", slot);
+            /* PT17: the owner's client stands its PC up from these vitals
+               (coop_lite_client_watch_vitals), whatever its own copy of
+               the spell did; re-send them once the spell is done. */
+            object_hp_damage_set(pc, object_hp_damage_get(pc)); /* not locked: broadcasts */
+            tig_debug_printf("CoopLite: slot %d PC resurrected (hp damage %d, fatigue %d)\n", slot,
+                object_hp_damage_get(pc), critter_fatigue_damage_get(pc));
         }
     }
 
@@ -4528,6 +4535,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_give_weapon_tick(now_ms);
     coop_lite_host_dev_world_mutate_tick(now_ms);
     coop_lite_host_dev_kill_client_tick(now_ms);
+    coop_lite_host_dev_auto_resurrect_tick(now_ms);
     coop_lite_host_barter_watch(now_ms);
 
     {
@@ -8388,6 +8396,64 @@ static void coop_lite_host_dev_kill_client_tick(unsigned int now_ms)
         objid_id_to_str(oid_str, obj_get_id(pc));
         tig_debug_printf("CoopLite: dev: killing slot %d PC %s\n", slot, oid_str);
         critter_kill(pc);
+    }
+}
+
+/*
+ * PT17 dev: ARCANUM_DEV_AUTO_RESURRECT=N (host) — N s after a client PC is
+ * seen dead, the host PC casts Resurrect on it the way the spell UI does
+ * (spell_ui_apply: invocation from the caster, target the corpse).
+ */
+static unsigned int coop_dev_res_ms[8];
+static bool coop_dev_res_done[8];
+
+static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
+{
+    const char* env = getenv("ARCANUM_DEV_AUTO_RESURRECT");
+    int64_t caster = player_get_local_pc_obj();
+    int secs;
+    int slot;
+
+    if (env == NULL || env[0] == '\0' || caster == OBJ_HANDLE_NULL || critter_is_dead(caster)) {
+        return;
+    }
+    secs = atoi(env);
+    if (secs <= 0) {
+        secs = 5;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        MagicTechInvocation mt_invocation;
+
+        if (pc == OBJ_HANDLE_NULL || coop_dev_res_done[slot] || !critter_is_dead(pc)) {
+            coop_dev_res_ms[slot] = 0;
+            continue;
+        }
+        if (coop_dev_res_ms[slot] == 0) {
+            coop_dev_res_ms[slot] = now_ms != 0 ? now_ms : 1;
+            continue;
+        }
+        if (!coop_lite_interval_elapsed(coop_dev_res_ms[slot], now_ms, (unsigned int)secs * 1000u)) {
+            continue;
+        }
+        coop_dev_res_done[slot] = true;
+        magictech_invocation_init(&mt_invocation, caster, SPELL_RESURRECT);
+        sub_4440E0(pc, &(mt_invocation.target_obj));
+        if (strchr(env, 'f') != NULL) {
+            mt_invocation.flags |= MAGICTECH_INVOCATION_FREE; /* "5f": no fatigue cost */
+        }
+        tig_debug_printf("CoopLite: dev: host casts Resurrect on slot %d PC\n", slot);
+        magictech_invocation_run(&mt_invocation);
+        if (strchr(env, 'd') != NULL) {
+            /* "5d": a double click — a second cast right behind the first. */
+            MagicTechInvocation again;
+
+            magictech_invocation_init(&again, caster, SPELL_RESURRECT);
+            sub_4440E0(pc, &(again.target_obj));
+            again.flags = mt_invocation.flags;
+            tig_debug_printf("CoopLite: dev: host casts Resurrect again (double cast)\n");
+            magictech_invocation_run(&again);
+        }
     }
 }
 #endif

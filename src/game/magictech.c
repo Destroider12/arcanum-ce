@@ -1963,6 +1963,21 @@ void magictech_effect_summon(MagicTechSummonInfo* summon_info)
     sub_463630(obj);
 }
 
+/* Coop diagnostics: which process was running when another one was asked. */
+static void magictech_reentry_log(MagicTechRunInfo* run_info)
+{
+    MagicTechRunInfo* cur = NULL;
+
+    if (magictech_cur_id >= 0 && magictech_cur_id < 512) {
+        cur = &(magictech_run_info[magictech_cur_id]);
+    }
+    tig_debug_printf("MagicTech: re-entry: asked id %d action %d (spell %d), running id %d action %d (spell %d)\n",
+        run_info->id, run_info->action, run_info->spell,
+        magictech_cur_id,
+        cur != NULL ? cur->action : -1,
+        cur != NULL ? cur->spell : -1);
+}
+
 // 0x451070
 void sub_451070(MagicTechRunInfo* run_info)
 {
@@ -1970,6 +1985,7 @@ void sub_451070(MagicTechRunInfo* run_info)
         tig_debug_printf("\n\nMagicTech: ERROR: Process function is NOT Re-Entrant, Spell: %d (%s)!\n",
             run_info->spell,
             magictech_get_name(run_info->spell));
+        magictech_reentry_log(run_info);
         return;
     }
 
@@ -4664,10 +4680,47 @@ void magictech_invocation_init(MagicTechInvocation* mt_invocation, int64_t obj, 
     mt_invocation->flags = 0;
 }
 
+/*
+ * Coop (PT17): the same caster casting the same spell on the same target
+ * again while the first cast is still in its BEGIN phase (double click on
+ * the hotbar). The engine then gets the second cast's anim callback while
+ * the first one is processing and refuses it ("Process function is NOT
+ * Re-Entrant"), leaving a half-run spell behind. Drop the duplicate.
+ */
+static bool magictech_invocation_is_duplicate(const MagicTechInvocation* mt_invocation)
+{
+    int idx;
+
+    if (mt_invocation->source_obj.obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    for (idx = 0; idx < 512; idx++) {
+        const MagicTechRunInfo* r = &(magictech_run_info[idx]);
+
+        if ((r->flags & MAGICTECH_RUN_ACTIVE) != 0
+            && r->action == MAGICTECH_ACTION_BEGIN
+            && r->spell == mt_invocation->spell
+            && r->source_obj.obj == mt_invocation->source_obj.obj
+            && r->target_obj.obj == mt_invocation->target_obj.obj
+            && r->target_obj.obj != OBJ_HANDLE_NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x455AC0
 void magictech_invocation_run(MagicTechInvocation* mt_invocation)
 {
     if (magictech_editor) {
+        return;
+    }
+
+    if (tig_net_is_coop_enabled()
+        && (!tig_net_is_active() || tig_net_is_host())
+        && magictech_invocation_is_duplicate(mt_invocation)) {
+        tig_debug_printf("MagicTech: spell %d (%s) already being cast on that target by that caster — duplicate dropped\n",
+            mt_invocation->spell, magictech_get_name(mt_invocation->spell));
         return;
     }
 
@@ -5300,9 +5353,53 @@ void magictech_fx_remove(int64_t obj, int fx)
     }
 }
 
+/*
+ * Network invocations carry the sender's object handles, which mean nothing
+ * here (PT17: a host Resurrect crashed the client in the target check).
+ * Every handle is rebuilt from its OID (and location for static objects);
+ * a named object we do not have, or a destroyed one, drops the cast instead
+ * of letting magictech dereference a stale handle. The attacker is optional.
+ */
+static bool mp_invocation_resolve_one(FollowerInfo* fi, bool required, const char* what, int spell)
+{
+    int64_t obj = OBJ_HANDLE_NULL;
+    char oid_str[80];
+
+    if (fi->field_8.objid.type == OID_TYPE_NULL) {
+        fi->obj = OBJ_HANDLE_NULL;
+        return true;
+    }
+    if (!sub_443F80(&obj, &(fi->field_8))
+        || obj == OBJ_HANDLE_NULL
+        || !obj_handle_is_valid(obj)
+        || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+        objid_id_to_str(oid_str, fi->field_8.objid);
+        tig_debug_printf("MP: invocation spell %d: %s %s not found here%s\n",
+            spell, what, oid_str, required ? " — cast dropped" : " — ignored");
+        fi->obj = OBJ_HANDLE_NULL;
+        return !required;
+    }
+    fi->obj = obj;
+    return true;
+}
+
+bool mp_magictech_resolve_invocation(MagicTechInvocation* mt_invocation)
+{
+    if (mt_invocation == NULL
+        || mt_invocation->spell < 0 || mt_invocation->spell >= MT_SPELL_COUNT) {
+        tig_debug_printf("MP: invocation with bad spell %d dropped\n",
+            mt_invocation != NULL ? mt_invocation->spell : -1);
+        return false;
+    }
+    return mp_invocation_resolve_one(&(mt_invocation->source_obj), true, "source", mt_invocation->spell)
+        && mp_invocation_resolve_one(&(mt_invocation->parent_obj), true, "parent", mt_invocation->spell)
+        && mp_invocation_resolve_one(&(mt_invocation->target_obj), true, "target", mt_invocation->spell)
+        && mp_invocation_resolve_one(&(mt_invocation->attacker_obj), false, "attacker", mt_invocation->spell);
+}
+
 void mp_magictech_apply_invocation(MagicTechInvocation* mt_invocation)
 {
-    if (mt_invocation == NULL) {
+    if (mt_invocation == NULL || !mp_magictech_resolve_invocation(mt_invocation)) {
         return;
     }
     sub_455C30(mt_invocation);
@@ -5381,6 +5478,7 @@ void sub_457060(MagicTechRunInfo* run_info)
         tig_debug_printf("\n\nMagicTech: ERROR: Process function is NOT Re-Entrant, Spell: %d (%s)!\n",
             run_info->spell,
             magictech_get_name(run_info->spell));
+        magictech_reentry_log(run_info);
         return;
     }
 

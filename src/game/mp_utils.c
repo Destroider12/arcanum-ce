@@ -880,6 +880,10 @@ void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
             return;
         }
     }
+    /* PT17: the client's handles are its own; rebuild them from the OIDs. */
+    if (!mp_magictech_resolve_invocation(&pkt->invocation)) {
+        return;
+    }
     magictech_invocation_run(&pkt->invocation);
 }
 
