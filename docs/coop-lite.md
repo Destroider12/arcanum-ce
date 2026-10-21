@@ -1382,3 +1382,42 @@ Review #3, verified against the code:
 - Limit: if a ground stack's blob request times out, the fallback pile
   uses the proto quantity; pickup still goes through the host, so totals
   stay right.
+
+## 30. PT17b: ground pickups in the GUI, Packet9 echo, real-click dev hooks
+
+- Ground items vanished before a client could pick them back up. Cause:
+  vanilla NPC AI (`ai_look_for_item_func`, 1 in 100 per AI tick, any item
+  within perception) takes items lying around. In a shop the merchant took
+  the client's dropped lockpicks and gold on the host. The client's copy
+  stayed until the next world state (up to 10 s, then "1 pruned"), and a
+  click on it asked the host for an item an NPC now carried. Reproduced
+  headless (NPC picked up the dropped dagger and gold). Fixes:
+  - On the host, an item a PC drops (item_drop_ex, inven_ui gold/ammo
+    drop, coop Packet81 drop) gets `OIF_NO_NPC_PICKUP`, which vanilla AI
+    already honours. A PC pickup clears it again.
+  - When an item leaves the ground at the host through a pickup goal (an
+    NPC, the host's PC), Packet72 goes out at once: no clickable ghost.
+  - Host log: "ground item … left the ground: destroyed / now carried by
+    NPC|PC …" when a listed item drops out of a slot's world state, and
+    "Anim: coop: NPC … picked up ground item …".
+- The real click path itself was fine: a click on a ground item goes
+  intgame_process_event → sub_54ED30 → AG_PICKUP_ITEM (non-auto-attack
+  path) → client-local goal → sub_42AA70 → pickup request. Verified with
+  queued mouse messages. Coop sessions log one "Intgame: click: …" line per
+  object click (type, combat mode, chosen goal, why refused).
+- "Packet9 from slot 1 … does not own — dropped" (host log): the client,
+  applying the host's Resurrect (Packet58), interrupted the caster (host
+  PC) locally and asked the host to do the same. A coop client now never
+  sends Packet9 for a PC it does not drive.
+- inven_ui: the gold/ammo OID is mapped to the host's only on the copy
+  that is sent (the local part of the drop used the unmapped one; the log
+  named the item "Walls").
+- Dev hooks (real UI input: mouse down/up queued like SDL input):
+  - client `ARCANUM_DEV_GOLD_PILE=2` (host `=Noi`: pile 2 tiles off and a
+    dagger): click the pile, drop 10 gold, click the dagger, drop it, walk
+    6 tiles, click both back.
+  - host `ARCANUM_DEV_AUTO_RESURRECT=Nh`: click the Resurrect hotbar slot,
+    then the corpse. Spell mode armed (mode 1); one cast, no duplicate.
+- Hotbar quirk (slot click looted the corpse): not reproduced. A mouse
+  click on the slot and the "1" key both call intgame_hotkey_activate.
+  The dev click logs whether the button under the slot centre is the slot.
