@@ -11,6 +11,7 @@
 #include "game/magictech.h"
 #include "game/map.h"
 #include "game/monstergen.h"
+#include "game/multiplayer.h"
 #include "game/mt_ai.h"
 #include "game/mt_item.h"
 #include "game/obj.h"
@@ -103,6 +104,7 @@ static void sub_4AB2A0(int64_t a1, int64_t a2);
 static bool ai_should_flee(int64_t source_obj, int64_t target_obj);
 static int64_t ai_find_target(int64_t a1);
 static bool sub_4AB990(int64_t a1, int64_t a2);
+static int ai_check_kos_party(int64_t source_obj, int64_t target_obj);
 static void sub_4ABC20(Ai* ai);
 static bool sub_4ABC70(Ai* ai);
 static int sub_4ABE20(Ai* ai);
@@ -2009,7 +2011,7 @@ int64_t ai_find_target(int64_t critter_obj)
                     v1 = handles[idx];
                 }
 
-                if (ai_check_kos(critter_obj, handles[idx]) != AI_KOS_NO) {
+                if (ai_check_kos_party(critter_obj, handles[idx]) != AI_KOS_NO) {
                     danger_source_obj = handles[idx];
                     break;
                 }
@@ -3450,6 +3452,48 @@ void ai_calc_party_size_and_level_internal(int64_t obj, int* cnt_ptr, int* lvl_p
 }
 
 // 0x4AE120
+/* PT26 co-op: the party shares an NPC's hostility. An NPC that hates one
+   player's PC (reaction) or already fights one ignored the other players
+   until they hit it. Target search only (dialog keeps per-PC reaction). */
+static int ai_check_kos_party(int64_t source_obj, int64_t target_obj)
+{
+    int rc = ai_check_kos(source_obj, target_obj);
+    int danger_type;
+    int64_t danger_obj;
+    int slot;
+
+    if (rc != AI_KOS_NO
+        || !coop_lite_is_party_pc(target_obj)
+        || obj_field_int32_get(source_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC
+        || critter_pc_leader_get(source_obj) != OBJ_HANDLE_NULL
+        || critter_is_dead(source_obj)
+        || !sub_4AB990(source_obj, target_obj)) {
+        return rc;
+    }
+    ai_danger_source(source_obj, &danger_type, &danger_obj);
+    if (danger_type == AI_DANGER_SOURCE_TYPE_COMBAT_FOCUS && danger_obj != OBJ_HANDLE_NULL
+        && danger_obj != target_obj && coop_lite_is_party_pc(danger_obj)) {
+        return AI_KOS_REACTION;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc == OBJ_HANDLE_NULL || pc == target_obj || critter_is_dead(pc)
+            || object_dist(source_obj, pc) > 20) {
+            continue;
+        }
+        if (ai_check_kos(source_obj, pc) == AI_KOS_REACTION) {
+            return AI_KOS_REACTION;
+        }
+    }
+    return rc;
+}
+
+int ai_check_kos_party_dev(int64_t source_obj, int64_t target_obj)
+{
+    return ai_check_kos_party(source_obj, target_obj);
+}
+
 int ai_check_kos(int64_t source_obj, int64_t target_obj)
 {
     int64_t pc_leader_obj;

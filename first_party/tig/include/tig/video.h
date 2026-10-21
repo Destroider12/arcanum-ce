@@ -122,6 +122,8 @@ int tig_video_3d_begin_scene(void);
 int tig_video_3d_end_scene(void);
 int tig_video_check_gamma_control(void);
 int tig_video_fade(tig_color_t color, int steps, float duration, TigFadeFlags flags);
+/* Coop: a steady translucent overlay (alpha 0 = off), no animation. */
+void tig_video_dim(tig_color_t color, int alpha);
 int tig_video_set_gamma(float gamma);
 int tig_video_buffer_create(TigVideoBufferCreateInfo* vb_create_info, TigVideoBuffer** video_buffer);
 int tig_video_buffer_destroy(TigVideoBuffer* video_buffer);

@@ -4487,6 +4487,30 @@ static bool inven_ui_dev_loot(int op)
         qword_681450 = qword_682C78; /* dragged out of the target */
         return sub_575180(&done);
     }
+    if (op == 3) {
+        /* PT26: our first ammo stack dropped into the loot target. */
+        int64_t* items;
+        int cnt;
+        int idx;
+        int loc;
+        bool done = false;
+
+        if (inven_ui_mode != INVEN_UI_MODE_LOOT) {
+            return false;
+        }
+        qword_681450 = inven_ui_pc_obj;
+        cnt = item_list_get(inven_ui_pc_obj, &items);
+        for (idx = 0; idx < cnt && !done; idx++) {
+            if (obj_field_int32_get(items[idx], OBJ_F_TYPE) == OBJ_TYPE_AMMO
+                && item_check_insert(items[idx], qword_6813A8, &loc) == ITEM_CANNOT_OK) {
+                tig_debug_printf("InvenUI: dev: put ammo into the target\n");
+                sub_5788C0(items[idx], qword_6813A8, loc, 0x21);
+                done = true;
+            }
+        }
+        item_list_free(items);
+        return done;
+    }
     if (op == 0) {
         if (inven_ui_mode != INVEN_UI_MODE_LOOT) {
             return false;

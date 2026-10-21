@@ -1140,6 +1140,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_OBJ_REQ:
         coop_lite_handle_obj_req((PacketCoopObjReq*)msg);
         break;
+    case PACKET_COOP_NPC_REQ:
+        coop_lite_handle_npc_req((PacketCoopObjReq*)msg);
+        break;
     case PACKET_COOP_OBJ_BLOB:
         coop_lite_handle_obj_blob((PacketCoopObjBlob*)msg);
         break;

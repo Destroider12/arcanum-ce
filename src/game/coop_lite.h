@@ -32,7 +32,8 @@ extern "C" {
 /* multiplayer_validate_message must allow up to this (exclusive). */
 #define PACKET_COOP_PC_STATS 144 /* PT19: PC build, host → clients and owner → host */
 #define PACKET_COOP_SWING 145 /* PT25: host → owner: your PC swung at this target */
-#define PACKET_COOP_TYPE_LIMIT 146
+#define PACKET_COOP_NPC_REQ 146 /* PT26: client → host: NPC_POS named these unknown NPCs (PacketCoopObjReq layout) */
+#define PACKET_COOP_TYPE_LIMIT 147
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 50u
@@ -263,6 +264,7 @@ typedef struct PacketCoopBarter {
 /* Review P1-3: an item the client already has is brought up to date too
    (durability, charges, keys), not only moved. */
 #define COOP_INVEN_E_STATE 0x1 /* hp_damage / mana fields are valid */
+#define COOP_INVEN_E_STACK 0x2 /* PT26: a container's gold/ammo stack; mana_store = quantity */
 
 typedef struct PacketCoopInvenEntry {
     /* 0000 */ uint8_t oid[24];
@@ -545,6 +547,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt);
 void coop_lite_handle_world_state(PacketCoopWorldState* pkt);
 bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size);
 void coop_lite_handle_obj_req(PacketCoopObjReq* pkt);
+void coop_lite_handle_npc_req(PacketCoopObjReq* pkt);
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);
 /* Client, Packet70 of a ground item: true = asked the host for the full
    object (created from the proto only if no blob comes in time). */
@@ -757,6 +760,8 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_REST_BEGIN 11 /* PT25: host sleeps/waits: clients fade out */
 #define COOP_PARTY_REST_END 12 /* PT25: host woke up: clients fade in */
 #define COOP_PARTY_WORLD_DIRTY 13 /* PT25: host dropped an item: refresh world state soon */
+#define COOP_PARTY_WMAP_OPEN 14 /* PT26: host is on the world map (resent every 3 s) */
+#define COOP_PARTY_WMAP_CLOSE 15 /* PT26: host left the world map */
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
@@ -818,6 +823,8 @@ const char* coop_lite_env(const char* name);
 bool coop_lite_party_friendly(int64_t a, int64_t b);
 /* Host: obj is a co-op client's PC (slot 1-7), i.e. owner-driven. */
 bool coop_lite_is_remote_slot_pc(int64_t obj);
+/* PT26: obj is any co-op player's PC (host or client), host side. */
+bool coop_lite_is_party_pc(int64_t obj);
 /* PT25 rest/sleep/wait: clients may not skip time (true = refused, message
    shown); the host's rest fades every client and heals every co-op PC. */
 bool coop_lite_client_rest_refused(void);

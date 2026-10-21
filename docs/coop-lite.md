@@ -24,7 +24,7 @@ that (full object/script sanitising of an uploaded character, per-slot rate
 limiting, authenticated sessions) is deliberately out of scope; do not
 expose a Coop Lite host to strangers on the Internet.
 
-**Wire (protocol 23, PT25; HELLO since 22).** The client's first packet on the reliable app
+**Wire (protocol 24, PT26; HELLO since 22).** The client's first packet on the reliable app
 channel is HELLO (name + protocol); ENet orders it before CHAR_OFFER etc. on
 that channel. The host drops app packets from a slot until a valid HELLO,
 fires the game's CONNECT for the slot only then, and disconnects a peer that
@@ -1681,3 +1681,30 @@ Party XP (host-authoritative):
   world state within ~4 s.
 - **NPCs** attacking in co-op run (vanilla did so only offline); their aggro
   growl / attack cry is forwarded to clients near them (Packet106).
+
+## PT26 behaviour notes
+
+- **Container stacks** (gold, ammo in chests, barrels, piles) are listed in
+  INVEN_SYNC as items (OID + quantity, `COOP_INVEN_E_STACK`) instead of a
+  per-proto total; the client drops unlisted stale stacks and loads unknown
+  ones as blobs (the host now serves container stacks). Critters keep the
+  total-based stack sync. A junk pile the host destroyed when emptied is
+  pruned on clients by the world state.
+- **Missing NPCs:** an NPC_POS for an unknown OID (in a loaded sector) makes
+  the client ask the host (PACKET_COOP_NPC_REQ 146, at most every 5 s per
+  OID); the host re-sends Packet70 so the NPC is created from its proto, and
+  NPC_POS then sets pose, art and HP. An NPC that NPC_POS lists but the client
+  has OF_OFF (switched on by a script) is switched on.
+- **Party-shared hostility:** in the AI target search an NPC that is KOS by
+  reaction toward one co-op PC (within 20 tiles) or already fights one treats
+  the other co-op PCs as KOS too (dialog keeps the per-PC reaction).
+- **Client melee:** an AG_ATTACK refused on the host because of a busy
+  animation is retried for 1.5 s instead of being dropped; refusals and swing
+  animation failures are logged (`attack refused ... retrying`, `swing anim
+  refused`, CoopDiag `anim=ok/fail`).
+- **Vitals:** the host sends each client PC's HP/fatigue after every rest hour
+  and on wake-up, and every 3 s when they changed (the setters stay silent
+  under the MP lock).
+- **World map:** while the host has the world map open, clients get a dark
+  overlay and a notice (PARTY_STATE 14/15, refreshed every 3 s, lapses after
+  8 s without a refresh).
