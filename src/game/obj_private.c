@@ -951,68 +951,62 @@ bool obj_data_write_file(ObjDataDescriptor* descr, TigFile* stream)
 }
 
 // 0x4E4990
-void obj_data_write_mem(ObjDataDescriptor* a1, WriteBuffer* wb)
+void obj_data_write_mem(ObjDataDescriptor* descr, WriteBuffer* wb)
 {
-    // uint8_t presence;
-    // int size;
+    /* The exact inverse of obj_data_read_mem (this used to be a stub, so
+       obj_write_mem / sub_442050 produced blobs with no field data). */
+    uint8_t presence;
+    int size;
 
-    // switch (a1->type) {
-    // case 3:
-    //     write_buffer_append(a1->d.int_value, sizeof(a1->d.int_value), wb);
-    //     break;
-    // case 4:
-    //     if (*a1->d.b != NULL) {
-    //         presence = 1;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //         write_buffer_append(*a1->d.b, sizeof(*a1->d.b), wb);
-    //     } else {
-    //         presence = 0;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //     }
-    //     break;
-    // case 5:
-    // case 6:
-    // case 7:
-    // case 8:
-    // case 9:
-    // case 10:
-    // case 13:
-    //     if (*a1->d.a.sa_ptr != NULL) {
-    //         presence = 1;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //         size = sa_total_byte_size(a1->d.a.sa_ptr);
-    //         write_buffer_ensure_size(wb, size);
-    //         sa_write_mem(a1->d.a.sa_ptr, wb->field_4);
-    //         wb->field_4 += size;
-    //         wb->field_C -= size;
-    //     } else {
-    //         presence = 0;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //     }
-    //     break;
-    // case 11:
-    //     if (*a1->d.str != NULL) {
-    //         presence = 1;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //         size = strlen(*a1->d.str);
-    //         write_buffer_append(&size, sizeof(size), wb);
-    //         write_buffer_append(*a1->d.str, size + 1, wb);
-    //     } else {
-    //         presence = 0;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //     }
-    //     break;
-    // case 12:
-    //     if (*a1->d.oid != NULL) {
-    //         presence = 1;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //         write_buffer_append(*a1->d.oid, sizeof(**a1->d.oid), wb);
-    //     } else {
-    //         presence = 0;
-    //         write_buffer_append(&presence, sizeof(presence), wb);
-    //     }
-    //     break;
-    // }
+    switch (descr->type) {
+    case OD_TYPE_INT32:
+        write_buffer_append(descr->ptr, sizeof(int), wb);
+        return;
+    case OD_TYPE_INT64:
+        presence = *(int64_t**)descr->ptr != NULL ? 1 : 0;
+        write_buffer_append(&presence, sizeof(presence), wb);
+        if (presence) {
+            write_buffer_append(*(int64_t**)descr->ptr, sizeof(int64_t), wb);
+        }
+        return;
+    case OD_TYPE_INT32_ARRAY:
+    case OD_TYPE_INT64_ARRAY:
+    case OD_TYPE_UINT32_ARRAY:
+    case OD_TYPE_UINT64_ARRAY:
+    case OD_TYPE_SCRIPT_ARRAY:
+    case OD_TYPE_QUEST_ARRAY:
+    case OD_TYPE_HANDLE_ARRAY:
+        presence = *(SizeableArray**)descr->ptr != NULL ? 1 : 0;
+        write_buffer_append(&presence, sizeof(presence), wb);
+        if (presence) {
+            size = sa_total_byte_size((SizeableArray**)descr->ptr);
+            write_buffer_ensure_size(wb, size);
+            sa_write_mem((SizeableArray**)descr->ptr, (SizeableArray*)wb->curr);
+            wb->curr += size;
+            wb->remaining -= size;
+        }
+        return;
+    case OD_TYPE_STRING:
+        presence = *(char**)descr->ptr != NULL ? 1 : 0;
+        write_buffer_append(&presence, sizeof(presence), wb);
+        if (presence) {
+            size = (int)strlen(*(char**)descr->ptr);
+            write_buffer_append(&size, sizeof(size), wb);
+            write_buffer_append(*(char**)descr->ptr, size + 1, wb);
+        }
+        return;
+    case OD_TYPE_HANDLE:
+        presence = *(ObjectID**)descr->ptr != NULL ? 1 : 0;
+        write_buffer_append(&presence, sizeof(presence), wb);
+        if (presence) {
+            write_buffer_append(*(ObjectID**)descr->ptr, sizeof(ObjectID), wb);
+        }
+        return;
+    case OD_TYPE_PTR:
+    case OD_TYPE_PTR_ARRAY:
+        /* Transient only; never serialized (same as the read side). */
+        assert(0);
+    }
 }
 
 /**

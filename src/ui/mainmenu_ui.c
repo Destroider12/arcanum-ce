@@ -5,6 +5,8 @@
 #include "game/area.h"
 #include "game/background.h"
 #include "game/critter.h"
+#include "game/coop_lite.h"
+#include "tig/memory.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
 #include "game/gfade.h"
@@ -28,6 +30,7 @@
 #include "game/timeevent.h"
 #include "ui/broadcast_ui.h"
 #include "ui/charedit_ui.h"
+#include "ui/dialog_ui.h"
 #include "ui/fate_ui.h"
 #include "ui/gameuilib.h"
 #include "ui/intgame.h"
@@ -126,6 +129,7 @@ static bool mainmenu_ui_new_char_button_leave(tig_button_handle_t button_handle)
 static void mainmenu_ui_new_char_mouse_idle(int x, int y);
 static bool mainmenu_ui_new_char_execute(int btn);
 static void mainmenu_ui_pregen_char_create(void);
+static void mainmenu_ui_dev_autostart_tick(void);
 static void mainmenu_ui_pregen_char_refresh(TigRect* rect);
 static bool mainmenu_ui_pregen_char_button_released(tig_button_handle_t button_handle);
 static bool mainmenu_ui_pregen_char_execute(int btn);
@@ -1391,6 +1395,20 @@ static int64_t qword_64C460;
 static int dword_64C468;
 
 // 0x540930
+/* Coop: the host left (review M1). Same reset as death / end game. */
+static void mainmenu_ui_coop_return_to_menu(void)
+{
+    if (mainmenu_ui_is_active()) {
+        return;
+    }
+    if (inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
+        sub_575770();
+    }
+    gamelib_reset();
+    gameuilib_reset();
+    mainmenu_ui_start(MM_TYPE_DEFAULT);
+}
+
 bool mainmenu_ui_init(GameInitInfo* init_info)
 {
     int index;
@@ -1484,6 +1502,7 @@ bool mainmenu_ui_init(GameInitInfo* init_info)
 
     mainmenu_ui_initialized = true;
     mainmenu_ui_window_type = MM_WINDOW_0;
+    coop_lite_set_return_to_menu_hook(mainmenu_ui_coop_return_to_menu);
 
     dword_64C388 = true;
     mainmenu_ui_start(MM_TYPE_DEFAULT);
@@ -1569,6 +1588,14 @@ void mainmenu_ui_start(MainMenuType type)
             type = MM_TYPE_1;
         }
 
+        if (type == MM_TYPE_IN_PLAY && !coop_lite_can_save_world()) {
+            /* Coop client (PT13): the world is the host's, so no Save/Load
+               here (the locked menu: Options/Quit/Continue). The character
+               is exported instead, every time the menu opens. */
+            coop_lite_export_local_character();
+            type = MM_TYPE_IN_PLAY_LOCKED;
+        }
+
         mainmenu_ui_type = type;
 
         switch (type) {
@@ -1648,6 +1675,23 @@ void sub_5412E0(bool a1)
             if (mainmenu_ui_start_new_game) {
                 mainmenu_ui_start_new_game = false;
 
+                if (coop_lite_should_skip_independent_new_game()) {
+                    char* offer_name = NULL;
+                    int proto = 16066;
+                    if (!coop_lite_client_waiting_for_sync()) {
+                        coop_lite_generate_start_inventory(pc_obj);
+                    }
+                    obj_field_string_get(pc_obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
+                    /* Prototype unknown here; CHAR_OFFER should already have been sent. */
+                    if (!coop_lite_client_waiting_for_sync()) {
+                        coop_lite_client_offer_character(proto,
+                            offer_name != NULL ? offer_name : "Companion");
+                    }
+                    if (offer_name != NULL) {
+                        FREE(offer_name);
+                    }
+                    tig_debug_printf("MainMenu-UI: coop client skipped independent New Game teleport\n");
+                } else {
                 map = map_by_type(MAP_TYPE_START_MAP);
                 if (map == 0) {
                     tig_debug_printf("MMUI: ERROR: Teleport/World Loc Failure!\n");
@@ -1689,6 +1733,7 @@ void sub_5412E0(bool a1)
                 timeevent_add_delay(&timeevent, &datetime);
 
                 wmap_rnd_schedule();
+                } /* end !coop client skip */
             } else {
                 if (dword_5C4004) {
                     sub_40FED0();
@@ -1744,6 +1789,18 @@ bool mainmenu_ui_handle(void)
         tig_timer_now(&timestamp);
         timeevent_ping(timestamp);
         gamelib_ping();
+        mainmenu_ui_dev_autostart_tick();
+        if (!mainmenu_ui_active) {
+            break;
+        }
+        /* Coop client: SESSION_SYNC arrived — leave menu into host world. */
+        if (coop_lite_client_session_ready()) {
+            tig_debug_printf("MainMenu-UI: coop session ready — closing menu\n");
+            coop_lite_acknowledge_session_ready();
+            mainmenu_ui_start_new_game = false;
+            sub_5412D0();
+            break;
+        }
         iso_redraw();
         tig_window_display();
 
@@ -1773,6 +1830,56 @@ bool mainmenu_ui_handle(void)
     }
 
     return true;
+}
+
+/*
+ * Developer hook (headless playtests without input automation):
+ * ARCANUM_DEV_AUTOSTART_PREGEN=<1..8> starts a New Game with that premade
+ * character once the main menu has been idle for ~2 s. Unset = no effect.
+ */
+static void mainmenu_ui_dev_autostart_tick(void)
+{
+    static int frames;
+    static bool done;
+    const char* env;
+    int idx;
+
+    if (done) {
+        return;
+    }
+
+    env = getenv("ARCANUM_DEV_AUTOSTART_PREGEN");
+    if (env == NULL || *env == '\0') {
+        done = true;
+        return;
+    }
+
+    if (mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+        return;
+    }
+
+    if (++frames < 120) {
+        return;
+    }
+
+    done = true;
+    idx = atoi(env);
+    if (idx < 1 || idx >= mainmenu_ui_pregen_char_cnt) {
+        idx = 1;
+    }
+
+    tig_debug_printf("MainMenu-UI: dev autostart: New Game with pregen %d\n", idx);
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_SINGLE_PLAYER;
+    mainmenu_ui_open();
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_PICK_NEW_OR_PREGEN;
+    mainmenu_ui_open();
+    mainmenu_ui_close(false);
+    mainmenu_ui_window_type = MM_WINDOW_PREGEN_CHAR;
+    mainmenu_ui_open();
+    mainmenu_ui_pregen_char_idx = idx;
+    sub_5480C0(2);
 }
 
 // 0x541680
@@ -2345,6 +2452,17 @@ bool mainmenu_ui_load_game_execute(int btn)
     char name[256];
 
     (void)btn;
+
+    /* Coop Lite: the world belongs to the host; a client loading a save
+       would fork the session (PT11 #3). */
+    if (!coop_lite_can_save_world()) {
+        UiMessage ui_message;
+
+        ui_message.type = UI_MSG_TYPE_EXCLAMATION;
+        ui_message.str = "Only the host can load the campaign.";
+        ui_display_msg(&ui_message);
+        return false;
+    }
 
     index = main_menu_window_info[mainmenu_ui_window_type]->selected_index;
     if (index == -1) {
@@ -2927,6 +3045,32 @@ bool sub_5432B0(const char* name)
     return false;
 }
 
+bool mainmenu_ui_coop_reload_save(const char* name)
+{
+    char slot[9];
+
+    if (mainmenu_ui_gsi_loaded) {
+        gamelib_saveinfo_exit(&mainmenu_ui_gsi);
+        mainmenu_ui_gsi_loaded = false;
+    }
+    if (name == NULL || !gamelib_saveinfo_load(name, &mainmenu_ui_gsi)) {
+        tig_debug_printf("MainMenu-UI: coop reload: no save info for %s\n", name != NULL ? name : "(null)");
+        return false;
+    }
+    mainmenu_ui_gsi_loaded = true;
+    /* Save list names carry the description; the slot is the first 8. */
+    strncpy(slot, name, 8);
+    slot[8] = '\0';
+    tig_debug_printf("MainMenu-UI: coop reload of %s\n", slot);
+    /* An open dialog ends while the world is torn down: its UI redraw then
+       locks sectors with half the objects gone, the object validator fails
+       and the game asks to quit (party reload hung behind that prompt). */
+    if (dialog_ui_is_local_pc_in_dialog()) {
+        dialog_ui_end_dialog(player_get_local_pc_obj(), 0);
+    }
+    return sub_5432B0(slot);
+}
+
 // 0x543380
 void mainmenu_ui_save_game_create(void)
 {
@@ -3027,6 +3171,17 @@ bool mainmenu_ui_save_game_execute(int btn)
 
     (void)btn;
 
+    /* Coop Lite: only the host writes the campaign/world save. Clients keep .mpc chars. */
+    if (!coop_lite_can_save_world()) {
+        coop_lite_export_local_character();
+        mes_file_entry.num = 5003; /* reuse corrupt/fail string channel */
+        mes_get_msg(mainmenu_ui_mainmenu_mes_file, &mes_file_entry);
+        ui_message.type = UI_MSG_TYPE_EXCLAMATION;
+        ui_message.str = "Only the host can save the campaign. Your character was exported.";
+        ui_display_msg(&ui_message);
+        return false;
+    }
+
     v1 = main_menu_window_info[mainmenu_ui_window_type]->selected_index;
     if (v1 == -1) {
         return false;
@@ -3097,6 +3252,9 @@ bool mainmenu_ui_save_game_execute(int btn)
     if (mainmenu_ui_textedit_buffer[0] == '\0') {
         strcpy(mainmenu_ui_textedit_buffer, name);
     }
+
+    /* Host: keep local character file in sync; remote PCs own their .mpc files. */
+    coop_lite_export_local_character();
 
     if (!gamelib_save(name, mainmenu_ui_textedit_buffer)) {
         mes_file_entry.num = 5003; // "Save Game Corrupt!  Save Failed!"
@@ -3646,6 +3804,9 @@ void mainmenu_ui_create_single_player(void)
 // 0x5446D0
 void mainmenu_ui_pick_new_or_pregen_create(void)
 {
+    /* Coop client back in the menu after Quit Game: rejoin before New Game. */
+    coop_lite_client_reconnect();
+
     dword_64C454 = CHAREDIT_MODE_CREATE;
     mainmenu_ui_window_type = MM_WINDOW_PICK_NEW_OR_PREGEN;
     mainmenu_ui_create_window();
@@ -4353,6 +4514,24 @@ bool mainmenu_ui_pregen_char_execute(int btn)
     }
 
     item_wield_best_all(player_create_info.obj, OBJ_HANDLE_NULL);
+
+    if (coop_lite_should_skip_independent_new_game()) {
+        char* offer_name = NULL;
+        /* No shop map on a coop client: give the premade its starting kit
+           here (SP does it in mainmenu_ui_shop_refresh). */
+        coop_lite_generate_start_inventory(player_create_info.obj);
+        obj_field_string_get(player_create_info.obj, OBJ_F_PC_PLAYER_NAME, &offer_name);
+        coop_lite_client_offer_character(player_create_info.basic_prototype,
+            offer_name != NULL ? offer_name : "Companion");
+        if (offer_name != NULL) {
+            FREE(offer_name);
+        }
+        /* Stay in menu loop until SESSION_SYNC; do not load our own start map. */
+        mainmenu_ui_start_new_game = false;
+        tig_debug_printf("MainMenu-UI: coop client offered char — waiting for host sync\n");
+        return true;
+    }
+
     sub_5412D0();
 
     return true;

@@ -5,6 +5,7 @@
 #include "game/anim.h"
 #include "game/background.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/effect.h"
@@ -439,6 +440,8 @@ void multiplayer_reset(void)
     S5F0DEC* node;
     int index;
 
+    coop_lite_on_game_reset();
+
     if (!dword_5F0E10) {
         if (dword_5F0E00) {
             multiplayer_end();
@@ -526,7 +529,8 @@ bool multiplayer_save(TigFile* stream)
         return false;
     }
 
-    return true;
+    /* Coop: player PCs kept for rejoin (optional trailing block). */
+    return coop_lite_save_appendix(stream);
 }
 
 // 0x49CA20
@@ -578,7 +582,7 @@ bool mutliplayer_load(GameLoadInfo* load_info)
         return false;
     }
 
-    return true;
+    return coop_lite_load_appendix(load_info->stream);
 }
 
 // 0x49CB50
@@ -970,7 +974,215 @@ bool multiplayer_map_open_by_name(const char* name)
 // 0x49D690
 void multiplayer_handle_message(void* msg)
 {
-    // TODO: Incomplete.
+    int type;
+    PacketGamePlayerList* player_list;
+    PacketGameTime* game_time;
+    PacketMultiplayerFlagsChange* flags_pkt;
+    PacketNotifyPlayerLagging* lag_pkt;
+    PacketNotifyPlayerRecovered* recover_pkt;
+    DateTime game_dt;
+    DateTime anim_dt;
+    int index;
+
+    if (msg == NULL) {
+        return;
+    }
+
+    type = *(int*)msg;
+
+    switch (type) {
+    case 2:
+        player_list = (PacketGamePlayerList*)msg;
+        for (index = 0; index < NUM_PLAYERS; index++) {
+            stru_5E8AD0[index].field_8 = player_list->oids[index];
+        }
+        break;
+    case 3:
+        game_time = (PacketGameTime*)msg;
+        game_dt.value = game_time->game_time;
+        anim_dt.value = game_time->anim_time;
+        timeevent_sync(&game_dt, &anim_dt);
+        break;
+    case 4:
+        mp_handle_packet4((Packet4*)msg);
+        break;
+    case 8:
+        mp_anim_modify((Packet8*)msg);
+        break;
+    case 9:
+        mp_handle_packet9((Packet9*)msg);
+        break;
+    case 10:
+        mp_handle_packet10((Packet10*)msg);
+        break;
+    case 11:
+        mp_handle_combat_mode_set((PacketCombatModeSet*)msg);
+        break;
+    case 29:
+        mp_handle_packet29((Packet29*)msg);
+        break;
+    case 57:
+        mp_handle_packet57((PacketPlayerRequestCastSpell*)msg);
+        break;
+    case 58:
+        mp_handle_packet58((PacketPlayerCastSpell*)msg);
+        break;
+    case 60:
+        mp_handle_packet60((PacketPlayerSpellMaintainAdd*)msg);
+        break;
+    case 61:
+        mp_handle_packet61((PacketPlayerSpellMaintainEnd*)msg);
+        break;
+    case 68:
+        lag_pkt = (PacketNotifyPlayerLagging*)msg;
+        sub_444110(&lag_pkt->field_8);
+        if (lag_pkt->field_8.obj != OBJ_HANDLE_NULL) {
+            anim_lag_icon_add(lag_pkt->field_8.obj);
+        }
+        break;
+    case 69:
+        recover_pkt = (PacketNotifyPlayerRecovered*)msg;
+        sub_444110(&recover_pkt->field_8);
+        if (recover_pkt->field_8.obj != OBJ_HANDLE_NULL) {
+            anim_lag_icon_remove(recover_pkt->field_8.obj);
+        }
+        break;
+    case 70:
+        mp_handle_packet70((Packet70*)msg);
+        break;
+    case 72:
+        mp_handle_packet72((PacketObjectDestroy*)msg);
+        break;
+    case 73:
+        mp_handle_packet73((PacketSummon*)msg);
+        break;
+    case 74:
+        mp_handle_packet74((Packet74*)msg);
+        break;
+    case 75:
+        mp_handle_packet75((PacketMagicTechObjFlag*)msg);
+        break;
+    case 76:
+        mp_handle_packet76((Packet76*)msg);
+        break;
+    case 77:
+        mp_handle_packet77((PacketMagicTechEyeCandy*)msg);
+        break;
+    case 92:
+        mp_handle_packet92((Packet92*)msg);
+        break;
+    case 94:
+        mp_handle_ui_update_inven((PacketUpdateInven*)msg);
+        break;
+    case 98:
+        flags_pkt = (PacketMultiplayerFlagsChange*)msg;
+        /* Review L1: on the host a client may only change its own flags. */
+        if (tig_net_is_host() && sub_52A530() != 0 && flags_pkt->client_id != sub_52A530()) {
+            tig_debug_printf("MP: Packet98 from slot %d for slot %d dropped\n", sub_52A530(), flags_pkt->client_id);
+            break;
+        }
+        if (flags_pkt->client_id >= 0 && flags_pkt->client_id < NUM_PLAYERS) {
+            stru_5E8AD0[flags_pkt->client_id].flags &= ~0xFF00u;
+            stru_5E8AD0[flags_pkt->client_id].flags |= flags_pkt->flags & 0xFF00u;
+        }
+        break;
+    case 99:
+        sub_4EDFF0((Packet99*)msg);
+        break;
+    case 100:
+        sub_4EE5E0((Packet100*)msg);
+        break;
+    case 106:
+        mp_handle_gsound_play_scheme((PacketPlaySound*)msg);
+        break;
+    case 118:
+        sub_4EF8B0((Packet118*)msg);
+        break;
+    case 121:
+        sub_4EFB50((Packet121*)msg);
+        break;
+    case PACKET_COOP_ATTACK_INTENT:
+        coop_lite_handle_attack_intent((PacketCoopAttackIntent*)msg);
+        break;
+    case PACKET_COOP_FOLLOW_HOST:
+        coop_lite_handle_follow_packet((PacketCoopFollowHost*)msg);
+        break;
+    case PACKET_COOP_CHAR_OFFER:
+        coop_lite_handle_char_offer((PacketCoopCharOffer*)msg);
+        break;
+    case PACKET_COOP_SESSION_SYNC:
+        coop_lite_handle_session_sync((PacketCoopSessionSync*)msg);
+        break;
+    case PACKET_COOP_PC_POS:
+        coop_lite_handle_pc_pos((PacketCoopPcPos*)msg);
+        break;
+    case PACKET_COOP_FOLLOWERS:
+        coop_lite_handle_followers((PacketCoopFollowers*)msg);
+        break;
+    case PACKET_COOP_NPC_POS:
+        coop_lite_handle_npc_pos((PacketCoopNpcPos*)msg);
+        break;
+    case PACKET_COOP_PARTY_STATE:
+        coop_lite_handle_party_state((PacketCoopPartyState*)msg);
+        break;
+    case PACKET_COOP_BARTER:
+        coop_lite_handle_barter((PacketCoopBarter*)msg);
+        break;
+    case PACKET_COOP_ROSTER:
+        coop_lite_handle_roster((PacketCoopRoster*)msg);
+        break;
+    case PACKET_COOP_INVEN_SYNC:
+        coop_lite_handle_inven_sync((PacketCoopInvenSync*)msg);
+        break;
+    case PACKET_COOP_OBJ_REQ:
+        coop_lite_handle_obj_req((PacketCoopObjReq*)msg);
+        break;
+    case PACKET_COOP_OBJ_BLOB:
+        coop_lite_handle_obj_blob((PacketCoopObjBlob*)msg);
+        break;
+    case PACKET_COOP_CHAR_BUNDLE:
+        coop_lite_handle_char_chunk((PacketCoopCharChunk*)msg);
+        break;
+    case PACKET_COOP_WORLD_REQ:
+        coop_lite_handle_world_req((PacketCoopWorldReq*)msg);
+        break;
+    case PACKET_COOP_WORLD_STATE:
+        coop_lite_handle_world_state((PacketCoopWorldState*)msg);
+        break;
+    case 81:
+        coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
+        break;
+    case 26:
+    case 27:
+    case 28:
+    case 125:
+        coop_lite_host_handle_item_op(type, msg);
+        break;
+    case 54:
+        /* Magictech end (review M5). Client spell run ids are allocated
+           locally and need not match the host's, so freeing by the host's id
+           could end an unrelated spell. Effects still end through the host's
+           own state packets (HP, objects); handled here without the old
+           "unhandled" spam. */
+        break;
+    case 122:
+        /* Client→host notification with no host-side handler; drop quietly
+           (was logging "unhandled" on every send). */
+        break;
+    default: {
+        /* Types with no coop handler (71, 6, 64, 67, 80, 84, 93, 97, 123,
+           ...) are logged once per type instead of on every packet (M5). */
+        static unsigned char unhandled_logged[256];
+
+        if (type < 0 || type >= 256 || !unhandled_logged[type]) {
+            if (type >= 0 && type < 256) {
+                unhandled_logged[type] = 1;
+            }
+            tig_debug_printf("MP: unhandled packet type %d (further ones not logged)\n", type);
+        }
+        break;
+    }
+    }
 }
 
 // 0x4A1F30
@@ -1012,13 +1224,78 @@ void multiplayer_send_player_list(void)
     }
 }
 
+/* Minimum wire size per app packet type (sizeof the struct the handler reads). */
+static size_t multiplayer_packet_min_size(int type)
+{
+    size_t coop_size;
+
+    switch (type) {
+    case 2: return sizeof(PacketGamePlayerList);
+    case 3: return sizeof(PacketGameTime);
+    case 4: return sizeof(Packet4);
+    case 8: return sizeof(Packet8);
+    case 9: return sizeof(Packet9);
+    case 10: return sizeof(Packet10);
+    case 11: return sizeof(PacketCombatModeSet);
+    case 26: return sizeof(Packet26);
+    case 27: return sizeof(Packet27);
+    case 28: return sizeof(Packet28);
+    case 125: return sizeof(PacketPerformIdentifyService);
+    case 29: return sizeof(Packet29);
+    case 57: return sizeof(PacketPlayerRequestCastSpell);
+    case 58: return sizeof(PacketPlayerCastSpell);
+    case 60: return sizeof(PacketPlayerSpellMaintainAdd);
+    case 61: return sizeof(PacketPlayerSpellMaintainEnd);
+    case 68: return sizeof(PacketNotifyPlayerLagging);
+    case 69: return sizeof(PacketNotifyPlayerRecovered);
+    case 70: return sizeof(Packet70);
+    case 72: return sizeof(PacketObjectDestroy);
+    case 73: return sizeof(PacketSummon);
+    case 74: return sizeof(Packet74);
+    case 75: return sizeof(PacketMagicTechObjFlag);
+    case 76: return sizeof(Packet76);
+    case 77: return sizeof(PacketMagicTechEyeCandy);
+    case 92: return sizeof(Packet92);
+    case 94: return sizeof(PacketUpdateInven);
+    case 98: return sizeof(PacketMultiplayerFlagsChange);
+    case 99: return sizeof(Packet99);
+    case 81: return sizeof(Packet81);
+    case 100: return sizeof(Packet100);
+    case 106: return sizeof(PacketPlaySound);
+    case 118: return sizeof(Packet118);
+    case 121: return sizeof(Packet121);
+    default:
+        coop_size = coop_lite_coop_packet_min_size(type);
+        return coop_size != 0 ? coop_size : sizeof(int);
+    }
+}
+
 // 0x4A2020
 bool multiplayer_validate_message(void* msg)
 {
     int type;
+    int size;
+    size_t min_size;
 
     type = *(int*)msg;
-    return type > 0 && type < 131;
+    if (type <= 0 || type >= PACKET_COOP_TYPE_LIMIT) {
+        return false;
+    }
+
+    /* Per-type size: handlers read the full struct. */
+    size = tig_net_last_message_size();
+    min_size = multiplayer_packet_min_size(type);
+    if (size > 0 && (size_t)size < min_size) {
+        tig_debug_printf("MP: drop type %d: size %d < %zu\n", type, size, min_size);
+        return false;
+    }
+
+    /* Direction: clients can't inject host state; hosts don't take orders. */
+    if (!coop_lite_packet_allowed(type, tig_net_is_host(), sub_52A530())) {
+        tig_debug_printf("MP: drop type %d from slot %d (wrong direction)\n", type, sub_52A530());
+        return false;
+    }
+    return true;
 }
 
 // 0x4A2040
@@ -1031,10 +1308,82 @@ void sub_4A2040(int a1)
     tig_net_send_app_all(&pkt, sizeof(pkt));
 }
 
+static bool multiplayer_sp_tb_saved;
+static int multiplayer_sp_tb;
+static int multiplayer_sp_fast_tb;
+
+void multiplayer_restore_sp_settings(void)
+{
+    if (!multiplayer_sp_tb_saved) {
+        return;
+    }
+    multiplayer_sp_tb_saved = false;
+    settings_set_value(&settings, FAST_TURN_BASED_KEY, multiplayer_sp_fast_tb);
+    settings_set_value(&settings, TURN_BASED_KEY, multiplayer_sp_tb);
+}
+
 // 0x4A2070
 bool multiplayer_handle_network_event(int type, int client_id, void* data, int size)
 {
-    // TODO: Incomplete.
+    (void)data;
+    (void)size;
+
+    switch (type) {
+    case TIG_NET_EVENT_CONNECT:
+        if (client_id < 0 || client_id >= NUM_PLAYERS) {
+            return false;
+        }
+        /* Hard real-time for the whole coop session. The player's own
+           preference is put back before settings are saved (review L4). */
+        if (!multiplayer_sp_tb_saved) {
+            multiplayer_sp_tb = settings_get_value(&settings, TURN_BASED_KEY);
+            multiplayer_sp_fast_tb = settings_get_value(&settings, FAST_TURN_BASED_KEY);
+            multiplayer_sp_tb_saved = true;
+        }
+        settings_set_value(&settings, TURN_BASED_KEY, 0);
+        settings_set_value(&settings, FAST_TURN_BASED_KEY, 0);
+        if (tig_net_is_host()) {
+            if (client_id != 0) {
+                /* Ensure slot struct is initialized for the new peer. */
+                if (stru_5E8AD0[client_id].field_8.type == OID_TYPE_NULL) {
+                    sub_4A2AE0(client_id);
+                }
+            }
+            multiplayer_send_player_list();
+            /* Session sync: CHAR_OFFER from this client triggers the spawn
+               (or the host entering the world, for queued offers). */
+            if (client_id != 0) {
+                tig_debug_printf("MP: client %d connected — waiting for CHAR_OFFER / SESSION_SYNC\n", client_id);
+            }
+        }
+        return true;
+    case TIG_NET_EVENT_DISCONNECT:
+        if (client_id > 0 && client_id < NUM_PLAYERS) {
+            int64_t left_pc = OBJ_HANDLE_NULL;
+            /* Slot already inactive here: read the binding directly. */
+            if (!sub_4A1F60(client_id, &left_pc)) {
+                left_pc = OBJ_HANDLE_NULL;
+            }
+            sub_4A2AE0(client_id);
+            if (tig_net_is_host()) {
+                coop_lite_host_on_client_disconnect(client_id);
+                coop_lite_host_remove_left_pc(client_id, left_pc);
+                multiplayer_send_player_list();
+            }
+        }
+        /* Local peer left the session — clear follow arming / queued follow. */
+        if (client_id == 0 || !tig_net_is_active()) {
+            if (client_id == 0 && !tig_net_is_host()) {
+                /* Review M1: tell the player instead of silently going SP. */
+                coop_lite_client_host_left();
+            }
+            coop_lite_session_reset();
+            multiplayer_restore_sp_settings();
+        }
+        return true;
+    default:
+        return true;
+    }
 }
 
 // 0x4A2A30
@@ -1124,6 +1473,22 @@ int64_t sub_4A2B60(int player)
 
     return OBJ_HANDLE_NULL;
 }
+
+void multiplayer_bind_slot_pc(int slot, int64_t obj)
+{
+    if (slot < 0 || slot >= NUM_PLAYERS) {
+        return;
+    }
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    stru_5E8AD0[slot].field_8 = obj_get_id(obj);
+    if (tig_net_is_host()) {
+        multiplayer_send_player_list();
+    }
+    tig_debug_printf("MP: bound slot %d to PC\n", slot);
+}
+
 
 // 0x4A2BA0
 bool multiplayer_is_locked(void)
@@ -1347,6 +1712,16 @@ void sub_4A3230(ObjectID oid, bool (*success_func)(void*), void* success_info, b
         sub_4F0690(oid, &item_obj);
         item_parent(item_obj, &parent_obj);
         sub_4F0640(parent_obj, &parent_oid);
+        if (tig_net_is_coop_enabled() && !tig_net_is_host()) {
+            /* Coop (PT13): the vanilla Packet80 item-lock round trip has no
+               host handler, so a client's drag never started. The host
+               resolves the transfer itself (Packet81/28, with a resync if
+               it refuses), so the local drag may start right away. */
+            if (success_func != NULL) {
+                success_func(success_info);
+            }
+            return;
+        }
         if (tig_net_is_host()) {
             if (sub_4A2EC0(oid, parent_oid, 0)) {
                 if (success_func != NULL) {
@@ -1633,7 +2008,7 @@ bool save_char(const char* path, int64_t obj)
 
     flags = obj_field_int32_get(obj, OBJ_F_PC_FLAGS);
     flags |= OPCF_USE_ALT_DATA;
-    obj_field_int32_set(obj, OPCF_USE_ALT_DATA, flags);
+    obj_field_int32_set(obj, OBJ_F_PC_FLAGS, flags); // FIX: field id was OPCF_USE_ALT_DATA.
 
     sub_4A6010(obj);
 
@@ -1651,7 +2026,8 @@ bool save_char(const char* path, int64_t obj)
             break;
         }
 
-        if (tig_file_fwrite(&data, size, 1, stream) != 1) {
+        /* FIX: was &data (the pointer variable and the stack after it). */
+        if (tig_file_fwrite(data, size, 1, stream) != 1) {
             break;
         }
 
@@ -2256,7 +2632,8 @@ bool sub_4A50D0(int64_t pc_obj, int64_t item_obj)
 {
     unsigned int flags;
 
-    if (tig_net_is_active()) {
+    /* Coop: drag hide/show is local, as in SP (no Packet93 handler). */
+    if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
         int client_id;
         Packet93 pkt;
         int64_t parent_obj;
@@ -2295,7 +2672,7 @@ bool sub_4A51C0(int64_t pc_obj, int64_t item_obj)
 {
     unsigned int flags;
 
-    if (tig_net_is_active()) {
+    if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
         int client_id;
         Packet93 pkt;
 
@@ -2386,7 +2763,9 @@ void sub_4A53B0(int64_t a1, int64_t a2)
 {
     int client_id;
 
-    if (!multiplayer_is_locked()) {
+    if (!multiplayer_is_locked() && !tig_net_is_coop_enabled()) {
+        /* Coop: who-views-whose-inventory is not replicated (no handler;
+           barter is tracked by PACKET_COOP_BARTER). */
         Packet97 pkt;
 
         pkt.type = 97;
@@ -2423,7 +2802,8 @@ int sub_4A5460(int64_t a1)
 // 0x4A5490
 void multiplayer_ping(tig_timestamp_t timestamp)
 {
-    (void)timestamp;
+    tig_net_pump();
+    coop_lite_ping((unsigned int)timestamp);
 }
 
 // 0x4A54A0

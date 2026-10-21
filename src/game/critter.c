@@ -1,5 +1,7 @@
 #include "game/critter.h"
 
+#include <string.h>
+
 #include "game/ai.h"
 #include "game/anim.h"
 #include "game/background.h"
@@ -12,6 +14,8 @@
 #include "game/magictech.h"
 #include "game/map.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/monstergen.h"
 #include "game/mt_item.h"
 #include "game/object.h"
@@ -26,6 +30,7 @@
 #include "game/stat.h"
 #include "game/tf.h"
 #include "game/ui.h"
+#include "game/coop_lite.h"
 
 typedef enum FatigueEventType {
     FATIGUE_EVENT_RECOVERY,
@@ -478,6 +483,17 @@ int critter_fatigue_damage_set(int64_t obj, int value)
     obj_field_int32_set(obj, OBJ_F_CRITTER_FATIGUE_DAMAGE, value);
     ui_refresh_fatigue_bar(obj);
 
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        Packet100 pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 100;
+        pkt.subtype = 13;
+        pkt.d.z.field_8 = obj_get_id(obj);
+        pkt.d.z.field_38 = object_hp_damage_get(obj);
+        pkt.d.z.field_3C = value;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+
     if (value != 0 && !obj_is_proto(obj)) {
         // Schedule fatigue recovery every 80 game seconds (10 RL seconds).
         critter_fatigue_timeevent_schedule(obj, FATIGUE_EVENT_RECOVERY, 80000);
@@ -878,6 +894,12 @@ bool critter_follow(int64_t follower_obj, int64_t leader_obj, bool force)
 {
     unsigned int flags;
 
+    /* Coop: followers are host-owned; clients only receive them. */
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        tig_debug_printf("critter_follow: refused on coop client\n");
+        return false;
+    }
+
     // Validate follower is an NPC.
     if (obj_field_int32_get(follower_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
         return false;
@@ -936,6 +958,10 @@ bool critter_disband(int64_t obj, bool force)
 {
     int64_t leader_obj;
     int64_t v1;
+
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        return false;
+    }
 
     leader_obj = critter_leader_get(obj);
     if (leader_obj != OBJ_HANDLE_NULL) {

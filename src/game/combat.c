@@ -1,4 +1,5 @@
 #include "game/combat.h"
+#include "game/coop_lite.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -21,6 +22,8 @@
 #include "game/map.h"
 #include "game/material.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/mt_item.h"
 #include "game/obj.h"
 #include "game/obj_private.h"
@@ -1371,6 +1374,35 @@ void combat_critter_toggle_combat_mode(int64_t obj)
 
     if ((critter_flags2 & OCF2_COMBAT_TOGGLE_FX) != 0) {
         magictech_fx_add(obj, MAGICTECH_FX_COMBAT_TOGGLE);
+    }
+
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        PacketCombatModeSet pkt;
+        pkt.type = 11;
+        pkt.padding_4 = 0;
+        pkt.oid = obj_get_id(obj);
+        pkt.active = combat_critter_is_combat_mode_active(obj);
+        pkt.padding_24 = 0;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else if (tig_net_is_coop_enabled()
+        && !multiplayer_is_locked()
+        && player_is_local_pc_obj(obj)) {
+        /* Coop client (PT12): the toggle used to stay local, so the host
+           copy of this PC kept its combat mode and re-sent it (client stuck
+           in combat mode). Tell the host; it applies and re-broadcasts. */
+        int depth = tig_net_local_suspend_pause();
+
+        if (tig_net_is_active() && !tig_net_is_host()) {
+            PacketCombatModeSet pkt;
+
+            pkt.type = 11;
+            pkt.padding_4 = 0;
+            pkt.oid = obj_get_id(obj);
+            pkt.active = combat_critter_is_combat_mode_active(obj);
+            pkt.padding_24 = 0;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
+        tig_net_local_suspend_resume(depth);
     }
 }
 
@@ -2858,6 +2890,10 @@ bool sub_4B6C90(bool turn_based)
 {
     int64_t pc;
 
+    if (!coop_lite_can_use_turn_based() && turn_based) {
+        turn_based = false;
+    }
+
     if (combat_turn_based == turn_based) {
         return true;
     }
@@ -2892,6 +2928,14 @@ bool sub_4B6C90(bool turn_based)
 // 0x4B6D20
 void combat_turn_based_toggle(void)
 {
+    if (!coop_lite_can_use_turn_based()) {
+        /* Force real-time while coop is active. */
+        if (combat_is_turn_based()) {
+            settings_set_value(&settings, TURN_BASED_KEY, 0);
+        }
+        return;
+    }
+
     if (combat_is_turn_based()) {
         settings_set_value(&settings, TURN_BASED_KEY, 0);
     } else {

@@ -1,10 +1,18 @@
 #include "game/mp_utils.h"
+#include "game/coop_lite.h"
 
 #include "game/a_name.h"
+#include "game/anim.h"
+#include "game/anim_private.h"
+#include "game/animfx.h"
 #include "game/area.h"
+#include "game/combat.h"
 #include "game/critter.h"
+#include "game/descriptions.h"
 #include "game/gsound.h"
 #include "game/item.h"
+#include "game/location.h"
+#include "game/magictech.h"
 #include "game/map.h"
 #include "game/material.h"
 #include "game/multiplayer.h"
@@ -14,6 +22,7 @@
 #include "game/player.h"
 #include "game/portal.h"
 #include "game/proto.h"
+#include "game/ui.h"
 #include "game/random.h"
 #include "game/sector.h"
 #include "game/spell.h"
@@ -157,14 +166,27 @@ void sub_4EDFF0(Packet99* pkt)
 {
     int64_t obj;
 
+    /* Host already applied locally in sub_4EDF20 before broadcast.
+       Clients must apply the authoritative location. */
     if (tig_net_is_host()) {
-        obj = obj_pool_perm_lookup(pkt->oid);
-        sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
-
-        if (pkt->field_30 && player_is_local_pc_obj(obj)) {
-            location_origin_set(pkt->location);
-        }
+        return;
     }
+
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    /* Our own locally driven PC is authoritative here. */
+    if (coop_lite_client_drives_obj(obj)) {
+        return;
+    }
+
+    multiplayer_lock();
+    sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
+    if (pkt->field_30 && player_is_local_pc_obj(obj)) {
+        location_origin_set(pkt->location);
+    }
+    multiplayer_unlock();
 }
 
 // 0x4EE060
@@ -399,6 +421,22 @@ void sub_4EE5E0(Packet100* pkt)
             break;
         }
         break;
+    case 13:
+        /* Coop Lite vitals sync: field_8=oid, field_38=hp_damage, field_3C=fatigue.
+           Host → clients only (review H1: a client could set any HP). */
+        if (tig_net_is_host()) {
+            break;
+        }
+        sub_4F0690(pkt->d.z.field_8, &v1);
+        if (v1 != OBJ_HANDLE_NULL) {
+            multiplayer_lock();
+            object_hp_damage_set(v1, pkt->d.z.field_38);
+            if (obj_type_is_critter(obj_field_int32_get(v1, OBJ_F_TYPE))) {
+                critter_fatigue_damage_set(v1, pkt->d.z.field_3C);
+            }
+            multiplayer_unlock();
+        }
+        break;
     }
 }
 
@@ -491,23 +529,524 @@ void mp_handle_gsound_play_scheme(PacketPlaySound* pkt)
     }
 }
 
+// 0x4EF320 - Packet4: client move intent → host resolves into real anim goals.
+void mp_handle_packet4(Packet4* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        tig_debug_printf("MP: Packet4 move intent for unknown OID (client PC not adopted?)\n");
+        return;
+    }
+    if (!coop_lite_sender_owns_obj(obj)) {
+        tig_debug_printf("MP: Packet4 from slot %d for an object it does not own — dropped\n", sub_52A530());
+        return;
+    }
+
+    switch (pkt->subtype) {
+    case 0:
+        anim_goal_move_to_tile(obj, pkt->loc);
+        break;
+    case 1:
+        anim_goal_run_to_tile(obj, pkt->loc);
+        break;
+    case 2:
+        sub_433A00(obj, pkt->loc, false);
+        break;
+    default:
+        break;
+    }
+}
+
+// Packet8 receive is implemented as mp_anim_modify in anim.c.
+
+// Packet9: interrupt/clear goals (sub_424070) + optional loc snap for remotes.
+void mp_handle_packet9(Packet9* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL) {
+        return;
+    }
+
+    if (!sub_444110(&pkt->field_18)) {
+        return;
+    }
+    obj = pkt->field_18.obj;
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    /* Reject corrupt priority from peers (menu-time follow used to ASSERT then continue). */
+    if (pkt->priority_level < PRIORITY_NONE || pkt->priority_level >= PRIORITY_HIGHEST) {
+        tig_debug_printf("MP: drop Packet9 with bad priority_level=%d\n", pkt->priority_level);
+        return;
+    }
+
+    if (tig_net_is_host()) {
+        if (!coop_lite_sender_owns_obj(obj)) {
+            tig_debug_printf("MP: Packet9 from slot %d for an object it does not own — dropped\n", sub_52A530());
+            return;
+        }
+        /* Client interrupt intent: a4=true skips nested net send inside sub_424070. */
+        sub_424070(obj, pkt->priority_level, pkt->field_48 != 0, true);
+        /* Rebroadcast to the other peers (not back to the owner, which
+           drives its own PC and already interrupted locally). */
+        {
+            Packet9 out = *pkt;
+            out.loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+            out.art_id = obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
+            out.offset_x = obj_field_int32_get(obj, OBJ_F_OFFSET_X);
+            out.offset_y = obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
+            if (sub_52A530() != 0) {
+                tig_net_send_app_except(&out, sizeof(out), sub_52A530());
+            } else {
+                tig_net_send_app_all(&out, sizeof(out));
+            }
+        }
+        return;
+    }
+
+    /* Our own locally driven PC: never snap/interrupt it from the wire. */
+    if (coop_lite_client_drives_obj(obj)) {
+        return;
+    }
+
+    multiplayer_lock();
+    if (pkt->loc != 0) {
+        sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+    }
+    if (pkt->art_id != (tig_art_id_t)-1) {
+        object_set_current_aid(obj, pkt->art_id);
+    }
+    sub_424070(obj, pkt->priority_level, pkt->field_48 != 0, true);
+    multiplayer_unlock();
+}
+
+// Packet10: authoritative anim pose snapshot from host.
+void mp_handle_packet10(Packet10* pkt)
+{
+    int64_t obj;
+    AnimRunInfo* run_info;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    multiplayer_lock();
+    if (pkt->loc != 0) {
+        sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
+    }
+    if (pkt->art_id != TIG_ART_ID_INVALID) {
+        object_set_current_aid(obj, pkt->art_id);
+    }
+    if (anim_id_to_run_info(&pkt->anim_id, &run_info) && run_info != NULL) {
+        run_info->flags = pkt->flags;
+    }
+    multiplayer_unlock();
+}
+
+// Packet11: combat mode toggle mirror.
+void mp_handle_combat_mode_set(PacketCombatModeSet* pkt)
+{
+    int64_t obj;
+    bool active;
+
+    if (pkt == NULL) {
+        return;
+    }
+
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    if (tig_net_is_host()) {
+        /* Coop: a client toggles its own PC only; mirror it to everyone. */
+        if (sub_52A530() == 0 || !coop_lite_sender_owns_obj(obj)) {
+            return;
+        }
+        active = combat_critter_is_combat_mode_active(obj);
+        multiplayer_lock();
+        if (pkt->active && !active) {
+            combat_critter_activate_combat_mode(obj);
+        } else if (!pkt->active && active) {
+            combat_critter_deactivate_combat_mode(obj);
+        }
+        multiplayer_unlock();
+        pkt->active = combat_critter_is_combat_mode_active(obj);
+        tig_debug_printf("MP: slot %d combat mode -> %d\n", sub_52A530(), pkt->active ? 1 : 0);
+        tig_net_send_app_all(pkt, sizeof(*pkt));
+        return;
+    }
+
+    active = combat_critter_is_combat_mode_active(obj);
+    multiplayer_lock();
+    if (pkt->active && !active) {
+        combat_critter_activate_combat_mode(obj);
+    } else if (!pkt->active && active) {
+        combat_critter_deactivate_combat_mode(obj);
+    }
+    multiplayer_unlock();
+}
+
+// Packet29: open container (client → host).
+void mp_handle_packet29(Packet29* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->oid, &obj);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    /* Review L7: a client may only collapse a junk pile next to its PC. */
+    if (sub_52A530() != 0) {
+        int64_t pc = sub_4A2B60(sub_52A530());
+
+        if (pc == OBJ_HANDLE_NULL
+            || location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION),
+                   obj_field_int64_get(obj, OBJ_F_LOCATION))
+                > 5) {
+            return;
+        }
+    }
+    sub_463540(obj);
+}
+
+/* Packet70s that arrived while the client was still loading the host map. */
+#define MP_DEFERRED_PACKET70_MAX 64
+static Packet70 mp_deferred_packet70[MP_DEFERRED_PACKET70_MAX];
+static int mp_deferred_packet70_count;
+
+void mp_clear_deferred_packet70(void)
+{
+    mp_deferred_packet70_count = 0;
+}
+
+void mp_flush_deferred_packet70(void)
+{
+    int index;
+    int count;
+
+    count = mp_deferred_packet70_count;
+    mp_deferred_packet70_count = 0;
+    if (count > 0) {
+        tig_debug_printf("MP: replaying %d deferred Packet70\n", count);
+    }
+    for (index = 0; index < count; index++) {
+        mp_handle_packet70(&(mp_deferred_packet70[index]));
+    }
+}
+
+// Packet70: object create / blood FX mirrors.
+void mp_handle_packet70(Packet70* pkt)
+{
+    int64_t obj;
+    int64_t blood_obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    /* Avoid creating world objects onto ShopMap before SESSION_SYNC. */
+    if (tig_net_is_active() && coop_lite_should_skip_independent_new_game()
+        && coop_lite_client_waiting_for_sync()) {
+        if (mp_deferred_packet70_count < MP_DEFERRED_PACKET70_MAX) {
+            mp_deferred_packet70[mp_deferred_packet70_count++] = *pkt;
+            tig_debug_printf("MP: Packet70 deferred (client waiting for session sync) subtype=%d name=%d\n",
+                pkt->subtype, pkt->subtype == 0 ? pkt->s0.name : -1);
+        } else {
+            tig_debug_printf("MP: Packet70 dropped — deferred queue full\n");
+        }
+        return;
+    }
+
+    if (pkt->subtype == 0 && (obj = obj_pool_perm_lookup(pkt->s0.oid)) != OBJ_HANDLE_NULL) {
+        /* Already have it (e.g. our own PC adopted by the host). An item of
+           ours the host just dropped (P1-3): move this very object to the
+           ground so it keeps its state. */
+        unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
+
+        if (item_is_item(obj) && (flags & OF_INVENTORY) != 0 && (flags & OF_DESTROYED) == 0) {
+            multiplayer_lock();
+            tig_net_local_suspend_begin();
+            item_remove(obj);
+            object_drop(obj, pkt->s0.loc);
+            tig_net_local_suspend_end();
+            multiplayer_unlock();
+        }
+        return;
+    }
+    if (pkt->subtype == 0) {
+        int64_t proto_obj = sub_4685A0(pkt->s0.name);
+
+        /* Unknown proto, or a PC: PCs only come from SESSION_SYNC (a
+           Packet70 PC would be a bare, unbound duplicate). */
+        if (proto_obj == OBJ_HANDLE_NULL
+            || obj_field_int32_get(proto_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+            tig_debug_printf("MP: Packet70 ignored (proto %d is %s)\n", pkt->s0.name,
+                proto_obj == OBJ_HANDLE_NULL ? "unknown" : "a PC");
+            return;
+        }
+        /* P1-2: a ground item keeps its state (HP, charges, names) when it
+           comes as the host's object blob. */
+        if (tig_net_is_active() && item_is_item(proto_obj)
+            && coop_lite_client_want_ground_blob((const unsigned char*)&pkt->s0.oid, pkt->s0.loc, pkt->s0.name)) {
+            return;
+        }
+    }
+
+    multiplayer_lock();
+    switch (pkt->subtype) {
+    case 0:
+        object_create_ex(sub_4685A0(pkt->s0.name), pkt->s0.loc, pkt->s0.oid, &obj);
+        break;
+    case 5:
+        /* Blood pool FX at death location (art animate is best-effort). */
+        if (object_create(sub_4685A0(BP_POOL_OF_BLOOD), pkt->s5.loc, &blood_obj)) {
+            sub_43E770(blood_obj, pkt->s5.loc, pkt->s5.offset_x, pkt->s5.offset_y);
+        }
+        break;
+    default:
+        break;
+    }
+    multiplayer_unlock();
+}
+
+// Packet92: current art id mirror.
+void mp_handle_packet92(Packet92* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    object_set_current_aid(obj, pkt->art_id);
+    multiplayer_unlock();
+}
+
+static bool mp_cast_item_held_by(ObjectID source_oid, ObjectID parent_oid, int64_t pc)
+{
+    int64_t source = obj_pool_perm_lookup(source_oid);
+    int64_t parent = OBJ_HANDLE_NULL;
+
+    if (source == OBJ_HANDLE_NULL || !objid_is_equal(parent_oid, obj_get_id(pc))) {
+        return false;
+    }
+    if (!obj_type_is_item(obj_field_int32_get(source, OBJ_F_TYPE))) {
+        return false;
+    }
+    return item_parent(source, &parent) && parent == pc;
+}
+
+// Packet57: client spell request → host runs (rebroadcasts 58).
+void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt)
+{
+    if (pkt == NULL || !tig_net_is_host()) {
+        return;
+    }
+    if (sub_52A530() != 0) {
+        /* The caster (or parent, for item casts) must be the sender's PC. */
+        int64_t pc = sub_4A2B60(sub_52A530());
+        ObjectID pc_oid;
+
+        if (pc == OBJ_HANDLE_NULL) {
+            return;
+        }
+        pc_oid = obj_get_id(pc);
+        /* Review L5: the caster is the PC itself, or an item the PC holds
+           (scroll, wand) with the PC as parent. */
+        if (!objid_is_equal(pkt->invocation.source_obj.field_8.objid, pc_oid)
+            && !mp_cast_item_held_by(pkt->invocation.source_obj.field_8.objid,
+                pkt->invocation.parent_obj.field_8.objid, pc)) {
+            tig_debug_printf("MP: Packet57 cast from slot %d not by its PC — dropped\n", sub_52A530());
+            return;
+        }
+    }
+    /* PT17: the client's handles are its own; rebuild them from the OIDs. */
+    if (!mp_magictech_resolve_invocation(&pkt->invocation)) {
+        return;
+    }
+    magictech_invocation_run(&pkt->invocation);
+}
+
+// Packet58: host cast broadcast → clients apply under lock.
+void mp_handle_packet58(PacketPlayerCastSpell* pkt)
+{
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    multiplayer_lock();
+    mp_magictech_apply_invocation(&pkt->invocation);
+    multiplayer_unlock();
+}
+
+// Packet60 / 61: spell maintain UI for the owning player.
+void mp_handle_packet60(PacketPlayerSpellMaintainAdd* pkt)
+{
+    if (pkt == NULL) {
+        return;
+    }
+    if (pkt->player == sub_529520()) {
+        ui_spell_maintain_add(pkt->mt_id);
+    }
+}
+
+void mp_handle_packet61(PacketPlayerSpellMaintainEnd* pkt)
+{
+    if (pkt == NULL) {
+        return;
+    }
+    if (pkt->player == sub_529520()) {
+        ui_spell_maintain_end(pkt->mt_id);
+    }
+}
+
+// Packet72: destroy object.
+void mp_handle_packet72(PacketObjectDestroy* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    object_destroy(obj);
+    multiplayer_unlock();
+}
+
+// Packet73: summon mirror (create with host-assigned oid).
+void mp_handle_packet73(PacketSummon* pkt)
+{
+    int64_t proto_obj;
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    proto_obj = obj_pool_perm_lookup(pkt->summon_info.field_60);
+    if (proto_obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    multiplayer_lock();
+    if (object_create_ex(proto_obj, pkt->summon_info.loc, pkt->summon_info.field_88, &obj)) {
+        if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+            sub_424070(obj, 5, false, true);
+        }
+    }
+    multiplayer_unlock();
+}
+
+// Packet74: dispel / related MT component mirrors.
+void mp_handle_packet74(Packet74* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->oid, &obj);
+    multiplayer_lock();
+    switch (pkt->subtype) {
+    case 0:
+        /* End maintain / dispel variant - best-effort via maintain end. */
+        ui_spell_maintain_end(pkt->mt_id);
+        break;
+    case 1:
+        if (obj != OBJ_HANDLE_NULL) {
+            magictech_component_dispel(obj, pkt->mt_id);
+        }
+        break;
+    default:
+        break;
+    }
+    multiplayer_unlock();
+}
+
+// Packet75: MagicTech object-flag component.
+void mp_handle_packet75(PacketMagicTechObjFlag* pkt)
+{
+    int64_t target;
+    int64_t self_obj;
+    int64_t parent_obj;
+    int64_t source_obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    sub_4F0690(pkt->field_8, &target);
+    sub_4F0690(pkt->self_oid, &self_obj);
+    sub_4F0690(pkt->parent_oid, &parent_obj);
+    sub_4F0690(pkt->source_oid, &source_obj);
+    multiplayer_lock();
+    magictech_component_obj_flag(target, self_obj, pkt->fld, pkt->value, pkt->state,
+        parent_obj, source_obj);
+    multiplayer_unlock();
+}
+
+// Packet76: charge/cost mirror.
+void mp_handle_packet76(Packet76* pkt)
+{
+    int64_t obj;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    obj = obj_pool_perm_lookup(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    multiplayer_lock();
+    sub_450420(obj, pkt->cost, pkt->field_24, pkt->magictech);
+    multiplayer_unlock();
+}
+
+// Packet77: eye candy add/remove.
+void mp_handle_packet77(PacketMagicTechEyeCandy* pkt)
+{
+    /* Coop Lite: ignore streamed eye candy - FX are local from Packet58. */
+    (void)pkt;
+}
+
 // 0x4EF320
 void sub_4EF320(void)
 {
-    // TODO: Incomplete.
+    /* Legacy stub slot - receive path lives in mp_handle_* above. */
 }
 
 // 0x4EF3D0
 void sub_4EF3D0(void)
 {
-    // TODO: Incomplete.
 }
 
 // 0x4EF540
 void sub_4EF540(void)
 {
-    // TODO: Incomplete.
 }
+
 
 // 0x4EF830
 void sub_4EF830(int64_t a1, int64_t a2)
@@ -565,6 +1104,10 @@ void sub_4EFB50(Packet121* pkt)
 {
     int64_t obj;
 
+    /* Host → clients only (review H2: a client could empty any inventory). */
+    if (tig_net_is_host()) {
+        return;
+    }
     multiplayer_lock();
     sub_4F0690(pkt->oid, &obj);
     sub_463B30(obj, pkt->field_20);

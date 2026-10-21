@@ -3,6 +3,7 @@
 #include "game/anim.h"
 #include "game/anim_private.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -1048,6 +1049,9 @@ void ai_attack(int64_t source_obj, int64_t target_obj, int loudness, unsigned in
             source_obj,
             NULL);
     }
+
+    /* Coop Lite: companion PC aggression counts as party aggression on host. */
+    coop_lite_propagate_party_aggression(source_obj, target_obj);
 }
 
 // 0x4A9AD0
@@ -2869,6 +2873,16 @@ bool ai_timeevent_process(TimeEvent* timeevent)
 
     obj = timeevent->params[0].object_value;
     if (obj == OBJ_HANDLE_NULL) {
+        return true;
+    }
+
+    /*
+     * Coop client: the host simulates every NPC (AI, heartbeat scripts,
+     * monster generators); poses arrive via PACKET_COOP_NPC_POS. Running AI
+     * here only produced Packet4 move intents for NPCs the host rejects
+     * ("Packet4 from slot 1 for an object it does not own", PT9).
+     */
+    if (tig_net_is_coop_enabled() && coop_lite_is_client_role()) {
         return true;
     }
 

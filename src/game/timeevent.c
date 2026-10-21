@@ -1,5 +1,7 @@
 #include "game/timeevent.h"
 
+#include "game/coop_lite.h"
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -549,6 +551,16 @@ bool timeevent_set_funcs(TimeEventFuncs* funcs)
     return true;
 }
 
+/* True if a handler is registered for this event type (UI-provided types
+   such as MP_CTRL_UI are NULL until the UI layer calls timeevent_set_funcs). */
+bool timeevent_type_has_handler(int type)
+{
+    if (type < 0 || type >= TIMEEVENT_TYPE_COUNT) {
+        return false;
+    }
+    return stru_5B2188[type].process_func != NULL;
+}
+
 // 0x45AE80
 void timeevent_reset(void)
 {
@@ -822,22 +834,18 @@ void timeevent_ping(tig_timestamp_t timestamp)
     timeevent_in_ping = true;
     datetime_add_milliseconds(&timeevent_real_time, delta);
 
-    if (tig_net_is_active()
-        && !tig_net_is_host()) {
-        if (!sub_45B300()) {
-            if (dword_5E8628 < 1000 * (sub_4A38A0() + 16)) {
-                datetime_add_milliseconds(&timeevent_game_time, 8 * delta);
-                datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
-                dword_5E8628 += 8 * delta;
-            }
-        }
-    } else {
-        if (!sub_45B300()) {
+    /*
+     * Coop clients: host owns *game* time (time-of-day, NPC schedules, etc.)
+     * via PacketGameTime. Clients must still advance real-time (already done
+     * above) and anim-time so local movement/rendering are not frozen.
+     */
+    if (!sub_45B300()) {
+        if (coop_lite_can_advance_game_time()) {
             if (!combat_turn_based_is_active()) {
                 datetime_add_milliseconds(&timeevent_game_time, 8 * delta);
             }
-            datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
         }
+        datetime_add_milliseconds(&timeevent_anim_time, 8 * delta);
     }
 
     for (time_type = 0; time_type < TIME_TYPE_COUNT; time_type++) {
@@ -871,7 +879,13 @@ void timeevent_ping(tig_timestamp_t timestamp)
                 // immediate processing.
                 offending_node_candidate = *node;
 
-                info->process_func(&(node->te));
+                if (info->process_func == NULL) {
+                    tig_debug_printf("TimeEvent: timeevent_ping: ERROR: NULL process_func for type %d (%s) — dropping event\n",
+                        node->te.type,
+                        info->name != NULL ? info->name : "?");
+                } else {
+                    info->process_func(&(node->te));
+                }
             }
 
             // Give user code a chance for cleanup.

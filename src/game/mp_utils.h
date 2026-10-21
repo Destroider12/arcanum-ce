@@ -695,4 +695,34 @@ void mp_gsound_play_scheme(int music_scheme_idx, int ambient_scheme_idx);
 void sub_4F0640(int64_t obj, ObjectID* oid_ptr);
 void sub_4F0690(ObjectID oid, int64_t* obj_ptr);
 
+/* Receive-side helpers used by multiplayer_handle_message. */
+void mp_handle_ui_update_inven(PacketUpdateInven* pkt);
+void sub_4EDFF0(Packet99* pkt);
+void sub_4EE5E0(Packet100* pkt);
+void mp_handle_gsound_play_scheme(PacketPlaySound* pkt);
+void sub_4EF8B0(Packet118* pkt);
+void sub_4EFB50(Packet121* pkt);
+
+void mp_handle_packet4(Packet4* pkt);
+void mp_handle_packet9(Packet9* pkt);
+void mp_handle_packet10(Packet10* pkt);
+void mp_handle_combat_mode_set(PacketCombatModeSet* pkt);
+void mp_handle_packet29(Packet29* pkt);
+void mp_handle_packet70(Packet70* pkt);
+void mp_flush_deferred_packet70(void);
+/* Drop queued Packet70s (session reset / disconnect; review L2). */
+void mp_clear_deferred_packet70(void);
+void mp_handle_packet92(Packet92* pkt);
+void mp_handle_packet57(PacketPlayerRequestCastSpell* pkt);
+void mp_handle_packet58(PacketPlayerCastSpell* pkt);
+void mp_handle_packet60(PacketPlayerSpellMaintainAdd* pkt);
+void mp_handle_packet61(PacketPlayerSpellMaintainEnd* pkt);
+void mp_handle_packet72(PacketObjectDestroy* pkt);
+void mp_handle_packet73(PacketSummon* pkt);
+void mp_handle_packet74(Packet74* pkt);
+void mp_handle_packet75(PacketMagicTechObjFlag* pkt);
+void mp_handle_packet76(Packet76* pkt);
+void mp_handle_packet77(PacketMagicTechEyeCandy* pkt);
+void mp_anim_modify(Packet8* pkt);
+
 #endif /* ARCANUM_GAME_MP_UTILS_H_ */
