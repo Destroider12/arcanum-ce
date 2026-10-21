@@ -9351,6 +9351,48 @@ static void coop_lite_dev_list_near(const char* why)
     object_list_destroy(&objects);
 }
 
+/* Dev trigger "items": every item on the ground within 15 tiles, with its
+   object flags, art and screen spot (PT18: a drop the host did not draw). */
+static void coop_lite_dev_list_ground_items(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t pc_loc;
+
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    pc_loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    tig_debug_printf("CoopLite: dev items: my PC at %d,%d\n",
+        (int)LOCATION_GET_X(pc_loc), (int)LOCATION_GET_Y(pc_loc));
+    object_list_vicinity(pc, OBJ_TM_ITEM, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        int64_t loc = obj_field_int64_get(node->obj, OBJ_F_LOCATION);
+        int x = -1;
+        int y = -1;
+        bool hit;
+        char name[128];
+        char oid_str[80];
+
+        if (location_dist(loc, pc_loc) > 15) {
+            continue;
+        }
+        name[0] = '\0';
+        object_examine(node->obj, pc, name);
+        objid_id_to_str(oid_str, obj_get_id(node->obj));
+        hit = coop_dev_probe_obj_hook != NULL && coop_dev_probe_obj_hook(node->obj, &x, &y);
+        tig_debug_printf("CoopLite: dev items:   '%s' %s @%d,%d off %d,%d flags 0x%08x item flags 0x%08x aid 0x%08x %s (%d,%d)\n",
+            name, oid_str, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
+            obj_field_int32_get(node->obj, OBJ_F_OFFSET_X), obj_field_int32_get(node->obj, OBJ_F_OFFSET_Y),
+            (unsigned int)obj_field_int32_get(node->obj, OBJ_F_FLAGS),
+            (unsigned int)obj_field_int32_get(node->obj, OBJ_F_ITEM_FLAGS),
+            (unsigned int)obj_field_int32_get(node->obj, OBJ_F_CURRENT_AID),
+            hit ? "click" : "no click spot", x, y);
+    }
+    object_list_destroy(&objects);
+}
+
 /*
  * PT18 GUI dev trigger: ARCANUM_DEV_TRIGGER=<file> (host or client). Polled
  * twice a second; when the file exists its first word is run and the file
@@ -9401,6 +9443,8 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
     tig_debug_printf("CoopLite: dev trigger: '%s'\n", cmd);
     if (strcmp(cmd, "list") == 0) {
         coop_lite_dev_list_near("trigger");
+    } else if (strcmp(cmd, "items") == 0) {
+        coop_lite_dev_list_ground_items();
     } else if (strcmp(cmd, "kill-host") == 0 && tig_net_is_host()) {
         int64_t pc = player_get_local_pc_obj();
 
