@@ -195,8 +195,12 @@ void show_inven_loot(int64_t pc_obj, int64_t target_obj)
         return;
     }
 
+    /* Core-systems test: on a coop client the local copy of a corpse's
+       inventory can be stale (items the creature gained on the host), so
+       open anyway and let the host's loot-session sync fill it. */
     if (obj_type_is_critter(obj_field_int32_get(target_obj, OBJ_F_TYPE))
-        && obj_field_int32_get(target_obj, OBJ_F_CRITTER_INVENTORY_NUM) == 0) {
+        && obj_field_int32_get(target_obj, OBJ_F_CRITTER_INVENTORY_NUM) == 0
+        && !(tig_net_is_active() && !tig_net_is_host() && tig_net_is_coop_enabled())) {
         intgame_there_is_nothing_to_loot();
         return;
     }

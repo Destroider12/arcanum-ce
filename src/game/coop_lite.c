@@ -1156,7 +1156,16 @@ void coop_lite_handle_attack_intent(PacketCoopAttackIntent* pkt)
     }
     (void)pkt->attack_kind;
     /* Host resolves AG_ATTACK — combat_dmg / ai_attack run here (event-level). */
-    anim_goal_attack(attacker, target);
+    {
+        bool ok = anim_goal_attack(attacker, target);
+        char tname[128];
+
+        tname[0] = '\0';
+        object_examine(target, attacker, tname);
+        tig_debug_printf("CoopLite: slot %d attacks '%s' (dist %d): %s\n", sub_52A530(), tname,
+            (int)location_dist(obj_field_int64_get(attacker, OBJ_F_LOCATION), obj_field_int64_get(target, OBJ_F_LOCATION)),
+            ok ? "goal started" : "goal refused");
+    }
 #else
     (void)attacker;
     (void)target;
@@ -9412,6 +9421,7 @@ static void coop_lite_dev_list_ground_items(void)
     object_list_destroy(&objects);
 }
 
+static const char* coop_lite_dev_ui_click(int64_t obj);
 /*
  * PT18 GUI dev trigger: ARCANUM_DEV_TRIGGER=<file> (host or client). Polled
  * twice a second; when the file exists its first word is run and the file
@@ -9426,11 +9436,251 @@ static unsigned int coop_dev_trigger_ms;
 static unsigned int coop_dev_list_ms;
 static bool coop_dev_list_done;
 
+/* ---- Dev trigger: core-systems test (combat, corpses, map change) ---- */
+
+static void coop_lite_dev_hp_line(const char* tag, int64_t obj)
+{
+    char name[128];
+    int64_t loc;
+    int64_t focus = OBJ_HANDLE_NULL;
+    char fname[128];
+
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    name[0] = fname[0] = '\0';
+    object_examine(obj, obj, name);
+    loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
+        focus = obj_field_handle_get(obj, OBJ_F_NPC_COMBAT_FOCUS);
+        if (focus != OBJ_HANDLE_NULL) {
+            object_examine(focus, focus, fname);
+        }
+    }
+    tig_debug_printf("CoopLite: dev hp: %s '%s' @%d,%d hp %d/%d%s%s%s%s\n", tag, name,
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
+        object_hp_current(obj), object_hp_max(obj),
+        critter_is_dead(obj) ? " DEAD" : "",
+        focus != OBJ_HANDLE_NULL ? " fighting '" : "", fname, focus != OBJ_HANDLE_NULL ? "'" : "");
+}
+
+static int64_t coop_lite_dev_nearest_critter(bool hostile_only, bool dead, const char* name_part);
+
+/* Nearest living non-PC critter within 12 tiles; hostile_only: only one
+   that is fighting someone (combat focus set). */
+static int64_t coop_lite_dev_nearest_npc(bool hostile_only, const char* name_part)
+{
+    return coop_lite_dev_nearest_critter(hostile_only, false, name_part);
+}
+
+static int64_t coop_lite_dev_nearest_critter(bool hostile_only, bool dead, const char* name_part)
+{
+    int64_t pc = player_get_local_pc_obj();
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t best = OBJ_HANDLE_NULL;
+    int64_t best_d = 13;
+
+    if (pc == OBJ_HANDLE_NULL) {
+        return OBJ_HANDLE_NULL;
+    }
+    object_list_vicinity(pc, dead ? (OBJ_TM_NPC | OBJ_TM_PC) : OBJ_TM_NPC, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        int64_t d;
+
+        if (critter_is_dead(node->obj) != dead) {
+            continue;
+        }
+        if (hostile_only && obj_field_handle_get(node->obj, OBJ_F_NPC_COMBAT_FOCUS) == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        if (name_part != NULL && name_part[0] != '\0') {
+            char name[128];
+
+            name[0] = '\0';
+            object_examine(node->obj, pc, name);
+            if (strstr(name, name_part) == NULL) {
+                continue;
+            }
+        }
+        d = location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(node->obj, OBJ_F_LOCATION));
+        if (d < best_d) {
+            best_d = d;
+            best = node->obj;
+        }
+    }
+    object_list_destroy(&objects);
+    return best;
+}
+
+static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
+{
+    int slot;
+
+    if (strcmp(cmd, "hp") == 0) {
+        ObjectList objects;
+        ObjectNode* node;
+        int64_t pc = player_get_local_pc_obj();
+
+        for (slot = 0; slot < 8; slot++) {
+            char tag[24];
+
+            snprintf(tag, sizeof(tag), "slot %d PC", slot);
+            coop_lite_dev_hp_line(tag, sub_4A2B60(slot));
+        }
+        if (pc != OBJ_HANDLE_NULL) {
+            object_list_vicinity(pc, OBJ_TM_NPC, &objects);
+            for (node = objects.head; node != NULL; node = node->next) {
+                if (location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(node->obj, OBJ_F_LOCATION)) <= 15) {
+                    coop_lite_dev_hp_line("NPC", node->obj);
+                }
+            }
+            object_list_destroy(&objects);
+        }
+        return true;
+    }
+    if (strcmp(cmd, "attack") == 0 || strcmp(cmd, "attack-npc") == 0) {
+        /* The real UI click path (intgame), in combat mode, on the nearest
+           hostile (attack) or the nearest NPC whose name contains arg. */
+        int64_t pc = player_get_local_pc_obj();
+        int64_t target = coop_lite_dev_nearest_npc(strcmp(cmd, "attack") == 0, arg);
+        char name[128];
+
+        name[0] = '\0';
+        if (pc == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+            tig_debug_printf("CoopLite: dev attack: no target\n");
+            return true;
+        }
+        object_examine(target, pc, name);
+        if (!combat_critter_is_combat_mode_active(pc)) {
+            combat_critter_activate_combat_mode(pc);
+        }
+        if (tig_net_is_host()) {
+            /* Host: its own click path is vanilla; start the attack goal
+               directly so an overlapping corpse can't catch the click. */
+            tig_debug_printf("CoopLite: dev attack: host attacks '%s': %s\n", name,
+                anim_goal_attack(pc, target) ? "goal started" : "goal refused");
+            return true;
+        }
+        tig_debug_printf("CoopLite: dev attack: click on '%s' (combat mode %d): %s\n", name,
+            combat_critter_is_combat_mode_active(pc) ? 1 : 0, coop_lite_dev_ui_click(target));
+        return true;
+    }
+    if (strcmp(cmd, "loot") == 0) {
+        /* The real UI click on the nearest corpse whose name contains arg. */
+        int64_t corpse = coop_lite_dev_nearest_critter(false, true, arg);
+        char name[128];
+
+        name[0] = '\0';
+        if (corpse != OBJ_HANDLE_NULL) {
+            object_examine(corpse, player_get_local_pc_obj(), name);
+        }
+        if (player_get_local_pc_obj() != OBJ_HANDLE_NULL
+            && combat_critter_is_combat_mode_active(player_get_local_pc_obj())) {
+            combat_critter_deactivate_combat_mode(player_get_local_pc_obj()); /* else the click attacks */
+        }
+        if (tig_net_is_host() && corpse != OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev loot: host opens loot on '%s'\n", name);
+            ui_show_inven_loot(player_get_local_pc_obj(), corpse);
+            return true;
+        }
+        tig_debug_printf("CoopLite: dev loot: click on corpse '%s': %s\n", name,
+            coop_lite_dev_ui_click(corpse));
+        return true;
+    }
+    if (strcmp(cmd, "kill-npc") == 0 && tig_net_is_host()) {
+        int64_t npc = coop_lite_dev_nearest_npc(false, arg);
+
+        if (npc != OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev: killing NPC matching '%s'\n", arg);
+            critter_kill(npc);
+        }
+        return true;
+    }
+    if (!tig_net_is_host()) {
+        return false;
+    }
+    if (strcmp(cmd, "spawn-rat") == 0 || strcmp(cmd, "spawn-wolf") == 0) {
+        /* arg "host" = at the host PC, otherwise at each client PC. */
+        bool wolf = strcmp(cmd, "spawn-wolf") == 0;
+
+        for (slot = 0; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+            int64_t loc;
+            int64_t npc;
+
+            if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)
+                || ((strcmp(arg, "host") == 0) != (slot == 0))) {
+                continue;
+            }
+            loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+            {
+                static int spawn_n;
+
+                /* a fresh tile each time, so a new creature never stands on an old corpse */
+                spawn_n++;
+                loc = coop_lite_follow_loc_for_slot(LOCATION_MAKE(LOCATION_GET_X(loc) + 2 + (spawn_n % 3),
+                                                        LOCATION_GET_Y(loc) - 1 + (spawn_n % 4)), 0);
+            }
+            if (!mp_object_create(wolf ? BP_WOLF : BP_SEWER_RAT, loc, &npc) || npc == OBJ_HANDLE_NULL) {
+                tig_debug_printf("CoopLite: dev: spawn failed\n");
+                continue;
+            }
+            item_gold_transfer(OBJ_HANDLE_NULL, npc, 25, OBJ_HANDLE_NULL); /* corpse loot test */
+            ai_attack(pc, npc, LOUDNESS_NORMAL, 0);
+            tig_debug_printf("CoopLite: dev: %s (25 gold) spawned to attack slot %d PC at %d,%d\n",
+                wolf ? "wolf" : "sewer rat", slot, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+        }
+        return true;
+    }
+    if (strcmp(cmd, "maps") == 0) {
+        int m;
+
+        for (m = 0; m < 200; m++) {
+            char* name = NULL;
+            int64_t x;
+            int64_t y;
+
+            if (!map_get_name(m, &name) || name == NULL) {
+                continue;
+            }
+            if (!map_get_starting_location(m, &x, &y)) {
+                x = y = -1;
+            }
+            tig_debug_printf("CoopLite: dev map %d '%s' start %d,%d%s\n", m, name, (int)x, (int)y,
+                m == map_current_map() ? " (current)" : "");
+        }
+        return true;
+    }
+    if (strcmp(cmd, "map") == 0) {
+        /* Host map change through teleport_do (what a stair/door jump
+           point does), to map arg at its start location. */
+        TeleportData td;
+        int m = atoi(arg);
+        int64_t x;
+        int64_t y;
+
+        if (!map_get_starting_location(m, &x, &y)) {
+            tig_debug_printf("CoopLite: dev map: no map %d\n", m);
+            return true;
+        }
+        memset(&td, 0, sizeof(td));
+        td.obj = player_get_local_pc_obj();
+        td.loc = LOCATION_MAKE(x, y);
+        td.map = m;
+        tig_debug_printf("CoopLite: dev map: host teleports to map %d at %d,%d\n", m, (int)x, (int)y);
+        teleport_do(&td);
+        return true;
+    }
+    return false;
+}
+
 static void coop_lite_dev_trigger_tick(unsigned int now_ms)
 {
     const char* env;
     FILE* f;
     char cmd[64];
+    char arg[64];
     int slot;
 
     env = getenv("ARCANUM_DEV_LIST_NEAR");
@@ -9454,13 +9704,16 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
         return;
     }
     cmd[0] = '\0';
-    if (fscanf(f, "%63s", cmd) != 1) {
+    arg[0] = '\0';
+    if (fscanf(f, "%63s %63s", cmd, arg) < 1) {
         cmd[0] = '\0';
     }
     fclose(f);
     remove(env);
-    tig_debug_printf("CoopLite: dev trigger: '%s'\n", cmd);
-    if (strcmp(cmd, "list") == 0) {
+    tig_debug_printf("CoopLite: dev trigger: '%s'%s%s\n", cmd, arg[0] != '\0' ? " " : "", arg);
+    if (coop_lite_dev_trigger_core(cmd, arg)) {
+        /* core-systems test commands (spawn, attack, hp, map) */
+    } else if (strcmp(cmd, "list") == 0) {
         coop_lite_dev_list_near("trigger");
     } else if (strcmp(cmd, "items") == 0) {
         coop_lite_dev_list_ground_items();

@@ -1509,3 +1509,28 @@ Headless with real xdotool clicks (`pt18-gui-flow.sh`, `logs/pt18-h3/`): bin loo
   `loot: asked the host to plant an item ('Bandages' from my PC into 'Merwin Tumblebrook')`.
 - New trigger command `inven` (`ARCANUM_DEV_TRIGGER`): dumps every slot PC's
   inventory with owner checks on that side.
+
+### Core-systems test (combat, corpses, loot, map change), 2026-10-21
+
+Headless runs `logs/core1`–`core10` with real UI-click hooks. Fixes:
+
+- **Client attack clicks never reached the host.** `intgame` builds AG_ATTACK
+  with `anim_goal_add`, not `anim_goal_attack`, so no attack intent was sent
+  and the client's PC swung at nothing (rat HP unchanged after 3 client
+  clicks). A coop client's attack click is now sent as
+  `PACKET_COOP_ATTACK_INTENT` (`anim_goal_attack`), and the host logs
+  `slot N attacks '<target>' (dist d): goal started`.
+- **"There is nothing to loot." on the client** for a corpse whose items were
+  gained on the host (the client's copy was empty). A coop client now opens
+  the loot window anyway; the host's loot-session sync fills it.
+- New `ARCANUM_DEV_TRIGGER` commands: `hp` (HP, death and combat focus of
+  slot PCs and NPCs within 15 tiles), `attack` / `attack-npc <name>` (a real
+  click in combat mode; the host uses `anim_goal_attack` directly), `loot
+  <name>` (nearest corpse, NPC or PC), and on the host `spawn-rat|spawn-wolf
+  [host]` (25 gold in its inventory), `kill-npc <name>`, `maps`, `map <n>`
+  (teleport_do to map n's start, as a stair or door does).
+
+Known, not fixed: the host PC's stat changes (dev CON grant, and so likely
+level-ups) don't reach clients. The client shows Merwin at 24 max HP while
+the host has 34; current damage matches. The NPC blood pool decal is
+host-only (the corpse pose matches).

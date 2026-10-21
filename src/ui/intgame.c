@@ -3562,6 +3562,19 @@ void sub_54ED30(TargetDescriptor* td)
         }
     }
 
+    /* Core-systems test: a coop client's attack click built a local AG_ATTACK
+       goal that never reached the host (AG_ATTACK isn't client-local), so the
+       client's PC swung at nothing. Send it as an attack intent; the host
+       resolves the hit (anim_goal_attack plays the swing here when adjacent). */
+    if ((anim == AG_ATTACK || anim == AG_ATTEMPT_ATTACK)
+        && tig_net_is_active()
+        && !tig_net_is_host()
+        && tig_net_is_coop_enabled()) {
+        intgame_coop_click_trace("goal %d: sent to the host as an attack intent", anim);
+        anim_goal_attack(pc_obj, td->obj);
+        return;
+    }
+
     if (combat_auto_attack_get(pc_obj)) {
         if (sub_44E6F0(pc_obj, &goal_data)) {
             intgame_coop_click_trace("goal %d: already running (sub_44E6F0)", anim);
