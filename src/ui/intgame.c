@@ -170,6 +170,7 @@ static void intgame_unforce_fullscreen(void);
 static void sub_551F80(void);
 static bool sub_552050(int x, int y, TargetDescriptor* td);
 static bool intgame_dev_click_obj(int64_t obj, int button);
+static bool intgame_dev_probe_obj(int64_t obj, int* x, int* y);
 static void intgame_coop_click_trace(const char* fmt, ...);
 static void sub_5520D0(RotatingWindowType window_type, int step);
 static void iso_interface_window_swap(RotatingWindowType window_type);
@@ -976,6 +977,7 @@ bool intgame_init(GameInitInfo* init_info)
 
     (void)init_info;
     coop_lite_set_dev_click_obj_hook(intgame_dev_click_obj);
+    coop_lite_set_dev_probe_obj_hook(intgame_dev_probe_obj);
 
     if (!mes_load("mes\\intgame.mes", &intgame_mes_file)) {
         return false;
@@ -5199,6 +5201,49 @@ static void intgame_coop_click_trace(const char* fmt, ...)
  * button: 0 = left, 1 = right, 2 = probe only (find the spot, queue
  * nothing). Returns false when no spot on the object picks it.
  */
+/* Coop dev (PT18 GUI): the first spot on the object's art that picks it
+   (game-window coordinates, what a player would click). 0 = found,
+   1 = no screen rect (off screen), 2 = no spot picks it. */
+static int intgame_dev_find_spot(int64_t obj, int* out_x, int* out_y)
+{
+    TigRect rect;
+    TigWindowData window_data;
+    TargetDescriptor td;
+    int x;
+    int y;
+    int dx;
+    int dy;
+
+    if (obj == OBJ_HANDLE_NULL || tig_window_data(dword_64C52C, &window_data) != TIG_OK) {
+        return 1;
+    }
+    object_get_rect(obj, 0, &rect);
+    if (rect.width <= 0 || rect.height <= 0) {
+        return 1;
+    }
+    for (dy = 0; dy < 5; dy++) {
+        for (dx = 0; dx < 5; dx++) {
+            static const int order[5] = { 2, 1, 3, 0, 4 };
+
+            x = rect.x + rect.width * (1 + 2 * order[dx]) / 10 + window_data.rect.x;
+            y = rect.y + rect.height * (1 + 2 * order[dy]) / 10 + (intgame_fullscreen ? 0 : window_data.rect.y);
+            if (sub_552050(x, y, &td) && !td.is_loc && td.obj == obj) {
+                *out_x = x;
+                *out_y = y;
+                return 0;
+            }
+        }
+    }
+    *out_x = rect.x + rect.width / 2 + window_data.rect.x;
+    *out_y = rect.y + rect.height / 2 + (intgame_fullscreen ? 0 : window_data.rect.y);
+    return 2;
+}
+
+static bool intgame_dev_probe_obj(int64_t obj, int* x, int* y)
+{
+    return intgame_dev_find_spot(obj, x, y) == 0;
+}
+
 static bool intgame_dev_click_obj(int64_t obj, int button)
 {
     TigRect rect;

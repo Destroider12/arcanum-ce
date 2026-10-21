@@ -1160,6 +1160,10 @@ void inven_ui_destroy(void)
     if (inven_ui_mode == INVEN_UI_MODE_BARTER
         && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
         coop_lite_client_request_barter(inven_ui_pc_obj, qword_682C78, COOP_BARTER_CLOSE);
+    } else if ((inven_ui_mode == INVEN_UI_MODE_LOOT || inven_ui_mode == INVEN_UI_MODE_STEAL)
+        && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        /* PT18 GUI: end the host's loot / pickpocket session too. */
+        coop_lite_client_request_barter(inven_ui_pc_obj, qword_6813A8, COOP_BARTER_CLOSE);
     }
 
     if ((inven_ui_mode == INVEN_UI_MODE_LOOT

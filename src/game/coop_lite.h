@@ -594,6 +594,7 @@ bool coop_lite_load_appendix(struct TigFile* stream);
 void coop_lite_set_hotkey_spell_hook(int (*hook)(int spell));
 /* intgame_dev_click_obj (dev: a real mouse click on an object; 0 = left). */
 void coop_lite_set_dev_click_obj_hook(bool (*hook)(int64_t obj, int button));
+void coop_lite_set_dev_probe_obj_hook(bool (*hook)(int64_t obj, int* x, int* y));
 /* hotkey_ui_dev_click_slot (dev: a real mouse click on a hotbar slot). */
 void coop_lite_set_dev_click_hotkey_hook(bool (*hook)(int index));
 void coop_lite_set_dev_loot_hook(bool (*hook)(int op));

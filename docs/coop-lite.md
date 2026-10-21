@@ -1461,3 +1461,21 @@ The review text is in `/workspace/review/argon-review-3-pt18.md`, outside the re
 - Host `ARCANUM_DEV_STEAL_FORCE=1`: pickpocket always succeeds (tests the success path).
 
 Known noise: `ASSERTION anim.c:4105 priority_level < PRIORITY_HIGHEST` on a client when its PC falls. Vanilla callers (`multiplayer.c`) also pass PRIORITY_HIGHEST, the original check was `<=`, and the CE assertion is stricter. Harmless.
+
+### PT18 GUI run 1 (`logs/pt18-gui1/`)
+Part 1 passed: the host looted the client corpse (`changed on the host ... gold 0`), and the hotbar resurrect worked (`HotkeyUI: click: slot 0 ... activate`, then `resurrected`). Part 2 failed. Diagnosis:
+- **Container click.** Both client clicks were `Intgame: click: on own PC, ignored`. The grey can next to the PC is scenery. The client PC stood over it, so its sprite took the click. The real Rubbish Bin (wire basket, 7 items) is at 90246,84155. A real xdotool click opens it: `goal 81` → `opened loot window on 'Rubbish Bin'`.
+- **Pickpocket.** The skill rows in the character sheet only show the skill. Vanilla uses skills through the in-game Skills button, which opens the rotating panel (Prowling / Pick Pocket / Disarm / Repair): pick the hand icon, then click the target (`skill_ui_activate` → `sub_57A710` → `inven_ui_open(STEAL)`). On a client this already goes to the host (`OPEN_STEAL`). Clicking the Blacksmith normally is dialog, which is correct.
+- **"Snap back."** There is no `host correction` (client) and no `implausible` (host) line. Both censuses agree. The client walked to 84158, and the click on the Blacksmith (`goal 21`, talk) walked it back next to him. That is not a correction.
+
+Fixed:
+- **A peer PC that dies stayed standing on the client.** Only hit points arrive, and the poses of dead PCs are not interpolated. `coop_lite_client_watch_vitals` now lays down / stands up other slots' PCs (`slot N PC (peer) fell — corpse pose here` / `stood up here`).
+- **Looting the gold of a remote PC** (host corpse, another client) sent the client's local stack OID: `takes '' from target: refused`. INVEN_SYNC already carries each critter owner's gold/ammo OIDs. The client now remembers them (`coop_stack_map`), and `coop_lite_client_map_stack_oid` maps any critter's stack, not only its own.
+- **Closing a loot / pickpocket window** now ends the host session (`window ended (closed by the client)`). Before, it ran on until the watch ended it.
+
+New dev switches (both sides unless noted):
+- `ARCANUM_DEV_GRANT_PICKPOCKET=N`: N Pick Pocket points (DEX raised to 20), once per PC.
+- `ARCANUM_DEV_LIST_NEAR=S`: S s in, log containers and critters within 15 tiles: name, tile, lock / dead, items, and the game-window spot where a click picks it (`intgame_dev_find_spot`).
+- `ARCANUM_DEV_TRIGGER=<file>`: polled every 0.5 s; the first word is run and the file deleted. `list`, and on the host `kill-host` / `kill-client`. The host's death does not wipe while a client lives. The client can loot the corpse and Resurrect it from its hotbar.
+
+Headless with real xdotool clicks (`pt18-gui-flow.sh`, `logs/pt18-h3/`): bin loot (boots), pickpocket of the Blacksmith (key) and of the host (ring) with skill 20, kill-host, client loot of the host corpse (385 gold, client 785), and client hotbar Resurrect of the host (`host PC resurrected`). Each window close was logged.
