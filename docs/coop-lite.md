@@ -1735,6 +1735,6 @@ Protocol stays 24 (no packet layout changed).
   is hurt (cap 7 days).
 - **Party:** an NPC follower that heals (AI heal) also considers the other
   co-op PCs and their followers within 20 tiles. Party-shared hostility now
-  covers KOS by reaction, faction and alignment, up to 60 tiles.
+  covers KOS by reaction, faction and alignment, up to 120 tiles.
 - **Note:** an NPC whose dialog with a PC never ended keeps its AI frozen
   (vanilla behaviour).
