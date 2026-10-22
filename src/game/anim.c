@@ -4108,7 +4108,7 @@ static bool sub_424070_impl(int64_t obj, int priority_level, bool a3, bool a4)
     int prev = -1;
     int slot;
 
-    ASSERT(priority_level >= PRIORITY_NONE && priority_level < PRIORITY_HIGHEST); // (priorityLevel >= priorityNone)&&(priorityLevel <= priorityHighest)
+    ASSERT(priority_level >= PRIORITY_NONE && priority_level <= PRIORITY_HIGHEST); // PT29: vanilla allows highest (was "<": assert dump on every HIGHEST interrupt) (priorityLevel >= priorityNone)&&(priorityLevel <= priorityHighest)
 
     if (!a4) {
         if (tig_net_is_active() && player_is_pc_obj(obj)) {

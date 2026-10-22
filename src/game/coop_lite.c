@@ -1578,7 +1578,7 @@ static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj
         tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)));
     ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
     if (!ok && !moving) {
-        sub_424070(attacker_obj, PRIORITY_5, false, true);
+        sub_424070(attacker_obj, PRIORITY_HIGHEST, false, true);
         ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
     }
     if (ok) {

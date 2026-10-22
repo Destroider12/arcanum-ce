@@ -1080,7 +1080,7 @@ bool coop_lite_should_skip_independent_new_game(void);
  * a longer step snaps.
  */
 #define COOP_INTERP_RING 3
-#define COOP_INTERP_DELAY_MS 55u /* PT28: one PC_POS interval (50 ms) + a little */
+#define COOP_INTERP_DELAY_MS 120u /* PT29: 2-3 PC_POS samples (50 ms) of jitter margin */
 
 typedef struct CoopInterpSample {
     int64_t loc;
