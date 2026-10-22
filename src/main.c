@@ -130,6 +130,12 @@ int main(int argc, char** argv)
         }
     }
 
+#ifndef COOP_BUILD_SHA
+#define COOP_BUILD_SHA "unknown"
+#endif
+    /* PT28: which build is this (first log line, window title). */
+    tig_debug_printf("Arcanum CE Coop Lite build %s\n", COOP_BUILD_SHA);
+
     highres_config_load();
     highres_config = highres_config_get();
 
@@ -290,9 +296,9 @@ int main(int argc, char** argv)
     /* Coop: say which side this window is (PT18 GUI: a desktop tester
        drove the host window believing it was the client's). */
     if (coop_cli_mode == 1) {
-        init_info.window_name = "Arcanum CE - CO-OP HOST";
+        init_info.window_name = "Arcanum CE - CO-OP HOST [" COOP_BUILD_SHA "]";
     } else if (coop_cli_mode == 2) {
-        init_info.window_name = "Arcanum CE - CO-OP CLIENT";
+        init_info.window_name = "Arcanum CE - CO-OP CLIENT [" COOP_BUILD_SHA "]";
     }
 
     if (tig_init(&init_info) != TIG_OK) {

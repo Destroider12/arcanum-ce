@@ -98,7 +98,22 @@ typedef struct PacketCoopPcPos {
     /* 0038 */ int map; /* coop_lite_pose_map_key: map index + load generation */
     /* 003C */ uint16_t epoch; /* P0-2: bumped by the host on every correction */
     /* 003E */ uint16_t seq; /* P0-2: per-sender order inside an epoch */
+    /* PT28 item 5 (protocol 25): the host's visual state of the PC, applied
+       by clients only (spells: stone / shrink / translucent, polymorph). */
+    /* 0040 */ unsigned int vis_flags; /* OBJ_F_FLAGS & COOP_PC_VIS_FLAGS */
+    /* 0044 */ unsigned int critter_flags; /* OBJ_F_CRITTER_FLAGS */
+    /* 0048 */ unsigned int critter_flags2; /* OBJ_F_CRITTER_FLAGS2 */
+    /* 004C */ unsigned int spell_flags; /* OBJ_F_SPELL_FLAGS */
+    /* 0050 */ unsigned int blit_flags; /* OBJ_F_BLIT_FLAGS */
+    /* 0054 */ unsigned int blit_color; /* OBJ_F_BLIT_COLOR */
+    /* 0058 */ int blit_alpha; /* OBJ_F_BLIT_ALPHA */
+    /* 005C */ int blit_scale; /* OBJ_F_BLIT_SCALE */
 } PacketCoopPcPos;
+
+/* OBJ_F_FLAGS bits that are only how a PC looks (PT28 item 5). */
+#define COOP_PC_VIS_FLAGS (0x00000004u /* FLAT */ | 0x00000040u /* TRANSLUCENT */ \
+    | 0x00000080u /* SHRUNK */ | 0x00000200u /* INVISIBLE */ | 0x00080000u /* STONED */ \
+    | 0x00100000u /* DONTLIGHT */ | 0x10000000u /* FROZEN */)
 
 /* Host → clients: follower/leader table (variable length: count entries). */
 #define COOP_FOLLOWERS_MAX 16
@@ -178,7 +193,8 @@ COOP_STATIC_ASSERT(offsetof(PacketCoopFollowHost, loc) == 0x08, "PacketCoopFollo
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, has_oid) == 0x4C, "PacketCoopCharOffer layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopCharOffer, pc_oid) == 0x50, "PacketCoopCharOffer layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopCharOffer) == 0x78, "PacketCoopCharOffer size");
-COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x40, "PacketCoopPcPos size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopPcPos) == 0x60, "PacketCoopPcPos size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, vis_flags) == 0x40, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, map) == 0x38, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, loc) == 0x20, "PacketCoopPcPos layout");
 COOP_STATIC_ASSERT(offsetof(PacketCoopPcPos, flags) == 0x34, "PacketCoopPcPos layout");
@@ -1064,7 +1080,7 @@ bool coop_lite_should_skip_independent_new_game(void);
  * a longer step snaps.
  */
 #define COOP_INTERP_RING 3
-#define COOP_INTERP_DELAY_MS 100u
+#define COOP_INTERP_DELAY_MS 55u /* PT28: one PC_POS interval (50 ms) + a little */
 
 typedef struct CoopInterpSample {
     int64_t loc;

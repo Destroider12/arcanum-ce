@@ -337,6 +337,18 @@ target_sources(arcanum-ce PUBLIC
     ${SRCS}
 )
 
+# PT28: build id (git short sha at configure time) for the log and title.
+execute_process(
+    COMMAND git rev-parse --short=8 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE COOP_BUILD_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT COOP_BUILD_SHA)
+    set(COOP_BUILD_SHA "unknown")
+endif()
+set_source_files_properties(src/main.c PROPERTIES COMPILE_DEFINITIONS "COOP_BUILD_SHA=\"${COOP_BUILD_SHA}\"")
+
 target_include_directories(arcanum-ce PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )

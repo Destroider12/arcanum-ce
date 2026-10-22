@@ -2523,8 +2523,9 @@ void MTComponentEyeCandy_ProcFunc(void)
                 magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell,
                 mt_id);
 
-            /* Coop Lite: no Packet77 eye-candy stream — local FX from cast. */
-            if (0 && tig_net_is_active()) {
+            /* PT28 item 7: the host streams spell eye candy (Packet77) so
+               clients see buff particles come and go. */
+            if (tig_net_is_active() && tig_net_is_host()) {
                 PacketMagicTechEyeCandy pkt;
 
                 pkt.type = 77;
@@ -2551,6 +2552,18 @@ void MTComponentEyeCandy_ProcFunc(void)
         node.animate = true;
         node.flags = magictech_cur_component->data.eye_candy.flags;
         node.parent_obj = magictech_cur_run_info->parent_obj.obj;
+
+        /* PT28 item 7: clients get the same eye candy (Packet77 add). */
+        if (tig_net_is_active() && tig_net_is_host()) {
+            PacketMagicTechEyeCandy pkt;
+
+            pkt.type = 77;
+            pkt.subtype = 1;
+            pkt.oid = obj_get_id(stru_5E6D28.target_obj);
+            pkt.fx_id = magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell;
+            pkt.mt_id = magictech_cur_run_info->id;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
 
         if ((magictech_cur_run_info->flags & MAGICTECH_RUN_0x40) == 0) {
             if (animfx_add(&node)) {
@@ -5339,9 +5352,8 @@ void magictech_fx_remove(int64_t obj, int fx)
 
     animfx_remove(&spell_eye_candies, obj, fx % 10 + 6 * (fx / 10), -1);
 
-    /* Coop Lite: do not stream per-sprite eye candy (Packet77). Clients spawn
-       particles locally when they apply Packet58 cast. */
-    if (0 && tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+    /* PT28 item 7: stream the removal to clients (Packet77). */
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
         PacketMagicTechEyeCandy pkt;
 
         pkt.type = 77;
@@ -5392,7 +5404,9 @@ bool mp_magictech_resolve_invocation(MagicTechInvocation* mt_invocation)
         return false;
     }
     return mp_invocation_resolve_one(&(mt_invocation->source_obj), true, "source", mt_invocation->spell)
-        && mp_invocation_resolve_one(&(mt_invocation->parent_obj), true, "parent", mt_invocation->spell)
+        /* PT28 item 6: the parent is optional (validated only when named);
+           a parent we do not have must not drop the whole cast. */
+        && mp_invocation_resolve_one(&(mt_invocation->parent_obj), false, "parent", mt_invocation->spell)
         && mp_invocation_resolve_one(&(mt_invocation->target_obj), true, "target", mt_invocation->spell)
         && mp_invocation_resolve_one(&(mt_invocation->attacker_obj), false, "attacker", mt_invocation->spell);
 }
@@ -5415,12 +5429,18 @@ void mp_magictech_apply_eye_candy_ex(int subtype, ObjectID oid, int fx_id, int m
         return;
     }
 
+    if (fx_id < 0) {
+        return;
+    }
     if (subtype == 0) {
         animfx_remove(&spell_eye_candies, obj, fx_id, mt_id);
     } else {
         sub_4CCD20(&spell_eye_candies, &node, obj, mt_id, fx_id);
         node.animate = true;
-        animfx_add(&node);
+        /* PT28: a local cast may already show it - no double. */
+        if (!animfx_has(&node)) {
+            animfx_add(&node);
+        }
     }
 }
 

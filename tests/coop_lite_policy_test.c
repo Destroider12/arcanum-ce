@@ -384,7 +384,7 @@ static int test_pc_pos_helpers(void)
         fprintf(stderr, "PC_POS not under validate limit\n");
         return 1;
     }
-    if (sizeof(PacketCoopPcPos) != 0x40 || offsetof(PacketCoopPcPos, map) != 0x38
+    if (sizeof(PacketCoopPcPos) != 0x60 || offsetof(PacketCoopPcPos, map) != 0x38
         || sizeof(PacketCoopCharOffer) != 0x78
         || offsetof(PacketCoopCharOffer, token) != 0x68
         || offsetof(PacketCoopSessionSync, flags) != 0xDC) {
@@ -417,7 +417,7 @@ static int test_pose_order(void)
     memset(&host, 0, sizeof(host));
     memset(&peer, 0, sizeof(peer));
     if (offsetof(PacketCoopPcPos, epoch) != 0x3C || offsetof(PacketCoopPcPos, seq) != 0x3E
-        || sizeof(PacketCoopPcPos) != 0x40 || sizeof(PacketCoopFollowHost) != 0x18
+        || sizeof(PacketCoopPcPos) != 0x60 || sizeof(PacketCoopFollowHost) != 0x18
         || offsetof(PacketCoopSessionSync, map_gen) != 0xD4
         || offsetof(PacketCoopSessionSync, pose_epoch) != 0xD8) {
         fprintf(stderr, "pose ordering fields misplaced\n");

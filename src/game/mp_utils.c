@@ -1082,8 +1082,14 @@ void mp_handle_packet76(Packet76* pkt)
 // Packet77: eye candy add/remove.
 void mp_handle_packet77(PacketMagicTechEyeCandy* pkt)
 {
-    /* Coop Lite: ignore streamed eye candy - FX are local from Packet58. */
-    (void)pkt;
+    /* PT28 item 7: host-streamed spell eye candy. The host's spell run id
+       means nothing here (client run ids are local): -1 = any run. */
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    multiplayer_lock();
+    mp_magictech_apply_eye_candy_ex(pkt->subtype, pkt->oid, pkt->fx_id, -1);
+    multiplayer_unlock();
 }
 
 // 0x4EF320
@@ -1290,7 +1296,7 @@ _Static_assert(sizeof(PacketCoopObjBlob) == 8256, "PacketCoopObjBlob wire layout
 _Static_assert(sizeof(PacketCoopObjReq) == 392, "PacketCoopObjReq wire layout");
 _Static_assert(sizeof(PacketCoopPartyState) == 24, "PacketCoopPartyState wire layout");
 _Static_assert(sizeof(PacketCoopSwing) == 56, "PacketCoopSwing wire layout");
-_Static_assert(sizeof(PacketCoopPcPos) == 64, "PacketCoopPcPos wire layout");
+_Static_assert(sizeof(PacketCoopPcPos) == 96, "PacketCoopPcPos wire layout");
 _Static_assert(sizeof(PacketCoopPcStats) == 444, "PacketCoopPcStats wire layout");
 _Static_assert(sizeof(PacketCoopRoster) == 112, "PacketCoopRoster wire layout");
 _Static_assert(sizeof(PacketCoopSessionSync) == 224, "PacketCoopSessionSync wire layout");

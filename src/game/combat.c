@@ -759,16 +759,20 @@ void sub_4B2F60(CombatContext* combat)
         if ((combat->flags & CF_CRITICAL) != 0) {
             sound_id = sfx_critter_sound(combat->target_obj, CRITTER_SOUND_CRITICALLY_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->target_obj);
+            coop_lite_host_npc_sound(sound_id, combat->target_obj); /* PT28 */
 
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_CRITICAL_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         } else {
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         }
     } else {
         sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_MISS);
         gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+        coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
 
         if (combat->target_obj != OBJ_HANDLE_NULL
             && obj_field_int32_get(combat->target_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
@@ -1024,12 +1028,15 @@ void combat_process_melee_attack(CombatContext* combat)
         if ((combat->flags & CF_CRITICAL) != 0) {
             sound_id = sfx_critter_sound(combat->target_obj, CRITTER_SOUND_CRITICALLY_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->target_obj);
+            coop_lite_host_npc_sound(sound_id, combat->target_obj); /* PT28 */
 
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_CRITICAL_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         } else {
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         }
 
         if ((obj_field_int32_get(combat->attacker_obj, OBJ_F_SPELL_FLAGS) & OSF_BODY_OF_FIRE) == 0
@@ -1041,6 +1048,7 @@ void combat_process_melee_attack(CombatContext* combat)
     } else {
         sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_MISS);
         gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+        coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
 
         if (obj_field_int32_get(combat->target_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
             ai_process(combat->target_obj);

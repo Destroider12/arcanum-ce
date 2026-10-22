@@ -1556,6 +1556,18 @@ static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj
     bool ok;
 
     tig_net_local_suspend_begin();
+    /* PT28 item 2: a swing already on screen is never interrupted (that
+       destroyed its run and the next one often did not start): restart its
+       frames instead and keep the run. */
+    if (tig_art_id_anim_get(art_id) == TIG_ART_ANIM_ATTACK
+        && anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL)) {
+        object_set_current_aid(attacker_obj,
+            tig_art_id_frame_set(tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)), 0));
+        coop_diag.swing_anim++;
+        tig_net_local_suspend_end();
+        coop_client_swing_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+        return;
+    }
     /* PT27: a previous cosmetic swing still running would hold this one
        back; restart it (never cut a walk). */
     if (!moving && anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL)) {
@@ -1626,9 +1638,11 @@ void coop_lite_host_npc_sound(int sound_id, int64_t npc)
     int64_t loc;
 
     if (sound_id == -1 || npc == OBJ_HANDLE_NULL || !tig_net_is_active() || !tig_net_is_host()
-        || !tig_net_is_coop_enabled() || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+        || !tig_net_is_coop_enabled() || !obj_type_is_critter(obj_field_int32_get(npc, OBJ_F_TYPE))) {
         return;
     }
+    /* PT28 item 3: PC attackers too (weapon swing / hit / miss sounds) -
+       clients never resolve a hit, so they never played them. */
     /* PT25 item 1: NPC anim-goal sounds only ever played on the host, so
        a wolf charging a client PC far from the host was silent there. */
     memset(&pkt, 0, sizeof(pkt));
@@ -1731,6 +1745,14 @@ void coop_lite_handle_swing(PacketCoopSwing* pkt)
         coop_client_swing_click = false;
         return;
     }
+    /* PT28 item 2: the first host echo must not cut our own local swing
+       that is still playing (frame reset would restart it mid-way). */
+    if (coop_client_swing_click
+        && tig_art_id_anim_get(obj_field_int32_get(attacker, OBJ_F_CURRENT_AID)) == TIG_ART_ANIM_ATTACK
+        && anim_is_current_goal_type(attacker, AG_ANIMATE, NULL)) {
+        coop_client_swing_click = false;
+        return;
+    }
     coop_client_swing_click = false;
     coop_lite_client_play_swing(attacker, target);
 #else
@@ -1806,7 +1828,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 74:
     case 75:
     case 76:
-    /* 77 eye-candy: suppressed — clients spawn FX locally from Packet58 cast */
+    case 77: /* PT28 item 7: host spell eye candy → client */
     case 92:
     case 99: /* location */
     case 2: /* player list */
@@ -2078,6 +2100,8 @@ bool coop_lite_pc_pos_changed(const PacketCoopPcPos* prev, const PacketCoopPcPos
         || prev->offset_x != cur->offset_x
         || prev->offset_y != cur->offset_y
         || prev->art_id != cur->art_id
+        || memcmp(&prev->vis_flags, &cur->vis_flags,
+               sizeof(*cur) - offsetof(PacketCoopPcPos, vis_flags)) != 0 /* PT28 */
         || memcmp(prev->oid, cur->oid, sizeof(prev->oid)) != 0;
 }
 
@@ -2707,6 +2731,98 @@ static void coop_lite_fill_pc_pos(PacketCoopPcPos* pkt, int slot, int64_t obj)
     pkt->offset_y = obj_field_int32_get(obj, OBJ_F_OFFSET_Y);
     pkt->art_id = (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
     pkt->map = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
+    pkt->vis_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & COOP_PC_VIS_FLAGS;
+    pkt->critter_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS);
+    pkt->critter_flags2 = (unsigned int)obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS2);
+    pkt->spell_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_SPELL_FLAGS);
+    pkt->blit_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_BLIT_FLAGS);
+    pkt->blit_color = (unsigned int)obj_field_int32_get(obj, OBJ_F_BLIT_COLOR);
+    pkt->blit_alpha = obj_field_int32_get(obj, OBJ_F_BLIT_ALPHA);
+    pkt->blit_scale = obj_field_int32_get(obj, OBJ_F_BLIT_SCALE);
+}
+
+/* PT28 item 5: client side - take the host's look of a PC (spell flags,
+   blit state); when the base art changes (polymorph ends) drop overlays
+   left from the old body. Own PC: its owner-driven critter flags (combat
+   mode, sleeping ...) are kept, only the look is taken. */
+static unsigned int coop_vis_body[8]; /* host's last art type/num per slot */
+static bool coop_vis_body_valid[8];
+
+static void coop_lite_client_apply_pc_visual(int64_t obj, const PacketCoopPcPos* pkt, bool own)
+{
+    unsigned int cur;
+    unsigned int body;
+    unsigned int prev_body;
+    bool prev_valid;
+    bool changed = false;
+    int slot;
+    int i;
+
+    if (tig_net_is_host() || pkt->type != PACKET_COOP_PC_POS) {
+        return;
+    }
+    cur = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & COOP_PC_VIS_FLAGS;
+    if (cur != pkt->vis_flags) {
+        if ((pkt->vis_flags & ~cur) != 0) {
+            object_add_flags(obj, pkt->vis_flags & ~cur);
+        }
+        if ((cur & ~pkt->vis_flags) != 0) {
+            object_remove_flags(obj, cur & ~pkt->vis_flags);
+        }
+        changed = true;
+    }
+    if (!own) {
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS) != pkt->critter_flags) {
+            obj_field_int32_set(obj, OBJ_F_CRITTER_FLAGS, (int)pkt->critter_flags);
+        }
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS2) != pkt->critter_flags2) {
+            obj_field_int32_set(obj, OBJ_F_CRITTER_FLAGS2, (int)pkt->critter_flags2);
+        }
+    }
+    if ((unsigned int)obj_field_int32_get(obj, OBJ_F_SPELL_FLAGS) != pkt->spell_flags) {
+        obj_field_int32_set(obj, OBJ_F_SPELL_FLAGS, (int)pkt->spell_flags);
+    }
+    if ((unsigned int)obj_field_int32_get(obj, OBJ_F_BLIT_FLAGS) != pkt->blit_flags
+        || (unsigned int)obj_field_int32_get(obj, OBJ_F_BLIT_COLOR) != pkt->blit_color
+        || obj_field_int32_get(obj, OBJ_F_BLIT_ALPHA) != pkt->blit_alpha) {
+        obj_field_int32_set(obj, OBJ_F_BLIT_FLAGS, (int)pkt->blit_flags);
+        obj_field_int32_set(obj, OBJ_F_BLIT_COLOR, (int)pkt->blit_color);
+        obj_field_int32_set(obj, OBJ_F_BLIT_ALPHA, pkt->blit_alpha);
+        changed = true;
+    }
+    if (obj_field_int32_get(obj, OBJ_F_BLIT_SCALE) != pkt->blit_scale) {
+        object_set_blit_scale(obj, pkt->blit_scale); /* redraws */
+    }
+    body = ((unsigned int)tig_art_type((tig_art_id_t)pkt->art_id) << 16)
+        | (tig_art_num_get((tig_art_id_t)pkt->art_id) & 0xFFFFu);
+    slot = pkt->slot >= 0 && pkt->slot < 8 ? pkt->slot : 0;
+    prev_valid = coop_vis_body_valid[slot];
+    prev_body = coop_vis_body[slot];
+    coop_vis_body[slot] = body;
+    coop_vis_body_valid[slot] = true;
+    if (prev_valid && prev_body != body) {
+        /* Base body changed (polymorph on / off): the old body's overlays
+           and palette are stale here. */
+        for (i = 0; i < 7; i++) {
+            if (obj_arrayfield_uint32_get(obj, OBJ_F_OVERLAY_FORE, i) != TIG_ART_ID_INVALID) {
+                object_overlay_set(obj, OBJ_F_OVERLAY_FORE, i, TIG_ART_ID_INVALID);
+            }
+            if (obj_arrayfield_uint32_get(obj, OBJ_F_OVERLAY_BACK, i) != TIG_ART_ID_INVALID) {
+                object_overlay_set(obj, OBJ_F_OVERLAY_BACK, i, TIG_ART_ID_INVALID);
+            }
+        }
+        if (own) {
+            /* Own PC: the interpolation never sets its art - take the
+               host's body (palette included). */
+            object_set_current_aid(obj, (tig_art_id_t)pkt->art_id);
+        }
+        tig_debug_printf("CoopLite: PC visual: base art changed (polymorph) - overlays cleared\n");
+        changed = true;
+    }
+    if (changed) {
+        /* Same scale: only redraws the PC's rect. */
+        object_set_blit_scale(obj, obj_field_int32_get(obj, OBJ_F_BLIT_SCALE));
+    }
 }
 
 static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
@@ -6241,11 +6357,16 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
         coop_own_pose_epoch = pkt->epoch;
     }
     if (obj == player_get_local_pc_obj() && (pkt->flags & COOP_PC_POS_FORCE) == 0) {
-        /* Our own movement echoed back — we are authoritative for it. */
+        /* Our own movement echoed back — we are authoritative for it. The
+           look (spells cast on us) is the host's (PT28 item 5). */
+        multiplayer_lock();
+        coop_lite_client_apply_pc_visual(obj, pkt, true);
+        multiplayer_unlock();
         return;
     }
 
     multiplayer_lock();
+    coop_lite_client_apply_pc_visual(obj, pkt, obj == player_get_local_pc_obj());
     if (obj == player_get_local_pc_obj()) {
         /* Host correction of our PC: position only. Its art would be a
            stand frame, and a stand art ends our running move goal. */
@@ -6267,6 +6388,13 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
         smp.t_ms = coop_obj_now_ms;
         CoopInterpRing* ring = &coop_interp[pkt->slot];
 
+        /* PT28 item 4: a stand pose ends the move: snap to it now, no
+           smooth tail behind the delay. */
+        if (tig_art_id_anim_get((tig_art_id_t)pkt->art_id) == TIG_ART_ANIM_STAND) {
+            ring->s[0] = smp;
+            ring->n = 1;
+            coop_lite_apply_pc_pos(obj, pkt);
+        } else
         /* Step from the newest sample, not from where the (delayed) copy
            is drawn right now. */
         if (!coop_interp_push(ring, &smp,
@@ -7992,6 +8120,27 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
             coop_lite_host_target_transfer(slot, pc, target, pkt, item, from, to, qty);
             return;
         }
+    }
+    /* PT28 item 1: equip slot <-> backpack on the client's own PC is legal
+       with no barter / loot session (the window's merchant and store fields
+       may still name whatever the client last had open). */
+    if (from == pc && to == pc && item != OBJ_HANDLE_NULL
+        && coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
+        && (((unsigned int)pkt->field_8) & (COOP_XFER_STEAL | COOP_XFER_PLANT)) == 0
+        && item_parent(item, &parent) && parent == pc && qty > 0) {
+        copy = (Packet81*)MALLOC(sizeof(*copy));
+        *copy = *pkt;
+        copy->field_5C = 0;
+        copy->field_70.type = OID_TYPE_NULL;
+        copy->field_88.type = OID_TYPE_NULL;
+        tig_debug_printf("CoopLite: inven: slot %d own move (equip/backpack) to loc %d\n", slot, pkt->field_58);
+        sub_460960(copy); /* frees `copy` */
+        /* The host's copy is the truth now: the resync below carries the new
+           slot, and the victim watch takes it as the known state. */
+        coop_lite_host_sync_slot_inven(slot);
+        coop_slot_inven_sig[slot] = coop_lite_pc_inven_sig(pc);
+        coop_slot_inven_sig_valid[slot] = true;
+        return;
     }
     if (!coop_lite_client_transfer_flags_allowed((unsigned int)pkt->field_8)
         || (((unsigned int)pkt->field_8) & (COOP_XFER_STEAL | COOP_XFER_PLANT)) != 0

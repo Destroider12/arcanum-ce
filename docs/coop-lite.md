@@ -1738,3 +1738,21 @@ Protocol stays 24 (no packet layout changed).
   covers KOS by reaction, faction and alignment, up to 120 tiles.
 - **Note:** an NPC whose dialog with a PC never ended keeps its AI frozen
   (vanilla behaviour).
+
+## PT28 behaviour notes
+
+Protocol 25: PACKET_COOP_PC_POS grew to 0x60 (visual state: look flags,
+critter flags, spell flags, blit flags/colour/alpha/scale).
+
+- Own-PC equip slot <-> backpack moves (Packet81) are allowed without a
+  barter/loot session; the victim watch takes the result as known state.
+- Client swing: an attack anim already playing gets its frame reset instead
+  of an interrupt; the first host echo never cuts the local swing.
+- Weapon hit/miss/critical sounds are forwarded (Packet106) for PC and NPC
+  attackers.
+- Remote-PC interpolation delay 55 ms; a stand pose snaps.
+- Clients take the host's look of every PC; a base-art change (polymorph
+  ends) clears stale overlays.
+- Spell invocations: the parent is optional. Packet77 spell eye candy is
+  streamed host -> clients again (no double when already shown).
+- The build id (git short sha) is the first log line and in the window title.
