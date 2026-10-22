@@ -1556,27 +1556,42 @@ static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj
     bool ok;
 
     tig_net_local_suspend_begin();
-    /* PT28 item 2: a swing already on screen is never interrupted (that
-       destroyed its run and the next one often did not start): restart its
-       frames instead and keep the run. */
+    /* PT30: resetting the frame of a running cosmetic swing (PT28) froze
+       the PC: an echo usually lands while AG_ANIMATE holds the LAST frame,
+       and that run then just ends - no swing played. A swing still in
+       its frames is left to finish; one that is done (last frame) is
+       replaced by a fresh AG_ANIMATE below. */
     if (tig_art_id_anim_get(art_id) == TIG_ART_ANIM_ATTACK
         && anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL)) {
-        object_set_current_aid(attacker_obj,
-            tig_art_id_frame_set(tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)), 0));
-        coop_diag.swing_anim++;
-        tig_net_local_suspend_end();
-        coop_client_swing_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
-        return;
+        TigArtAnimData data;
+
+        if (tig_art_anim_data(art_id, &data) == TIG_OK && data.num_frames > 1
+            && tig_art_id_frame_get(art_id) < data.num_frames - 2) {
+            coop_diag.swing_anim++;
+            tig_net_local_suspend_end();
+            coop_client_swing_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+            return;
+        }
     }
     /* PT27: a previous cosmetic swing still running would hold this one
        back; restart it (never cut a walk). */
     if (!moving && anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL)) {
-        sub_424070(attacker_obj, PRIORITY_5, false, true);
+        /* PT30: PRIORITY_5 did not end the cosmetic AG_ANIMATE (the new
+           one then waited behind it, frozen on the last frame). */
+        sub_424070(attacker_obj, PRIORITY_HIGHEST, false, true);
         art_id = obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID);
     }
+    /* PT30 root cause of "swings once": anim_goal_animate keeps the
+       current frame. After a swing the art stays on the ATTACK anim's last
+       frame, so every later swing started there and ended at once. */
     object_set_current_aid(attacker_obj,
-        tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)));
+        tig_art_id_frame_set(tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)), 0));
     ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
+    if (coop_lite_env("ARCANUM_DEV_SWING_TRACE") != NULL) {
+        tig_debug_printf("SWTRACE play: moving %d ok %d frame %d animate %d\n", moving, ok,
+            tig_art_id_frame_get(obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID)),
+            anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL));
+    }
     if (!ok && !moving) {
         sub_424070(attacker_obj, PRIORITY_HIGHEST, false, true);
         ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
@@ -6065,6 +6080,20 @@ void coop_lite_ping(unsigned int now_ms)
     if (!tig_net_is_host()) {
         coop_lite_obj_ground_fallback_tick(now_ms);
         coop_lite_client_interp_tick(now_ms);
+        if (coop_lite_env("ARCANUM_DEV_SWING_TRACE") != NULL && coop_client_swing_ms != 0
+            && !coop_lite_interval_elapsed(coop_client_swing_ms, now_ms, 1500u)) {
+            int64_t me = player_get_local_pc_obj();
+            static unsigned int last_aid;
+
+            if (me != OBJ_HANDLE_NULL && (unsigned int)obj_field_int32_get(me, OBJ_F_CURRENT_AID) != last_aid) {
+                tig_art_id_t a = obj_field_int32_get(me, OBJ_F_CURRENT_AID);
+
+                last_aid = (unsigned int)a;
+                tig_debug_printf("SWTRACE +%u anim %d frame %d animate %d attack %d\n",
+                    now_ms - coop_client_swing_ms, tig_art_id_anim_get(a), tig_art_id_frame_get(a),
+                    anim_is_current_goal_type(me, AG_ANIMATE, NULL), anim_is_current_goal_type(me, AG_ATTACK, NULL));
+            }
+        }
         /* Client: retry a SESSION_SYNC teleport that could not be queued. */
         if (coop_pending_sync_valid && !coop_pending_sync_teleport_queued
             && coop_lite_interval_elapsed(coop_pending_sync_retry_ms, now_ms, 250u)) {
@@ -8722,6 +8751,22 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
 
     if (old_pc == OBJ_HANDLE_NULL || slot <= 0 || slot >= 8) {
         return;
+    }
+    /* PT30 crash after a party wipe: when the client kept its own PC (it
+       had died and was revived for the reload) that PC already carries the
+       parked PC's OID. Loading the blob made a second object with the same
+       OID and then destroyed the "old" one - the client crashed. Our PC is
+       the parked PC: keep it, only refresh the inventory. */
+    {
+        ObjectID want;
+        ObjectID have = obj_get_id(old_pc);
+
+        memcpy(&want, pkt->oid, sizeof(want));
+        if (objid_is_equal(want, have) || obj_pool_perm_lookup(want) != OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: rejoin: parked PC is already here - kept\n");
+            coop_lite_client_request_barter(old_pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
+            return;
+        }
     }
     loc = obj_field_int64_get(old_pc, OBJ_F_LOCATION);
     multiplayer_lock();
