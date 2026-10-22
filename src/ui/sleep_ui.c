@@ -655,7 +655,8 @@ bool sleep_ui_process_callback(TimeEvent* timeevent)
         || (timeevent->params[0].integer_value == UNTIL_EVENING_VAL
             && datetime_current_hour() != 20)
         || (timeevent->params[0].integer_value == UNTIL_HEALED_VAL
-            && object_hp_damage_get(sleep_ui_obj) > 0)) {
+            && (object_hp_damage_get(sleep_ui_obj) > 0
+                || coop_lite_host_rest_anyone_hurt()))) { /* PT27: co-op PCs too */
         // Pass special duration value as-is.
         next_timeevent.params[0].integer_value = timeevent->params[0].integer_value;
 
@@ -754,4 +755,22 @@ void sleep_ui_notify_leader_sleeping(void)
     }
 
     object_list_destroy(&objects);
+}
+
+/* PT27 dev trigger "rest-healed": press "Until Healed" in the open sleep
+   window, as the player would. */
+bool sleep_ui_dev_until_healed(void)
+{
+    TigMessage msg;
+
+    if (!sleep_ui_active || sleep_ui_wait_mode) {
+        tig_debug_printf("SleepUI: dev until healed: window %s, wait mode %d\n",
+            sleep_ui_active ? "open" : "not open", sleep_ui_wait_mode);
+        return false;
+    }
+    memset(&msg, 0, sizeof(msg));
+    msg.type = TIG_MESSAGE_BUTTON;
+    msg.data.button.state = TIG_BUTTON_STATE_RELEASED;
+    msg.data.button.button_handle = sleep_ui_buttons[SLEEP_UI_OPTION_UNTIL_HEALED].button_handle;
+    return sleep_ui_message_filter(&msg);
 }

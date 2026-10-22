@@ -1708,3 +1708,33 @@ Party XP (host-authoritative):
 - **World map:** while the host has the world map open, clients get a dark
   overlay and a notice (PARTY_STATE 14/15, refreshed every 3 s, lapses after
   8 s without a refresh).
+
+## PT27 behaviour notes
+
+Protocol stays 24 (no packet layout changed).
+
+- **Anim-end snapshots on clients:** a co-op client ignores vanilla Packet10
+  (anim-end pose: location, offset, stand frame 0) for critters, and Packet9
+  (interrupt + location/art) for PCs. Those snapshots reset the client's own
+  PC to the stand frame after each host-side swing (the "swing plays once"
+  bug) and snapped the host PC ahead of the interpolation ring (smear /
+  rubber band). Positions keep coming from PC_POS / NPC_POS. CoopDiag
+  `p10=own/peer/npc` counts the dropped snapshots; `peer_anim` and
+  `interp_lag` watch the peer PC interpolation.
+- **Client swing:** the echo of a client's own swing is skipped once (700 ms)
+  instead of every swing in that window; a busy AG_ANIMATE is restarted.
+- **Container / corpse use from a distance:** AG_USE_CONTAINER is a
+  client-local goal, so the client walks to it (AG_MOVE_NEAR_OBJ) and opens
+  the loot window as in single player.
+- **Far loot:** a dropped item the client had destroyed earlier (an owner's
+  INVEN_SYNC arrived first) left an OF_DESTROYED handle that blocked the
+  refetch. Such handles are freed (`world_reclaimed`) before a ground item or
+  a container entry is applied, so the blob is requested again. Ground items
+  in unloaded client sectors are not fetched until the sector loads.
+- **Rest until healed:** the host keeps sleeping while any living co-op PC
+  is hurt (cap 7 days).
+- **Party:** an NPC follower that heals (AI heal) also considers the other
+  co-op PCs and their followers within 20 tiles. Party-shared hostility now
+  covers KOS by reaction, faction and alignment, up to 60 tiles.
+- **Note:** an NPC whose dialog with a PC never ended keeps its AI frozen
+  (vanilla behaviour).

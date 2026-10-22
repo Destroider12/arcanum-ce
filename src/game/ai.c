@@ -492,6 +492,17 @@ bool ai_heal(Ai* ai)
     object_list_destroy(&objects);
 
     if (node == NULL) {
+        /* PT27 co-op: the other players' PCs and followers too. */
+        int64_t party[32];
+        int cnt = coop_lite_party_heal_targets(ai->obj, party, 32);
+        int idx;
+
+        for (idx = 0; idx < cnt; idx++) {
+            if (ai_heal_func(ai, party[idx], force)) {
+                tig_debug_printf("AI: coop: healing another player's party member\n");
+                return true;
+            }
+        }
         return false;
     }
 
@@ -3475,15 +3486,21 @@ static int ai_check_kos_party(int64_t source_obj, int64_t target_obj)
         && danger_obj != target_obj && coop_lite_is_party_pc(danger_obj)) {
         return AI_KOS_REACTION;
     }
+    /* PT27 item 6: not only a bad reaction - an NPC that is KOS to another
+       player's PC by faction or alignment (a rat to the host, say) ignored
+       a client whose own stats did not trip it. Any of those, for any co-op
+       PC on this map, makes the whole party fair game. */
     for (slot = 0; slot < 8; slot++) {
         int64_t pc = sub_4A2B60(slot);
+        int other;
 
         if (pc == OBJ_HANDLE_NULL || pc == target_obj || critter_is_dead(pc)
-            || object_dist(source_obj, pc) > 20) {
+            || object_dist(source_obj, pc) > 60) {
             continue;
         }
-        if (ai_check_kos(source_obj, pc) == AI_KOS_REACTION) {
-            return AI_KOS_REACTION;
+        other = ai_check_kos(source_obj, pc);
+        if (other == AI_KOS_REACTION || other == AI_KOS_FACTION || other == AI_KOS_ALIGNMENT) {
+            return other;
         }
     }
     return rc;

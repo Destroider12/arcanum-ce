@@ -1028,6 +1028,11 @@ typedef struct CoopDiag {
     unsigned int swing_anim; /* PT26 client: swing animations started */
     unsigned int swing_anim_fail; /* PT26 client: ... refused */
     unsigned int npc_sound_tx; /* host: PT25 NPC sounds forwarded */
+    unsigned int p10_own;  /* PT27 client: host anim-end poses for our own PC, dropped */
+    unsigned int p10_peer; /* ... for another (interpolated) PC, dropped */
+    unsigned int p10_npc;  /* ... for an NPC (NPC_POS drives it), dropped */
+    unsigned int peer_anim; /* PT27 client: interp frames a peer PC had a local anim run */
+    unsigned int interp_lag; /* PT27 client: max tiles a drawn peer PC trailed its newest pose */
     unsigned int max_gap_ms;
     unsigned int last_ping_ms;
 } CoopDiag;
@@ -1256,6 +1261,7 @@ static void coop_lite_client_attack_reset(void)
 #endif
 
 static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj);
+static bool coop_client_swing_click; /* PT27: the click drew a swing; skip its own echo once */
 
 bool coop_lite_client_send_attack_intent(int64_t attacker_obj, int64_t target_obj)
 {
@@ -1281,6 +1287,7 @@ bool coop_lite_client_send_attack_intent(int64_t attacker_obj, int64_t target_ob
             obj_field_int64_get(target_obj, OBJ_F_LOCATION))
         <= 1) {
         coop_lite_client_play_swing(attacker_obj, target_obj);
+        coop_client_swing_click = true;
     }
 #else
     (void)attacker_obj;
@@ -1544,10 +1551,25 @@ static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj
 #ifndef COOP_LITE_TEST_STUBS
     tig_art_id_t art_id = obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID);
 
+    bool moving = anim_is_current_goal_type(attacker_obj, AG_MOVE_TO_TILE, NULL)
+        || anim_is_current_goal_type(attacker_obj, AG_RUN_NEAR_TILE, NULL);
+    bool ok;
+
     tig_net_local_suspend_begin();
+    /* PT27: a previous cosmetic swing still running would hold this one
+       back; restart it (never cut a walk). */
+    if (!moving && anim_is_current_goal_type(attacker_obj, AG_ANIMATE, NULL)) {
+        sub_424070(attacker_obj, PRIORITY_5, false, true);
+        art_id = obj_field_int32_get(attacker_obj, OBJ_F_CURRENT_AID);
+    }
     object_set_current_aid(attacker_obj,
         tig_art_id_rotation_set(art_id, object_rot(attacker_obj, target_obj)));
-    if (anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK)) {
+    ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
+    if (!ok && !moving) {
+        sub_424070(attacker_obj, PRIORITY_5, false, true);
+        ok = anim_goal_animate(attacker_obj, TIG_ART_ANIM_ATTACK);
+    }
+    if (ok) {
         coop_diag.swing_anim++;
     } else {
         coop_diag.swing_anim_fail++;
@@ -1700,10 +1722,16 @@ void coop_lite_handle_swing(PacketCoopSwing* pkt)
     }
     coop_diag.swing_rx++;
     /* The click already drew the first swing; its strike echo lands
-       mid-animation - do not double it. */
-    if (coop_client_swing_ms != 0 && !coop_lite_interval_elapsed(coop_client_swing_ms, coop_obj_now_ms, 700u)) {
+       mid-animation - do not double it. PT27: only that one echo is
+       skipped; every later strike plays, however fast the attacker
+       swings (the old 700 ms window after ANY swing dropped every other
+       strike of a fast attacker). */
+    if (coop_client_swing_click && coop_client_swing_ms != 0
+        && !coop_lite_interval_elapsed(coop_client_swing_ms, coop_obj_now_ms, 700u)) {
+        coop_client_swing_click = false;
         return;
     }
+    coop_client_swing_click = false;
     coop_lite_client_play_swing(attacker, target);
 #else
     (void)pkt;
@@ -2273,6 +2301,39 @@ bool coop_lite_client_drives_obj(int64_t obj)
     return obj == player_get_local_pc_obj();
 }
 
+/* PT27 items 1/2: vanilla Packet10 is the host's "anim ended, pose = stand
+   frame 0 at loc/offset" snapshot (plus the host run's flags written into
+   whatever local run has that AnimID). In co-op every critter already has
+   its own pose channel - our PC is driven here, peers come through the
+   PC_POS interpolation ring, NPCs through NPC_POS - so applying it cut our
+   swing to a stand frame after each host strike and yanked the host's PC
+   out of its interpolated path. true: the caller must drop the packet. */
+bool coop_lite_client_drop_anim_pose(int64_t obj)
+{
+#ifdef COOP_LITE_TEST_STUBS
+    (void)obj;
+    return false;
+#else
+    int type;
+
+    if (obj == OBJ_HANDLE_NULL || !tig_net_is_active() || tig_net_is_host() || !tig_net_is_coop_enabled()) {
+        return false;
+    }
+    type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    if (!obj_type_is_critter(type)) {
+        return false;
+    }
+    if (obj == player_get_local_pc_obj()) {
+        coop_diag.p10_own++;
+    } else if (type == OBJ_TYPE_PC) {
+        coop_diag.p10_peer++;
+    } else {
+        coop_diag.p10_npc++;
+    }
+    return true;
+#endif
+}
+
 bool coop_lite_sender_owns_obj(int64_t obj)
 {
     int slot;
@@ -2556,6 +2617,50 @@ static bool coop_lite_party_side(int64_t obj)
     }
     leader = critter_leader_get(obj);
     return leader != OBJ_HANDLE_NULL && coop_lite_slot_of_obj(leader) >= 0;
+}
+
+/* PT27 item 6: vanilla ai_heal() only looks at the healer itself, its
+   leader and the leader's followers - so Virgil (the host's follower) never
+   healed a client's PC. A follower of any co-op PC may also heal the other
+   co-op PCs and their followers within 20 tiles. Host only; nothing about
+   who leads whom changes. Returns how many candidates went into out. */
+int coop_lite_party_heal_targets(int64_t healer, int64_t* out, int max)
+{
+    int n = 0;
+    int slot;
+    int64_t own_leader;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || !tig_net_is_coop_enabled() || healer == OBJ_HANDLE_NULL
+        || obj_field_int32_get(healer, OBJ_F_TYPE) != OBJ_TYPE_NPC || !coop_lite_party_side(healer)) {
+        return 0;
+    }
+    own_leader = critter_leader_get(healer);
+    for (slot = 0; slot < 8 && n < max; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        ObjectList objects;
+        ObjectNode* node;
+
+        if (pc == OBJ_HANDLE_NULL || pc == own_leader || object_dist(healer, pc) > 20) {
+            continue; /* own leader + its followers: vanilla already tried */
+        }
+        out[n++] = pc;
+        object_list_all_followers(pc, &objects);
+        for (node = objects.head; node != NULL && n < max; node = node->next) {
+            if (node->obj != healer && object_dist(healer, node->obj) <= 20) {
+                out[n++] = node->obj;
+            }
+        }
+        object_list_destroy(&objects);
+    }
+    {
+        static unsigned int logged_ms;
+
+        if (coop_lite_interval_elapsed(logged_ms, coop_obj_now_ms, 10000u)) {
+            logged_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+            tig_debug_printf("CoopLite: AI heal: %d other co-op party members in reach\n", n);
+        }
+    }
+    return n;
 }
 
 bool coop_lite_is_remote_slot_pc(int64_t obj)
@@ -4880,8 +4985,36 @@ void coop_lite_host_world_dirty(void)
     tig_net_send_app_all(&pkt, sizeof(pkt));
 }
 
+static int coop_rest_extra_hours; /* PT27: hours slept on for a hurt client */
+
+/* PT27 item 5: "Until Healed" only looked at the host's own PC (sleep_ui
+   checks sleep_ui_obj's damage), so a host at full health woke the party
+   after one hour. true while a living co-op client PC is still hurt - the
+   party sleeps on; capped at a week per rest so a PC that cannot heal
+   (e.g. a bad stat effect) cannot lock the game asleep. */
+bool coop_lite_host_rest_anyone_hurt(void)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || coop_rest_extra_hours >= 7 * 24) {
+        return false;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && !critter_is_dead(pc) && object_hp_damage_get(pc) > 0) {
+            coop_rest_extra_hours++;
+            tig_debug_printf("CoopLite: rest: slot %d still hurt (hp damage %d) - the party sleeps on\n", slot,
+                object_hp_damage_get(pc));
+            return true;
+        }
+    }
+    return false;
+}
+
 void coop_lite_host_rest_begin(void)
 {
+    coop_rest_extra_hours = 0;
     if (tig_net_is_active() && tig_net_is_host()) {
         tig_debug_printf("CoopLite: host rests - clients fade out\n");
         coop_lite_host_party_notice(COOP_PARTY_REST_BEGIN, 0, 0);
@@ -5078,6 +5211,7 @@ void coop_lite_host_rest_begin(void) { }
 void coop_lite_host_world_dirty(void) { }
 void coop_lite_host_rest_end(void) { }
 void coop_lite_host_rest_heal(int hours) { (void)hours; }
+bool coop_lite_host_rest_anyone_hurt(void) { return false; }
 #endif
 
 /* Corpse pose (local only; peers get the pose from PC_POS / vitals). */
@@ -5759,13 +5893,14 @@ static void coop_lite_diag_tick(unsigned int now_ms)
     tig_debug_printf("CoopDiag: %s map=%d pings=%u max_gap=%ums anim_runs=%d timeevents=%d deferred70=%d "
                      "kept_sectors=%d far_pc=%d npc_tx=%u npc_rx=%u npc_unknown=%u npc_req=%u npc_on=%u npc_dead=%u pc_rx=%u pc_tx=%u "
                      "pc_drop=%u/%u/%u carry=%d "
-                     "force_tx=%u own_corr=%u atk=%u approach=%u swing=%u/%u anim=%u/%u npc_snd=%u interp=%d/%d\n",
+                     "force_tx=%u own_corr=%u atk=%u approach=%u swing=%u/%u anim=%u/%u npc_snd=%u interp=%d/%d p10=%u/%u/%u peer_anim=%u interp_lag=%u\n",
         tig_net_is_host() ? "host" : "client", map_current_map(), coop_diag.pings, coop_diag.max_gap_ms,
         anim_debug_active_runs(), timeevent_debug_count(), mp_deferred_packet70_pending(),
         kept, remote_far, coop_diag.npc_tx, coop_diag.npc_rx, coop_diag.npc_rx_unknown, coop_diag.npc_req, coop_diag.npc_rx_on, coop_diag.npc_rx_dead,
         coop_diag.pc_rx, coop_diag.pc_tx, coop_diag.pc_drop_map, coop_diag.pc_drop_order, coop_diag.pc_drop_bad,
         coop_follow_carry_pending ? 1 : 0, coop_diag.force_tx, coop_diag.own_corrections, coop_diag.attack_intents,
-        coop_diag.attack_approaches, coop_diag.swing_tx, coop_diag.swing_rx, coop_diag.swing_anim, coop_diag.swing_anim_fail, coop_diag.npc_sound_tx, coop_interp[0].n, coop_interp[1].n);
+        coop_diag.attack_approaches, coop_diag.swing_tx, coop_diag.swing_rx, coop_diag.swing_anim, coop_diag.swing_anim_fail, coop_diag.npc_sound_tx, coop_interp[0].n, coop_interp[1].n,
+        coop_diag.p10_own, coop_diag.p10_peer, coop_diag.p10_npc, coop_diag.peer_anim, coop_diag.interp_lag);
     memset(&coop_diag, 0, sizeof(coop_diag));
     coop_diag.window_ms = now_ms != 0 ? now_ms : 1;
     coop_diag.last_ping_ms = now_ms;
@@ -8048,6 +8183,32 @@ static bool coop_lite_inv_listed(const CoopInvBufOwner* o, ObjectID oid)
     return false;
 }
 
+/* PT27 item 3: an item we destroyed (an owner's sync no longer listed it -
+   the host had just dropped it or moved it into a chest) stays in the
+   object pool, OF_DESTROYED, until the map closes. Its OID then looked
+   "known" to the next ground/container listing, which skipped it forever:
+   the host's drop never appeared here. Free it for real so the listing
+   fetches the host's object afresh. Returns OBJ_HANDLE_NULL when freed. */
+static int coop_world_reclaimed; /* PT27: destroyed copies freed for a refetch */
+
+static int64_t coop_lite_client_reclaim_destroyed(int64_t obj)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    if (obj == OBJ_HANDLE_NULL || tig_net_is_host()
+        || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0
+        || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_INVENTORY) != 0
+        || !item_is_item(obj)) {
+        return obj;
+    }
+    sub_43CF70(obj);
+    object_delete(obj);
+    coop_world_reclaimed++;
+    return OBJ_HANDLE_NULL;
+#else
+    return obj;
+#endif
+}
+
 static void coop_lite_inv_destroy_stray(const uint8_t* oid_bytes)
 {
     int64_t obj = coop_lite_get_oid_obj(oid_bytes);
@@ -8151,6 +8312,22 @@ static void coop_lite_obj_req_flush(void)
     }
 }
 
+/* PT27 item 3: true when a ground object at loc can live here. An item the
+   host announced (Packet70) or listed far away, in a sector this client
+   has not loaded, used to be created anyway: it sat in the object pool,
+   known by its OID, but in no loaded sector's list - drawn nowhere. When
+   the host later dropped it next to us, the world state found it "known"
+   and never fetched it again: it stayed invisible for good. */
+bool coop_lite_client_ground_loc_live(int64_t loc)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    return loc != 0 && sector_loaded(sector_id_from_loc(loc));
+#else
+    (void)loc;
+    return true;
+#endif
+}
+
 bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc, int proto)
 {
     CoopObjPending* p;
@@ -8158,7 +8335,16 @@ bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc,
     if (tig_net_is_host() || !coop_lite_obj_blobs_enabled()) {
         return false;
     }
-    if (coop_lite_obj_pending_find(oid) != NULL) {
+    if (!coop_lite_client_ground_loc_live(loc)) {
+        /* Far away: nothing to show. The world state lists it again once
+           it lies near our PC. */
+        return true;
+    }
+    if ((p = coop_lite_obj_pending_find(oid)) != NULL) {
+        if (p->ground) {
+            p->ground_loc = loc; /* where the host has it now */
+            p->ground_proto = proto;
+        }
         return true;
     }
     if (!coop_lite_obj_blob_defer(oid)) {
@@ -8201,6 +8387,19 @@ static void coop_lite_client_interp_tick(unsigned int now_ms)
         if (obj == OBJ_HANDLE_NULL || obj == local_pc || critter_is_dead(obj)) {
             continue;
         }
+        {
+            int run = anim_find_first(obj);
+
+            if (run != -1) {
+                static int logged;
+
+                coop_diag.peer_anim++;
+                if (logged++ < 10) {
+                    tig_debug_printf("CoopLite: interp: slot %d PC has a local anim run (goal %d)\n", slot,
+                        anim_run_info[run].goals[0].type);
+                }
+            }
+        }
         kind = coop_interp_pick(ring, now_ms - COOP_INTERP_DELAY_MS, &ia, &ib, &num, &den);
         if (kind == 0) {
             continue;
@@ -8241,6 +8440,13 @@ static void coop_lite_client_interp_tick(unsigned int now_ms)
             }
             multiplayer_unlock();
         }
+        {
+            unsigned int lag = (unsigned int)location_dist(loc, ring->s[ring->n - 1].loc);
+
+            if (lag > coop_diag.interp_lag) {
+                coop_diag.interp_lag = lag;
+            }
+        }
     }
 }
 
@@ -8262,7 +8468,8 @@ static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms)
         p->used = false;
         memcpy(&oid, p->oid, sizeof(oid));
         proto_obj = sub_4685A0(p->ground_proto);
-        if (proto_obj == OBJ_HANDLE_NULL || obj_pool_perm_lookup(oid) != OBJ_HANDLE_NULL) {
+        if (proto_obj == OBJ_HANDLE_NULL || obj_pool_perm_lookup(oid) != OBJ_HANDLE_NULL
+            || !coop_lite_client_ground_loc_live(p->ground_loc)) {
             continue;
         }
         tig_debug_printf("CoopLite: obj blob: ground item timed out, using the proto\n");
@@ -8451,6 +8658,10 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     }
     if (!coop_lite_obj_blob_bounded(pkt->data, pkt->size)) {
         return; /* review P1-4 */
+    }
+    if (ground && !coop_lite_client_ground_loc_live(ground_loc)) {
+        tig_debug_printf("CoopLite: obj blob: ground item in a sector not loaded here - skipped\n");
+        return;
     }
     if (ground) {
         multiplayer_lock();
@@ -8711,7 +8922,7 @@ static void coop_lite_client_apply_inven_batch(void)
         owner_loc = obj_field_int64_get(owner, OBJ_F_LOCATION);
         for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
             PacketCoopInvenEntry* e = &coop_inv_entry[i];
-            int64_t item = coop_lite_get_oid_obj(e->oid);
+            int64_t item = coop_lite_client_reclaim_destroyed(coop_lite_get_oid_obj(e->oid));
             int64_t parent = OBJ_HANDLE_NULL;
             int loc = e->inventory_location;
             int free_loc;
@@ -10386,11 +10597,16 @@ static int coop_world_want_cnt;
 static int coop_world_fetched; /* unknown ground items asked for, this snapshot */
 static bool coop_world_log_pending;
 static int coop_world_pruned;
+static int coop_world_ghosts; /* PT27: unseen pool copies dropped for a refetch */
 
 static void coop_lite_world_apply(const CoopWorldEntry* e)
 {
     int64_t obj = coop_lite_get_oid_obj(e->oid);
     int type;
+
+    if (e->kind == COOP_WORLD_GROUND_ITEM) {
+        obj = coop_lite_client_reclaim_destroyed(obj);
+    }
 
     if (e->kind == COOP_WORLD_CONTAINER) {
         coop_oid_set_add(coop_world_seen, e->oid); /* PT26: junk piles prune too */
@@ -10470,6 +10686,20 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
                 item_remove(obj);
                 object_drop(obj, e->loc);
                 coop_world_stats[e->kind]++;
+            }
+            return;
+        }
+        if (!coop_lite_client_ground_loc_live(obj_field_int64_get(obj, OBJ_F_LOCATION))) {
+            /* PT27 item 3: a copy loaded earlier into a sector we never had
+               (or one since unloaded) - in no sector list, drawn nowhere.
+               Drop it and fetch the host's object afresh where it lies. */
+            object_destroy(obj);
+            if (coop_lite_client_reclaim_destroyed(obj) != OBJ_HANDLE_NULL) {
+                return; /* a script kept it */
+            }
+            coop_world_ghosts++;
+            if (coop_world_want_cnt < COOP_WORLD_CHUNK) {
+                coop_world_want[coop_world_want_cnt++] = e;
             }
             return;
         }
@@ -10633,6 +10863,16 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         /* Counts are changes: an item already where the host has it counts
            as listed, not changed. */
         coop_world_log_pending = false;
+        if (coop_world_reclaimed > 0) {
+            tig_debug_printf("CoopLite: world/inven: %d items destroyed here earlier are listed by the host again - refetched\n",
+                coop_world_reclaimed);
+            coop_world_reclaimed = 0;
+        }
+        if (coop_world_ghosts > 0) {
+            tig_debug_printf("CoopLite: world state: %d ground items were known here but in no loaded sector - refetched\n",
+                coop_world_ghosts);
+            coop_world_ghosts = 0;
+        }
         tig_debug_printf("CoopLite: world state applied: changed portals %d, containers %d, npcs %d, ground items %d; fetched %d; %d ground items listed; %d pruned\n",
             coop_world_stats[COOP_WORLD_PORTAL], coop_world_stats[COOP_WORLD_CONTAINER],
             coop_world_stats[COOP_WORLD_NPC], coop_world_stats[COOP_WORLD_GROUND_ITEM],
@@ -11280,6 +11520,17 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         tig_debug_printf("CoopLite: dev rest: sleep UI %s\n", sleep_ui_is_active() ? "open" : "not open");
         return true;
     }
+    if (strcmp(cmd, "rest-healed") == 0 && tig_net_is_host()) {
+        /* PT27 item 5: open the sleep window and press "Until Healed". */
+        if (!sleep_ui_is_active()) {
+            sleep_ui_toggle(OBJ_HANDLE_NULL);
+        }
+        tig_debug_printf("CoopLite: dev rest-healed: day %d %02d:%02d, host hp damage %d: %s\n",
+            datetime_current_day(), datetime_current_hour(), datetime_current_minute(),
+            object_hp_damage_get(player_get_local_pc_obj()),
+            sleep_ui_dev_until_healed() ? "sleeping" : "not possible");
+        return true;
+    }
     if (strcmp(cmd, "rest-sim") == 0 && tig_net_is_host()) {
         /* PT25: what a finished host sleep does, N hours (default 8). */
         int hours = atoi(arg) > 0 ? atoi(arg) : 8;
@@ -11304,7 +11555,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         return true;
     }
     if (strcmp(cmd, "dmg") == 0 && tig_net_is_host()) {
-        int64_t pc = sub_4A2B60(1);
+        int64_t pc = sub_4A2B60(strstr(arg, "host") != NULL ? 0 : 1);
         int n = atoi(arg) > 0 ? atoi(arg) : 10;
 
         if (pc != OBJ_HANDLE_NULL) {
@@ -11478,6 +11729,31 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         tig_debug_printf("CoopLite: dev npc-see: %d cows\n", n);
         return true;
     }
+    if (strcmp(cmd, "oid") == 0) {
+        /* PT27 item 3: where is this object here? */
+        ObjectID oid;
+        int64_t obj;
+
+        if (!objid_id_from_str(&oid, arg) || (obj = obj_pool_perm_lookup(oid)) == OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev oid %s: unknown here\n", arg);
+        } else {
+            int64_t loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+
+            tig_debug_printf("CoopLite: dev oid %s: @%d,%d flags 0x%08x sector %s\n", arg,
+                (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), obj_field_int32_get(obj, OBJ_F_FLAGS),
+                sector_loaded(sector_id_from_loc(loc)) ? "loaded" : "NOT loaded");
+        }
+        return true;
+    }
+    if (strcmp(cmd, "box-click") == 0) {
+        /* PT27 item 4: a player's click on the nearest container. */
+        int64_t pc = player_get_local_pc_obj();
+        int64_t box = pc != OBJ_HANDLE_NULL ? coop_lite_dev_nearest(pc, OBJ_TM_CONTAINER, false) : OBJ_HANDLE_NULL;
+
+        tig_debug_printf("CoopLite: dev box-click: container %d tiles away: %s\n",
+            box != OBJ_HANDLE_NULL ? (int)object_dist(pc, box) : -1, coop_lite_dev_ui_click(box));
+        return true;
+    }
     if (strcmp(cmd, "box-open") == 0 || strcmp(cmd, "box-dump") == 0 || strcmp(cmd, "take-all") == 0
         || strcmp(cmd, "box-put") == 0 || strcmp(cmd, "loot-close") == 0) {
         /* PT26: container stacks. Open/dump the nearest container, the
@@ -11512,7 +11788,8 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
             return true;
         }
         loc = obj_field_int64_get(cpc, OBJ_F_LOCATION);
-        loc = location_make(LOCATION_GET_X(loc) + 1, LOCATION_GET_Y(loc));
+        /* PT27 item 4: "box N" puts it N tiles away (default 1). */
+        loc = location_make(LOCATION_GET_X(loc) + (atoi(arg) > 0 ? atoi(arg) : 1), LOCATION_GET_Y(loc));
         if (mp_object_create(BP_CHEST_1, loc, &chest) && chest != OBJ_HANDLE_NULL) {
             obj = item_gold_create(25, loc);
             if (obj != OBJ_HANDLE_NULL) {
@@ -11534,6 +11811,64 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
             coop_lite_dev_inven_dump("host box", chest);
         }
         tig_debug_printf("CoopLite: dev box: %s\n", chest != OBJ_HANDLE_NULL ? "created" : "failed");
+        return true;
+    }
+    if (strcmp(cmd, "medic") == 0 && tig_net_is_host()) {
+        /* PT27 item 6: the nearest NPC named arg follows the host and gets
+           the host's bandages (what a healer companion needs). */
+        int64_t hpc = player_get_local_pc_obj();
+        int64_t npc = OBJ_HANDLE_NULL;
+        int64_t* items;
+        int cnt;
+        int i;
+        int given = 0;
+        ObjectList near;
+        ObjectNode* nn;
+
+        /* by its own name (the host may not have been introduced yet) */
+        object_list_vicinity(hpc, OBJ_TM_NPC, &near);
+        for (nn = near.head; nn != NULL; nn = nn->next) {
+            char nname[128];
+
+            nname[0] = '\0';
+            object_examine(nn->obj, nn->obj, nname);
+            if (!critter_is_dead(nn->obj) && strstr(nname, arg) != NULL) {
+                npc = nn->obj;
+                break;
+            }
+        }
+        object_list_destroy(&near);
+
+        if (npc == OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: dev medic: no NPC '%s'\n", arg);
+            return true;
+        }
+        {
+            int64_t talk = sub_4C1110(npc);
+            int ts = talk != OBJ_HANDLE_NULL ? coop_lite_slot_of_obj(talk) : -2;
+
+            tig_debug_printf("CoopLite: dev medic: '%s' in dialog with %s (slot %d)\n", arg,
+                talk == OBJ_HANDLE_NULL ? "nobody" : "a PC", ts);
+        }
+        if (sub_4C1110(npc) == hpc) {
+            ui_end_dialog(hpc, 0); /* the opening talk of the dev start */
+        }
+        if (critter_leader_get(npc) != hpc) {
+            critter_follow(npc, hpc, true);
+        }
+        cnt = sub_4A2B60(1) != OBJ_HANDLE_NULL ? item_list_get(sub_4A2B60(1), &items) : item_list_get(hpc, &items);
+        for (i = 0; i < cnt; i++) {
+            char iname[128];
+
+            iname[0] = '\0';
+            object_examine(items[i], hpc, iname);
+            if (strstr(iname, "Bandage") != NULL && item_transfer(items[i], npc)) {
+                given++;
+            }
+        }
+        item_list_free(items);
+        tig_debug_printf("CoopLite: dev medic: '%s' follows the host: %s, bandages given %d\n", arg,
+            critter_leader_get(npc) == hpc ? "yes" : "no", given);
         return true;
     }
     if (strcmp(cmd, "kill-npc") == 0 && tig_net_is_host()) {
@@ -11570,6 +11905,84 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
                 (int)LOCATION_GET_X(td.loc), (int)LOCATION_GET_Y(td.loc));
             teleport_do(&td);
         }
+        return true;
+    }
+    if (strcmp(cmd, "host-far") == 0 || strcmp(cmd, "host-back") == 0 || strcmp(cmd, "grab") == 0
+        || strcmp(cmd, "drop-grab") == 0 || strcmp(cmd, "put-grab") == 0) {
+        /* PT27 item 3: the host fetches an item far from the client (an
+           unloaded sector there) and drops it / puts it in a box near the
+           client. host-far N: host N tiles east; host-back: back next to
+           slot 1; grab: nearest ground item (or a quiet dagger); drop-grab /
+           put-grab: onto the ground / into the box nearest slot 1. */
+        static ObjectID grab_oid;
+        int64_t hpc = player_get_local_pc_obj();
+        int64_t cpc = sub_4A2B60(1);
+        int64_t item = OBJ_HANDLE_NULL;
+        char oid_str[40];
+        bool ok = false;
+
+        if (strcmp(cmd, "host-far") == 0 || strcmp(cmd, "host-back") == 0) {
+            TeleportData td;
+            int64_t loc = obj_field_int64_get(strcmp(cmd, "host-far") == 0 || cpc == OBJ_HANDLE_NULL ? hpc : cpc,
+                OBJ_F_LOCATION);
+            int tiles = strcmp(cmd, "host-far") == 0 ? (atoi(arg) != 0 ? atoi(arg) : 120) : 2;
+
+            memset(&td, 0, sizeof(td));
+            td.obj = hpc;
+            td.map = map_current_map();
+            td.loc = coop_lite_follow_loc_for_slot(LOCATION_MAKE(LOCATION_GET_X(loc) + tiles, LOCATION_GET_Y(loc)), 0);
+            ok = teleport_do(&td);
+        } else if (strcmp(cmd, "grab") == 0) {
+            if (strcmp(arg, "mp") == 0 || strcmp(arg, "ammo") == 0) {
+                /* announced with Packet70 while the client is far away (loot,
+                   a split stack, a script's item) and lying there first */
+                if (strcmp(arg, "ammo") == 0) {
+                    item = item_ammo_create(12, 1, obj_field_int64_get(hpc, OBJ_F_LOCATION));
+                } else {
+                    mp_object_create(BP_DAGGER, obj_field_int64_get(hpc, OBJ_F_LOCATION), &item);
+                }
+                if (item != OBJ_HANDLE_NULL) {
+                    grab_oid = obj_get_id(item);
+                }
+                objid_id_to_str(oid_str, grab_oid);
+                tig_debug_printf("CoopLite: dev grab %s: %s on the ground at the host\n", arg, oid_str);
+                return true;
+            }
+            if (strcmp(arg, "take") == 0) {
+                item = obj_pool_perm_lookup(grab_oid);
+            } else {
+                item = strcmp(arg, "new") == 0 ? OBJ_HANDLE_NULL : coop_lite_dev_nearest(hpc, OBJ_TM_ITEM, false);
+            }
+            if (item == OBJ_HANDLE_NULL || location_dist(obj_field_int64_get(item, OBJ_F_LOCATION),
+                                               obj_field_int64_get(hpc, OBJ_F_LOCATION))
+                    > 40) {
+                item = OBJ_HANDLE_NULL;
+                object_create(sub_4685A0(BP_DAGGER), obj_field_int64_get(hpc, OBJ_F_LOCATION), &item);
+                tig_debug_printf("CoopLite: dev grab: no ground item near, made a quiet dagger\n");
+            }
+            if (item != OBJ_HANDLE_NULL) {
+                char iname[128];
+
+                iname[0] = '\0';
+                object_examine(item, hpc, iname);
+                grab_oid = obj_get_id(item);
+                tig_debug_printf("CoopLite: dev grab: '%s' %d tiles from the host\n", iname,
+                    (int)location_dist(obj_field_int64_get(item, OBJ_F_LOCATION), obj_field_int64_get(hpc, OBJ_F_LOCATION)));
+                ok = item_transfer(item, hpc);
+            }
+        } else {
+            item = obj_pool_perm_lookup(grab_oid);
+            if (item != OBJ_HANDLE_NULL && strcmp(cmd, "drop-grab") == 0) {
+                ok = item_drop(item);
+            } else if (item != OBJ_HANDLE_NULL && cpc != OBJ_HANDLE_NULL) {
+                int64_t box = coop_lite_dev_nearest(cpc, OBJ_TM_CONTAINER, false);
+
+                ok = box != OBJ_HANDLE_NULL && item_transfer(item, box);
+            }
+        }
+        objid_id_to_str(oid_str, grab_oid);
+        tig_debug_printf("CoopLite: dev %s: %s (item %s, oid type %d)\n", cmd, ok ? "done" : "failed",
+            oid_str, grab_oid.type);
         return true;
     }
     if (strcmp(cmd, "npc-quiet") == 0 || strcmp(cmd, "npc-off") == 0 || strcmp(cmd, "npc-on") == 0) {

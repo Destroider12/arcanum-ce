@@ -11,5 +11,6 @@ void sleep_ui_toggle(int64_t bed_obj);
 void sleep_ui_close(void);
 bool sleep_ui_is_active(void);
 bool sleep_ui_process_callback(TimeEvent* timeevent);
+bool sleep_ui_dev_until_healed(void);
 
 #endif /* ARCANUM_UI_SLEEP_UI_H_ */

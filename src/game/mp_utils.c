@@ -634,6 +634,13 @@ void mp_handle_packet9(Packet9* pkt)
         return;
     }
 
+    /* PT27 item 2: a peer's PC is drawn from its PC_POS interpolation
+       ring; this reliable-channel snapshot (sent ahead of the delayed
+       ring) made the host's PC jump forward and get pulled back. */
+    if (tig_net_is_coop_enabled() && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        return;
+    }
+
     multiplayer_lock();
     if (pkt->loc != 0) {
         sub_43E770(obj, pkt->loc, pkt->offset_x, pkt->offset_y);
@@ -657,6 +664,10 @@ void mp_handle_packet10(Packet10* pkt)
 
     sub_4F0690(pkt->oid, &obj);
     if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    /* Coop: critters have their own pose channels (PT27 items 1/2). */
+    if (coop_lite_client_drop_anim_pose(obj)) {
         return;
     }
 

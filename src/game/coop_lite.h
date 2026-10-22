@@ -551,6 +551,7 @@ void coop_lite_handle_npc_req(PacketCoopObjReq* pkt);
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt);
 /* Client, Packet70 of a ground item: true = asked the host for the full
    object (created from the proto only if no blob comes in time). */
+bool coop_lite_client_ground_loc_live(int64_t loc);
 bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc, int proto);
 /*
  * Which barter/inventory transfers a client may ask the host to perform
@@ -825,11 +826,13 @@ bool coop_lite_party_friendly(int64_t a, int64_t b);
 bool coop_lite_is_remote_slot_pc(int64_t obj);
 /* PT26: obj is any co-op player's PC (host or client), host side. */
 bool coop_lite_is_party_pc(int64_t obj);
+int coop_lite_party_heal_targets(int64_t healer, int64_t* out, int max);
 /* PT25 rest/sleep/wait: clients may not skip time (true = refused, message
    shown); the host's rest fades every client and heals every co-op PC. */
 bool coop_lite_client_rest_refused(void);
 void coop_lite_host_rest_begin(void);
 void coop_lite_host_rest_end(void);
+bool coop_lite_host_rest_anyone_hurt(void);
 void coop_lite_host_rest_heal(int hours);
 /* Host: a PC dropped an item - clients refresh their world state soon. */
 void coop_lite_host_world_dirty(void);
@@ -923,6 +926,7 @@ void coop_lite_terminate_name(char* name, size_t size);
  * is replicated with PC_POS.
  */
 bool coop_lite_client_drives_obj(int64_t obj);
+bool coop_lite_client_drop_anim_pose(int64_t obj);
 /* Client applying host state: object scripts must not run (review P0-3). */
 bool coop_lite_scripts_muted(void);
 /* Client: our gold / ammo stack's OID → the host's (they differ). */

@@ -3874,6 +3874,8 @@ static bool anim_goal_type_is_client_local(int goal_type)
     case AG_ATTEMPT_MOVE_NEAR:
     case AG_TALK:
     case AG_PICKUP_ITEM: /* walk there locally; the pickup itself goes to the host */
+    case AG_USE_CONTAINER: /* PT27: walk to the chest/corpse locally, then the
+                              PT18 local loot window (host-validated) opens */
         return true;
     default:
         return false;
