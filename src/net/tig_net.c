@@ -793,6 +793,11 @@ bool tig_net_is_host(void)
     return coop_enabled && active && is_host && local_suspend_depth == 0;
 }
 
+bool tig_net_is_coop_client(void)
+{
+    return coop_enabled && active && !is_host;
+}
+
 void tig_net_local_suspend_begin(void)
 {
     local_suspend_depth++;

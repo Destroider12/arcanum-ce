@@ -56,6 +56,8 @@ set(SRCS
     "src/game/combat.h"
     "src/game/coop_lite.c"
     "src/game/crash_log.c"
+    "src/game/coop_menu.c"
+    "src/game/coop_menu_sys.c"
     "src/game/coop_lite.h"
     "src/game/context.h"
     "src/game/criticals.h"
@@ -406,6 +408,15 @@ if(WIN32)
     target_link_libraries(coop_lite_policy_test PRIVATE ws2_32 winmm)
 endif()
 add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
+
+add_executable(coop_menu_test
+    "tests/coop_menu_test.c"
+    "src/game/coop_menu.c"
+)
+target_include_directories(coop_menu_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+add_test(NAME coop_menu COMMAND coop_menu_test)
 
 add_executable(coop_lite_dialog_filter_test
     "tests/coop_lite_dialog_filter_test.c"

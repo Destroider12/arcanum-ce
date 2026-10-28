@@ -1801,3 +1801,27 @@ critter flags, spell flags, blit flags/colour/alpha/scale).
   `coop_lite_session_reset`; a matching slot-0 map key clears the mismatch timer.
 - Crash log prints raw addresses and shows `exe+0x` only for addresses inside
   the exe image (NULL jumps and DLL frames stay readable).
+
+## PT33 behaviour notes
+
+- **Host save load → clients follow.** A save loaded from the menu goes through
+  `sub_5432B0`; it now calls `coop_lite_host_note_save_loaded()`, which arms the
+  existing party-reload resync (`COOP_PARTY_RESYNC` once the host is back in the
+  world: clients reset the session and re-offer their PC; PCs come back on their
+  feet as after a wipe reload). No packet change.
+- **Dead PC level-up.** The XP split still pays only the living. The host's
+  500 ms PC-stats tick now runs `level_recalc` (auto-level scheme included) for
+  any connected PC, dead or alive, whose XP already reaches the next level; the
+  normal build sync carries it to the owner.
+- **Worn items vs inventory sync.** When the host's copy lists an item in the
+  backpack that the client's PC still wears, the client keeps it worn and
+  re-asserts the slot with the usual own-move Packet81 (rate-limited per item).
+- **Auto-generated loot.** `sub_463E20` returns on a suspended coop client (the
+  window's local open-time prep used to roll loot with the client's RNG, which
+  the host's empty container sync then deleted). The host rolls SPAWN_ONCE stock
+  on the first OPEN_LOOT before it syncs.
+- **Main menu.** "Host Co-op" / "Join Co-op (addr)" under Exit (plain launches
+  only). They relaunch the exe with `-coop -host` / `-coop -join <addr>`, keeping
+  other options, then close this copy. Join address: a valid host[:port] on the
+  clipboard, else `coop_join.txt` (last used; written by `-join` too), else
+  127.0.0.1. CLI flags unchanged.

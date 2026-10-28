@@ -6,6 +6,8 @@
 #include "game/background.h"
 #include "game/critter.h"
 #include "game/coop_lite.h"
+#include "game/coop_menu.h"
+#include "net/tig_net.h"
 #include "tig/memory.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
@@ -66,6 +68,8 @@ static TigWindowModalDialogChoice mainmenu_ui_confirm(int num);
 static void sub_541830(char* dst, const char* src);
 static void sub_5418A0(char* str, TigRect* rect, tig_font_handle_t font, unsigned int flags);
 static void mainmenu_ui_create_mainmenu(void);
+static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle);
+static void mainmenu_ui_coop_buttons_create(void);
 static void mainmenu_ui_draw_version(void);
 static bool mainmenu_ui_press_mainmenu_in_play(tig_button_handle_t button_handle);
 static bool mainmenu_ui_press_mainmenu_in_play_locked(tig_button_handle_t button_handle);
@@ -483,7 +487,7 @@ static MainMenuWindowInfo mainmenu_ui_mainmenu_window_info = {
     NULL,
     0,
     NULL,
-    NULL,
+    mainmenu_ui_release_mainmenu,
     NULL,
     NULL,
     NULL,
@@ -2105,6 +2109,118 @@ void mainmenu_ui_create_mainmenu(void)
     mainmenu_ui_create_window();
     ++dword_64C43C;
     mainmenu_ui_draw_version();
+    mainmenu_ui_coop_buttons_create();
+}
+
+/*
+ * PT33 item 6: "Host Co-op" and "Join Co-op" under Exit. Co-op is configured
+ * once at start-up (-coop -host / -join), so a press relaunches the game with
+ * those flags (everything else on the command line is kept) and closes this
+ * copy. No new art: the text is drawn like the other entries and the buttons
+ * are the same text-sized hit areas. Join uses the host IP on the clipboard,
+ * else the last one used (coop_join.txt), else 127.0.0.1; the menu shows it.
+ * Only offered in a plain (non-co-op) launch.
+ */
+static MainMenuButtonInfo mainmenu_ui_coop_buttons[2] = {
+    { 410, 343, -1, TIG_BUTTON_HANDLE_INVALID, 0, 0, 0, { 0 }, -1 },
+    { 410, 393, -1, TIG_BUTTON_HANDLE_INVALID, 0, 0, 0, { 0 }, -1 },
+};
+static char mainmenu_ui_coop_join_addr[96];
+
+static void mainmenu_ui_coop_buttons_create(void)
+{
+    MainMenuWindowInfo* window = &mainmenu_ui_mainmenu_window_info;
+    char label[2][160];
+    tig_font_handle_t font;
+    TigFont font_desc;
+    TigRect text_rect;
+    int idx;
+
+    mainmenu_ui_coop_buttons[0].button_handle = TIG_BUTTON_HANDLE_INVALID;
+    mainmenu_ui_coop_buttons[1].button_handle = TIG_BUTTON_HANDLE_INVALID;
+    if (tig_net_is_coop_enabled() || mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+        return;
+    }
+
+    coop_menu_pick_address(mainmenu_ui_coop_join_addr, sizeof(mainmenu_ui_coop_join_addr));
+    snprintf(label[0], sizeof(label[0]), "Host Co-op");
+    snprintf(label[1], sizeof(label[1]), "Join Co-op (%s)", mainmenu_ui_coop_join_addr);
+
+    if ((window->refresh_text_flags & 0x1) != 0) {
+        font = (window->refresh_text_flags & 0x8) != 0 ? dword_64C228[0][0] : dword_64C0CC[0][0];
+    } else {
+        font = (window->refresh_text_flags & 0x10) != 0 ? dword_64C218[0] : dword_64C210[0];
+    }
+
+    for (idx = 0; idx < 2; idx++) {
+        MainMenuButtonInfo* button = &mainmenu_ui_coop_buttons[idx];
+
+        font_desc.width = 0;
+        font_desc.height = 0;
+        font_desc.str = label[idx];
+        font_desc.flags = 0;
+        tig_font_push(font);
+        tig_font_measure(&font_desc);
+        tig_font_pop();
+
+        button->x = 410;
+        button->y = idx == 0 ? 343 : 393;
+        if ((window->refresh_text_flags & 0x04) != 0) {
+            button->x -= font_desc.width / 2;
+        }
+        button->rect.x = 0;
+        button->rect.y = 0;
+        button->rect.width = font_desc.width;
+        button->rect.height = font_desc.height;
+
+        text_rect = button->rect;
+        text_rect.x = button->x - window->field_30;
+        text_rect.y = button->y - window->field_34;
+        mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[idx], &text_rect,
+            window->refresh_text_flags | 0x20);
+
+        if (!main_menu_button_create(button, font_desc.width, font_desc.height)) {
+            tig_debug_printf("MainMenu: co-op button %d not created\n", idx);
+            button->button_handle = TIG_BUTTON_HANDLE_INVALID;
+        }
+    }
+    tig_window_display();
+}
+
+static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle)
+{
+    bool join;
+
+    if (button_handle == TIG_BUTTON_HANDLE_INVALID) {
+        return false;
+    }
+    if (button_handle == mainmenu_ui_coop_buttons[0].button_handle) {
+        join = false;
+    } else if (button_handle == mainmenu_ui_coop_buttons[1].button_handle) {
+        join = true;
+    } else {
+        return false;
+    }
+
+    if (join) {
+        char now[96];
+
+        coop_menu_pick_address(now, sizeof(now));
+        if (strcmp(now, mainmenu_ui_coop_join_addr) != 0) {
+            /* The clipboard changed since the menu was drawn: redraw with the
+               address a second press will use, rather than join another one. */
+            mainmenu_ui_close(false);
+            mainmenu_ui_window_type = MM_WINDOW_MAINMENU;
+            mainmenu_ui_open();
+            return true;
+        }
+        coop_menu_remember_address(now);
+    }
+    if (coop_menu_relaunch(join, mainmenu_ui_coop_join_addr)) {
+        sub_5412D0();
+        mainmenu_ui_exit_game();
+    }
+    return true;
 }
 
 // 0x541AC0
@@ -3037,6 +3153,7 @@ bool sub_5432B0(const char* name)
             ui_display_msg(&ui_message);
 
             mainmenu_ui_start_new_game = false;
+            coop_lite_host_note_save_loaded(); /* PT33: clients follow a host load */
             sub_5412D0();
 
             return true;

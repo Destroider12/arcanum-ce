@@ -13,6 +13,7 @@
 
 #include "game/ai.h"
 #include "game/coop_lite.h"
+#include "game/coop_menu.h"
 #include "game/anim.h"
 #include "game/combat.h"
 #include "game/crash_log.h"
@@ -202,6 +203,7 @@ int main(int argc, char** argv)
        Review PT24: whole argv tokens, not substrings of lpCmdLine (a -log
        path like D:\\my-coop-host\\x.log must not switch modes). */
     coop_cli_mode = 0;
+    coop_menu_set_args(argc, argv); /* PT33: the main menu relaunches with -host / -join */
     if (coop_arg_find(argc, argv, "-coop", NULL)) {
         const char* val = NULL;
 
@@ -230,6 +232,7 @@ int main(int argc, char** argv)
                     port = atoi(colon + 1);
                 }
                 tig_net_configure_join(hostbuf, port);
+                coop_menu_remember_address(val); /* PT33: the menu's Join reuses it */
                 coop_cli_mode = 2;
                 tig_debug_printf("Coop: will join %s:%d\n", hostbuf, port);
             }

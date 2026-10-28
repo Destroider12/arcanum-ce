@@ -710,6 +710,8 @@ void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc);
 /* Host: a party-wipe reload is due. Copies the save name; main loop loads it
    outside of gamelib_ping. */
 bool coop_lite_take_reload_request(char* name, size_t size);
+/* Host: a save was loaded from the menu — resync the clients (PT33). */
+void coop_lite_host_note_save_loaded(void);
 /* Host: the reload could not be started (bad save). */
 void coop_lite_reload_failed(void);
 /* ARCANUM_DEV_COOP_SAVE=1: host saves Slot9990 once a client is in (dev). */

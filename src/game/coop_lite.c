@@ -5454,6 +5454,31 @@ static void coop_lite_host_raise_pc(int64_t pc)
     object_hp_damage_set(pc, 0); /* broadcasts vitals (Packet100) */
 }
 
+/*
+ * PT33 item 1: the host loaded a save from the menu (not the party-wipe
+ * reload). That bumps the map generation, so every client's PC_POS /
+ * WORLD_REQ carry a stale key and are dropped, and nothing told the client
+ * to start over: it had to be restarted by hand. Take the party-reload route
+ * for it too: once the host is back in the world it sends COOP_PARTY_RESYNC,
+ * each client resets its session and re-offers its character, exactly as
+ * after a wipe reload. As there, the party comes back on its feet.
+ */
+void coop_lite_host_note_save_loaded(void)
+{
+    int slot;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_host()) {
+        return;
+    }
+    coop_reload_resync_pending = true;
+    for (slot = 1; slot < 8; slot++) {
+        if (tig_net_client_is_active(slot)) {
+            coop_reload_raise[slot] = true;
+        }
+    }
+    tig_debug_printf("CoopLite: host loaded a save — clients will be resynced\n");
+}
+
 bool coop_lite_take_reload_request(char* name, size_t size)
 {
     if (!coop_reload_request_valid) {
@@ -7538,6 +7563,17 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
         if (pc == OBJ_HANDLE_NULL) {
             continue;
         }
+        /* PT33: a PC that holds the XP for its next level gets it (and its
+           auto-level scheme) whether or not it is dead; the XP split only
+           pays the living, but nothing else may leave a dead PC un-levelled. */
+        if (obj_field_int32_get(pc, OBJ_F_TYPE) == OBJ_TYPE_PC
+            && (slot == 0 || tig_net_client_is_active(slot))
+            && stat_base_get(pc, STAT_LEVEL) < stat_level_max(pc, STAT_LEVEL)
+            && level_experience_points_to_next_level(pc) <= 0) {
+            tig_debug_printf("CoopLite: PC stats: slot %d holds XP for level %d%s — level-up\n", slot,
+                stat_base_get(pc, STAT_LEVEL) + 1, critter_is_dead(pc) ? " (dead)" : "");
+            level_recalc(pc);
+        }
         coop_lite_pc_build_fill(pc, &b);
         sig = coop_lite_pc_build_sig(&b);
         if (sig == coop_pcs_sig[slot]) {
@@ -8027,6 +8063,14 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
                 want == COOP_TARGET_STEAL ? "pickpocket" : "loot", tname, kind);
             coop_lite_host_sync_slot_inven(slot);
             return;
+        }
+        if (obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+            && (obj_field_int32_get(target, OBJ_F_CONTAINER_FLAGS) & OCOF_INVEN_SPAWN_ONCE) != 0) {
+            /* PT33 item 4: first open of auto-generated loot. The host rolls
+               it (the client's own roll is gone), so the sync below carries
+               the stock instead of an empty container. */
+            sub_463E20(target);
+            tig_debug_printf("CoopLite: loot: slot %d first open: host generated the container's stock\n", slot);
         }
         coop_barter[slot].target_valid = true;
         coop_barter[slot].target_kind = kind;
@@ -9236,6 +9280,68 @@ void coop_lite_client_map_stack_oid(void* oid_ptr)
     }
 }
 
+/*
+ * PT33 item 3: the host's copy of this client's PC lists a worn item (weapon,
+ * shield, ...) in the backpack while the client still wears it. The client
+ * is the source of truth for what its own PC wears, so the inventory sync no
+ * longer takes it off; the worn slot is asserted to the host with the same
+ * own-move Packet81 a drag in the window sends, so the host's copy (and its
+ * combat) catch up. Rate-limited: a host that refuses is not hammered.
+ */
+#define COOP_WORN_REASSERT_SLOTS 8
+static struct {
+    ObjectID oid;
+    unsigned int ms;
+} coop_worn_reassert[COOP_WORN_REASSERT_SLOTS];
+static int coop_worn_reassert_next;
+
+static void coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
+{
+    Packet81 pkt;
+    ObjectID oid;
+    unsigned int now = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    int depth;
+    int i;
+
+    if (pc == OBJ_HANDLE_NULL || item == OBJ_HANDLE_NULL) {
+        return;
+    }
+    oid = obj_get_id(item);
+    for (i = 0; i < COOP_WORN_REASSERT_SLOTS; i++) {
+        if (coop_worn_reassert[i].ms != 0 && objid_is_equal(coop_worn_reassert[i].oid, oid)) {
+            if ((unsigned int)(now - coop_worn_reassert[i].ms) < 4000u) {
+                return; /* asked a moment ago; the host's answer is in flight */
+            }
+            break;
+        }
+    }
+    if (i == COOP_WORN_REASSERT_SLOTS) {
+        i = coop_worn_reassert_next;
+        coop_worn_reassert_next = (coop_worn_reassert_next + 1) % COOP_WORN_REASSERT_SLOTS;
+    }
+    coop_worn_reassert[i].oid = oid;
+    coop_worn_reassert[i].ms = now;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = 81;
+    pkt.field_8 = 0x01;
+    pkt.field_10 = obj_get_id(item);
+    pkt.field_28 = obj_get_id(pc);
+    pkt.field_40 = obj_get_id(pc);
+    pkt.field_58 = loc;
+    pkt.field_5C = 0;
+    pkt.field_60 = 1;
+    pkt.field_68 = sub_529520();
+    pkt.field_70.type = OID_TYPE_NULL;
+    pkt.field_88.type = OID_TYPE_NULL;
+    pkt.field_A0 = obj_get_id(pc);
+    depth = tig_net_local_suspend_pause();
+    if (tig_net_is_active() && !tig_net_is_host()) {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: inven: kept worn item at loc %d, told the host\n", loc);
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -9335,6 +9441,9 @@ static void coop_lite_client_apply_inven_batch(void)
                 if (owner != local_pc && cur != loc) {
                     item_remove(item);
                     item_insert(item, owner, loc);
+                } else if (owner == local_pc && cur != loc && IS_WEAR_INV_LOC(cur) && !IS_WEAR_INV_LOC(loc)) {
+                    /* PT33 item 3: keep what we wear; tell the host. */
+                    coop_lite_client_reassert_worn(owner, item, cur);
                 } else if (owner == local_pc && cur != loc
                     && (IS_WEAR_INV_LOC(loc) || IS_WEAR_INV_LOC(cur))) {
                     item_remove(item);

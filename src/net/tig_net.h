@@ -63,6 +63,8 @@ void tig_net_pump(void);
 
 bool tig_net_is_active(void);
 bool tig_net_is_host(void);
+/* PT33: a coop client, whether or not its calls are locally suspended. */
+bool tig_net_is_coop_client(void);
 
 void tig_net_on_message(TigNetMessageFunc func);
 void tig_net_on_message_validation(TigNetMessageValidationFunc func);
