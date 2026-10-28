@@ -6157,6 +6157,7 @@ void mainmenu_ui_exit_game(void)
     gamelib_exit();
     tig_exit();
     tig_memory_print_stats(TIG_MEMORY_STATS_PRINT_GROUPED_BLOCKS);
+    coop_menu_run_pending_relaunch(); /* PT34: after everything is released */
     exit(EXIT_SUCCESS);
 }
 

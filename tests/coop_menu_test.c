@@ -1,7 +1,6 @@
 /* PT33: main-menu co-op helpers: address validation, remembered address. */
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "game/coop_menu.h"
 
@@ -36,7 +35,7 @@ int main(void)
     CHECK(coop_menu_address_from_text("  10.0.0.5\r\n", out, sizeof(out)) && strcmp(out, "10.0.0.5") == 0);
     CHECK(!coop_menu_address_from_text("hello world", out, sizeof(out)));
 
-    unlink("coop_join.txt");
+    remove("coop_join.txt");
     coop_menu_last_address(out, sizeof(out));
     CHECK(strcmp(out, "127.0.0.1") == 0);
     coop_menu_remember_address("10.1.2.3:7777");
@@ -54,7 +53,7 @@ int main(void)
     CHECK(strcmp(out, "10.1.2.3:7777") == 0);
     coop_menu_pick_address_from(NULL, out, sizeof(out));
     CHECK(strcmp(out, "10.1.2.3:7777") == 0);
-    unlink("coop_join.txt");
+    remove("coop_join.txt");
 
     if (failures != 0) {
         return 1;

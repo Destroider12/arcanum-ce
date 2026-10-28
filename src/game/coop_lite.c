@@ -1209,9 +1209,17 @@ static void coop_lite_client_attack_reset(void);
 static void coop_lite_session_reset_extra(void);
 #endif
 
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_worn_reassert_reset(void);
+#endif
+
 void coop_lite_session_reset(void)
 {
     int i;
+
+#ifndef COOP_LITE_TEST_STUBS
+    coop_lite_worn_reassert_reset(); /* PT34: no stale ring across sessions */
+#endif
 
     /* Review P0-1: half-received bundles must not survive a session. */
     coop_lite_char_rx_reset_all();
@@ -9289,13 +9297,38 @@ void coop_lite_client_map_stack_oid(void* oid_ptr)
  * combat) catch up. Rate-limited: a host that refuses is not hammered.
  */
 #define COOP_WORN_REASSERT_SLOTS 8
+#define COOP_WORN_REASSERT_TRIES 2
 static struct {
     ObjectID oid;
     unsigned int ms;
+    int tries;
 } coop_worn_reassert[COOP_WORN_REASSERT_SLOTS];
 static int coop_worn_reassert_next;
 
-static void coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
+static void coop_lite_worn_reassert_reset(void)
+{
+    memset(coop_worn_reassert, 0, sizeof(coop_worn_reassert));
+    coop_worn_reassert_next = 0;
+}
+
+/* True when the host's entries of this owner put a different item at `loc`:
+   the slot is not ours to keep (PT34). */
+static bool coop_lite_inv_slot_claimed(int o, int self_idx, int loc)
+{
+    int k;
+
+    for (k = coop_inv_owner[o].first; k < coop_inv_owner[o].first + coop_inv_owner[o].count; k++) {
+        if (k != self_idx && coop_inv_entry[k].inventory_location == loc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True: the worn item stays worn (asserted to the host, or asked a moment
+   ago). False: the host listed it in the backpack COOP_WORN_REASSERT_TRIES
+   times in a row, so it meant it (script, curse, a stat debuff): obey it. */
+static bool coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
 {
     Packet81 pkt;
     ObjectID oid;
@@ -9304,27 +9337,38 @@ static void coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
     int i;
 
     if (pc == OBJ_HANDLE_NULL || item == OBJ_HANDLE_NULL) {
-        return;
+        return false;
     }
     oid = obj_get_id(item);
     for (i = 0; i < COOP_WORN_REASSERT_SLOTS; i++) {
         if (coop_worn_reassert[i].ms != 0 && objid_is_equal(coop_worn_reassert[i].oid, oid)) {
-            if ((unsigned int)(now - coop_worn_reassert[i].ms) < 4000u) {
-                return; /* asked a moment ago; the host's answer is in flight */
-            }
             break;
         }
     }
-    if (i == COOP_WORN_REASSERT_SLOTS) {
+    if (i < COOP_WORN_REASSERT_SLOTS) {
+        unsigned int age = (unsigned int)(now - coop_worn_reassert[i].ms);
+
+        if (age > 30000u) {
+            coop_worn_reassert[i].tries = 0; /* not "in a row" any more */
+        } else if (age < 4000u) {
+            return true; /* asked a moment ago; the host's answer is in flight */
+        } else if (coop_worn_reassert[i].tries >= COOP_WORN_REASSERT_TRIES) {
+            memset(&coop_worn_reassert[i], 0, sizeof(coop_worn_reassert[i]));
+            tig_debug_printf("CoopLite: inven: host keeps the item at loc %d unworn, obeying\n", loc);
+            return false;
+        }
+    } else {
         i = coop_worn_reassert_next;
         coop_worn_reassert_next = (coop_worn_reassert_next + 1) % COOP_WORN_REASSERT_SLOTS;
+        coop_worn_reassert[i].tries = 0;
     }
     coop_worn_reassert[i].oid = oid;
     coop_worn_reassert[i].ms = now;
+    coop_worn_reassert[i].tries++;
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = 81;
     pkt.field_8 = 0x01;
-    pkt.field_10 = obj_get_id(item);
+    pkt.field_10 = oid;
     pkt.field_28 = obj_get_id(pc);
     pkt.field_40 = obj_get_id(pc);
     pkt.field_58 = loc;
@@ -9339,7 +9383,9 @@ static void coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
         tig_net_send_app_all(&pkt, sizeof(pkt));
     }
     tig_net_local_suspend_resume(depth);
-    tig_debug_printf("CoopLite: inven: kept worn item at loc %d, told the host\n", loc);
+    tig_debug_printf("CoopLite: inven: kept worn item at loc %d, told the host (try %d)\n", loc,
+        coop_worn_reassert[i].tries);
+    return true;
 }
 
 static void coop_lite_client_apply_inven_batch(void)
@@ -9441,9 +9487,12 @@ static void coop_lite_client_apply_inven_batch(void)
                 if (owner != local_pc && cur != loc) {
                     item_remove(item);
                     item_insert(item, owner, loc);
-                } else if (owner == local_pc && cur != loc && IS_WEAR_INV_LOC(cur) && !IS_WEAR_INV_LOC(loc)) {
-                    /* PT33 item 3: keep what we wear; tell the host. */
-                    coop_lite_client_reassert_worn(owner, item, cur);
+                } else if (owner == local_pc && cur != loc && IS_WEAR_INV_LOC(cur) && !IS_WEAR_INV_LOC(loc)
+                    && !coop_lite_inv_slot_claimed(o, i, cur)
+                    && coop_lite_client_reassert_worn(owner, item, cur)) {
+                    /* PT33 item 3: keep what we wear; tell the host. PT34:
+                       not when another item of the batch takes that slot,
+                       and not after the host said no twice. */
                 } else if (owner == local_pc && cur != loc
                     && (IS_WEAR_INV_LOC(loc) || IS_WEAR_INV_LOC(cur))) {
                     item_remove(item);

@@ -33,8 +33,13 @@ void coop_menu_pick_address_from(const char* clip, char* out, size_t out_size);
 /* main(): keep argv for the relaunch. */
 void coop_menu_set_args(int argc, char** argv);
 
-/* Start a new copy of the game as host (join == false) or as a client of
-   `addr`, keeping the other command-line options. True when it started. */
+/* Ask for a new copy of the game as host (join == false) or as a client of
+   `addr`, keeping the other command-line options. True when the request was
+   accepted; nothing starts yet. */
 bool coop_menu_relaunch(bool join, const char* addr);
+
+/* Spawn the requested copy. Call at the very end of the shutdown, just
+   before the process exits (no-op without a request). */
+void coop_menu_run_pending_relaunch(void);
 
 #endif /* ARCANUM_GAME_COOP_MENU_H_ */
