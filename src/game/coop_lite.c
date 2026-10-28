@@ -933,6 +933,17 @@ static bool coop_lite_client_in_world(void)
    ends here) must not keep it from travelling with the host; the host
    re-asserts it in the PC_POS look if it still holds. */
 static int coop_follow_busy_retries;
+/* PT32: session-scoped state (cleared in coop_lite_session_reset). */
+static unsigned int coop_in_world_ms; /* host: since when settled, follow arming */
+static unsigned int coop_mismatch_key;
+static unsigned int coop_mismatch_since_ms;
+static unsigned int coop_mismatch_follow_ms;
+
+/* PT32: the client's PC location when it SENT the WORLD_REQ. The host samples
+   COOP_WORLD_RADIUS around its copy of that PC (a PC_POS old), so pruning is
+   measured from here, never from where the client has run to since. */
+static int64_t coop_world_req_center;
+static bool coop_world_req_center_valid;
 
 static void coop_lite_client_clear_stuck_flags(int64_t pc_obj, const char* why)
 {
@@ -1209,6 +1220,12 @@ void coop_lite_session_reset(void)
         coop_interp_reset(&coop_interp[i]);
     }
     coop_rejoin_pc_wanted = false;
+    coop_in_world_ms = 0;
+    coop_mismatch_key = 0;
+    coop_mismatch_since_ms = 0;
+    coop_mismatch_follow_ms = 0;
+    coop_follow_busy_retries = 0;
+    coop_world_req_center_valid = false;
 
     coop_lite_follow_armed = false;
     coop_lite_pose_order_reset();
@@ -2192,7 +2209,12 @@ bool coop_interp_push(CoopInterpRing* ring, const CoopInterpSample* sample, int6
             return true;
         }
     }
-    if (ring->n == 0 || step_tiles > 1 || step_tiles < 0) {
+    /* PT32: the newest sample is old (the PC stood still; keyframe resends
+       do not refresh t_ms): that motion is over, so start afresh instead of
+       interpolating / holding across a gap of seconds. The duplicate return
+       above only takes an unchanged pose, a resumed step gets here. */
+    if (ring->n == 0 || step_tiles > 1 || step_tiles < 0
+        || (unsigned int)(sample->t_ms - ring->s[ring->n - 1].t_ms) > COOP_INTERP_DELAY_MS * 2u) {
         ring->s[0] = *sample;
         ring->n = 1;
         return false;
@@ -6240,15 +6262,15 @@ void coop_lite_ping(unsigned int now_ms)
        and the client never followed (PT31 log: map key dropped for minutes).
        Settled in the world for 1.5 s = it is not a spawn any more. */
     if (!coop_lite_follow_armed) {
-        static unsigned int in_world_ms;
-
-        if (in_world_ms == 0) {
-            in_world_ms = now_ms ? now_ms : 1u;
-        } else if (coop_lite_interval_elapsed(in_world_ms, now_ms, 1500u)) {
+        if (coop_in_world_ms == 0) {
+            coop_in_world_ms = now_ms ? now_ms : 1u;
+        } else if (coop_lite_interval_elapsed(coop_in_world_ms, now_ms, 1500u)) {
             coop_lite_follow_armed = true;
-            in_world_ms = 0;
+            coop_in_world_ms = 0;
             tig_debug_printf("CoopLite: follow armed (host settled in the world)\n");
         }
+    } else {
+        coop_in_world_ms = 0; /* armed some other way: do not leave a stale start */
     }
     coop_lite_client_follow_own_pc(coop_lite_camera_target());
     coop_lite_keep_remote_sectors();
@@ -6373,10 +6395,6 @@ void coop_lite_ping(unsigned int now_ms)
    announcing its map key; when it stays different from ours for 3 s (no
    travel of ours in flight), follow it from the key (map index + load
    generation) and its location. Retried every 5 s while it persists. */
-static unsigned int coop_mismatch_key;
-static unsigned int coop_mismatch_since_ms;
-static unsigned int coop_mismatch_follow_ms;
-
 static void coop_lite_client_map_mismatch(const PacketCoopPcPos* pkt)
 {
     PacketCoopFollowHost fol;
@@ -6436,6 +6454,9 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
         }
         coop_lite_client_map_mismatch(pkt);
         return;
+    }
+    if (pkt->slot == 0) {
+        coop_mismatch_since_ms = 0; /* the host's map is ours again */
     }
     memcpy(&oid, pkt->oid, sizeof(oid));
     coop_diag.pc_rx++;
@@ -11080,10 +11101,10 @@ static int coop_lite_world_prune(void)
     int iter;
     int i;
 
-    if (pc == OBJ_HANDLE_NULL || coop_world_seen->overflow) {
+    if (pc == OBJ_HANDLE_NULL || coop_world_seen->overflow || !coop_world_req_center_valid) {
         return 0;
     }
-    center = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    center = coop_world_req_center; /* PT32: not the current position */
     if (obj_inst_first(&obj, &iter)) {
         do {
             unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
@@ -11294,6 +11315,14 @@ static void coop_lite_client_world_req_tick(unsigned int now_ms)
     }
     coop_world_req_key = key;
     coop_world_req_ms = now_ms;
+    {
+        int64_t lpc = player_get_local_pc_obj();
+
+        coop_world_req_center_valid = lpc != OBJ_HANDLE_NULL;
+        if (coop_world_req_center_valid) {
+            coop_world_req_center = obj_field_int64_get(lpc, OBJ_F_LOCATION);
+        }
+    }
     req.type = PACKET_COOP_WORLD_REQ;
     req.map = key;
     tig_net_send_app(&req, sizeof(req), 0);

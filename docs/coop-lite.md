@@ -1786,3 +1786,18 @@ critter flags, spell flags, blit flags/colour/alpha/scale).
   `ARCANUM_DEV=1 ARCANUM_DEV_INTERP=lerp` restores the lerp for comparison.
   PC_POS interval 50 -> 33 ms, interpolation ring 3 -> 6 (120 ms delay kept).
   Stand-pose snap and the over-1-tile snap are unchanged.
+
+## PT32 behaviour notes (Argon review of PT31)
+
+- World prune is measured from the client PC's location when it SENT the
+  WORLD_REQ (not where it has run to by the last chunk). The host samples 24
+  tiles around its copy of that PC; the prune radius is 18, so 6 tiles cover
+  the PC_POS lag. No packet change, protocol stays 25.
+- `coop_interp_push`: a new pose more than 2x COOP_INTERP_DELAY_MS after the
+  newest sample restarts the ring (stepwise mode no longer shows a stale
+  sample when walking resumes after a stand). Keyframe duplicates still return
+  early and keep their time.
+- Follow-arming and self-follow statics are file scope and cleared in
+  `coop_lite_session_reset`; a matching slot-0 map key clears the mismatch timer.
+- Crash log prints raw addresses and shows `exe+0x` only for addresses inside
+  the exe image (NULL jumps and DLL frames stay readable).

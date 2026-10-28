@@ -1510,6 +1510,24 @@ static int test_interp(void)
         fprintf(stderr, "interp: keyframe repeat changed the ring\n");
         return 1;
     }
+    /* PT32: motion resumes after a long stand: the stale ring is dropped. */
+    {
+        CoopInterpRing stale = ring;
+        CoopInterpSample d = c;
+
+        d.offset_x += 4;
+        d.t_ms = 5000;
+        if (coop_interp_push(&stale, &d, 1) || stale.n != 1 || stale.s[0].t_ms != 5000) {
+            fprintf(stderr, "interp: stale ring not reset on resumed motion\n");
+            return 1;
+        }
+        d.t_ms = ring.s[2].t_ms + 40;
+        stale = ring;
+        if (!coop_interp_push(&stale, &d, 1) || stale.n != 4) {
+            fprintf(stderr, "interp: fresh step wrongly reset the ring\n");
+            return 1;
+        }
+    }
     if (coop_interp_pick(&ring, 900, &ia, &ib, &num, &den) != 1 || ia != 0) {
         fprintf(stderr, "interp: before oldest must hold it\n");
         return 1;

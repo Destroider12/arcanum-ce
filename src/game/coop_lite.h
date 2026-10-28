@@ -425,7 +425,7 @@ void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
  * that the host does not have (picked up, destroyed).
  */
 #define COOP_WORLD_RADIUS 24 /* tiles around the client PC (host side) */
-#define COOP_WORLD_PRUNE_RADIUS 18 /* client prunes ground items within this */
+#define COOP_WORLD_PRUNE_RADIUS 18 /* client prunes within this of its PC position AT REQUEST TIME (host samples 24 around its copy: 6 tiles of PC_POS lag margin) */
 #define COOP_WORLD_CHUNK 64
 #define COOP_WORLD_F_FIRST 0x1
 #define COOP_WORLD_F_LAST 0x2
