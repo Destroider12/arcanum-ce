@@ -181,6 +181,9 @@ void sub_4EDFF0(Packet99* pkt)
         return;
     }
 
+    if (!coop_lite_loc_in_map(pkt->location)) {
+        return; /* PT37: the host's new-map position, we are still on the old map */
+    }
     multiplayer_lock();
     sub_43E770(obj, pkt->location, pkt->dx, pkt->dy);
     if (pkt->field_30 && player_is_local_pc_obj(obj)) {

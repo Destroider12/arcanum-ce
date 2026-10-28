@@ -2138,7 +2138,36 @@ static void mainmenu_ui_coop_buttons_create(void)
 
     mainmenu_ui_coop_buttons[0].button_handle = TIG_BUTTON_HANDLE_INVALID;
     mainmenu_ui_coop_buttons[1].button_handle = TIG_BUTTON_HANDLE_INVALID;
-    if (tig_net_is_coop_enabled() || mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+    if (mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+        return;
+    }
+    if (tig_net_is_coop_enabled()) {
+        /* PT37: launched with co-op flags (launcher / shortcut): no relaunch
+           buttons, but say which mode this is. */
+        if (tig_net_describe_coop_mode(label[0], sizeof(label[0]))) {
+            if ((window->refresh_text_flags & 0x1) != 0) {
+                font = (window->refresh_text_flags & 0x8) != 0 ? dword_64C228[0][0] : dword_64C0CC[0][0];
+            } else {
+                font = (window->refresh_text_flags & 0x10) != 0 ? dword_64C218[0] : dword_64C210[0];
+            }
+            font_desc.width = 0;
+            font_desc.height = 0;
+            font_desc.str = label[0];
+            font_desc.flags = 0;
+            tig_font_push(font);
+            tig_font_measure(&font_desc);
+            tig_font_pop();
+            text_rect.x = 410 - window->field_30;
+            if ((window->refresh_text_flags & 0x04) != 0) {
+                text_rect.x -= font_desc.width / 2;
+            }
+            text_rect.y = 343 - window->field_34;
+            text_rect.width = font_desc.width;
+            text_rect.height = font_desc.height;
+            mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[0], &text_rect,
+                window->refresh_text_flags | 0x20);
+            tig_window_display();
+        }
         return;
     }
 

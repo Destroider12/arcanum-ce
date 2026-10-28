@@ -1161,6 +1161,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_STORY_SYNC:
         coop_lite_handle_story_sync((PacketCoopStorySync*)msg);
         break;
+    case PACKET_COOP_DOOR_USE:
+        coop_lite_handle_door_use((PacketCoopDoorUse*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

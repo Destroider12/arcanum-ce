@@ -3882,6 +3882,15 @@ static bool anim_goal_type_is_client_local(int goal_type)
     }
 }
 
+/* PT37: AG_USE_OBJECT on a door: the client walks there itself and asks the host. */
+static bool anim_goal_is_portal_use(const AnimRunInfo* run_info)
+{
+    int64_t target = run_info->goals[0].params[AGDATA_TARGET_OBJ].obj;
+
+    return run_info->goals[0].type == AG_USE_OBJECT && target != OBJ_HANDLE_NULL
+        && obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_PORTAL;
+}
+
 bool anim_timeevent_process(TimeEvent* timeevent)
 {
     int run_index;
@@ -3894,7 +3903,8 @@ bool anim_timeevent_process(TimeEvent* timeevent)
         run_info = &(anim_run_info[run_index]);
         if (run_info->id.slot_num == run_index
             && (run_info->flags & 0x01) != 0
-            && anim_goal_type_is_client_local(run_info->goals[0].type)
+            && (anim_goal_type_is_client_local(run_info->goals[0].type)
+                || anim_goal_is_portal_use(run_info))
             && coop_lite_client_drives_obj(run_info->anim_obj)) {
             /*
              * Our own PC walking/talking: run exactly the single-player
@@ -6695,6 +6705,11 @@ bool sub_428A10(AnimRunInfo* run_info)
     obj_type = obj_field_int32_get(target_obj, OBJ_F_TYPE);
     switch (obj_type) {
     case OBJ_TYPE_PORTAL:
+        /* PT37: a coop client's own PC: the host runs the door's script. */
+        if (coop_lite_client_local_goal_obj(source_obj)) {
+            coop_lite_client_queue_door_use(target_obj);
+            return true;
+        }
         if (!object_script_execute(source_obj, target_obj, source_obj, SAP_USE, 0)) {
             return false;
         }
@@ -9558,6 +9573,7 @@ bool AGbeginAnimOpenDoor(AnimRunInfo* run_info)
     }
 
     art_id = obj_field_int32_get(door_obj, OBJ_F_CURRENT_AID);
+    coop_lite_host_portal_changed(); /* PT37 */
     if (!portal_open(door_obj)) {
         return false;
     }
@@ -9591,6 +9607,7 @@ bool AGupdateAnimOpenDoor(AnimRunInfo* run_info)
         return false;
     }
 
+    coop_lite_host_portal_changed(); /* PT37 */
     if (!portal_open(door_obj)) {
         return false;
     }

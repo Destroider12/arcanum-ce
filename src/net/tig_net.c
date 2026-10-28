@@ -412,6 +412,24 @@ bool tig_net_is_coop_enabled(void)
     return coop_enabled;
 }
 
+/* PT37: one line for the main menu when co-op was set up by command line flags. */
+bool tig_net_describe_coop_mode(char* buf, size_t size)
+{
+    if (!coop_enabled || buf == NULL || size == 0) {
+        return false;
+    }
+    if (want_host) {
+        snprintf(buf, size, "Co-op Mode: Hosting on port %d", listen_port);
+    } else if (want_join && active) {
+        snprintf(buf, size, "Co-op Mode: Connected to %s:%d", join_host, join_port);
+    } else if (want_join) {
+        snprintf(buf, size, "Co-op Mode: Joining %s:%d", join_host, join_port);
+    } else {
+        snprintf(buf, size, "Co-op Mode");
+    }
+    return true;
+}
+
 void tig_net_configure_host(int port)
 {
     want_host = true;

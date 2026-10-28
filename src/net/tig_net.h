@@ -31,7 +31,7 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 27
+#define TIG_NET_PROTOCOL 28
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,
@@ -45,6 +45,7 @@ typedef bool (*TigNetNetworkEventFunc)(int type, int client_id, void* data, int 
 /* --- lifecycle / mode (coop-gated; inactive unless coop enabled) --- */
 void tig_net_set_coop_enabled(bool enabled);
 bool tig_net_is_coop_enabled(void);
+bool tig_net_describe_coop_mode(char* buf, size_t size); /* PT37: main menu status line */
 /* -join host[:port] was given (client can reconnect). */
 bool tig_net_join_configured(void);
 

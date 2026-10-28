@@ -1887,3 +1887,52 @@ dialog is shown; a client's own merchant dialog stays local (not broadcast).
 - Test: `coop_dialog_test` (codec, truncation, strict validation, vote
   aggregation / rate limit / tally, packet policy). The panel and the host
   markers are compiled but not playtested (no game data on this box).
+
+## PT37 (protocol 28)
+
+Verified against code before changing; Argon was right on several symptoms,
+wrong on some causes.
+
+1. **NPC fatigue** (fixed, protocol 27 → 28). `PacketCoopNpcPosEntry` had a
+   `reserved` int at 0x34 (always 0); it is now `fatigue_damage` (size
+   unchanged, the host sends `critter_fatigue_damage_get`, the client applies
+   it). The logged "TimeEvent" error was a generic map-load message, not the
+   cause. Bumped because an old host would send 0 and zero the client's fatigue.
+2. **Ghost NPCs after a host reload** (fixed, runtime untested). The client
+   sync teleport now carries `TELEPORT_FORCE_RELOAD`: same-map reload of the
+   cleared `Save\Current\maps\<map>` (the clear is unconditional) without the
+   `map_flush` that would write the stale state back. The host resets the NPC
+   cache on resync / client spawn so the full state is resent. An AG_ATTACK
+   intent beyond range+3 is refused and the host chases to the owner instead of
+   dragging the client PC (FORCE slot 1).
+3. **Doors** (fixed, untested in play). New `PACKET_COOP_DOOR_USE` 149
+   (client → host, 32 B, `TYPE_LIMIT` 150). A client's own AG_USE_OBJECT on a
+   portal is client-local (walk), `sub_428A10` queues the use; PC_POS goes
+   first, then the door packet. The host checks the sender's PC, that the
+   portal exists and is ≤ 8 tiles away, runs the door's own SAP_USE script
+   (locks / keys apply), then WORLD_DIRTY at once. Doors opened by the host,
+   NPCs (`portal_toggle`, the two NPC `portal_open` sites) call
+   `coop_lite_host_portal_changed()`: a 400 ms trailing debounce → WORLD_DIRTY.
+4. **Sprite trail / "outside the limits" spam**. Argon's cause was only half
+   right: `sub_43E770` and `object_set_current_aid` already invalidate the old
+   and new rects. The real gap is `sub_4423E0` (offset-only move, used between
+   frames): it read the old rect and never invalidated it; now it does. The
+   spam is not missing invalidation: a position from the host's NEW map reaches
+   the client while it is still on the old map (log: x=90220 vs limit 192, right
+   after "follow apply"). PC_POS, NPC_POS and Packet99 now drop out-of-limit
+   locations (`coop_lite_loc_in_map`).
+5. **Dense zones** (revised): `COOP_NPC_CACHE` 2048, a miss replaces the oldest
+   `sent_ms` among 8 probes; per-tick set is the 81×81 rect around every PC;
+   idle unchanged NPCs refresh every 5 s (others 2 s) and keyframes go after the
+   changed NPCs; `world_req` lists dead / OF_OFF NPCs only within
+   `COOP_WORLD_DEAD_RADIUS` (72) of the client, so the 1024-entry seen set no
+   longer overflows (the prune only looks 18 tiles; farther corpses arrive in
+   the 100 ms NPC_POS DEAD flag or the next refresh). Deferred: per-slot interest
+   lists (needs a per-slot sent cache and an addressed pose send; with the shared
+   cache a newcomer's first copy comes from the reset on spawn).
+6. **Menu**. The Host / Join buttons were only skipped when launched with co-op
+   flags; a plain launch shows them (code read, not seen on screen). A flagged
+   launch now shows "Co-op Mode: Hosting on port N" / "Connected to addr:port".
+
+Tests: `coop_lite_policy_test` (fatigue offset, door packet size / role /
+validity). Everything else is compiled only.

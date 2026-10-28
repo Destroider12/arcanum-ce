@@ -63,6 +63,7 @@ const char* coop_lite_env(const char* name)
 
 typedef unsigned int TeleportFlags;
 #define TELEPORT_RENDER_LOCK 0x0020u
+#define TELEPORT_FORCE_RELOAD 0x0200u
 
 typedef struct TeleportData {
     TeleportFlags flags;
@@ -1065,6 +1066,9 @@ static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
 static unsigned int coop_obj_now_ms; /* last coop_lite_ping time */
+/* PT37: debounced WORLD_DIRTY after any door change on the host. */
+static bool coop_portal_changed;
+static unsigned int coop_portal_changed_ms;
 
 /* PT23: cheap counters, logged every 30 s on both sides ("CoopDiag:"), so a
    user's log shows growth (anim slots, time events, queues) and desync. */
@@ -1120,6 +1124,7 @@ static void coop_lite_host_dev_gold_pile_tick(unsigned int now_ms);
 static void coop_lite_client_dev_gold_pile_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_tick(unsigned int now_ms);
 static void coop_lite_client_pickup_reset(void);
+static void coop_lite_client_door_tick(void);
 #endif
 
 #ifndef COOP_LITE_TEST_STUBS
@@ -1609,6 +1614,15 @@ void coop_lite_handle_attack_intent(PacketCoopAttackIntent* pkt)
             return;
         }
         coop_host_intent[slot >= 1 && slot < 8 ? slot : 0].valid = false;
+        /* PT37: far off (stale target on the owner's screen): AG_ATTACK
+           would walk the client PC across the map (FORCE snaps x115). Make
+           the owner re-approach instead; its next click re-sends. */
+        if (slot >= 1 && slot < 8 && object_dist(attacker, target) > range + 3) {
+            tig_debug_printf("CoopLite: slot %d attack intent refused: %d tiles away (range %d) - owner re-approaches\n",
+                slot, (int)object_dist(attacker, target), range);
+            coop_lite_host_chase_to_owner(attacker, target);
+            return;
+        }
     }
     coop_lite_host_start_attack(attacker, target, sub_52A530());
 #else
@@ -1908,6 +1922,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_BARTER: /* barter open/close/inventory resync */
     case PACKET_COOP_OBJ_REQ: /* item blob request (P1-2) */
     case PACKET_COOP_NPC_REQ: /* PT26 unknown NPC request */
+    case PACKET_COOP_DOOR_USE: /* PT37 client door use → host */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
     case PACKET_COOP_WORLD_REQ: /* §7 world state request */
         return COOP_MP_PKT_HOST_RESOLVE;
@@ -2939,6 +2954,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return offsetof(PacketCoopStorySync, data);
     case PACKET_COOP_PC_STATS:
         return sizeof(PacketCoopPcStats);
+    case PACKET_COOP_DOOR_USE:
+        return sizeof(PacketCoopDoorUse);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -3484,8 +3501,28 @@ static void coop_lite_client_apply_pc_visual(int64_t obj, const PacketCoopPcPos*
     }
 }
 
+/* PT37: a position from the host's NEW map reaching us while we are still on
+   the old one ("object_get_rect found object with location outside the
+   limits" x60 at every follow travel): not applied. */
+bool coop_lite_loc_in_map(int64_t loc)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    int64_t lx;
+    int64_t ly;
+
+    location_limits_get(&lx, &ly);
+    return LOCATION_GET_X(loc) < lx && LOCATION_GET_Y(loc) < ly;
+#else
+    (void)loc;
+    return true;
+#endif
+}
+
 static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
 {
+    if (!coop_lite_loc_in_map(pkt->loc)) {
+        return;
+    }
     if (obj_field_int64_get(obj, OBJ_F_LOCATION) != pkt->loc
         || obj_field_int32_get(obj, OBJ_F_OFFSET_X) != pkt->offset_x
         || obj_field_int32_get(obj, OBJ_F_OFFSET_Y) != pkt->offset_y) {
@@ -3892,8 +3929,12 @@ static int64_t coop_lite_host_pc_from_bundle(int slot, int64_t loc, const Object
 }
 #endif
 
+static void coop_lite_npc_cache_reset(void);
+
 static bool coop_lite_host_spawn_client(int slot)
 {
+    /* PT37: the shared "already sent" cache must not hide NPCs from a newcomer. */
+    coop_lite_npc_cache_reset();
     int64_t host_pc;
     int64_t spawn_loc;
     int64_t client_obj;
@@ -4183,7 +4224,18 @@ static ObjectID coop_client_followers[COOP_FOLLOWERS_MAX];
 static int coop_client_followers_cnt;
 
 /* Host: last NPC pose sent (change detection). */
-#define COOP_NPC_CACHE 256
+/* PT37: 2048 (Tarant has 1500+ NPCs). The cache is never pruned, so a full
+   one used to re-send every NPC that missed a free probe slot each 100 ms
+   tick; it is also cleared on a map change (coop_lite_host_send_npc_pos). */
+#define COOP_NPC_CACHE 2048
+#define COOP_NPC_PROBES 8
+#define COOP_NPC_DEDUPE 512 /* NPCs remembered per tick to skip repeats */
+#define COOP_NPC_KEYFRAME_IDLE_MS 5000u /* idle + unchanged: slow refresh */
+#define COOP_NPC_KEYFRAME_MS 2000u
+#define COOP_NPC_KEYFRAME_QUEUE 64 /* keyframes per tick; changed NPCs go first */
+/* PT37: NPC_POS also covers this many tiles around every PC: the host's own
+   window rect is smaller than a client's bigger screen. */
+#define COOP_NPC_POS_RADIUS 40
 typedef struct CoopNpcCacheEntry {
     int64_t obj;
     PacketCoopNpcPosEntry last;
@@ -4191,6 +4243,7 @@ typedef struct CoopNpcCacheEntry {
 } CoopNpcCacheEntry;
 static CoopNpcCacheEntry coop_npc_cache[COOP_NPC_CACHE];
 static unsigned int coop_npc_pos_ms;
+static int coop_npc_cache_map;
 
 /* Client: last hp damage seen per NPC (damage floats). */
 typedef struct CoopNpcHpEntry {
@@ -5358,21 +5411,47 @@ static void coop_lite_fill_npc_entry(PacketCoopNpcPosEntry* e, int64_t obj)
         e->flags |= COOP_NPC_POS_DEAD;
     }
     e->hp_damage = object_hp_damage_get(obj);
+    e->fatigue_damage = critter_fatigue_damage_get(obj);
+}
+
+static void coop_lite_npc_cache_reset(void)
+{
+    memset(coop_npc_cache, 0, sizeof(coop_npc_cache));
+    coop_npc_pos_ms = 0;
 }
 
 static CoopNpcCacheEntry* coop_lite_npc_cache_slot(int64_t obj)
 {
     unsigned int h = (unsigned int)((uint64_t)obj * 2654435761u) % COOP_NPC_CACHE;
+    CoopNpcCacheEntry* oldest = NULL;
     unsigned int i;
 
-    for (i = 0; i < COOP_NPC_CACHE; i++) {
+    for (i = 0; i < COOP_NPC_PROBES; i++) {
         CoopNpcCacheEntry* c = &coop_npc_cache[(h + i) % COOP_NPC_CACHE];
         if (c->obj == obj || c->obj == OBJ_HANDLE_NULL) {
             return c;
         }
+        if (oldest == NULL || (int)(oldest->sent_ms - c->sent_ms) > 0) {
+            oldest = c;
+        }
     }
-    /* Full: reuse the home slot. */
-    return &coop_npc_cache[h];
+    /* PT37: all probes taken by others: replace the one sent longest ago. */
+    return oldest;
+}
+
+/* NPCs within COOP_NPC_POS_RADIUS tiles of `pc`. */
+static void coop_lite_npc_list_around(int64_t pc, ObjectList* objects)
+{
+    int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    int64_t x = LOCATION_GET_X(loc);
+    int64_t y = LOCATION_GET_Y(loc);
+    LocRect rect;
+
+    rect.x1 = x > COOP_NPC_POS_RADIUS ? x - COOP_NPC_POS_RADIUS : 0;
+    rect.y1 = y > COOP_NPC_POS_RADIUS ? y - COOP_NPC_POS_RADIUS : 0;
+    rect.x2 = x + COOP_NPC_POS_RADIUS;
+    rect.y2 = y + COOP_NPC_POS_RADIUS;
+    object_list_rect(&rect, OBJ_TM_NPC, objects);
 }
 
 /* Host: NPCs around every PC — position, art (animation frame) and death. */
@@ -5385,15 +5464,26 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
     int64_t pc;
     PacketCoopNpcPosEntry e;
     CoopNpcCacheEntry* c;
-    int64_t done[COOP_NPC_CACHE];
+    int64_t done[COOP_NPC_DEDUPE];
+    CoopNpcCacheEntry* kf_cache[COOP_NPC_KEYFRAME_QUEUE];
+    PacketCoopNpcPosEntry kf_entry[COOP_NPC_KEYFRAME_QUEUE];
+    int kf_cnt = 0;
     int done_cnt = 0;
     int k;
     bool any_client = false;
 
+    if (coop_portal_changed && coop_lite_interval_elapsed(coop_portal_changed_ms, now_ms, 400u)) {
+        coop_portal_changed = false;
+        coop_lite_host_world_dirty();
+    }
     if (!coop_lite_interval_elapsed(coop_npc_pos_ms, now_ms, 100u)) {
         return;
     }
     coop_npc_pos_ms = now_ms;
+    if (coop_npc_cache_map != map_current_map()) {
+        coop_npc_cache_map = map_current_map();
+        memset(coop_npc_cache, 0, sizeof(coop_npc_cache));
+    }
 
     for (slot = 1; slot < 8; slot++) {
         if (sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
@@ -5411,7 +5501,7 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
         if (pc == OBJ_HANDLE_NULL) {
             continue;
         }
-        object_list_vicinity(pc, OBJ_TM_NPC, &objects);
+        coop_lite_npc_list_around(pc, &objects);
         for (node = objects.head; node != NULL; node = node->next) {
             for (k = 0; k < done_cnt; k++) {
                 if (done[k] == node->obj) {
@@ -5421,14 +5511,21 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
             if (k < done_cnt) {
                 continue;
             }
-            if (done_cnt < COOP_NPC_CACHE) {
+            if (done_cnt < COOP_NPC_DEDUPE) {
                 done[done_cnt++] = node->obj;
             }
             coop_lite_fill_npc_entry(&e, node->obj);
             c = coop_lite_npc_cache_slot(node->obj);
-            if (c->obj == node->obj
-                && memcmp(&c->last, &e, sizeof(e)) == 0
-                && !coop_lite_interval_elapsed(c->sent_ms, now_ms, 2000u)) {
+            if (c->obj == node->obj && memcmp(&c->last, &e, sizeof(e)) == 0) {
+                /* Unchanged: only a slow keyframe, queued behind the changed ones. */
+                unsigned int keyframe = anim_is_idle(node->obj) ? COOP_NPC_KEYFRAME_IDLE_MS
+                                                                 : COOP_NPC_KEYFRAME_MS;
+
+                if (coop_lite_interval_elapsed(c->sent_ms, now_ms, keyframe)
+                    && kf_cnt < COOP_NPC_KEYFRAME_QUEUE) {
+                    kf_cache[kf_cnt] = c;
+                    kf_entry[kf_cnt++] = e;
+                }
                 continue;
             }
             c->obj = node->obj;
@@ -5443,6 +5540,16 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
             }
         }
         object_list_destroy(&objects);
+    }
+    for (k = 0; k < kf_cnt; k++) {
+        kf_cache[k]->sent_ms = now_ms;
+        pkt.entries[pkt.count++] = kf_entry[k];
+        coop_diag.npc_tx++;
+        if (pkt.count == COOP_NPC_POS_MAX) {
+            tig_net_send_pose_all(&pkt, (int)coop_lite_batch_size(pkt.count,
+                COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)));
+            pkt.count = 0;
+        }
     }
     if (pkt.count > 0) {
         tig_net_send_pose_all(&pkt, (int)coop_lite_batch_size(pkt.count,
@@ -5601,7 +5708,7 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
             continue;
         }
         if (obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_NPC
-            || coop_lite_obj_is_slot_pc(obj)) {
+            || coop_lite_obj_is_slot_pc(obj) || !coop_lite_loc_in_map(e->loc)) {
             continue;
         }
         coop_diag.npc_rx++;
@@ -5635,6 +5742,12 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
            locally-dead check, and a revive on the host shows up here). */
         if (e->hp_damage >= 0 && obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != e->hp_damage) {
             obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage);
+        }
+        /* PT37: so does fatigue (client-side spell cost / lost regen events
+           left companions exhausted here only). Host value wins. */
+        if (e->fatigue_damage >= 0
+            && obj_field_int32_get(obj, OBJ_F_CRITTER_FATIGUE_DAMAGE) != e->fatigue_damage) {
+            obj_field_int32_set(obj, OBJ_F_CRITTER_FATIGUE_DAMAGE, e->fatigue_damage);
         }
         hp = coop_lite_npc_hp_slot(obj);
         if (hp->obj == obj && e->hp_damage > hp->hp_damage) {
@@ -6171,6 +6284,10 @@ static void coop_lite_host_resync_after_reload(void)
     }
     coop_reload_resync_pending = false;
     coop_lite_story_reset(); /* clients get a fresh story snapshot */
+    /* PT37: clients reload the map from disk; every NPC pose (dead ones
+       included) must go out again, not only what changed. */
+    memset(coop_npc_cache, 0, sizeof(coop_npc_cache));
+    coop_npc_pos_ms = 0;
     coop_lite_follow_armed = true; /* the load had no spawn teleport to arm it */
     multiplayer_bind_slot_pc(0, player_get_local_pc_obj());
     memset(&pkt, 0, sizeof(pkt));
@@ -6543,7 +6660,10 @@ static bool coop_lite_client_request_sync_teleport(void)
     bool ok;
 
     memset(&teleport_data, 0, sizeof(teleport_data));
-    teleport_data.flags = TELEPORT_RENDER_LOCK;
+    /* PT37: the host's map is the truth; when we already stand on it (the
+       host reloaded a save) reload it from disk too, or killed / moved NPCs
+       of the old session stay as ghosts. */
+    teleport_data.flags = TELEPORT_RENDER_LOCK | TELEPORT_FORCE_RELOAD;
     teleport_data.obj = player_get_local_pc_obj();
     teleport_data.loc = coop_pending_sync.client_loc;
     teleport_data.map = coop_pending_sync.map;
@@ -6606,7 +6726,7 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
      * the host map (old proxies / old local PCs = the "bare-torso" extras)
      * would be loaded instead of the pristine map. Drop it first.
      */
-    if (map_current_map() != pkt->map) {
+    {
         char* map_name = NULL;
         char path[TIG_MAX_PATH];
 
@@ -6810,6 +6930,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_loot_tick(now_ms);
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
+            coop_lite_client_door_tick();
             coop_lite_client_attack_tick(now_ms);
         }
         coop_lite_frame_stats(now_ms, 0);
@@ -12070,7 +12191,11 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
                save still has them alive), the living ones in reach (so the
                client can drop what the host destroyed). */
             if (type == OBJ_TYPE_NPC && (critter_is_dead(obj) || (flags & OF_OFF) != 0)) {
-                /* map-wide */
+                /* PT37: a window (COOP_WORLD_DEAD_RADIUS), not the whole map; the 100 ms
+                   NPC_POS stream (DEAD flag) and the next WORLD_REQ cover the rest. */
+                if (location_dist(loc, center) > COOP_WORLD_DEAD_RADIUS) {
+                    continue;
+                }
             } else if (location_dist(loc, center) > COOP_WORLD_RADIUS) {
                 continue;
             }
@@ -12681,6 +12806,7 @@ static void coop_lite_host_dev_world_mutate_tick(unsigned int now_ms)
  */
 #ifndef COOP_LITE_TEST_STUBS
 static CoopPickupQueue coop_pickup_q;
+static CoopPickupQueue coop_door_q; /* PT37 */
 #endif
 
 void coop_pickup_queue_reset(CoopPickupQueue* q)
@@ -12747,6 +12873,7 @@ void coop_lite_client_queue_pickup(int64_t item)
 static void coop_lite_client_pickup_reset(void)
 {
     coop_pickup_queue_reset(&coop_pickup_q);
+    coop_pickup_queue_reset(&coop_door_q);
 }
 
 static void coop_lite_client_pickup_tick(unsigned int now_ms)
@@ -12789,6 +12916,105 @@ static void coop_lite_client_pickup_tick(unsigned int now_ms)
     }
     tig_debug_printf("CoopLite: pickup request sent to host (%d)\n", n);
 }
+#endif
+
+bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_DOOR_USE && size >= (int)sizeof(PacketCoopDoorUse);
+}
+
+void coop_lite_host_portal_changed(void)
+{
+    if (tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled()) {
+        coop_portal_changed = true;
+        coop_portal_changed_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    }
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+/* Client, own PC (packets are suspended inside its local goal): the walk to
+   the door ran here; the use itself is the host's. */
+void coop_lite_client_queue_door_use(int64_t portal)
+{
+    ObjectID oid;
+
+    if (portal == OBJ_HANDLE_NULL) {
+        return;
+    }
+    oid = obj_get_id(portal);
+    if (coop_pickup_queue_push(&coop_door_q, (const uint8_t*)&oid,
+            coop_lite_pose_map_key(map_current_map(), coop_map_gen))) {
+        tig_debug_printf("CoopLite: door use queued\n");
+    }
+}
+
+static void coop_lite_client_door_tick(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    uint8_t oids[COOP_PICKUP_QUEUE_MAX][24];
+    PacketCoopPcPos pos;
+    PacketCoopDoorUse pkt;
+    int n;
+    int i;
+
+    if (coop_door_q.count == 0) {
+        return;
+    }
+    n = coop_pickup_queue_take(&coop_door_q, coop_lite_pose_map_key(map_current_map(), coop_map_gen),
+        oids, COOP_PICKUP_QUEUE_MAX);
+    if (pc == OBJ_HANDLE_NULL || n == 0 || critter_is_dead(pc) || coop_rejoin_pc_wanted) {
+        return;
+    }
+    coop_lite_fill_pc_pos(&pos, sub_529520(), pc);
+    pos.epoch = coop_own_pose_epoch;
+    pos.seq = ++coop_own_pose_seq;
+    coop_client_pos = pos;
+    coop_client_pos_valid = true;
+    tig_net_send_app_all(&pos, sizeof(pos));
+    for (i = 0; i < n; i++) {
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = PACKET_COOP_DOOR_USE;
+        memcpy(pkt.oid, oids[i], 24);
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_debug_printf("CoopLite: door use sent to host (%d)\n", n);
+}
+
+/* Host: a client used a door. Same SAP_USE script as a local click (lock,
+   key, toggle); then every client refreshes its world state. */
+void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
+{
+    int slot;
+    int64_t pc;
+    int64_t portal;
+
+    if (!tig_net_is_active() || !tig_net_is_host()
+        || !coop_lite_door_use_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    portal = coop_lite_get_oid_obj(pkt->oid);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || portal == OBJ_HANDLE_NULL
+        || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL
+        || (obj_field_int32_get(portal, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
+        return;
+    }
+    if (object_dist(pc, portal) > 8) {
+        tig_debug_printf("CoopLite: slot %d door use refused: %d tiles away\n", slot, (int)object_dist(pc, portal));
+        return;
+    }
+    object_script_execute(pc, portal, pc, SAP_USE, 0);
+    tig_debug_printf("CoopLite: slot %d used a door (open now %d)\n", slot, portal_is_open(portal) ? 1 : 0);
+    coop_portal_changed = false;
+    coop_lite_host_world_dirty();
+}
+#else
+void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
+void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
 #endif
 
 bool coop_lite_client_local_goal_obj(int64_t obj)

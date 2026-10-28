@@ -35,7 +35,8 @@ extern "C" {
 #define PACKET_COOP_NPC_REQ 146 /* PT26: client → host: NPC_POS named these unknown NPCs (PacketCoopObjReq layout) */
 #define PACKET_COOP_STORY_SYNC 147 /* PT35: host → client: quests, rumors, reputation (chunked snapshot) */
 #define PACKET_COOP_DIALOG_STATE 148 /* PT36: host → client dialog view; client → host vote (kind field) */
-#define PACKET_COOP_TYPE_LIMIT 149
+#define PACKET_COOP_DOOR_USE 149 /* PT37: client → host: I used this door (portal OID) */
+#define PACKET_COOP_TYPE_LIMIT 150
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -142,7 +143,7 @@ typedef struct PacketCoopNpcPosEntry {
     /* 0028 */ unsigned int art_id;
     /* 002C */ unsigned int flags;
     /* 0030 */ int hp_damage;
-    /* 0034 */ int reserved;
+    /* 0034 */ int fatigue_damage; /* PT37 (was reserved, always 0 before) */
 } PacketCoopNpcPosEntry;
 
 typedef struct PacketCoopNpcPos {
@@ -349,6 +350,15 @@ bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size);
 #define COOP_OBJ_REQ_MAX 16
 #define COOP_OBJ_BLOB_MAX 8192
 
+/* PT37: client → host, one door use (the host validates and runs the door's
+   SAP_USE script, then refreshes everyone's world state). */
+typedef struct PacketCoopDoorUse {
+    /* 0000 */ int type;
+    /* 0004 */ int reserved;
+    /* 0008 */ uint8_t oid[24];
+} PacketCoopDoorUse;
+COOP_STATIC_ASSERT(sizeof(PacketCoopDoorUse) == 0x20, "PacketCoopDoorUse size");
+
 typedef struct PacketCoopObjReq {
     /* 0000 */ int type;
     /* 0004 */ int count;
@@ -427,6 +437,7 @@ void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
  * that the host does not have (picked up, destroyed).
  */
 #define COOP_WORLD_RADIUS 24 /* tiles around the client PC (host side) */
+#define COOP_WORLD_DEAD_RADIUS (COOP_WORLD_RADIUS * 3) /* PT37: dead / switched-off NPCs are listed this far (was map-wide: overflowed the client's 1024-entry seen set); the prune only looks at PRUNE_RADIUS, so it never needs more */
 #define COOP_WORLD_PRUNE_RADIUS 18 /* client prunes within this of its PC position AT REQUEST TIME (host samples 24 around its copy: 6 tiles of PC_POS lag margin) */
 #define COOP_WORLD_CHUNK 64
 #define COOP_WORLD_F_FIRST 0x1
@@ -954,6 +965,14 @@ void coop_lite_client_map_stack_oid(void* oid_ptr); /* ObjectID* */
 /* Ground pickup: client queues a host request (sent from the coop tick);
    host resyncs a client PC that gained an item outside the item-op path. */
 void coop_lite_client_queue_pickup(int64_t item);
+bool coop_lite_loc_in_map(int64_t loc); /* PT37 */
+/* PT37 doors: client queues a door use for the host; host marks a door change
+   (debounced WORLD_DIRTY to the clients) and handles the client's request. */
+void coop_lite_client_queue_door_use(int64_t portal);
+void coop_lite_host_portal_changed(void);
+void coop_lite_handle_door_use(PacketCoopDoorUse* pkt);
+/* Door request is the right size for the received byte count. */
+bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size);
 
 #define COOP_PICKUP_QUEUE_MAX 8
 typedef struct CoopPickupQueue {

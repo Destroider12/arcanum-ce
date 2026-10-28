@@ -1,4 +1,5 @@
 #include "game/portal.h"
+#include "game/coop_lite.h"
 
 #include "game/a_name.h"
 #include "game/gsound.h"
@@ -105,6 +106,7 @@ bool portal_is_open(int64_t portal_obj)
  */
 void portal_toggle(int64_t portal_obj)
 {
+    coop_lite_host_portal_changed(); /* PT37: clients refresh doors promptly */
     if (tig_art_id_frame_get(obj_field_int32_get(portal_obj, OBJ_F_CURRENT_AID)) == 0) {
         // Portal is closed, wait until it is completely open.
         while (portal_open(portal_obj)) {

@@ -4328,6 +4328,10 @@ void sub_4423E0(int64_t obj, int offset_x, int offset_y)
     Sector* sector;
 
     object_get_rect(obj, 0x7, &rect);
+    /* PT37: the old rect was read but never invalidated, so an offset-only
+       move (remote PCs / companions between animation frames) left a
+       sprite trail; sub_444270 below only invalidates the new rect. */
+    object_iso_invalidate_rect(&rect);
     loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
     flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
 

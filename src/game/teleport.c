@@ -238,7 +238,8 @@ bool teleport_process(TeleportData* teleport_data)
         wallcheck_flush();
     }
 
-    if (teleport_data->map != map && player_is_pc_obj(teleport_data->obj)) {
+    if ((teleport_data->map != map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0)
+        && player_is_pc_obj(teleport_data->obj)) {
         sub_459F50();
         sub_437980();
         timeevent_notify_pc_teleported(teleport_data->map);
@@ -261,8 +262,12 @@ bool teleport_process(TeleportData* teleport_data)
 
         teleport_is_teleporting_pc = false;
 
-        if (teleport_data->map != map) {
-            if (!map_open_in_game(teleport_data->map, false, false)) {
+        if (teleport_data->map != map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0) {
+            /* a3 = true on a forced same-map reload: map_flush would write
+               the stale map state back over the cleared Save\Current copy
+               (map_close still releases sectors and clears objects). */
+            if (!map_open_in_game(teleport_data->map, false,
+                    teleport_data->map == map)) {
                 return false;
             }
 
@@ -412,7 +417,7 @@ bool sub_4D39A0(TeleportData* teleport_data)
     TigFile* stream;
 
     curr_map = map_current_map();
-    if (curr_map != teleport_data->map) {
+    if (curr_map != teleport_data->map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0) {
         if (!map_get_name(curr_map, &curr_map_name)) {
             return false;
         }

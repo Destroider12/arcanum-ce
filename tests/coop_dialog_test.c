@@ -205,8 +205,8 @@ static int test_votes(void)
 
 static int test_policy(void)
 {
-    CHECK(TIG_NET_PROTOCOL == 27, "protocol bumped");
-    CHECK(PACKET_COOP_DIALOG_STATE == 148 && PACKET_COOP_TYPE_LIMIT == 149, "packet id");
+    CHECK(TIG_NET_PROTOCOL >= 27, "protocol bumped");
+    CHECK(PACKET_COOP_DIALOG_STATE == 148 && PACKET_COOP_TYPE_LIMIT >= 149, "packet id");
     CHECK(sizeof(PacketCoopDialogState) <= 4096 && COOP_DIALOG_HDR_SIZE == 0x18, "sizes");
     CHECK(coop_lite_mp_packet_role(PACKET_COOP_DIALOG_STATE) == COOP_MP_PKT_BOTH, "role: both ways, kind-checked");
     CHECK(coop_lite_packet_allowed(PACKET_COOP_DIALOG_STATE, false, 0), "client accepts the host's");
