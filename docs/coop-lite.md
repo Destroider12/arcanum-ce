@@ -1870,10 +1870,16 @@ dialog is shown; a client's own merchant dialog stays local (not broadcast).
   header), kind / action / option-count bounds, every string NUL-terminated
   inside its field, vote counts <= 7 and zero past `num_options`, stale or
   repeated `seq` dropped. Control characters are blanked for display.
-- Client viewer (`dialog_ui.c`): a plain tig window with a message filter.
+- Client viewer (`dialog_ui.c`, PT38 compact layout): a small color-keyed tig
+  window in the top-right corner (<= 1/3 screen width, <= 1/4 height,
+  recomputed from the screen size whenever it is shown; 2 of 3 pixel rows are
+  dark, the rest see-through). It shows the NPC name, the last 3 wrapped lines
+  of the NPC line ("..." when cut), and up to 5 one-line options with "[n]"
+  votes. Mouse buttons are swallowed only inside its rectangle.
+  It is a plain tig window with a message filter.
   It has no path into the dialog engine; its only output is a vote packet.
   Vote: click an option or press V (cycles); voting for the same option
-  again clears it. Your vote is marked "< your vote", counts as "[n]".
+  again clears it. Your vote is marked "<" (and green), counts as "[n]".
 - VOTE (header only): option index or -1. The host checks the slot, that a
   dialog is open, the line id (stale votes dropped), the index against the
   line's option count, and a 250 ms per-slot rate limit. Votes reset on every

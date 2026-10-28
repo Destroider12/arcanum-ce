@@ -654,12 +654,18 @@ void dialog_ui_speech_stop(void)
 
 /* ---- PT36: co-op dialog viewer (read-only) and host vote markers ----------- */
 
-#define CDV_WIDTH 540
-#define CDV_HEIGHT 290
-#define CDV_TOP 60
-#define CDV_OPT_Y 150
-#define CDV_OPT_STEP 22
-#define CDV_OPT_CHARS 72
+/* PT38: compact panel. Size/position are derived from the screen size every
+   time the panel is shown: at most ~1/3 of the width and ~1/4 of the height,
+   anchored to the top-right corner. */
+#define CDV_MARGIN 4
+#define CDV_PAD 4
+#define CDV_MAX_TEXT_LINES 3
+#define CDV_MAX_OPTIONS 5
+#define CDV_MAX_WRAP_LINES 128
+#define CDV_TMP 256
+#define CDV_KEY_R 255
+#define CDV_KEY_G 0
+#define CDV_KEY_B 255
 
 static tig_window_handle_t cdv_window = TIG_WINDOW_HANDLE_INVALID;
 static tig_font_handle_t cdv_font_name;
@@ -669,6 +675,13 @@ static tig_font_handle_t cdv_font_mine;
 static tig_font_handle_t cdv_font_hint;
 static bool cdv_fonts_ready;
 static CoopDialogView cdv_view;
+static int cdv_x;
+static int cdv_y;
+static int cdv_w;
+static int cdv_h;
+static int cdv_lh;
+static int cdv_text_lines;
+static int cdv_opt_y;
 
 static const char* dialog_ui_option_label(DialogUiEntry* entry, int index)
 {
@@ -737,8 +750,8 @@ static int cdv_option_at(int mouse_x, int mouse_y)
     if (x < 0 || y < 0 || x >= window_data.rect.width || y >= window_data.rect.height) {
         return -2; /* outside the panel */
     }
-    index = (y - CDV_OPT_Y) / CDV_OPT_STEP;
-    if (y >= CDV_OPT_Y && index >= 0 && index < cdv_view.num_options && x >= 10) {
+    index = (y - cdv_opt_y) / cdv_lh;
+    if (y >= cdv_opt_y && index >= 0 && index < cdv_view.num_options && x >= CDV_PAD) {
         return index;
     }
     return -1; /* inside the panel, not on an option */
@@ -764,13 +777,24 @@ static bool cdv_message_filter(TigMessage* msg)
     if (msg->type == TIG_MESSAGE_MOUSE) {
         index = cdv_option_at(msg->data.mouse.x, msg->data.mouse.y);
         if (index == -2) {
-            return false;
+            return false; /* outside the panel rectangle: the game gets it */
         }
         if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP && index >= 0) {
             coop_lite_client_dialog_vote(index);
         }
-        return msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP
-            || msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN;
+        /* Inside the rectangle (also on the color-keyed see-through rows)
+           buttons are swallowed so nothing is clicked behind the panel. */
+        switch (msg->data.mouse.event) {
+        case TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN:
+        case TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP:
+        case TIG_MESSAGE_MOUSE_RIGHT_BUTTON_DOWN:
+        case TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP:
+        case TIG_MESSAGE_MOUSE_MIDDLE_BUTTON_DOWN:
+        case TIG_MESSAGE_MOUSE_MIDDLE_BUTTON_UP:
+            return true;
+        default:
+            return false;
+        }
     }
     return false;
 }
@@ -788,40 +812,238 @@ static void cdv_write(tig_font_handle_t font, const char* str, int x, int y, int
     tig_font_pop();
 }
 
+/* Pixel width of str[0..len) in the given font. */
+static int cdv_measure(tig_font_handle_t font, const char* str, int len)
+{
+    TigFont desc;
+    char tmp[CDV_TMP];
+
+    if (len <= 0) {
+        return 0;
+    }
+    if (len > CDV_TMP - 1) {
+        len = CDV_TMP - 1;
+    }
+    memcpy(tmp, str, len);
+    tmp[len] = '\0';
+    memset(&desc, 0, sizeof(desc));
+    desc.str = tmp;
+    desc.width = 0;
+    tig_font_push(font);
+    tig_font_measure(&desc);
+    tig_font_pop();
+    return desc.width;
+}
+
+/* Copy src into out, cut with "..." so it is at most max_width pixels wide
+   (suffix, if any, is reserved at the end and always kept). */
+static void cdv_fit(tig_font_handle_t font, const char* src, const char* suffix, int max_width, char* out, size_t size)
+{
+    int len = (int)strlen(src);
+    int suffix_len = (int)strlen(suffix);
+    int avail = max_width - cdv_measure(font, suffix, suffix_len);
+    int lo;
+    int hi;
+    int mid;
+
+    if (len > CDV_TMP - 8) {
+        len = CDV_TMP - 8;
+    }
+    if (cdv_measure(font, src, len) <= avail && len == (int)strlen(src)) {
+        snprintf(out, size, "%s%s", src, suffix);
+        return;
+    }
+    lo = 0;
+    hi = len;
+    while (lo < hi) { /* longest prefix such that prefix + "..." fits */
+        mid = (lo + hi + 1) / 2;
+        if (cdv_measure(font, src, mid) + cdv_measure(font, "...", 3) <= avail) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    snprintf(out, size, "%.*s...%s", lo, src, suffix);
+}
+
+/* Greedy word wrap of the NPC line; returns the number of lines, offsets in
+   starts[] / lens[]. */
+static int cdv_wrap(tig_font_handle_t font, const char* str, int max_width, int* starts, int* lens)
+{
+    int count = 0;
+    int pos = 0;
+    int last;
+    int end;
+    int word_end;
+
+    while (str[pos] != '\0' && count < CDV_MAX_WRAP_LINES) {
+        while (str[pos] == ' ') {
+            pos++;
+        }
+        if (str[pos] == '\0') {
+            break;
+        }
+        last = pos;
+        end = pos;
+        for (;;) {
+            word_end = end;
+            while (str[word_end] == ' ') {
+                word_end++;
+            }
+            while (str[word_end] != ' ' && str[word_end] != '\0') {
+                word_end++;
+            }
+            if (word_end == end || word_end - pos > CDV_TMP - 1
+                || cdv_measure(font, str + pos, word_end - pos) > max_width) {
+                break;
+            }
+            last = word_end;
+            end = word_end;
+            if (str[end] == '\0') {
+                break;
+            }
+        }
+        if (last == pos) { /* a single word wider than the panel: cut it */
+            last = pos + 1;
+            while (str[last] != '\0' && last - pos < CDV_TMP - 1
+                && cdv_measure(font, str + pos, last + 1 - pos) <= max_width) {
+                last++;
+            }
+        }
+        starts[count] = pos;
+        lens[count] = last - pos;
+        count++;
+        pos = last;
+    }
+    return count;
+}
+
+/* Size and position from the current screen size: top-right corner, at most
+   1/3 of the width and 1/4 of the height. */
+static void cdv_layout(void)
+{
+    int sw = hrp_iso_window_width_get();
+    int sh = hrp_iso_window_height_get();
+    int rows;
+
+    if (sw <= 0) {
+        sw = 800;
+    }
+    if (sh <= 0) {
+        sh = 600;
+    }
+    {
+        TigFont desc;
+
+        memset(&desc, 0, sizeof(desc));
+        desc.str = "Ag";
+        tig_font_push(cdv_font_text);
+        tig_font_measure(&desc);
+        tig_font_pop();
+        cdv_lh = desc.height;
+    }
+    if (cdv_lh < 8) {
+        cdv_lh = 8;
+    } else if (cdv_lh > 20) {
+        cdv_lh = 20;
+    }
+    cdv_lh += 1;
+
+    cdv_w = sw / 3;
+    if (cdv_w < 240) {
+        cdv_w = 240;
+    }
+    if (cdv_w > sw - 2 * CDV_MARGIN) {
+        cdv_w = sw - 2 * CDV_MARGIN;
+    }
+    /* name + text lines + options + hint */
+    cdv_text_lines = CDV_MAX_TEXT_LINES;
+    rows = (sh / 4 - 2 * CDV_PAD) / cdv_lh;
+    while (cdv_text_lines > 1 && 1 + cdv_text_lines + CDV_MAX_OPTIONS + 1 > rows) {
+        cdv_text_lines--;
+    }
+    cdv_h = 2 * CDV_PAD + cdv_lh * (1 + cdv_text_lines + CDV_MAX_OPTIONS + 1);
+    if (cdv_h > sh - 2 * CDV_MARGIN) {
+        cdv_h = sh - 2 * CDV_MARGIN;
+    }
+    cdv_x = sw - cdv_w - CDV_MARGIN;
+    cdv_y = CDV_MARGIN;
+    cdv_opt_y = CDV_PAD + cdv_lh * (1 + cdv_text_lines);
+}
+
 static void cdv_draw(void)
 {
     TigRect rect;
-    char line[COOP_DIALOG_OPT_MAX + 48];
+    char line[CDV_TMP + 48];
+    char raw[CDV_TMP];
+    char suffix[48];
+    char prefix[16];
+    int starts[CDV_MAX_WRAP_LINES];
+    int lens[CDV_MAX_WRAP_LINES];
+    int count;
+    int first;
     int index;
-    int votes;
+    int row;
+    int text_w = cdv_w - 2 * CDV_PAD;
+    tig_color_t key = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
 
+    /* Cheap "alpha": the window is color-keyed; two of every three pixel rows
+       are dark, the rest stay see-through (about 2/3 opaque). */
     rect.x = 0;
     rect.y = 0;
-    rect.width = CDV_WIDTH;
-    rect.height = CDV_HEIGHT;
-    tig_window_fill(cdv_window, &rect, tig_color_make(24, 18, 12));
+    rect.width = cdv_w;
+    rect.height = cdv_h;
+    tig_window_fill(cdv_window, &rect, key);
+    for (row = 0; row < cdv_h; row++) {
+        if (row % 3 != 0) {
+            rect.y = row;
+            rect.height = 1;
+            tig_window_fill(cdv_window, &rect, tig_color_make(16, 12, 8));
+        }
+    }
+    rect.y = 0;
+    rect.height = cdv_h;
     tig_window_box(cdv_window, &rect, tig_color_make(150, 120, 60));
 
-    snprintf(line, sizeof(line), "%s", cdv_view.npc_name);
-    cdv_write(cdv_font_name, line, 10, 6, CDV_WIDTH - 20, 20);
-    cdv_write(cdv_font_text, cdv_view.reply, 10, 30, CDV_WIDTH - 20, 112);
+    cdv_fit(cdv_font_name, cdv_view.npc_name, "", text_w, line, sizeof(line));
+    cdv_write(cdv_font_name, line, CDV_PAD, CDV_PAD, text_w, cdv_lh);
 
-    for (index = 0; index < cdv_view.num_options; index++) {
-        votes = cdv_view.votes[index];
-        snprintf(line, sizeof(line), "%d. %.*s%s", index + 1, CDV_OPT_CHARS, cdv_view.options[index],
-            strlen(cdv_view.options[index]) > CDV_OPT_CHARS ? "..." : "");
-        if (votes > 0) {
-            snprintf(line + strlen(line), sizeof(line) - strlen(line), "  [%d]", votes);
+    /* last CDV_MAX_TEXT_LINES lines of the NPC line */
+    count = cdv_wrap(cdv_font_text, cdv_view.reply, text_w, starts, lens);
+    first = count > cdv_text_lines ? count - cdv_text_lines : 0;
+    for (index = first; index < count; index++) {
+        prefix[0] = '\0';
+        if (index == first && first > 0) {
+            snprintf(prefix, sizeof(prefix), "...");
         }
-        if (cdv_view.my_vote == index) {
-            snprintf(line + strlen(line), sizeof(line) - strlen(line), "  < your vote");
-        }
-        cdv_write(cdv_view.my_vote == index ? cdv_font_mine : cdv_font_option, line, 10,
-            CDV_OPT_Y + index * CDV_OPT_STEP, CDV_WIDTH - 20, 20);
+        snprintf(raw, sizeof(raw), "%s%.*s", prefix, lens[index] > CDV_TMP - 8 ? CDV_TMP - 8 : lens[index],
+            cdv_view.reply + starts[index]);
+        cdv_fit(cdv_font_text, raw, "", text_w, line, sizeof(line));
+        cdv_write(cdv_font_text, line, CDV_PAD, CDV_PAD + cdv_lh * (1 + index - first), text_w, cdv_lh);
     }
 
-    cdv_write(cdv_font_hint, "Read-only view of the host's dialog. Click an option or press V to vote; the host decides.",
-        10, CDV_HEIGHT - 24, CDV_WIDTH - 20, 18);
+    for (index = 0; index < cdv_view.num_options && index < CDV_MAX_OPTIONS; index++) {
+        suffix[0] = '\0';
+        if (cdv_view.votes[index] > 0) {
+            snprintf(suffix, sizeof(suffix), " [%d]", cdv_view.votes[index]);
+        }
+        if (cdv_view.my_vote == index) {
+            snprintf(suffix + strlen(suffix), sizeof(suffix) - strlen(suffix), " <");
+        }
+        snprintf(prefix, sizeof(prefix), "%d. ", index + 1);
+        {
+            char text[CDV_TMP];
+
+            snprintf(text, sizeof(text), "%s%s", prefix, cdv_view.options[index]);
+            cdv_fit(cdv_view.my_vote == index ? cdv_font_mine : cdv_font_option, text, suffix, text_w, line,
+                sizeof(line));
+        }
+        cdv_write(cdv_view.my_vote == index ? cdv_font_mine : cdv_font_option, line, CDV_PAD,
+            cdv_opt_y + index * cdv_lh, text_w, cdv_lh);
+    }
+
+    cdv_write(cdv_font_hint, "Host's dialog. Click/V: vote", CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
+        cdv_lh);
 }
 
 static void dialog_ui_coop_view_show(const CoopDialogView* view)
@@ -832,16 +1054,24 @@ static void dialog_ui_coop_view_show(const CoopDialogView* view)
         return;
     }
     cdv_view = *view;
+    cdv_layout();
+    if (cdv_window != TIG_WINDOW_HANDLE_INVALID
+        && (tig_window_data(cdv_window, &window_data) != TIG_OK || window_data.rect.x != cdv_x
+            || window_data.rect.y != cdv_y || window_data.rect.width != cdv_w
+            || window_data.rect.height != cdv_h)) {
+        /* resolution changed since the panel was created: recreate it */
+        tig_window_destroy(cdv_window);
+        cdv_window = TIG_WINDOW_HANDLE_INVALID;
+    }
     if (cdv_window == TIG_WINDOW_HANDLE_INVALID) {
-        window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
-        window_data.rect.x = 0;
-        window_data.rect.y = CDV_TOP;
-        window_data.rect.width = CDV_WIDTH;
-        window_data.rect.height = CDV_HEIGHT;
-        window_data.background_color = tig_color_make(24, 18, 12);
-        window_data.color_key = 0;
+        window_data.flags = TIG_WINDOW_TRANSPARENT | TIG_WINDOW_MESSAGE_FILTER;
+        window_data.rect.x = cdv_x;
+        window_data.rect.y = cdv_y;
+        window_data.rect.width = cdv_w;
+        window_data.rect.height = cdv_h;
+        window_data.background_color = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
+        window_data.color_key = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
         window_data.message_filter = cdv_message_filter;
-        hrp_apply(&(window_data.rect), GRAVITY_CENTER_HORIZONTAL | GRAVITY_TOP);
         if (tig_window_create(&window_data, &cdv_window) != TIG_OK) {
             cdv_window = TIG_WINDOW_HANDLE_INVALID;
             tig_debug_printf("DialogUI: co-op viewer window create failed\n");
