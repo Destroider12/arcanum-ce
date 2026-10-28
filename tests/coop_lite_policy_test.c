@@ -744,6 +744,13 @@ static int test_packet_hardening(void)
             fprintf(stderr, "transfer flag policy wrong\n");
             return 1;
         }
+        /* PT39: throws are host-only (0x04 stays refused, so a client throw
+           would duplicate the item); clients may not throw. */
+        if (!coop_lite_throw_allowed(false, false, false) || !coop_lite_throw_allowed(true, true, true)
+            || !coop_lite_throw_allowed(true, false, false) || coop_lite_throw_allowed(true, false, true)) {
+            fprintf(stderr, "throw policy wrong\n");
+            return 1;
+        }
         /* PT18: pickpocket bits only as 0x41 / 0x81. */
         if (!coop_lite_client_transfer_flags_allowed(0x01 | COOP_XFER_STEAL)
             || !coop_lite_client_transfer_flags_allowed(0x01 | COOP_XFER_PLANT)

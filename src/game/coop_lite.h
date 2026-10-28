@@ -590,6 +590,13 @@ bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc,
  * (0x08 / 0x10) are refused.
  */
 bool coop_lite_client_transfer_flags_allowed(unsigned int flags);
+/* PT39: a throw is resolved on the machine that owns the world. The host
+   refuses the cursor pick-up (flag 0x04) of a thrown item, so a client's own
+   throw would drop a copy on the ground while the item stays in its
+   inventory: clients may not throw (host-authoritative throw: deferred). */
+bool coop_lite_throw_allowed(bool net_active, bool is_host, bool coop);
+/* True on a co-op client (callers cannot throw there). */
+bool coop_lite_client_throw_denied(void);
 
 COOP_STATIC_ASSERT(sizeof(PacketCoopPartyState) == 0x18, "PacketCoopPartyState size");
 COOP_STATIC_ASSERT(offsetof(PacketCoopSessionSync, host_loc) == 0x08, "PacketCoopSessionSync layout");

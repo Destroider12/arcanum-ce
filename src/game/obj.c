@@ -3,6 +3,7 @@
 #include <inttypes.h>
 
 #include "game/item.h"
+#include "net/tig_net.h"
 #include "game/obj_file.h"
 #include "game/obj_find.h"
 #include "game/obj_private.h"
@@ -700,6 +701,11 @@ bool obj_validate_system(unsigned int flags)
                     if (cnt != obj_arrayfield_length_get(obj, inventory_list_fld)) {
                         tig_debug_println("!VS  obj_f_critter_inventory_num doesn't match count for obj_f_critter_inventory_list_idx.");
 
+                        if (tig_net_is_coop_enabled()) {
+                            /* PT39: really repair it (the list is the truth;
+                               walkers trust NUM and would read past it). */
+                            cnt = obj_arrayfield_length_get(obj, inventory_list_fld);
+                        }
                         object = obj_lock(obj);
                         obj_field_store(object, inventory_num_fld, &cnt);
                         obj_unlock(obj);

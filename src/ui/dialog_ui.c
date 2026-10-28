@@ -659,13 +659,10 @@ void dialog_ui_speech_stop(void)
    anchored to the top-right corner. */
 #define CDV_MARGIN 4
 #define CDV_PAD 4
-#define CDV_MAX_TEXT_LINES 3
+#define CDV_MAX_TEXT_LINES 6
 #define CDV_MAX_OPTIONS 5
 #define CDV_MAX_WRAP_LINES 128
 #define CDV_TMP 256
-#define CDV_KEY_R 255
-#define CDV_KEY_G 0
-#define CDV_KEY_B 255
 
 static tig_window_handle_t cdv_window = TIG_WINDOW_HANDLE_INVALID;
 static tig_font_handle_t cdv_font_name;
@@ -918,8 +915,8 @@ static int cdv_wrap(tig_font_handle_t font, const char* str, int max_width, int*
     return count;
 }
 
-/* Size and position from the current screen size: top-right corner, at most
-   1/3 of the width and 1/4 of the height. */
+/* Size and position from the current screen size: top-right corner, 2/5 of the width
+   (min 360 px), at most 1/3 of the height (text lines shrink to fit). */
 static void cdv_layout(void)
 {
     int sw = hrp_iso_window_width_get();
@@ -949,16 +946,16 @@ static void cdv_layout(void)
     }
     cdv_lh += 1;
 
-    cdv_w = sw / 3;
-    if (cdv_w < 240) {
-        cdv_w = 240;
+    cdv_w = sw * 2 / 5;
+    if (cdv_w < 360) {
+        cdv_w = 360;
     }
     if (cdv_w > sw - 2 * CDV_MARGIN) {
         cdv_w = sw - 2 * CDV_MARGIN;
     }
     /* name + text lines + options + hint */
     cdv_text_lines = CDV_MAX_TEXT_LINES;
-    rows = (sh / 4 - 2 * CDV_PAD) / cdv_lh;
+    rows = (sh / 3 - 2 * CDV_PAD) / cdv_lh;
     while (cdv_text_lines > 1 && 1 + cdv_text_lines + CDV_MAX_OPTIONS + 1 > rows) {
         cdv_text_lines--;
     }
@@ -983,27 +980,15 @@ static void cdv_draw(void)
     int count;
     int first;
     int index;
-    int row;
     int text_w = cdv_w - 2 * CDV_PAD;
-    tig_color_t key = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
 
-    /* Cheap "alpha": the window is color-keyed; two of every three pixel rows
-       are dark, the rest stay see-through (about 2/3 opaque). */
+    /* PT39: solid opaque panel (PT38 interlaced see-through rows were unreadable). */
     rect.x = 0;
     rect.y = 0;
     rect.width = cdv_w;
     rect.height = cdv_h;
-    tig_window_fill(cdv_window, &rect, key);
-    for (row = 0; row < cdv_h; row++) {
-        if (row % 3 != 0) {
-            rect.y = row;
-            rect.height = 1;
-            tig_window_fill(cdv_window, &rect, tig_color_make(16, 12, 8));
-        }
-    }
-    rect.y = 0;
-    rect.height = cdv_h;
-    tig_window_box(cdv_window, &rect, tig_color_make(150, 120, 60));
+    tig_window_fill(cdv_window, &rect, tig_color_make(20, 16, 12));
+    tig_window_box(cdv_window, &rect, tig_color_make(160, 130, 70));
 
     cdv_fit(cdv_font_name, cdv_view.npc_name, "", text_w, line, sizeof(line));
     cdv_write(cdv_font_name, line, CDV_PAD, CDV_PAD, text_w, cdv_lh);
@@ -1064,13 +1049,13 @@ static void dialog_ui_coop_view_show(const CoopDialogView* view)
         cdv_window = TIG_WINDOW_HANDLE_INVALID;
     }
     if (cdv_window == TIG_WINDOW_HANDLE_INVALID) {
-        window_data.flags = TIG_WINDOW_TRANSPARENT | TIG_WINDOW_MESSAGE_FILTER;
+        window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
         window_data.rect.x = cdv_x;
         window_data.rect.y = cdv_y;
         window_data.rect.width = cdv_w;
         window_data.rect.height = cdv_h;
-        window_data.background_color = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
-        window_data.color_key = tig_color_make(CDV_KEY_R, CDV_KEY_G, CDV_KEY_B);
+        window_data.background_color = tig_color_make(20, 16, 12);
+        window_data.color_key = 0;
         window_data.message_filter = cdv_message_filter;
         if (tig_window_create(&window_data, &cdv_window) != TIG_OK) {
             cdv_window = TIG_WINDOW_HANDLE_INVALID;

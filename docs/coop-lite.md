@@ -1870,11 +1870,13 @@ dialog is shown; a client's own merchant dialog stays local (not broadcast).
   header), kind / action / option-count bounds, every string NUL-terminated
   inside its field, vote counts <= 7 and zero past `num_options`, stale or
   repeated `seq` dropped. Control characters are blanked for display.
-- Client viewer (`dialog_ui.c`, PT38 compact layout): a small color-keyed tig
-  window in the top-right corner (<= 1/3 screen width, <= 1/4 height,
-  recomputed from the screen size whenever it is shown; 2 of 3 pixel rows are
-  dark, the rest see-through). It shows the NPC name, the last 3 wrapped lines
-  of the NPC line ("..." when cut), and up to 5 one-line options with "[n]"
+- Client viewer (`dialog_ui.c`, PT39 layout): a SOLID opaque tig window
+  (fill 20,16,12, border 160,130,70, no color key; PT38's interlaced
+  see-through rows were an unreadable mesh) in the top-right corner (2/5 of the
+  screen width, min 360 px, height capped at 1/3 screen, recomputed from the
+  screen size whenever it is shown). It shows the NPC name, the last 6 wrapped
+  lines of the NPC line ("..." when cut; fewer on small screens), and up to 5
+  one-line options with "[n]"
   votes. Mouse buttons are swallowed only inside its rectangle.
   It is a plain tig window with a message filter.
   It has no path into the dialog engine; its only output is a vote packet.
@@ -1942,3 +1944,38 @@ wrong on some causes.
 
 Tests: `coop_lite_policy_test` (fatigue offset, door packet size / role /
 validity). Everything else is compiled only.
+
+## PT39 (playtest of PT38, review by Argon; protocol stays 28)
+
+1. **Dialog viewer**: solid dark panel + border, 2/5 width (min 360), 6 text
+   lines (see the viewer paragraph above). Hit-test and voting unchanged.
+2. **Throw dupe + inventory freeze**. Symptom right, cause half right. Flag 0x04
+   is "item to the cursor" (the item leaves the pack, held parentless); the host
+   rightly refuses it (`transfer refused (flags 0x4)`), so the item stays in the
+   host's pack, but the client still ran `combat_throw`: `object_drop` put the
+   item on the ground while it was still in the client's inventory list (and it
+   was then destroyed/decayed there): a dangling list entry, NUM != list length
+   (`!VS ... doesn't match count`), and the next INVEN_SYNC found it "already
+   there" without OF_INVENTORY. Fixes (smallest): clients may not throw
+   (`coop_lite_throw_allowed` / `coop_lite_client_throw_denied`: guards in
+   `anim_goal_throw_item`, the cursor-throw clicks and the default-throw weapon
+   path in `intgame.c`; the item never leaves the pack); `apply_inven_batch`
+   re-picks an owned item that lies on the ground (`object_pickup`) and ends by
+   forcing NUM == list length per owner; the `obj.c` validator really repairs
+   NUM (co-op only; it used to store the same value back); the item-delete loop
+   in `item.c` can no longer spin when `item_force_remove` fails. The exact
+   freeze site was not reproduced (no GUI): the unbounded candidate is that
+   delete loop on a stale NUM. Deferred: host-authoritative throw (host removes
+   from stack, resolves the hit, creates the dropped item; needs a throw intent
+   packet + projectile replay, protocol bump). Allowing 0x04 was rejected: the
+   host would hold a parentless item forever if the client never throws.
+3. **.dif**: when a client's bad `.dif` is removed, `sector_lock` now resets the
+   half-loaded sector and reloads it from the map in the same call (no failed
+   lock). `Couldn't match ObjID to HANDLE` is a benign Note (an object field
+   names a PC that is created after `map_open`, census follows); not changed.
+   "Don't write .dif on clients" is not done: clients also keep Save\Current for
+   their own saves and reloads, and skipping the write changes sector_save_game
+   for every sector; risky for little gain (the truncated .dif now self-heals).
+
+Tests: `coop_lite_policy_test` (throw policy; 0x04 still refused). Dialog panel,
+item/sector/obj changes are compiled only.

@@ -1999,6 +1999,12 @@ void sub_463B30(int64_t obj, bool a2)
             item_force_remove(item_obj, obj);
             object_drop(item_obj, loc);
             object_destroy(item_obj);
+
+            /* PT39: item_force_remove can fail without shrinking the list
+               (item not found / stale NUM); step past it, never spin. */
+            if (obj_field_int32_get(obj, inventory_num_fld) >= cnt) {
+                idx++;
+            }
         }
 
         cnt = obj_field_int32_get(obj, inventory_num_fld);

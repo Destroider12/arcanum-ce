@@ -14417,6 +14417,11 @@ bool anim_goal_throw_item(int64_t obj, int64_t item_obj, int64_t target_loc)
 
     ASSERT(item_obj != OBJ_HANDLE_NULL); // itemObj != OBJ_HANDLE_NULL
 
+    if (coop_lite_client_throw_denied()) {
+        tig_debug_printf("CoopLite: client throw refused (host-authoritative throw not implemented)\n");
+        return false;
+    }
+
     if (!sub_4348E0(obj, 0)) {
         return false;
     }

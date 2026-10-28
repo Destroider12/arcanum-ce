@@ -121,6 +121,9 @@ static SectorCacheEntry* sector_cache_entries;
 // 0x6017B4
 static SectorLoadFunc sector_load_func;
 
+/* PT39: set when a co-op client's bad .dif was just removed by a failed load. */
+static bool sector_coop_dif_removed;
+
 // 0x6017B8
 static IsoInvalidateRectFunc* sector_iso_window_invalidate_rect;
 
@@ -866,6 +869,7 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
     unsigned int index;
     unsigned int oldest = -1;
     DateTime datetime;
+    bool load_ok;
 
     if (in_sector_lock) {
         tig_debug_printf("Warning: recursive sector lock detected\n");
@@ -951,7 +955,18 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
         cache_entry = &(sector_cache_entries[index]);
         cache_entry->sector.datetime = datetime;
 
-        if (!sector_load_func(id, &(cache_entry->sector))) {
+        sector_coop_dif_removed = false;
+        load_ok = sector_load_func(id, &(cache_entry->sector));
+        if (!load_ok && sector_coop_dif_removed) {
+            /* PT39: the bad .dif is gone; reset the half-loaded sector and
+               read it again from the map right now (no failed lock). */
+            sector_coop_dif_removed = false;
+            sector_cache_evict(&(cache_entry->sector));
+            cache_entry->sector.datetime = datetime;
+            tig_debug_printf("CoopLite: sector %I64u reloaded without its .dif\n", id);
+            load_ok = sector_load_func(id, &(cache_entry->sector));
+        }
+        if (!load_ok) {
             tig_debug_printf("Error: attempt to lock sector %I64u in cache failed due to error in load.  This is bad.  Help.\n", id);
             in_sector_lock = false;
             return false;
@@ -1707,6 +1722,7 @@ bool sector_load_game(int64_t id, Sector* sector)
                 if (tig_net_is_active() && !tig_net_is_host() && tig_net_is_coop_enabled()) {
                     tig_debug_printf("CoopLite: bad sector .dif %s removed (sector reloads from the map)\n", dif_path);
                     tig_file_remove(dif_path);
+                    sector_coop_dif_removed = true;
                 }
                 return false;
             }

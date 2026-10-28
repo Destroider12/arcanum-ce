@@ -2724,7 +2724,10 @@ void intgame_process_event(TigMessage* msg)
                             }
 
                             if (!hotkey_ui_is_dragging()) {
-                                if (critter_is_active(pc_obj)) {
+                                if (coop_lite_client_throw_denied()) {
+                                    sub_575770();
+                                    intgame_refresh_cursor();
+                                } else if (critter_is_active(pc_obj)) {
                                     sub_573840();
                                     intgame_refresh_cursor();
                                     anim_goal_throw_item(pc_obj, v2, td.loc);
@@ -3301,6 +3304,12 @@ void sub_54ED30(TargetDescriptor* td)
         }
 
         item_obj = inven_ui_drag_item_obj_get();
+        if (coop_lite_client_throw_denied()) {
+            /* PT39: the item never left the inventory; just drop the cursor. */
+            sub_575770();
+            intgame_refresh_cursor();
+            return;
+        }
         if (hotkey_ui_is_dragging()) {
             hotkey_ui_cancel_drag();
             sub_573740(item_obj, false);
@@ -3546,6 +3555,7 @@ void sub_54ED30(TargetDescriptor* td)
         if (weapon_obj != OBJ_HANDLE_NULL
             && obj_field_int32_get(weapon_obj, OBJ_F_TYPE) == OBJ_TYPE_WEAPON
             && (obj_field_int32_get(weapon_obj, OBJ_F_WEAPON_FLAGS) & OWF_DEFAULT_THROWS) != 0
+            && !coop_lite_client_throw_denied()
             && !item_check_remove(weapon_obj)) {
             int64_t throwable_instance_obj = item_find_first_matching_prototype(pc_obj, weapon_obj);
             if (throwable_instance_obj == OBJ_HANDLE_NULL) {

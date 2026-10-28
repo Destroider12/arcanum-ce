@@ -7643,6 +7643,16 @@ bool coop_lite_client_transfer_flags_allowed(unsigned int flags)
     return (flags & 0x01u) != 0 && (flags & ~0x21u) == 0;
 }
 
+bool coop_lite_throw_allowed(bool net_active, bool is_host, bool coop)
+{
+    return !(net_active && !is_host && coop);
+}
+
+bool coop_lite_client_throw_denied(void)
+{
+    return !coop_lite_throw_allowed(tig_net_is_active(), tig_net_is_host(), tig_net_is_coop_enabled());
+}
+
 int coop_lite_target_kind(bool is_container, bool locked, bool is_critter, bool dead, bool is_self, int dist)
 {
     if (is_self || dist < 0 || dist > COOP_TARGET_REACH) {
@@ -10573,6 +10583,26 @@ static bool coop_lite_client_reassert_worn(int64_t pc, int64_t item, int loc)
     return true;
 }
 
+/* PT39: the inventory NUM field must equal the list length; every walker
+   (inven_ui, item_list_get, delete loops) trusts NUM. */
+static void coop_lite_fix_inven_num(int64_t owner)
+{
+    int num_fld = OBJ_F_CRITTER_INVENTORY_NUM;
+    int list_fld = OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+    int len;
+
+    if (obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER) {
+        num_fld = OBJ_F_CONTAINER_INVENTORY_NUM;
+        list_fld = OBJ_F_CONTAINER_INVENTORY_LIST_IDX;
+    }
+    len = obj_arrayfield_length_get(owner, list_fld);
+    if (obj_field_int32_get(owner, num_fld) != len) {
+        tig_debug_printf("CoopLite: inven: NUM %d != list length %d, fixed\n",
+            obj_field_int32_get(owner, num_fld), len);
+        obj_field_int32_set(owner, num_fld, len);
+    }
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -10669,6 +10699,12 @@ static void coop_lite_client_apply_inven_batch(void)
                    (P1-3: host-side combat uses the host's equipment). */
                 int cur = item_inventory_location_get(item);
 
+                if ((obj_field_int32_get(item, OBJ_F_FLAGS) & OF_INVENTORY) == 0) {
+                    /* PT39: also lying on the ground (a local throw/drop of an
+                       item the host still has in the pack): take it back. */
+                    object_pickup(item, owner);
+                    moved++;
+                }
                 if (owner != local_pc && cur != loc) {
                     item_remove(item);
                     item_insert(item, owner, loc);
@@ -10804,6 +10840,12 @@ static void coop_lite_client_apply_inven_batch(void)
                 item_ammo_transfer(owner, OBJ_HANDLE_NULL, -d, t, OBJ_HANDLE_NULL);
             }
             coop_lite_inv_destroy_stray(coop_inv_owner[o].head.ammo_oid[t]);
+        }
+    }
+
+    for (o = 0; o < coop_inv_owner_cnt; o++) {
+        if (owner_obj[o] != OBJ_HANDLE_NULL) {
+            coop_lite_fix_inven_num(owner_obj[o]);
         }
     }
 
