@@ -15,6 +15,7 @@
 #include "game/coop_lite.h"
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/crash_log.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -300,6 +301,8 @@ int main(int argc, char** argv)
     } else if (coop_cli_mode == 2) {
         init_info.window_name = "Arcanum CE - CO-OP CLIENT [" COOP_BUILD_SHA "]";
     }
+
+    crash_log_install();
 
     if (tig_init(&init_info) != TIG_OK) {
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.

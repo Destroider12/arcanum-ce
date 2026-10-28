@@ -55,6 +55,7 @@ set(SRCS
     "src/game/combat.c"
     "src/game/combat.h"
     "src/game/coop_lite.c"
+    "src/game/crash_log.c"
     "src/game/coop_lite.h"
     "src/game/context.h"
     "src/game/criticals.h"

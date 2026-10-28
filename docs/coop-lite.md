@@ -1756,3 +1756,33 @@ critter flags, spell flags, blit flags/colour/alpha/scale).
 - Spell invocations: the parent is optional. Packet77 spell eye candy is
   streamed host -> clients again (no double when already shown).
 - The build id (git short sha) is the first log line and in the window title.
+
+## PT31 behaviour notes
+
+- **Stuck follow.** A host that loaded a save from the menu never armed the
+  follow (only the party-reload path did), so its first real map change was
+  swallowed as the "initial spawn" and the client stayed behind forever (both
+  sides drop PC_POS of another map key). The host now arms the follow after
+  1.5 s settled in the world (`follow armed (host settled in the world)`).
+  Client self-heal, no packet: a host PC_POS whose map key differs from ours
+  for 3 s (slot 0) makes the client request the teleport itself, from the key
+  (map = key & 0xFFFF, gen = key >> 16) and the packet's loc; retried every
+  5 s (`map mismatch ... self-follow`).
+- **Paralysis / stun.** `coop_lite_client_clear_stuck_flags` clears
+  OCF_PARALYZED / OCF_STUNNED on the client's own PC on follow and sync (the
+  host's state is echoed to the owner, which is what sets them there);
+  without it the vanilla anim start refuses to run and the PC is frozen.
+- **Rejoin, stale live mobs.** The world-state answer now lists every dead /
+  OF_OFF NPC of the host's loaded map (not only those within reach), and the
+  client prunes unlisted NPCs inside COOP_WORLD_PRUNE_RADIUS. Limit: the host
+  only knows sectors it has loaded.
+- **Crash log.** Windows builds install an exception filter
+  (`src/game/crash_log.c`): `CRASH: exception ... exe+0x...` and a stack as
+  exe offsets in the log. Resolve with `nm -n` of the same build.
+- **Remote PC motion.** The engine advances the art frame and the sub-tile
+  offset together in one discrete step (`sub_4305D0`). The old client lerped
+  the offset per render frame while showing the newer sample's frame.
+  Default is now stepwise: the newest due sample is shown whole.
+  `ARCANUM_DEV=1 ARCANUM_DEV_INTERP=lerp` restores the lerp for comparison.
+  PC_POS interval 50 -> 33 ms, interpolation ring 3 -> 6 (120 ms delay kept).
+  Stand-pose snap and the over-1-tile snap are unchanged.

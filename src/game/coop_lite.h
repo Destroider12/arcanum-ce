@@ -36,7 +36,7 @@ extern "C" {
 #define PACKET_COOP_TYPE_LIMIT 147
 
 /* PC position broadcast interval (ms). */
-#define COOP_LITE_PC_POS_INTERVAL_MS 50u
+#define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
 
 /* PacketCoopPcPos.flags */
 #define COOP_PC_POS_FORCE 0x1 /* host moved an owner-driven PC; owner must apply */
@@ -1079,7 +1079,7 @@ bool coop_lite_should_skip_independent_new_game(void);
  * COOP_INTERP_DELAY_MS late, lerped in screen space between adjacent tiles;
  * a longer step snaps.
  */
-#define COOP_INTERP_RING 3
+#define COOP_INTERP_RING 6 /* PT31: 33 ms samples, 120 ms delay */
 #define COOP_INTERP_DELAY_MS 120u /* PT29: 2-3 PC_POS samples (50 ms) of jitter margin */
 
 typedef struct CoopInterpSample {
