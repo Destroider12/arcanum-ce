@@ -34,7 +34,8 @@ extern "C" {
 #define PACKET_COOP_SWING 145 /* PT25: host → owner: your PC swung at this target */
 #define PACKET_COOP_NPC_REQ 146 /* PT26: client → host: NPC_POS named these unknown NPCs (PacketCoopObjReq layout) */
 #define PACKET_COOP_STORY_SYNC 147 /* PT35: host → client: quests, rumors, reputation (chunked snapshot) */
-#define PACKET_COOP_TYPE_LIMIT 148
+#define PACKET_COOP_DIALOG_STATE 148 /* PT36: host → client dialog view; client → host vote (kind field) */
+#define PACKET_COOP_TYPE_LIMIT 149
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -1195,5 +1196,104 @@ int coop_story_rx_add(CoopStoryRx* rx, const PacketCoopStorySync* pkt, int size)
    reputation writes are refused (the host owns them). */
 bool coop_lite_story_write_blocked(void);
 void coop_lite_handle_story_sync(PacketCoopStorySync* pkt);
+
+/*
+ * PT36 dialog viewer + voting (PACKET_COOP_DIALOG_STATE, one type, two kinds).
+ * kind STATE (host -> client): the host's own dialog (open / new line / new
+ * options / vote counts / close); the client shows it in a read-only panel.
+ * kind VOTE (client -> host): the option index this client prefers (-1 clears).
+ * Nothing here can reach the dialog engine: the host alone picks the answer.
+ * Texts are capped on the host (longer ones are truncated, never chunked), so
+ * one packet always fits in 4096 bytes.
+ */
+#define COOP_DIALOG_MAX_OPTIONS 5 /* DialogState.options[5] */
+#define COOP_DIALOG_NAME_MAX 64
+#define COOP_DIALOG_TEXT_MAX 1000 /* DialogState.reply[1000] */
+#define COOP_DIALOG_OPT_MAX 384
+#define COOP_DIALOG_KIND_STATE 1
+#define COOP_DIALOG_KIND_VOTE 2
+#define COOP_DIALOG_ACT_CLOSE 0
+#define COOP_DIALOG_ACT_OPEN 1
+#define COOP_DIALOG_MAX_VOTES 7 /* client slots 1..7 */
+#define COOP_DIALOG_VOTE_INTERVAL_MS 250u /* per-slot vote rate limit */
+
+typedef struct PacketCoopDialogState {
+    /* 0000 */ int type;
+    /* 0004 */ unsigned char kind; /* COOP_DIALOG_KIND_* */
+    /* 0005 */ unsigned char action; /* STATE: COOP_DIALOG_ACT_*; VOTE: 0 */
+    /* 0006 */ unsigned char num_options; /* STATE open: 0..5; VOTE: 0 */
+    /* 0007 */ signed char vote_index; /* VOTE: option or -1; STATE: 0 */
+    /* 0008 */ unsigned int seq; /* STATE: monotonic packet number; VOTE: 0 */
+    /* 000C */ unsigned int line; /* dialog line id (votes reset when it changes) */
+    /* 0010 */ unsigned char votes[8]; /* STATE: count per option (first 5 used) */
+    /* 0018 */ char npc_name[COOP_DIALOG_NAME_MAX];
+    /* 0058 */ char reply[COOP_DIALOG_TEXT_MAX];
+    /* 0440 */ char options[COOP_DIALOG_MAX_OPTIONS][COOP_DIALOG_OPT_MAX];
+} PacketCoopDialogState;
+
+COOP_STATIC_ASSERT(offsetof(PacketCoopDialogState, npc_name) == 0x18, "PacketCoopDialogState header");
+COOP_STATIC_ASSERT(offsetof(PacketCoopDialogState, reply) == 0x58, "PacketCoopDialogState reply");
+COOP_STATIC_ASSERT(offsetof(PacketCoopDialogState, options) == 0x440, "PacketCoopDialogState options");
+COOP_STATIC_ASSERT(sizeof(PacketCoopDialogState) == 0x440 + 5 * 384, "PacketCoopDialogState size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopDialogState) <= 4096, "dialog state fits 4 KB");
+
+#define COOP_DIALOG_HDR_SIZE ((int)offsetof(PacketCoopDialogState, npc_name))
+
+/* Host: who voted for what in the current dialog line. */
+typedef struct CoopDialogVotes {
+    bool open;
+    unsigned int line;
+    int num_options;
+    signed char vote[8]; /* per slot, -1 none (slot 0 never votes) */
+    bool seen[8];
+    unsigned int last_ms[8];
+} CoopDialogVotes;
+
+/* Client: what the read-only panel shows. */
+typedef struct CoopDialogView {
+    bool open;
+    unsigned int seq;
+    unsigned int line;
+    int num_options;
+    int my_vote; /* -1 none */
+    unsigned char votes[8];
+    char npc_name[COOP_DIALOG_NAME_MAX];
+    char reply[COOP_DIALOG_TEXT_MAX];
+    char options[COOP_DIALOG_MAX_OPTIONS][COOP_DIALOG_OPT_MAX];
+} CoopDialogView;
+
+/* Truncating copies; options may be NULL entries. */
+void coop_dialog_fill_state(PacketCoopDialogState* pkt, unsigned int seq, unsigned int line, const char* npc_name,
+    const char* reply, int num_options, const char* const* options, const unsigned char* votes);
+void coop_dialog_fill_close(PacketCoopDialogState* pkt, unsigned int seq, unsigned int line);
+void coop_dialog_fill_vote(PacketCoopDialogState* pkt, unsigned int line, int option);
+/* Bytes to put on the wire for `pkt` (header only for close / vote). */
+int coop_dialog_wire_size(const PacketCoopDialogState* pkt);
+/* Strict check; from_host = the receiver is a client (so kind must be STATE). */
+bool coop_dialog_packet_valid(const PacketCoopDialogState* pkt, int size, bool from_host);
+/* Control characters -> spaces (display safety). */
+void coop_dialog_sanitize(char* s);
+void coop_dialog_view_from_packet(CoopDialogView* view, const PacketCoopDialogState* pkt);
+
+void coop_dialog_votes_reset(CoopDialogVotes* v);
+/* New dialog line / options: clears the votes, keeps the rate-limit clocks. */
+void coop_dialog_votes_new_line(CoopDialogVotes* v, unsigned int line, int num_options);
+/* Apply a vote: true when the tally changed. Rejected: not open, bad slot,
+   stale line, option out of range, or faster than COOP_DIALOG_VOTE_INTERVAL_MS. */
+bool coop_dialog_vote_apply(CoopDialogVotes* v, int slot, int option, unsigned int line, unsigned int now_ms);
+/* Drop the vote of a slot that left; true when it had one. */
+bool coop_dialog_vote_clear_slot(CoopDialogVotes* v, int slot);
+void coop_dialog_votes_tally(const CoopDialogVotes* v, unsigned char out[COOP_DIALOG_MAX_OPTIONS]);
+
+void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt);
+/* Host (dialog_ui): the local PC's dialog changed / ended. */
+void coop_lite_host_dialog_state(const char* npc_name, const char* reply, int num_options, const char* const* options);
+void coop_lite_host_dialog_closed(void);
+int coop_lite_host_dialog_vote_count(int option); /* votes shown next to an option */
+/* Client (viewer UI): vote for an option, again to clear. false: refused. */
+bool coop_lite_client_dialog_vote(int option);
+/* UI side registers: show/refresh the panel, close it, refresh the host's markers. */
+void coop_lite_set_dialog_view_hooks(void (*show)(const CoopDialogView* view), void (*close)(void),
+    void (*host_refresh)(void));
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

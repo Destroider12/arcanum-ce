@@ -428,6 +428,25 @@ if(WIN32)
 endif()
 add_test(NAME coop_story COMMAND coop_story_test)
 
+add_executable(coop_dialog_test
+    "tests/coop_dialog_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_dialog_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_dialog_test PRIVATE enet)
+target_compile_definitions(coop_dialog_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_dialog_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_dialog COMMAND coop_dialog_test)
+
 add_executable(coop_menu_test
     "tests/coop_menu_test.c"
     "src/game/coop_menu.c"

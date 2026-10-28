@@ -276,8 +276,8 @@ static int test_chunks(void)
 
 static int test_policy(void)
 {
-    CHECK(TIG_NET_PROTOCOL == 26, "protocol bumped");
-    CHECK(PACKET_COOP_STORY_SYNC == 147 && PACKET_COOP_TYPE_LIMIT == 148, "packet id");
+    CHECK(TIG_NET_PROTOCOL >= 26, "protocol bumped");
+    CHECK(PACKET_COOP_STORY_SYNC == 147 && PACKET_COOP_TYPE_LIMIT > PACKET_COOP_STORY_SYNC, "packet id");
     CHECK(coop_lite_mp_packet_role(PACKET_COOP_STORY_SYNC) == COOP_MP_PKT_CLIENT_APPLY, "role: host -> client");
     CHECK(coop_lite_packet_allowed(PACKET_COOP_STORY_SYNC, false, 0), "client accepts the host's");
     CHECK(!coop_lite_packet_allowed(PACKET_COOP_STORY_SYNC, false, 2), "client ignores peers");

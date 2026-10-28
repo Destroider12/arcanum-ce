@@ -13,6 +13,7 @@
 #include "game/critter.h"
 #include "game/dialog.h"
 #include "game/gsound.h"
+#include "game/hrp.h"
 #include "game/obj_private.h"
 #include "game/player.h"
 #include "game/script.h"
@@ -52,8 +53,19 @@ static void dialog_ui_pc_say(int64_t pc_obj, int64_t npc_obj, int type, int expi
 static void dialog_ui_speech_start(int64_t npc_obj, int64_t pc_obj, int speech_id);
 static void dialog_ui_speech_stop(void);
 
+static void dialog_ui_coop_publish(DialogUiEntry* entry);
+static const char* dialog_ui_option_label(DialogUiEntry* entry, int index);
+static void dialog_ui_coop_refresh_votes(void);
+static void dialog_ui_coop_view_show(const CoopDialogView* view);
+static void dialog_ui_coop_view_close(void);
+static void dialog_ui_coop_view_init(void);
+static void dialog_ui_coop_view_exit(void);
+
 // 0x66DAB8
 static DialogUiEntry stru_66DAB8[8];
+
+/* PT36: host-side option text with the vote marker (tc keeps the pointer). */
+static char dialog_ui_marked_options[5][1024];
 
 // 0x67B960
 static tig_sound_handle_t dialog_ui_speech_handle;
@@ -65,6 +77,7 @@ static bool dialog_ui_local_pc_dialog_active;
 bool dialog_ui_init(GameInitInfo* init_info)
 {
     coop_lite_set_dialog_end_hook(dialog_ui_end_dialog);
+    dialog_ui_coop_view_init();
     int index;
 
     (void)init_info;
@@ -86,6 +99,7 @@ bool dialog_ui_init(GameInitInfo* init_info)
 void dialog_ui_exit(void)
 {
     dialog_ui_speech_stop();
+    dialog_ui_coop_view_exit();
 }
 
 // 0x5673B0
@@ -97,6 +111,8 @@ void dialog_ui_reset(void)
         intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = false;
     }
+    coop_lite_host_dialog_closed();
+    dialog_ui_coop_view_close();
 
     for (index = 0; index < MAX_ENTRIES; index++) {
         if (stru_66DAB8[index].field_1850) {
@@ -277,6 +293,7 @@ void dialog_ui_end_dialog(int64_t obj, int a2)
     if (player_is_local_pc_obj(obj)) {
         intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = 0;
+        coop_lite_host_dialog_closed();
     }
 
     dialog_unload(entry->dlg);
@@ -323,6 +340,7 @@ void dialog_ui_notify_dialog_ended(int64_t obj)
     if (player_is_local_pc_obj(obj)) {
         intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = false;
+        coop_lite_host_dialog_closed();
     }
 }
 
@@ -533,10 +551,12 @@ void dialog_ui_display(DialogUiEntry* entry)
             }
         }
 
+        dialog_ui_coop_publish(entry);
+
         intgame_dialog_clear();
 
         for (index = 0; index < entry->state.num_options; index++) {
-            intgame_dialog_set_option(index, entry->state.options[index]);
+            intgame_dialog_set_option(index, dialog_ui_option_label(entry, index));
         }
     }
 }
@@ -630,4 +650,250 @@ void dialog_ui_speech_stop(void)
         tig_sound_destroy(dialog_ui_speech_handle);
         dialog_ui_speech_handle = TIG_SOUND_HANDLE_INVALID;
     }
+}
+
+/* ---- PT36: co-op dialog viewer (read-only) and host vote markers ----------- */
+
+#define CDV_WIDTH 540
+#define CDV_HEIGHT 290
+#define CDV_TOP 60
+#define CDV_OPT_Y 150
+#define CDV_OPT_STEP 22
+#define CDV_OPT_CHARS 72
+
+static tig_window_handle_t cdv_window = TIG_WINDOW_HANDLE_INVALID;
+static tig_font_handle_t cdv_font_name;
+static tig_font_handle_t cdv_font_text;
+static tig_font_handle_t cdv_font_option;
+static tig_font_handle_t cdv_font_mine;
+static tig_font_handle_t cdv_font_hint;
+static bool cdv_fonts_ready;
+static CoopDialogView cdv_view;
+
+static const char* dialog_ui_option_label(DialogUiEntry* entry, int index)
+{
+    int votes;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_host() || !player_is_local_pc_obj(entry->state.pc_obj)) {
+        return entry->state.options[index];
+    }
+    votes = coop_lite_host_dialog_vote_count(index);
+    if (votes <= 0 || index >= 5) {
+        return entry->state.options[index];
+    }
+    snprintf(dialog_ui_marked_options[index], sizeof(dialog_ui_marked_options[index]), "%s  [%d]",
+        entry->state.options[index], votes);
+    return dialog_ui_marked_options[index];
+}
+
+/* Host: tell the clients what the local PC's dialog shows now. */
+static void dialog_ui_coop_publish(DialogUiEntry* entry)
+{
+    const char* options[5];
+    char npc_name[256];
+    int index;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_host() || !player_is_local_pc_obj(entry->state.pc_obj)) {
+        return;
+    }
+    npc_name[0] = '\0';
+    if (entry->state.npc_obj != OBJ_HANDLE_NULL) {
+        object_examine(entry->state.npc_obj, entry->state.pc_obj, npc_name);
+    }
+    for (index = 0; index < 5; index++) {
+        options[index] = entry->state.options[index];
+    }
+    coop_lite_host_dialog_state(npc_name, entry->state.reply, entry->state.num_options, options);
+}
+
+/* Host: a client's vote changed the counts; redraw the option list. */
+static void dialog_ui_coop_refresh_votes(void)
+{
+    DialogUiEntry* entry = &(stru_66DAB8[0]);
+    int index;
+
+    if (!entry->field_1850 || !player_is_local_pc_obj(entry->state.pc_obj)
+        || intgame_mode_get() != INTGAME_MODE_DIALOG) {
+        return;
+    }
+    intgame_dialog_clear();
+    for (index = 0; index < entry->state.num_options; index++) {
+        intgame_dialog_set_option(index, dialog_ui_option_label(entry, index));
+    }
+}
+
+static int cdv_option_at(int mouse_x, int mouse_y)
+{
+    TigWindowData window_data;
+    int x;
+    int y;
+    int index;
+
+    if (cdv_window == TIG_WINDOW_HANDLE_INVALID || tig_window_data(cdv_window, &window_data) != TIG_OK) {
+        return -2;
+    }
+    x = mouse_x - window_data.rect.x;
+    y = mouse_y - window_data.rect.y;
+    if (x < 0 || y < 0 || x >= window_data.rect.width || y >= window_data.rect.height) {
+        return -2; /* outside the panel */
+    }
+    index = (y - CDV_OPT_Y) / CDV_OPT_STEP;
+    if (y >= CDV_OPT_Y && index >= 0 && index < cdv_view.num_options && x >= 10) {
+        return index;
+    }
+    return -1; /* inside the panel, not on an option */
+}
+
+/* The viewer only ever calls coop_lite_client_dialog_vote: a vote packet to
+   the host. It has no path into the dialog engine. */
+static bool cdv_message_filter(TigMessage* msg)
+{
+    int index;
+
+    if (!cdv_view.open || cdv_window == TIG_WINDOW_HANDLE_INVALID) {
+        return false;
+    }
+    if (msg->type == TIG_MESSAGE_KEYBOARD) {
+        if (msg->data.keyboard.pressed && msg->data.keyboard.scancode == SDL_SCANCODE_V
+            && cdv_view.num_options > 0) {
+            coop_lite_client_dialog_vote((cdv_view.my_vote + 1) % cdv_view.num_options);
+            return true;
+        }
+        return false;
+    }
+    if (msg->type == TIG_MESSAGE_MOUSE) {
+        index = cdv_option_at(msg->data.mouse.x, msg->data.mouse.y);
+        if (index == -2) {
+            return false;
+        }
+        if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP && index >= 0) {
+            coop_lite_client_dialog_vote(index);
+        }
+        return msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP
+            || msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN;
+    }
+    return false;
+}
+
+static void cdv_write(tig_font_handle_t font, const char* str, int x, int y, int width, int height)
+{
+    TigRect rect;
+
+    rect.x = x;
+    rect.y = y;
+    rect.width = width;
+    rect.height = height;
+    tig_font_push(font);
+    tig_window_text_write(cdv_window, str, &rect);
+    tig_font_pop();
+}
+
+static void cdv_draw(void)
+{
+    TigRect rect;
+    char line[COOP_DIALOG_OPT_MAX + 48];
+    int index;
+    int votes;
+
+    rect.x = 0;
+    rect.y = 0;
+    rect.width = CDV_WIDTH;
+    rect.height = CDV_HEIGHT;
+    tig_window_fill(cdv_window, &rect, tig_color_make(24, 18, 12));
+    tig_window_box(cdv_window, &rect, tig_color_make(150, 120, 60));
+
+    snprintf(line, sizeof(line), "%s", cdv_view.npc_name);
+    cdv_write(cdv_font_name, line, 10, 6, CDV_WIDTH - 20, 20);
+    cdv_write(cdv_font_text, cdv_view.reply, 10, 30, CDV_WIDTH - 20, 112);
+
+    for (index = 0; index < cdv_view.num_options; index++) {
+        votes = cdv_view.votes[index];
+        snprintf(line, sizeof(line), "%d. %.*s%s", index + 1, CDV_OPT_CHARS, cdv_view.options[index],
+            strlen(cdv_view.options[index]) > CDV_OPT_CHARS ? "..." : "");
+        if (votes > 0) {
+            snprintf(line + strlen(line), sizeof(line) - strlen(line), "  [%d]", votes);
+        }
+        if (cdv_view.my_vote == index) {
+            snprintf(line + strlen(line), sizeof(line) - strlen(line), "  < your vote");
+        }
+        cdv_write(cdv_view.my_vote == index ? cdv_font_mine : cdv_font_option, line, 10,
+            CDV_OPT_Y + index * CDV_OPT_STEP, CDV_WIDTH - 20, 20);
+    }
+
+    cdv_write(cdv_font_hint, "Read-only view of the host's dialog. Click an option or press V to vote; the host decides.",
+        10, CDV_HEIGHT - 24, CDV_WIDTH - 20, 18);
+}
+
+static void dialog_ui_coop_view_show(const CoopDialogView* view)
+{
+    TigWindowData window_data;
+
+    if (!cdv_fonts_ready || view == NULL || !view->open) {
+        return;
+    }
+    cdv_view = *view;
+    if (cdv_window == TIG_WINDOW_HANDLE_INVALID) {
+        window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
+        window_data.rect.x = 0;
+        window_data.rect.y = CDV_TOP;
+        window_data.rect.width = CDV_WIDTH;
+        window_data.rect.height = CDV_HEIGHT;
+        window_data.background_color = tig_color_make(24, 18, 12);
+        window_data.color_key = 0;
+        window_data.message_filter = cdv_message_filter;
+        hrp_apply(&(window_data.rect), GRAVITY_CENTER_HORIZONTAL | GRAVITY_TOP);
+        if (tig_window_create(&window_data, &cdv_window) != TIG_OK) {
+            cdv_window = TIG_WINDOW_HANDLE_INVALID;
+            tig_debug_printf("DialogUI: co-op viewer window create failed\n");
+            return;
+        }
+    }
+    cdv_draw();
+}
+
+static void dialog_ui_coop_view_close(void)
+{
+    cdv_view.open = false;
+    if (cdv_window != TIG_WINDOW_HANDLE_INVALID) {
+        tig_window_destroy(cdv_window);
+        cdv_window = TIG_WINDOW_HANDLE_INVALID;
+    }
+}
+
+static tig_font_handle_t cdv_font_make(int r, int g, int b)
+{
+    TigFont font_desc;
+    tig_font_handle_t handle = TIG_FONT_HANDLE_INVALID;
+
+    memset(&font_desc, 0, sizeof(font_desc));
+    font_desc.flags = TIG_FONT_NO_ALPHA_BLEND | TIG_FONT_SHADOW;
+    tig_art_misc_id_create(TIG_ART_SYSTEM_FONT, 0, &(font_desc.art_id));
+    font_desc.color = tig_color_make(r, g, b);
+    tig_font_create(&font_desc, &handle);
+    return handle;
+}
+
+static void dialog_ui_coop_view_init(void)
+{
+    cdv_font_name = cdv_font_make(230, 200, 110);
+    cdv_font_text = cdv_font_make(235, 235, 235);
+    cdv_font_option = cdv_font_make(170, 170, 170);
+    cdv_font_mine = cdv_font_make(120, 230, 120);
+    cdv_font_hint = cdv_font_make(130, 130, 150);
+    cdv_fonts_ready = true;
+    coop_lite_set_dialog_view_hooks(dialog_ui_coop_view_show, dialog_ui_coop_view_close, dialog_ui_coop_refresh_votes);
+}
+
+static void dialog_ui_coop_view_exit(void)
+{
+    if (!cdv_fonts_ready) {
+        return;
+    }
+    dialog_ui_coop_view_close();
+    tig_font_destroy(cdv_font_name);
+    tig_font_destroy(cdv_font_text);
+    tig_font_destroy(cdv_font_option);
+    tig_font_destroy(cdv_font_mine);
+    tig_font_destroy(cdv_font_hint);
+    cdv_fonts_ready = false;
 }

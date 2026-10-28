@@ -1849,3 +1849,41 @@ arrays and the global quest and quelled-rumor tables. The host owns them:
   logbook pages), global variables / flags (the logbook does not read them).
 - Test: `coop_story_test` (codec round trip, strict decode, merge, worst-case
   chunking and reassembly, packet policy).
+
+## PT36: dialog viewer + voting (protocol 27)
+
+When the host talks to an NPC, the other co-op clients see a read-only panel
+(NPC name, current NPC line, the PC reply options). Only the host's own
+dialog is shown; a client's own merchant dialog stays local (not broadcast).
+
+- `PACKET_COOP_DIALOG_STATE` (148, `TYPE_LIMIT` 149), role BOTH, with a
+  `kind` field: STATE (host -> client) or VOTE (client -> host). Each side
+  drops the other's kind (`coop_dialog_packet_valid(pkt, size, from_host)`).
+- STATE is sent over the reliable channel by the host tick to every active
+  client whose last seen `seq` differs: on open, every new NPC line / option
+  list (`dialog_ui_display`), every vote-count change, and on close
+  (`dialog_ui_end_dialog`, notify-ended, reset; header-only close packet). A
+  client that joins mid-dialog gets the current state. Texts are capped
+  (name 63, line 999, option 383 bytes, at most 5 options): the host truncates,
+  so one packet is always 3008 bytes (< 4096) and nothing is chunked.
+- Validation: exact sizes (open = whole struct, close / vote = 24-byte
+  header), kind / action / option-count bounds, every string NUL-terminated
+  inside its field, vote counts <= 7 and zero past `num_options`, stale or
+  repeated `seq` dropped. Control characters are blanked for display.
+- Client viewer (`dialog_ui.c`): a plain tig window with a message filter.
+  It has no path into the dialog engine; its only output is a vote packet.
+  Vote: click an option or press V (cycles); voting for the same option
+  again clears it. Your vote is marked "< your vote", counts as "[n]".
+- VOTE (header only): option index or -1. The host checks the slot, that a
+  dialog is open, the line id (stale votes dropped), the index against the
+  line's option count, and a 250 ms per-slot rate limit. Votes reset on every
+  new line; a slot that leaves loses its vote. The host shows the counts as
+  " [n]" after each option (display string only; the option text the game
+  uses is untouched) and republishes them to the clients. The host alone
+  picks the answer; the vote has no effect on the dialog.
+- Not done: initials instead of counts; a client's own dialog is not shown to
+  others; the viewer is not repositioned on a resolution change; the panel
+  stays up while the client is itself in a dialog.
+- Test: `coop_dialog_test` (codec, truncation, strict validation, vote
+  aggregation / rate limit / tally, packet policy). The panel and the host
+  markers are compiled but not playtested (no game data on this box).

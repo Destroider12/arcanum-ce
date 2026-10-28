@@ -1047,6 +1047,8 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
 static void coop_lite_story_reset(void);
+static void coop_lite_host_dialog_tick(unsigned int now_ms);
+static void coop_lite_dialog_reset(void);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 void coop_lite_client_dev_loot_tick(unsigned int now_ms);
@@ -1952,6 +1954,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case 98: /* multiplayer flags change */
     case PACKET_COOP_PC_POS: /* owner PC pos: client→host, host→others */
     case PACKET_COOP_PC_STATS: /* PT19 PC build: owner→host, host→all */
+    case PACKET_COOP_DIALOG_STATE: /* PT36: host view → clients, client vote → host (kind-checked) */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -2691,6 +2694,213 @@ int coop_story_rx_add(CoopStoryRx* rx, const PacketCoopStorySync* pkt, int size)
     return 1;
 }
 
+/* ---- PT36: dialog viewer + voting, pure part (codec, validation, votes) ---- */
+
+static void coop_dialog_copy(char* dst, size_t cap, const char* src)
+{
+    size_t n = 0;
+
+    if (src != NULL) {
+        n = strlen(src);
+        if (n > cap - 1) {
+            n = cap - 1;
+        }
+        memcpy(dst, src, n);
+    }
+    dst[n] = '\0';
+}
+
+void coop_dialog_fill_state(PacketCoopDialogState* pkt, unsigned int seq, unsigned int line, const char* npc_name,
+    const char* reply, int num_options, const char* const* options, const unsigned char* votes)
+{
+    int i;
+
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = PACKET_COOP_DIALOG_STATE;
+    pkt->kind = COOP_DIALOG_KIND_STATE;
+    pkt->action = COOP_DIALOG_ACT_OPEN;
+    if (num_options < 0) {
+        num_options = 0;
+    }
+    if (num_options > COOP_DIALOG_MAX_OPTIONS) {
+        num_options = COOP_DIALOG_MAX_OPTIONS;
+    }
+    pkt->num_options = (unsigned char)num_options;
+    pkt->seq = seq;
+    pkt->line = line;
+    coop_dialog_copy(pkt->npc_name, sizeof(pkt->npc_name), npc_name);
+    coop_dialog_copy(pkt->reply, sizeof(pkt->reply), reply);
+    for (i = 0; i < num_options; i++) {
+        coop_dialog_copy(pkt->options[i], sizeof(pkt->options[i]), options != NULL ? options[i] : NULL);
+        if (votes != NULL) {
+            pkt->votes[i] = votes[i] > COOP_DIALOG_MAX_VOTES ? COOP_DIALOG_MAX_VOTES : votes[i];
+        }
+    }
+}
+
+void coop_dialog_fill_close(PacketCoopDialogState* pkt, unsigned int seq, unsigned int line)
+{
+    memset(pkt, 0, COOP_DIALOG_HDR_SIZE);
+    pkt->type = PACKET_COOP_DIALOG_STATE;
+    pkt->kind = COOP_DIALOG_KIND_STATE;
+    pkt->action = COOP_DIALOG_ACT_CLOSE;
+    pkt->seq = seq;
+    pkt->line = line;
+}
+
+void coop_dialog_fill_vote(PacketCoopDialogState* pkt, unsigned int line, int option)
+{
+    memset(pkt, 0, COOP_DIALOG_HDR_SIZE);
+    pkt->type = PACKET_COOP_DIALOG_STATE;
+    pkt->kind = COOP_DIALOG_KIND_VOTE;
+    pkt->vote_index = (signed char)option;
+    pkt->line = line;
+}
+
+int coop_dialog_wire_size(const PacketCoopDialogState* pkt)
+{
+    if (pkt->kind == COOP_DIALOG_KIND_STATE && pkt->action == COOP_DIALOG_ACT_OPEN) {
+        return (int)sizeof(*pkt);
+    }
+    return COOP_DIALOG_HDR_SIZE;
+}
+
+static bool coop_dialog_str_ok(const char* s, size_t cap)
+{
+    return memchr(s, '\0', cap) != NULL;
+}
+
+bool coop_dialog_packet_valid(const PacketCoopDialogState* pkt, int size, bool from_host)
+{
+    int i;
+
+    if (pkt == NULL || size < COOP_DIALOG_HDR_SIZE || size > (int)sizeof(*pkt)
+        || pkt->type != PACKET_COOP_DIALOG_STATE) {
+        return false;
+    }
+    if (!from_host) {
+        /* Client -> host: header only, an option index or -1 (clear). */
+        return pkt->kind == COOP_DIALOG_KIND_VOTE && size == COOP_DIALOG_HDR_SIZE && pkt->action == 0
+            && pkt->num_options == 0 && pkt->seq == 0 && pkt->vote_index >= -1
+            && pkt->vote_index < COOP_DIALOG_MAX_OPTIONS && pkt->votes[0] == 0 && pkt->votes[1] == 0
+            && pkt->votes[2] == 0 && pkt->votes[3] == 0 && pkt->votes[4] == 0 && pkt->votes[5] == 0
+            && pkt->votes[6] == 0 && pkt->votes[7] == 0;
+    }
+    if (pkt->kind != COOP_DIALOG_KIND_STATE || pkt->vote_index != 0 || pkt->seq == 0) {
+        return false;
+    }
+    if (pkt->action == COOP_DIALOG_ACT_CLOSE) {
+        return size == COOP_DIALOG_HDR_SIZE && pkt->num_options == 0;
+    }
+    if (pkt->action != COOP_DIALOG_ACT_OPEN || size != (int)sizeof(*pkt)
+        || pkt->num_options > COOP_DIALOG_MAX_OPTIONS) {
+        return false;
+    }
+    if (!coop_dialog_str_ok(pkt->npc_name, sizeof(pkt->npc_name))
+        || !coop_dialog_str_ok(pkt->reply, sizeof(pkt->reply))) {
+        return false;
+    }
+    for (i = 0; i < COOP_DIALOG_MAX_OPTIONS; i++) {
+        if (!coop_dialog_str_ok(pkt->options[i], sizeof(pkt->options[i]))) {
+            return false;
+        }
+    }
+    for (i = 0; i < 8; i++) {
+        if (pkt->votes[i] > COOP_DIALOG_MAX_VOTES || (i >= pkt->num_options && pkt->votes[i] != 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void coop_dialog_sanitize(char* s)
+{
+    for (; *s != '\0'; s++) {
+        if ((unsigned char)*s < 0x20 || *s == 0x7F) {
+            *s = ' ';
+        }
+    }
+}
+
+void coop_dialog_view_from_packet(CoopDialogView* view, const PacketCoopDialogState* pkt)
+{
+    int i;
+
+    memset(view, 0, sizeof(*view));
+    view->my_vote = -1;
+    view->seq = pkt->seq;
+    view->line = pkt->line;
+    if (pkt->action != COOP_DIALOG_ACT_OPEN) {
+        return;
+    }
+    view->open = true;
+    view->num_options = pkt->num_options;
+    memcpy(view->votes, pkt->votes, sizeof(view->votes));
+    memcpy(view->npc_name, pkt->npc_name, sizeof(view->npc_name));
+    memcpy(view->reply, pkt->reply, sizeof(view->reply));
+    memcpy(view->options, pkt->options, sizeof(view->options));
+    view->npc_name[sizeof(view->npc_name) - 1] = '\0';
+    view->reply[sizeof(view->reply) - 1] = '\0';
+    coop_dialog_sanitize(view->npc_name);
+    coop_dialog_sanitize(view->reply);
+    for (i = 0; i < COOP_DIALOG_MAX_OPTIONS; i++) {
+        view->options[i][sizeof(view->options[i]) - 1] = '\0';
+        coop_dialog_sanitize(view->options[i]);
+    }
+}
+
+void coop_dialog_votes_reset(CoopDialogVotes* v)
+{
+    memset(v, 0, sizeof(*v));
+    memset(v->vote, -1, sizeof(v->vote));
+}
+
+void coop_dialog_votes_new_line(CoopDialogVotes* v, unsigned int line, int num_options)
+{
+    memset(v->vote, -1, sizeof(v->vote));
+    v->open = true;
+    v->line = line;
+    v->num_options = num_options < 0 ? 0 : num_options > COOP_DIALOG_MAX_OPTIONS ? COOP_DIALOG_MAX_OPTIONS : num_options;
+}
+
+bool coop_dialog_vote_apply(CoopDialogVotes* v, int slot, int option, unsigned int line, unsigned int now_ms)
+{
+    if (!v->open || slot < 1 || slot >= 8 || line != v->line || option < -1 || option >= v->num_options) {
+        return false;
+    }
+    if (v->seen[slot] && !coop_lite_interval_elapsed(v->last_ms[slot], now_ms, COOP_DIALOG_VOTE_INTERVAL_MS)) {
+        return false;
+    }
+    v->seen[slot] = true;
+    v->last_ms[slot] = now_ms;
+    if (v->vote[slot] == option) {
+        return false;
+    }
+    v->vote[slot] = (signed char)option;
+    return true;
+}
+
+bool coop_dialog_vote_clear_slot(CoopDialogVotes* v, int slot)
+{
+    if (slot < 1 || slot >= 8 || v->vote[slot] == -1) {
+        return false;
+    }
+    v->vote[slot] = -1;
+    return true;
+}
+
+void coop_dialog_votes_tally(const CoopDialogVotes* v, unsigned char out[COOP_DIALOG_MAX_OPTIONS])
+{
+    int slot;
+
+    memset(out, 0, COOP_DIALOG_MAX_OPTIONS);
+    for (slot = 1; slot < 8; slot++) {
+        if (v->vote[slot] >= 0 && v->vote[slot] < COOP_DIALOG_MAX_OPTIONS) {
+            out[(int)v->vote[slot]]++;
+        }
+    }
+}
+
 size_t coop_lite_coop_packet_min_size(int type)
 {
     switch (type) {
@@ -2729,6 +2939,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return offsetof(PacketCoopStorySync, data);
     case PACKET_COOP_PC_STATS:
         return sizeof(PacketCoopPcStats);
+    case PACKET_COOP_DIALOG_STATE:
+        return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
     case PACKET_COOP_NPC_POS:
         return 8; /* header; entries validated against count */
@@ -6674,6 +6886,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_victim_watch(now_ms);
     coop_lite_host_pc_stats_tick(now_ms);
     coop_lite_host_story_tick(now_ms);
+    coop_lite_host_dialog_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -8250,6 +8463,229 @@ void coop_lite_handle_story_sync(PacketCoopStorySync* pkt)
         coop_story_pending = true; /* applied by the client tick, once the world is ready */
         tig_debug_printf("CoopLite: story: snapshot %u complete (%u bytes)\n", coop_story_rx.snap, coop_story_rx.total);
     }
+}
+
+/* ---- PT36: dialog viewer + voting, game side ------------------------------- */
+
+static CoopDialogVotes coop_dialog_votes;
+static PacketCoopDialogState coop_dialog_tx; /* what the host last published */
+static unsigned int coop_dialog_seq;
+static unsigned int coop_dialog_line;
+static unsigned int coop_dialog_sent_seq[8];
+static CoopDialogView coop_dialog_view;
+static unsigned int coop_dialog_rx_seq;
+static bool coop_dialog_rx_seen;
+static unsigned int coop_dialog_vote_ms;
+static bool coop_dialog_vote_sent;
+static bool coop_dialog_votes_init;
+static void (*coop_dialog_show_hook)(const CoopDialogView* view);
+static void (*coop_dialog_close_hook)(void);
+static void (*coop_dialog_host_refresh_hook)(void);
+
+void coop_lite_set_dialog_view_hooks(void (*show)(const CoopDialogView* view), void (*close)(void),
+    void (*host_refresh)(void))
+{
+    coop_dialog_show_hook = show;
+    coop_dialog_close_hook = close;
+    coop_dialog_host_refresh_hook = host_refresh;
+}
+
+static void coop_lite_dialog_reset(void)
+{
+    if (coop_dialog_view.open && coop_dialog_close_hook != NULL) {
+        coop_dialog_close_hook();
+    }
+    memset(&coop_dialog_view, 0, sizeof(coop_dialog_view));
+    memset(&coop_dialog_tx, 0, sizeof(coop_dialog_tx));
+    memset(coop_dialog_sent_seq, 0, sizeof(coop_dialog_sent_seq));
+    coop_dialog_rx_seen = false;
+    coop_dialog_rx_seq = 0;
+    coop_dialog_vote_sent = false;
+    coop_dialog_seq = 0;
+    coop_dialog_votes_init = true;
+    coop_dialog_votes_reset(&coop_dialog_votes);
+}
+
+static void coop_dialog_votes_ensure(void)
+{
+    if (!coop_dialog_votes_init) {
+        coop_dialog_votes_init = true;
+        coop_dialog_votes_reset(&coop_dialog_votes);
+    }
+}
+
+/* Host: republish the current dialog with the current vote counts. */
+static void coop_dialog_host_republish(void)
+{
+    unsigned char tally[COOP_DIALOG_MAX_OPTIONS];
+    int i;
+
+    coop_dialog_votes_tally(&coop_dialog_votes, tally);
+    for (i = 0; i < COOP_DIALOG_MAX_OPTIONS; i++) {
+        coop_dialog_tx.votes[i] = i < coop_dialog_tx.num_options ? tally[i] : 0;
+    }
+    coop_dialog_tx.seq = ++coop_dialog_seq;
+}
+
+void coop_lite_host_dialog_state(const char* npc_name, const char* reply, int num_options, const char* const* options)
+{
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+    coop_dialog_votes_ensure();
+    coop_dialog_line++;
+    coop_dialog_votes_new_line(&coop_dialog_votes, coop_dialog_line, num_options);
+    coop_dialog_fill_state(&coop_dialog_tx, 0, coop_dialog_line, npc_name, reply, num_options, options, NULL);
+    coop_dialog_host_republish();
+}
+
+void coop_lite_host_dialog_closed(void)
+{
+    if (!tig_net_is_active() || !tig_net_is_host() || !coop_dialog_votes.open) {
+        return;
+    }
+    coop_dialog_votes.open = false;
+    coop_dialog_fill_close(&coop_dialog_tx, ++coop_dialog_seq, coop_dialog_line);
+}
+
+int coop_lite_host_dialog_vote_count(int option)
+{
+    unsigned char tally[COOP_DIALOG_MAX_OPTIONS];
+
+    if (!coop_dialog_votes.open || option < 0 || option >= COOP_DIALOG_MAX_OPTIONS) {
+        return 0;
+    }
+    coop_dialog_votes_tally(&coop_dialog_votes, tally);
+    return tally[option];
+}
+
+/* Host: push the current state to every client that has not seen this seq;
+   forget votes of clients that left. */
+static void coop_lite_host_dialog_tick(unsigned int now_ms)
+{
+    int slot;
+    int depth;
+    bool changed = false;
+
+    (void)now_ms;
+    if (coop_dialog_seq == 0) {
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        if (!tig_net_client_is_active(slot)) {
+            coop_dialog_sent_seq[slot] = 0;
+            if (coop_dialog_votes.open && coop_dialog_vote_clear_slot(&coop_dialog_votes, slot)) {
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        coop_dialog_host_republish();
+        if (coop_dialog_host_refresh_hook != NULL) {
+            coop_dialog_host_refresh_hook();
+        }
+    }
+    depth = tig_net_local_suspend_pause();
+    for (slot = 1; slot < 8; slot++) {
+        if (!tig_net_client_is_active(slot) || coop_dialog_sent_seq[slot] == coop_dialog_tx.seq) {
+            continue;
+        }
+        coop_dialog_sent_seq[slot] = coop_dialog_tx.seq;
+        if (!coop_dialog_votes.open && coop_dialog_tx.action != COOP_DIALOG_ACT_CLOSE) {
+            continue;
+        }
+        tig_net_send_app(&coop_dialog_tx, coop_dialog_wire_size(&coop_dialog_tx), slot);
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static void coop_lite_host_handle_dialog_vote(const PacketCoopDialogState* pkt)
+{
+    int slot = sub_52A530();
+    unsigned int now_ms = (unsigned int)(SDL_GetTicksNS() / 1000000u);
+
+    if (slot < 1 || slot >= 8 || !coop_dialog_votes.open) {
+        return;
+    }
+    if (!coop_dialog_vote_apply(&coop_dialog_votes, slot, pkt->vote_index, pkt->line, now_ms)) {
+        return;
+    }
+    coop_dialog_host_republish();
+    if (coop_dialog_host_refresh_hook != NULL) {
+        coop_dialog_host_refresh_hook();
+    }
+    tig_debug_printf("CoopLite: dialog: slot %d votes option %d\n", slot, (int)pkt->vote_index);
+}
+
+void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt)
+{
+    int size;
+
+    if (pkt == NULL || !tig_net_is_active()) {
+        return;
+    }
+    size = tig_net_last_message_size();
+    if (tig_net_is_host()) {
+        if (!coop_dialog_packet_valid(pkt, size, false)) {
+            tig_debug_printf("CoopLite: dialog: bad vote from slot %d dropped\n", sub_52A530());
+            return;
+        }
+        coop_lite_host_handle_dialog_vote(pkt);
+        return;
+    }
+    if (!coop_dialog_packet_valid(pkt, size, true)) {
+        tig_debug_printf("CoopLite: dialog: bad state packet dropped\n");
+        return;
+    }
+    if (coop_dialog_rx_seen && (int)(pkt->seq - coop_dialog_rx_seq) <= 0) {
+        return; /* stale or repeated */
+    }
+    coop_dialog_rx_seen = true;
+    coop_dialog_rx_seq = pkt->seq;
+    if (pkt->action == COOP_DIALOG_ACT_CLOSE) {
+        if (coop_dialog_view.open && coop_dialog_close_hook != NULL) {
+            coop_dialog_close_hook();
+        }
+        memset(&coop_dialog_view, 0, sizeof(coop_dialog_view));
+        return;
+    }
+    {
+        int my_vote = coop_dialog_view.open && coop_dialog_view.line == pkt->line ? coop_dialog_view.my_vote : -1;
+
+        coop_dialog_view_from_packet(&coop_dialog_view, pkt);
+        coop_dialog_view.my_vote = my_vote < coop_dialog_view.num_options ? my_vote : -1;
+    }
+    if (coop_dialog_show_hook != NULL) {
+        coop_dialog_show_hook(&coop_dialog_view);
+    }
+}
+
+bool coop_lite_client_dialog_vote(int option)
+{
+    PacketCoopDialogState pkt;
+    unsigned int now_ms = (unsigned int)(SDL_GetTicksNS() / 1000000u);
+    int idx;
+    int depth;
+
+    if (!coop_lite_is_client_role() || !tig_net_is_active() || !coop_dialog_view.open || option < 0
+        || option >= coop_dialog_view.num_options) {
+        return false;
+    }
+    if (coop_dialog_vote_sent && !coop_lite_interval_elapsed(coop_dialog_vote_ms, now_ms, COOP_DIALOG_VOTE_INTERVAL_MS)) {
+        return false;
+    }
+    coop_dialog_vote_sent = true;
+    coop_dialog_vote_ms = now_ms;
+    idx = option == coop_dialog_view.my_vote ? -1 : option;
+    coop_dialog_fill_vote(&pkt, coop_dialog_view.line, idx);
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app(&pkt, COOP_DIALOG_HDR_SIZE, 0);
+    tig_net_local_suspend_resume(depth);
+    coop_dialog_view.my_vote = idx;
+    if (coop_dialog_show_hook != NULL) {
+        coop_dialog_show_hook(&coop_dialog_view);
+    }
+    return true;
 }
 
 static unsigned int coop_victim_watch_ms;
@@ -14022,6 +14458,7 @@ static void coop_lite_session_reset_extra(void)
     memset(coop_pcs_obj, 0, sizeof(coop_pcs_obj));
     coop_client_pcs_sig = 0;
     coop_lite_story_reset();
+    coop_lite_dialog_reset();
     memset(coop_remote_fallen, 0, sizeof(coop_remote_fallen));
     memset(coop_slot_hp_damage, 0, sizeof(coop_slot_hp_damage));
     memset(coop_world_prev_ground_cnt, 0, sizeof(coop_world_prev_ground_cnt));
