@@ -14,6 +14,10 @@ add_subdirectory("third_party/sdl3" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/sdl3_mixer" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/zlib" EXCLUDE_FROM_ALL)
 
+# ENet v1.3.18 (MIT) — vendored under third_party/enet; C-only target so we
+# do not require a C++ toolchain just for networking.
+add_subdirectory("third_party/enet" EXCLUDE_FROM_ALL)
+
 add_subdirectory("first_party/bink_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/mss_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/tig" EXCLUDE_FROM_ALL)
@@ -50,6 +54,11 @@ set(SRCS
     "src/game/ci.h"
     "src/game/combat.c"
     "src/game/combat.h"
+    "src/game/coop_lite.c"
+    "src/game/crash_log.c"
+    "src/game/coop_menu.c"
+    "src/game/coop_menu_sys.c"
+    "src/game/coop_lite.h"
     "src/game/context.h"
     "src/game/criticals.h"
     "src/game/critter.c"
@@ -284,6 +293,8 @@ set(SRCS
     "src/ui/logbook_ui.h"
     "src/ui/mainmenu_ui.c"
     "src/ui/mainmenu_ui.h"
+    "src/ui/mp_ctrl_ui.c"
+    "src/ui/mp_ctrl_ui.h"
     "src/ui/options_ui.c"
     "src/ui/options_ui.h"
     "src/ui/roller_ui.c"
@@ -314,6 +325,8 @@ set(SRCS
     "src/ui/written_ui.c"
     "src/ui/written_ui.h"
     "src/net_compat.h"
+    "src/net/tig_net.c"
+    "src/net/tig_net.h"
     "src/main.c"
 )
 
@@ -327,13 +340,163 @@ target_sources(arcanum-ce PUBLIC
     ${SRCS}
 )
 
+# PT28: build id (git short sha at configure time) for the log and title.
+execute_process(
+    COMMAND git rev-parse --short=8 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE COOP_BUILD_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT COOP_BUILD_SHA)
+    set(COOP_BUILD_SHA "unknown")
+endif()
+set_source_files_properties(src/main.c PROPERTIES COMPILE_DEFINITIONS "COOP_BUILD_SHA=\"${COOP_BUILD_SHA}\"")
+
 target_include_directories(arcanum-ce PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(arcanum-ce PUBLIC
     ${TIG_LIBRARY}
+    enet
 )
+
+# Headless transport loopback test (no game data / SDL window required).
+add_executable(tig_net_loopback_test
+    "tests/tig_net_loopback_test.c"
+    "src/net/tig_net.c"
+)
+target_include_directories(tig_net_loopback_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(tig_net_loopback_test PRIVATE
+    enet
+)
+# Minimal tig_debug_printf stub for the test binary (avoid linking full tig/SDL).
+target_compile_definitions(tig_net_loopback_test PRIVATE TIG_NET_TEST_STUB_DEBUG=1)
+if(WIN32)
+    target_link_libraries(tig_net_loopback_test PRIVATE ws2_32 winmm)
+    target_link_libraries(arcanum-ce PUBLIC ws2_32 winmm)
+endif()
+
+enable_testing()
+add_test(NAME tig_net_loopback COMMAND tig_net_loopback_test)
+
+if(NOT WIN32 AND NOT ANDROID)
+    # tig file helpers against the real tig library (native paths only).
+    add_executable(tig_file_empty_dir_test "tests/tig_file_empty_dir_test.c")
+    target_link_libraries(tig_file_empty_dir_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_file_empty_dir COMMAND tig_file_empty_dir_test)
+endif()
+
+add_executable(coop_lite_policy_test
+    "tests/coop_lite_policy_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_policy_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_policy_test PRIVATE enet)
+target_compile_definitions(coop_lite_policy_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_policy_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
+
+add_executable(coop_story_test
+    "tests/coop_story_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_story_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_story_test PRIVATE enet)
+target_compile_definitions(coop_story_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_story_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_story COMMAND coop_story_test)
+
+add_executable(coop_menu_test
+    "tests/coop_menu_test.c"
+    "src/game/coop_menu.c"
+)
+target_include_directories(coop_menu_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+add_test(NAME coop_menu COMMAND coop_menu_test)
+
+add_executable(coop_lite_dialog_filter_test
+    "tests/coop_lite_dialog_filter_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_dialog_filter_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_dialog_filter_test PRIVATE enet)
+target_compile_definitions(coop_lite_dialog_filter_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_dialog_filter_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_dialog_filter COMMAND coop_lite_dialog_filter_test
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(coop_lite_session_sync_test
+    "tests/coop_lite_session_sync_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_session_sync_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_session_sync_test PRIVATE enet)
+target_compile_definitions(coop_lite_session_sync_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_session_sync_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_session_sync COMMAND coop_lite_session_sync_test)
+
+add_executable(coop_lite_net_hardening_test
+    "tests/coop_lite_net_hardening_test.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_net_hardening_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_net_hardening_test PRIVATE enet)
+target_compile_definitions(coop_lite_net_hardening_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_net_hardening_test PRIVATE ws2_32 winmm)
+endif()
+if(NOT WIN32)
+    add_test(NAME coop_lite_net_hardening COMMAND coop_lite_net_hardening_test)
+endif()
+
 
 # SDL HID on Android requires C++ linker.
 if(ANDROID)

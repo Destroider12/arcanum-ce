@@ -9,6 +9,8 @@
 #include "game/antiteleport.h"
 #include "game/area.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/effect.h"
@@ -1961,6 +1963,21 @@ void magictech_effect_summon(MagicTechSummonInfo* summon_info)
     sub_463630(obj);
 }
 
+/* Coop diagnostics: which process was running when another one was asked. */
+static void magictech_reentry_log(MagicTechRunInfo* run_info)
+{
+    MagicTechRunInfo* cur = NULL;
+
+    if (magictech_cur_id >= 0 && magictech_cur_id < 512) {
+        cur = &(magictech_run_info[magictech_cur_id]);
+    }
+    tig_debug_printf("MagicTech: re-entry: asked id %d action %d (spell %d), running id %d action %d (spell %d)\n",
+        run_info->id, run_info->action, run_info->spell,
+        magictech_cur_id,
+        cur != NULL ? cur->action : -1,
+        cur != NULL ? cur->spell : -1);
+}
+
 // 0x451070
 void sub_451070(MagicTechRunInfo* run_info)
 {
@@ -1968,6 +1985,7 @@ void sub_451070(MagicTechRunInfo* run_info)
         tig_debug_printf("\n\nMagicTech: ERROR: Process function is NOT Re-Entrant, Spell: %d (%s)!\n",
             run_info->spell,
             magictech_get_name(run_info->spell));
+        magictech_reentry_log(run_info);
         return;
     }
 
@@ -2505,7 +2523,9 @@ void MTComponentEyeCandy_ProcFunc(void)
                 magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell,
                 mt_id);
 
-            if (tig_net_is_active()) {
+            /* PT28 item 7: the host streams spell eye candy (Packet77) so
+               clients see buff particles come and go. */
+            if (tig_net_is_active() && tig_net_is_host()) {
                 PacketMagicTechEyeCandy pkt;
 
                 pkt.type = 77;
@@ -2532,6 +2552,18 @@ void MTComponentEyeCandy_ProcFunc(void)
         node.animate = true;
         node.flags = magictech_cur_component->data.eye_candy.flags;
         node.parent_obj = magictech_cur_run_info->parent_obj.obj;
+
+        /* PT28 item 7: clients get the same eye candy (Packet77 add). */
+        if (tig_net_is_active() && tig_net_is_host()) {
+            PacketMagicTechEyeCandy pkt;
+
+            pkt.type = 77;
+            pkt.subtype = 1;
+            pkt.oid = obj_get_id(stru_5E6D28.target_obj);
+            pkt.fx_id = magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell;
+            pkt.mt_id = magictech_cur_run_info->id;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
 
         if ((magictech_cur_run_info->flags & MAGICTECH_RUN_0x40) == 0) {
             if (animfx_add(&node)) {
@@ -2636,6 +2668,7 @@ void MTComponentObjFlag_ProcFunc(void)
         && tig_net_is_host()) {
         PacketMagicTechObjFlag pkt;
 
+        pkt.type = 75;
         sub_4F0640(stru_5E6D28.target_obj, &(pkt.field_8));
         sub_4F0640(stru_5E6D28.self_obj, &(pkt.self_oid));
         pkt.fld = magictech_cur_component->data.obj_flag.flags_fld;
@@ -4660,10 +4693,60 @@ void magictech_invocation_init(MagicTechInvocation* mt_invocation, int64_t obj, 
     mt_invocation->flags = 0;
 }
 
+/*
+ * Coop (PT17): the same caster casting the same spell on the same target
+ * again while the first cast is still in its BEGIN phase (double click on
+ * the hotbar). The engine then gets the second cast's anim callback while
+ * the first one is processing and refuses it ("Process function is NOT
+ * Re-Entrant"), leaving a half-run spell behind. Drop the duplicate.
+ */
+static bool magictech_invocation_is_duplicate(const MagicTechInvocation* mt_invocation)
+{
+    int idx;
+
+    if (mt_invocation->source_obj.obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    for (idx = 0; idx < 512; idx++) {
+        const MagicTechRunInfo* r = &(magictech_run_info[idx]);
+
+        if ((r->flags & MAGICTECH_RUN_ACTIVE) != 0
+            && r->action == MAGICTECH_ACTION_BEGIN
+            && r->spell == mt_invocation->spell
+            && r->source_obj.obj == mt_invocation->source_obj.obj
+            && r->target_obj.obj == mt_invocation->target_obj.obj
+            && r->target_obj.obj != OBJ_HANDLE_NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x455AC0
 void magictech_invocation_run(MagicTechInvocation* mt_invocation)
 {
     if (magictech_editor) {
+        return;
+    }
+
+    if (tig_net_is_coop_enabled()
+        && (!tig_net_is_active() || tig_net_is_host())
+        && magictech_invocation_is_duplicate(mt_invocation)) {
+        tig_debug_printf("MagicTech: spell %d (%s) already being cast on that target by that caster — duplicate dropped\n",
+            mt_invocation->spell, magictech_get_name(mt_invocation->spell));
+        return;
+    }
+
+    /*
+     * Coop Lite: a client's own cast runs inside its locally suspended
+     * animation; it must still go to the host as a request (Packet57) so the
+     * effect — e.g. Resurrect on a fallen companion — is resolved there and
+     * synced, instead of only on this client.
+     */
+    if (tig_net_is_coop_enabled() && tig_net_is_locally_suspended() && coop_lite_is_client_role()) {
+        int depth = tig_net_local_suspend_pause();
+        magictech_invocation_run(mt_invocation);
+        tig_net_local_suspend_resume(depth);
         return;
     }
 
@@ -5263,13 +5346,14 @@ void magictech_fx_add(int64_t obj, int fx)
 // 0x456EC0
 void magictech_fx_remove(int64_t obj, int fx)
 {
-    if (tig_net_is_active() && !tig_net_is_host()) {
+    if (tig_net_is_active() && !tig_net_is_host() && !multiplayer_is_locked()) {
         return;
     }
 
     animfx_remove(&spell_eye_candies, obj, fx % 10 + 6 * (fx / 10), -1);
 
-    if (tig_net_is_active()) {
+    /* PT28 item 7: stream the removal to clients (Packet77). */
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
         PacketMagicTechEyeCandy pkt;
 
         pkt.type = 77;
@@ -5278,6 +5362,85 @@ void magictech_fx_remove(int64_t obj, int fx)
         pkt.fx_id = fx % 10 + 6 * (fx / 10);
         pkt.mt_id = -1;
         tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+}
+
+/*
+ * Network invocations carry the sender's object handles, which mean nothing
+ * here (PT17: a host Resurrect crashed the client in the target check).
+ * Every handle is rebuilt from its OID (and location for static objects);
+ * a named object we do not have, or a destroyed one, drops the cast instead
+ * of letting magictech dereference a stale handle. The attacker is optional.
+ */
+static bool mp_invocation_resolve_one(FollowerInfo* fi, bool required, const char* what, int spell)
+{
+    int64_t obj = OBJ_HANDLE_NULL;
+    char oid_str[80];
+
+    if (fi->field_8.objid.type == OID_TYPE_NULL) {
+        fi->obj = OBJ_HANDLE_NULL;
+        return true;
+    }
+    if (!sub_443F80(&obj, &(fi->field_8))
+        || obj == OBJ_HANDLE_NULL
+        || !obj_handle_is_valid(obj)
+        || (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+        objid_id_to_str(oid_str, fi->field_8.objid);
+        tig_debug_printf("MP: invocation spell %d: %s %s not found here%s\n",
+            spell, what, oid_str, required ? " — cast dropped" : " — ignored");
+        fi->obj = OBJ_HANDLE_NULL;
+        return !required;
+    }
+    fi->obj = obj;
+    return true;
+}
+
+bool mp_magictech_resolve_invocation(MagicTechInvocation* mt_invocation)
+{
+    if (mt_invocation == NULL
+        || mt_invocation->spell < 0 || mt_invocation->spell >= MT_SPELL_COUNT) {
+        tig_debug_printf("MP: invocation with bad spell %d dropped\n",
+            mt_invocation != NULL ? mt_invocation->spell : -1);
+        return false;
+    }
+    return mp_invocation_resolve_one(&(mt_invocation->source_obj), true, "source", mt_invocation->spell)
+        /* PT28 item 6: the parent is optional (validated only when named);
+           a parent we do not have must not drop the whole cast. */
+        && mp_invocation_resolve_one(&(mt_invocation->parent_obj), false, "parent", mt_invocation->spell)
+        && mp_invocation_resolve_one(&(mt_invocation->target_obj), true, "target", mt_invocation->spell)
+        && mp_invocation_resolve_one(&(mt_invocation->attacker_obj), false, "attacker", mt_invocation->spell);
+}
+
+void mp_magictech_apply_invocation(MagicTechInvocation* mt_invocation)
+{
+    if (mt_invocation == NULL || !mp_magictech_resolve_invocation(mt_invocation)) {
+        return;
+    }
+    sub_455C30(mt_invocation);
+}
+
+void mp_magictech_apply_eye_candy_ex(int subtype, ObjectID oid, int fx_id, int mt_id)
+{
+    int64_t obj;
+    AnimFxNode node;
+
+    obj = obj_pool_perm_lookup(oid);
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    if (fx_id < 0) {
+        return;
+    }
+    if (subtype == 0) {
+        animfx_remove(&spell_eye_candies, obj, fx_id, mt_id);
+    } else {
+        sub_4CCD20(&spell_eye_candies, &node, obj, mt_id, fx_id);
+        node.animate = true;
+        /* PT28: a local cast may already show it - no double. */
+        if (!animfx_has(&node)) {
+            animfx_add(&node);
+        }
     }
 }
 
@@ -5335,6 +5498,7 @@ void sub_457060(MagicTechRunInfo* run_info)
         tig_debug_printf("\n\nMagicTech: ERROR: Process function is NOT Re-Entrant, Spell: %d (%s)!\n",
             run_info->spell,
             magictech_get_name(run_info->spell));
+        magictech_reentry_log(run_info);
         return;
     }
 

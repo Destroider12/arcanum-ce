@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include <SDL3/SDL_main.h>
 
@@ -11,8 +12,11 @@
 #include <tig/tig.h>
 
 #include "game/ai.h"
+#include "game/coop_lite.h"
+#include "game/coop_menu.h"
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/crash_log.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -20,6 +24,7 @@
 #include "game/gmovie.h"
 #include "game/gsound.h"
 #include "game/highres_config.h"
+#include "net/tig_net.h"
 #include "game/hrp.h"
 #include "game/item.h"
 #include "game/level.h"
@@ -27,6 +32,7 @@
 #include "game/location.h"
 #include "game/magictech.h"
 #include "game/map.h"
+#include "game/multiplayer.h"
 #include "game/name.h"
 #include "game/obj.h"
 #include "game/object.h"
@@ -55,6 +61,36 @@ static void main_loop(void);
 static void handle_mouse_scroll(void);
 static void handle_keyboard_scroll(void);
 static void build_cmd_line(char* dst, size_t size, int argc, char** argv);
+
+/* 0 = no coop mode, 1 = -host, 2 = -join (window title). */
+static int coop_cli_mode;
+
+/* Exact argv token "name" (value = next token unless it is another switch)
+   or "name=value". */
+static bool coop_arg_find(int argc, char** argv, const char* name, const char** value)
+{
+    size_t len = strlen(name);
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (SDL_strncasecmp(argv[i], name, len) != 0) {
+            continue;
+        }
+        if (argv[i][len] == '\0') {
+            if (value != NULL) {
+                *value = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[i + 1] : NULL;
+            }
+            return true;
+        }
+        if (argv[i][len] == '=') {
+            if (value != NULL) {
+                *value = argv[i][len + 1] != '\0' ? argv[i] + len + 1 : NULL;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 // 0x59A040
 static float gamma = 1.0f;
@@ -86,6 +122,21 @@ int main(int argc, char** argv)
     // Convert args array to WinMain-like lpCmdLine.
     char lpCmdLine[260];
     build_cmd_line(lpCmdLine, sizeof(lpCmdLine), argc, argv);
+
+    /* PT23: -log <path> mirrors every debug line into a file (from argv:
+       lpCmdLine is lowercased and length-capped). */
+    for (int i = 1; i + 1 < argc; i++) {
+        if (SDL_strcasecmp(argv[i], "-log") == 0) {
+            tig_debug_set_log_file(argv[i + 1]);
+            break;
+        }
+    }
+
+#ifndef COOP_BUILD_SHA
+#define COOP_BUILD_SHA "unknown"
+#endif
+    /* PT28: which build is this (first log line, window title). */
+    tig_debug_printf("Arcanum CE Coop Lite build %s\n", COOP_BUILD_SHA);
 
     highres_config_load();
     highres_config = highres_config_get();
@@ -148,6 +199,46 @@ int main(int argc, char** argv)
         gamelib_cheat_level_set(3);
     }
 
+    /* Coop Lite: inactive unless -coop. Optional -host [port] / -join host[:port].
+       Review PT24: whole argv tokens, not substrings of lpCmdLine (a -log
+       path like D:\\my-coop-host\\x.log must not switch modes). */
+    coop_cli_mode = 0;
+    coop_menu_set_args(argc, argv); /* PT33: the main menu relaunches with -host / -join */
+    if (coop_arg_find(argc, argv, "-coop", NULL)) {
+        const char* val = NULL;
+
+        tig_net_set_coop_enabled(true);
+        if (coop_arg_find(argc, argv, "-host", &val)) {
+            int port = TIG_NET_DEFAULT_PORT;
+
+            if (val != NULL && *val >= '0' && *val <= '9') {
+                port = atoi(val);
+            }
+            tig_net_configure_host(port);
+            coop_cli_mode = 1;
+            tig_debug_printf("Coop: will host on port %d\n", port);
+        } else if (coop_arg_find(argc, argv, "-join", &val)) {
+            char hostbuf[256] = { 0 };
+            int port = TIG_NET_DEFAULT_PORT;
+            char* colon;
+
+            if (val == NULL || sscanf(val, "%255s", hostbuf) != 1 || hostbuf[0] == '\0') {
+                tig_debug_printf("Coop: -join needs host[:port] - not joining\n");
+            } else {
+                /* IPv4 / hostname only: ENet here has no IPv6. */
+                colon = strchr(hostbuf, ':');
+                if (colon != NULL) {
+                    *colon = '\0';
+                    port = atoi(colon + 1);
+                }
+                tig_net_configure_join(hostbuf, port);
+                coop_menu_remember_address(val); /* PT33: the menu's Join reuses it */
+                coop_cli_mode = 2;
+                tig_debug_printf("Coop: will join %s:%d\n", hostbuf, port);
+            }
+        }
+    }
+
     pch = strstr(lpCmdLine, "-pathlimit");
     if (pch != NULL) {
         value = atoi(pch + 10);
@@ -206,6 +297,15 @@ int main(int argc, char** argv)
     // Specify window name.
     init_info.flags |= TIG_INITIALIZE_SET_WINDOW_NAME;
     init_info.window_name = "Arcanum: Of Steamworks & Magick Obscura - Community Edition";
+    /* Coop: say which side this window is (PT18 GUI: a desktop tester
+       drove the host window believing it was the client's). */
+    if (coop_cli_mode == 1) {
+        init_info.window_name = "Arcanum CE - CO-OP HOST [" COOP_BUILD_SHA "]";
+    } else if (coop_cli_mode == 2) {
+        init_info.window_name = "Arcanum CE - CO-OP CLIENT [" COOP_BUILD_SHA "]";
+    }
+
+    crash_log_install();
 
     if (tig_init(&init_info) != TIG_OK) {
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
@@ -275,6 +375,12 @@ int main(int argc, char** argv)
         tig_window_destroy(game_init_info.iso_window_handle);
         tig_exit();
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
+    }
+
+    if (tig_net_is_coop_enabled()) {
+        if (!multiplayer_start()) {
+            tig_debug_printf("Coop: multiplayer_start failed\n");
+        }
     }
 
     if (!gamelib_mod_load(gamelib_default_module_name_get())) {
@@ -385,6 +491,24 @@ void main_loop(void)
 
         tig_ping();
         gamelib_ping();
+
+        /* Coop Lite: party-wipe reload / dev save, outside gamelib_ping. */
+        {
+            char coop_save[TIG_MAX_PATH];
+
+            if (coop_lite_take_reload_request(coop_save, sizeof(coop_save))) {
+                if (!mainmenu_ui_coop_reload_save(coop_save)) {
+                    coop_lite_reload_failed();
+                }
+                continue;
+            }
+            if (coop_lite_take_dev_save_request()) {
+                coop_lite_export_local_character();
+                tig_debug_printf("CoopLite: dev save Slot9990: %s\n",
+                    gamelib_save("Slot9990", "Coop dev save") ? "ok" : "FAILED");
+            }
+        }
+
         iso_redraw();
         tig_window_display();
 
@@ -429,6 +553,13 @@ void main_loop(void)
                             && esc_mode != INTGAME_MODE_BARTER) {
                             intgame_mode_set(INTGAME_MODE_MAIN);
                             break;
+                        }
+                        if (tig_net_is_coop_enabled()) {
+                            tig_debug_printf("Main: Esc menu: dialog=%d wmap=%d tb=%d mode=%d\n",
+                                dialog_ui_is_local_pc_in_dialog() ? 1 : 0,
+                                wmap_ui_is_created() ? 1 : 0,
+                                combat_turn_based_is_active() ? 1 : 0,
+                                (int)esc_mode);
                         }
                         if (dialog_ui_is_local_pc_in_dialog()
                             || wmap_ui_is_created()

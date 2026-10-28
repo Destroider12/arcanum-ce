@@ -1,9 +1,12 @@
 #include "game/critter.h"
 
+#include <string.h>
+
 #include "game/ai.h"
 #include "game/anim.h"
 #include "game/background.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/effect.h"
 #include "game/gamelib.h"
 #include "game/item.h"
@@ -12,6 +15,8 @@
 #include "game/magictech.h"
 #include "game/map.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/monstergen.h"
 #include "game/mt_item.h"
 #include "game/object.h"
@@ -26,6 +31,8 @@
 #include "game/stat.h"
 #include "game/tf.h"
 #include "game/ui.h"
+#include "net/tig_net.h"
+#include "game/coop_lite.h"
 
 typedef enum FatigueEventType {
     FATIGUE_EVENT_RECOVERY,
@@ -478,6 +485,17 @@ int critter_fatigue_damage_set(int64_t obj, int value)
     obj_field_int32_set(obj, OBJ_F_CRITTER_FATIGUE_DAMAGE, value);
     ui_refresh_fatigue_bar(obj);
 
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        Packet100 pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 100;
+        pkt.subtype = 13;
+        pkt.d.z.field_8 = obj_get_id(obj);
+        pkt.d.z.field_38 = object_hp_damage_get(obj);
+        pkt.d.z.field_3C = value;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+
     if (value != 0 && !obj_is_proto(obj)) {
         // Schedule fatigue recovery every 80 game seconds (10 RL seconds).
         critter_fatigue_timeevent_schedule(obj, FATIGUE_EVENT_RECOVERY, 80000);
@@ -743,8 +761,10 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
     // Play dying animation.
     anim_goal_dying(victim_obj, anim);
 
-    // Schedule body decay.
-    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0) {
+    // Schedule body decay. Co-op: a fallen player's body waits for a
+    // resurrect or the party reload; it never decays away.
+    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0
+        && !(tig_net_is_coop_enabled() && obj_field_int32_get(victim_obj, OBJ_F_TYPE) == OBJ_TYPE_PC)) {
         critter_decay_timeevent_schedule(victim_obj);
     }
 
@@ -878,6 +898,12 @@ bool critter_follow(int64_t follower_obj, int64_t leader_obj, bool force)
 {
     unsigned int flags;
 
+    /* Coop: followers are host-owned; clients only receive them. */
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        tig_debug_printf("critter_follow: refused on coop client\n");
+        return false;
+    }
+
     // Validate follower is an NPC.
     if (obj_field_int32_get(follower_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
         return false;
@@ -936,6 +962,10 @@ bool critter_disband(int64_t obj, bool force)
 {
     int64_t leader_obj;
     int64_t v1;
+
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        return false;
+    }
 
     leader_obj = critter_leader_get(obj);
     if (leader_obj != OBJ_HANDLE_NULL) {
@@ -1836,8 +1866,6 @@ int critter_xp_worth(int64_t obj)
  */
 void critter_give_xp(int64_t obj, int xp_gain)
 {
-    int xp;
-
     if (obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return;
     }
@@ -1855,6 +1883,25 @@ void critter_give_xp(int64_t obj, int xp_gain)
         xp_gain -= xp_gain / 2;
         break;
     }
+
+    // Co-op: XP is the host's (clients get it with the PC build sync), and
+    // the host splits it among the living party.
+    if (tig_net_is_active() && tig_net_is_coop_enabled()) {
+        if (!tig_net_is_host() || coop_lite_host_share_xp(obj, xp_gain)) {
+            return;
+        }
+    }
+
+    critter_award_xp(obj, xp_gain);
+}
+
+/**
+ * Adds already difficulty-adjusted XP to a living PC (the vanilla tail of
+ * critter_give_xp, also used by the co-op party split).
+ */
+void critter_award_xp(int64_t obj, int xp_gain)
+{
+    int xp;
 
     // Single-player game - just give all reward to the local PC.
     if (!critter_is_dead(obj)) {

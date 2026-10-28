@@ -9,7 +9,9 @@
 #include "game/hrp.h"
 #include "game/item.h"
 #include "game/mes.h"
+#include "game/coop_lite.h"
 #include "game/mp_utils.h"
+#include "net/tig_net.h"
 #include "game/multiplayer.h"
 #include "game/obj.h"
 #include "game/obj_private.h"
@@ -87,6 +89,7 @@ static void sub_5786C0(int64_t obj);
 static void sub_578760(int64_t obj);
 static void sub_5788C0(int64_t a1, int64_t a2, int a3, int a4);
 static void sub_579770(int64_t from_obj, int64_t to_obj);
+static bool inven_ui_dev_loot(int op);
 static bool sub_579840(int64_t obj, bool a2);
 static void sub_579B60(int64_t obj);
 static void inven_ui_target_inventory_scrollbar_create(void);
@@ -418,6 +421,8 @@ static int dword_739F84;
 // 0x572060
 bool inven_ui_init(GameInitInfo* init_info)
 {
+    coop_lite_set_inven_open_hook(inven_ui_open);
+    coop_lite_set_dev_loot_hook(inven_ui_dev_loot);
     TigFont font;
 
     (void)init_info;
@@ -476,6 +481,42 @@ bool inven_ui_open(int64_t pc_obj, int64_t target_obj, int mode)
 {
     if (sub_572340()) {
         return true;
+    }
+
+    /*
+     * Coop client, own inventory / barter: open the window here (review H4,
+     * PT11 — the vanilla Packet100/12 handshake below never opens it on a
+     * client). Transfers go to the host as Packet81, which answers with an
+     * authoritative inventory sync.
+     */
+    if (coop_lite_client_opens_inven_locally(mode, pc_obj)) {
+        bool ok;
+
+        if (!sub_572370(pc_obj, target_obj, mode)) {
+            return false;
+        }
+        if (!sub_572510(pc_obj, target_obj, mode)) {
+            return false;
+        }
+        if (mode == INVEN_UI_MODE_BARTER) {
+            coop_lite_client_request_barter(pc_obj, target_obj, COOP_BARTER_OPEN);
+        } else if (mode == INVEN_UI_MODE_LOOT || mode == INVEN_UI_MODE_STEAL) {
+            /* PT18: the host checks the target and sends its inventory. */
+            coop_lite_client_request_barter(pc_obj, target_obj,
+                mode == INVEN_UI_MODE_LOOT ? COOP_BARTER_OPEN_LOOT : COOP_BARTER_OPEN_STEAL);
+        }
+        /* Same open-time prep the host does, so the stock looks right
+           before the host's sync lands. Local only. */
+        tig_net_local_suspend_begin();
+        sub_572640(pc_obj, target_obj, mode);
+        tig_net_local_suspend_end();
+        ok = inven_ui_create(pc_obj, target_obj, mode);
+        tig_debug_printf("InvenUI: coop client opened %s locally: %s\n",
+            mode == INVEN_UI_MODE_BARTER ? "barter"
+                : (mode == INVEN_UI_MODE_LOOT ? "loot"
+                    : (mode == INVEN_UI_MODE_STEAL ? "pickpocket" : "inventory")),
+            ok ? "ok" : "failed");
+        return ok;
     }
 
     if (tig_net_is_active() && !tig_net_is_host()) {
@@ -1115,6 +1156,15 @@ void inven_ui_destroy(void)
 
     inven_ui_created = false;
     sub_4A53B0(inven_ui_pc_obj, 0);
+
+    if (inven_ui_mode == INVEN_UI_MODE_BARTER
+        && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        coop_lite_client_request_barter(inven_ui_pc_obj, qword_682C78, COOP_BARTER_CLOSE);
+    } else if ((inven_ui_mode == INVEN_UI_MODE_LOOT || inven_ui_mode == INVEN_UI_MODE_STEAL)
+        && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        /* PT18 GUI: end the host's loot / pickpocket session too. */
+        coop_lite_client_request_barter(inven_ui_pc_obj, qword_6813A8, COOP_BARTER_CLOSE);
+    }
 
     if ((inven_ui_mode == INVEN_UI_MODE_LOOT
             || inven_ui_mode == INVEN_UI_MODE_IDENTIFY)
@@ -2289,6 +2339,12 @@ bool sub_575100(bool* a1)
     v1 = inven_ui_drag_item_obj;
     sub_575770();
 
+    if (coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        /* PT18: the host rolls; its inventory sync shows the outcome. */
+        coop_lite_client_request_steal(inven_ui_pc_obj, qword_682C78, v1, true);
+        return true;
+    }
+
     if (skill_plant_item(inven_ui_pc_obj, qword_682C78, v1)) {
         *a1 = true;
     }
@@ -2307,6 +2363,11 @@ bool sub_575180(bool* a1)
 
     v1 = inven_ui_drag_item_obj;
     sub_575770();
+
+    if (coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
+        coop_lite_client_request_steal(inven_ui_pc_obj, qword_682C78, v1, false);
+        return true;
+    }
 
     if (skill_steal_item(inven_ui_pc_obj, qword_682C78, v1)) {
         *a1 = true;
@@ -4134,6 +4195,9 @@ bool sub_578EA0(Packet81* pkt)
 
     if (tig_net_is_active()
         && !tig_net_is_host()) {
+        /* Coop: the host knows our gold/ammo stack by its own OID; map
+           the sent copy only (v2 above is our local stack). */
+        coop_lite_client_map_stack_oid(&(pkt->field_10));
         tig_net_send_app_all(pkt, sizeof(*pkt));
     }
 
@@ -4180,6 +4244,9 @@ bool sub_578EA0(Packet81* pkt)
                     } else if ((flags & 0x02) != 0) {
                         object_pickup(gold_obj, v1);
                         sub_466E50(gold_obj, loc);
+                        if (obj_field_int32_get(v1, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                            coop_lite_mark_player_drop(gold_obj);
+                        }
                     }
                 }
             } else {
@@ -4210,6 +4277,9 @@ bool sub_578EA0(Packet81* pkt)
                     } else if ((flags & 0x02) != 0) {
                         object_pickup(ammo_obj, v1);
                         sub_466E50(ammo_obj, loc);
+                        if (obj_field_int32_get(v1, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                            coop_lite_mark_player_drop(ammo_obj);
+                        }
                     }
                 }
             } else {
@@ -4381,6 +4451,76 @@ void sub_579770(int64_t from_obj, int64_t to_obj)
     }
 
     item_list_free(items);
+}
+
+/* Coop dev: the loot window's Take All button (op 0) or closing it (op 1). */
+static bool inven_ui_dev_loot(int op)
+{
+    if (!inven_ui_created || (inven_ui_mode != INVEN_UI_MODE_LOOT && inven_ui_mode != INVEN_UI_MODE_STEAL)) {
+        return false;
+    }
+    if (op == 2) {
+        /* The pickpocket drag: the target's first non-worn item dropped on
+           our grid (what sub_574F00's drop does via sub_575180). */
+        int64_t* items;
+        int64_t pick = OBJ_HANDLE_NULL;
+        int cnt;
+        int idx;
+        bool done = false;
+
+        if (inven_ui_mode != INVEN_UI_MODE_STEAL) {
+            return false;
+        }
+        cnt = item_list_get(qword_682C78, &items);
+        for (idx = 0; idx < cnt && pick == OBJ_HANDLE_NULL; idx++) {
+            if (!IS_WEAR_INV_LOC(item_inventory_location_get(items[idx]))
+                && (obj_field_int32_get(items[idx], OBJ_F_ITEM_FLAGS) & OIF_NO_DISPLAY) == 0) {
+                pick = items[idx];
+            }
+        }
+        item_list_free(items);
+        if (pick == OBJ_HANDLE_NULL) {
+            return false;
+        }
+        tig_debug_printf("InvenUI: dev: pickpocket drag of the target's first item\n");
+        sub_573630(pick);
+        qword_681450 = qword_682C78; /* dragged out of the target */
+        return sub_575180(&done);
+    }
+    if (op == 3) {
+        /* PT26: our first ammo stack dropped into the loot target. */
+        int64_t* items;
+        int cnt;
+        int idx;
+        int loc;
+        bool done = false;
+
+        if (inven_ui_mode != INVEN_UI_MODE_LOOT) {
+            return false;
+        }
+        qword_681450 = inven_ui_pc_obj;
+        cnt = item_list_get(inven_ui_pc_obj, &items);
+        for (idx = 0; idx < cnt && !done; idx++) {
+            if (obj_field_int32_get(items[idx], OBJ_F_TYPE) == OBJ_TYPE_AMMO
+                && item_check_insert(items[idx], qword_6813A8, &loc) == ITEM_CANNOT_OK) {
+                tig_debug_printf("InvenUI: dev: put ammo into the target\n");
+                sub_5788C0(items[idx], qword_6813A8, loc, 0x21);
+                done = true;
+            }
+        }
+        item_list_free(items);
+        return done;
+    }
+    if (op == 0) {
+        if (inven_ui_mode != INVEN_UI_MODE_LOOT) {
+            return false;
+        }
+        tig_debug_printf("InvenUI: dev: take all (%d items in the target)\n",
+            obj_field_int32_get(qword_6813A8, OBJ_F_CRITTER_INVENTORY_NUM));
+        sub_579770(qword_6813A8, inven_ui_pc_obj);
+        return true;
+    }
+    return intgame_mode_set(INTGAME_MODE_MAIN);
 }
 
 // 0x579840

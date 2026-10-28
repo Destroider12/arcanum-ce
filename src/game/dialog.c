@@ -24,6 +24,7 @@
 #include "game/tc.h"
 #include "game/timeevent.h"
 #include "game/ui.h"
+#include "game/coop_lite.h"
 
 typedef enum GeneratedDialog {
     GD_PC2M,
@@ -1898,6 +1899,15 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             if (SDL_strcasecmp(off_5A0750[act], code) == 0) {
                 break;
             }
+        }
+
+        /* Coop client: shared-state actions (quests, flags, join, items …)
+           are host-owned. Covers NPC-line actions too, which run on display. */
+        if (act < DIALOG_ACTION_COUNT
+            && coop_lite_is_client_role()
+            && coop_lite_dialog_action_blocked(code)) {
+            tig_debug_printf("Dialog: coop client skipped action '%s' (host-owned)\n", code);
+            continue;
         }
 
         switch (act) {

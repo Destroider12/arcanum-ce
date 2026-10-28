@@ -513,6 +513,17 @@ void scroll_by(int64_t dx, int64_t dy)
 }
 
 /**
+ * Scrolls the view by a pixel delta (same path as edge scrolling). Used by
+ * coop clients to keep their own PC in view while it walks.
+ */
+void scroll_view_by(int64_t dx, int64_t dy)
+{
+    if (dx != 0 || dy != 0) {
+        scroll_by(dx, dy);
+    }
+}
+
+/**
  * Sets the scroll frame rate.
  *
  * 0x40E890

@@ -2,6 +2,7 @@
 
 #include "game/anim.h"
 #include "game/background.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/description.h"
 #include "game/descriptions.h"
@@ -750,6 +751,10 @@ bool item_drop_ex(int64_t item_obj, int distance)
 
     item_remove(item_obj);
     sub_466E50(item_obj, loc);
+    if (obj_type == OBJ_TYPE_PC) {
+        coop_lite_mark_player_drop(item_obj);
+        coop_lite_host_world_dirty();
+    }
 
     if (obj_type == OBJ_TYPE_NPC) {
         switch (obj_field_int32_get(item_obj, OBJ_F_TYPE)) {
@@ -2082,6 +2087,12 @@ void sub_463E20(int64_t obj)
     int idx;
     int64_t item_obj;
 
+    if (tig_net_is_coop_client() && tig_net_is_locally_suspended()) {
+        /* PT33: the window's local open-time prep (suspended) used to roll
+           loot here with the client's own RNG; the host sync then deleted
+           it. Only the host generates loot. */
+        return;
+    }
     if (tig_net_is_active()
         && !tig_net_is_host()) {
         sub_4EFBA0(obj);
@@ -3931,6 +3942,15 @@ bool sub_466EF0(int64_t obj, int64_t loc)
     int inventory_location;
     int64_t new_container_obj;
     bool rc = false;
+
+    // PT25 co-op: no junk piles. A second item dropped on a tile went into
+    // a pile container the host had just created; clients never learn new
+    // containers or their contents, so the host's drops vanished for them
+    // (and the item already lying there was pruned). Loose items are world
+    // state ground items every client sees.
+    if (tig_net_is_coop_enabled()) {
+        return false;
+    }
 
     object_list_location(loc, OBJ_TM_CONTAINER, &objects);
     node = objects.head;

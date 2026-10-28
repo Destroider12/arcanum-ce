@@ -381,6 +381,13 @@ bool script_load_hdr(Script* scr);
 bool script_flags(Script* scr, ScriptFlags* flags_ptr);
 void script_play_explosion_fx(int64_t obj);
 
+/**
+ * True if the compiled script contains actions that change quests, story state,
+ * global flags/vars, reputation, world map marks, or other campaign-global state.
+ * Used by Coop Lite to decide whether non-host dialog is safe.
+ */
+bool script_has_global_side_effects(int script_num);
+
 static inline bool sfo_is_any(uint8_t type)
 {
     return type == SFO_ANY_FOLLOWER

@@ -1,11 +1,15 @@
 #include "ui/dialog_ui.h"
 
+#include <string.h>
+
 #include <stdio.h>
 
 #include "game/ai.h"
 #include "game/anim.h"
 #include "game/broadcast.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/dialog.h"
 #include "game/gsound.h"
@@ -60,6 +64,7 @@ static bool dialog_ui_local_pc_dialog_active;
 // 0x567330
 bool dialog_ui_init(GameInitInfo* init_info)
 {
+    coop_lite_set_dialog_end_hook(dialog_ui_end_dialog);
     int index;
 
     (void)init_info;
@@ -120,6 +125,51 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     DialogUiEntry* entry;
     char path[TIG_MAX_PATH];
     char str[2000];
+    CoopTalkPolicy talk_policy;
+
+    /*
+     * Coop Lite: clients only talk to merchants (reduced dialog, story nodes
+     * filtered in display/process). Everyone else — quest givers, story NPCs,
+     * other players' followers, citizens — just barks.
+     */
+    talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
+    if (tig_net_is_coop_enabled()) {
+        char npc_name[256];
+
+        npc_name[0] = '\0';
+        if (npc_obj != OBJ_HANDLE_NULL) {
+            object_examine(npc_obj, pc_obj, npc_name);
+        }
+        tig_debug_printf("DialogUI: start pc_local=%d npc='%s' script=%d line=%d policy=%d\n",
+            player_is_local_pc_obj(pc_obj) ? 1 : 0, npc_name, script_num, script_line, (int)talk_policy);
+    }
+    /* Coop host: a remote client's PC never runs dialog here — its owner
+       runs its own (merchant-only) dialog. Doing it here would also take
+       the single dialog entry from the host's own conversation. */
+    if (tig_net_is_coop_enabled() && tig_net_is_host() && !player_is_local_pc_obj(pc_obj)
+        && pc_obj != OBJ_HANDLE_NULL && obj_field_int32_get(pc_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        tig_debug_printf("DialogUI: remote PC dialog skipped on host\n");
+        return;
+    }
+    if (talk_policy == COOP_TALK_BLOCK) {
+        return;
+    }
+    if (talk_policy == COOP_TALK_BARK || talk_policy == COOP_TALK_BARK_FOLLOWER) {
+        int speech_id = -1;
+
+        str[0] = '\0';
+        if (talk_policy == COOP_TALK_BARK) {
+            /* The NPC's own generic farewell (race/gender aware). */
+            dialog_copy_npc_farewell_msg(npc_obj, pc_obj, str, &speech_id);
+        }
+        if (str[0] == '\0') {
+            snprintf(str, sizeof(str), "%s", coop_lite_bark_text(talk_policy));
+            speech_id = -1;
+        }
+        tig_debug_printf("DialogUI: coop client bark (policy %d)\n", (int)talk_policy);
+        dialog_ui_float_line(npc_obj, pc_obj, str, speech_id);
+        return;
+    }
 
     if (critter_is_dead(pc_obj)) {
         return;
@@ -253,6 +303,16 @@ void sub_5679C0(DialogUiEntry* entry)
 // 0x567A10
 bool dialog_ui_is_local_pc_in_dialog(void)
 {
+    /* Coop (PT11: host Esc menu had no Save/Load): a dialog flag left set
+       after the dialog window went away — e.g. a remote PC's dialog reusing
+       the single entry — must not lock the menu forever. */
+    if (dialog_ui_local_pc_dialog_active
+        && tig_net_is_coop_enabled()
+        && intgame_mode_get() != INTGAME_MODE_DIALOG
+        && intgame_mode_get() != INTGAME_MODE_BARTER) {
+        tig_debug_printf("DialogUI: stale local dialog flag cleared (mode %d)\n", (int)intgame_mode_get());
+        dialog_ui_local_pc_dialog_active = false;
+    }
     return dialog_ui_local_pc_dialog_active;
 }
 
@@ -283,6 +343,15 @@ bool dialog_ui_process_option(DialogUiEntry* entry, int option)
     bool is_pc;
 
     is_pc = player_is_local_pc_obj(entry->state.pc_obj);
+
+    if (coop_lite_is_client_role()
+        && option >= 0 && option < entry->state.num_options
+        && !coop_lite_dialog_option_allowed(entry->state.actions[option],
+            entry->state.field_17F0[option])) {
+        dialog_ui_float_line(entry->state.npc_obj, entry->state.pc_obj,
+            "Only the party leader can discuss this matter.", -1);
+        return true;
+    }
     dialog_ui_pc_say(entry->state.pc_obj,
         entry->state.npc_obj,
         TB_TYPE_GREEN,
@@ -363,6 +432,16 @@ bool dialog_ui_message_filter(TigMessage* msg)
 
     entry = sub_567420(player_get_local_pc_obj());
 
+    /* Coop client: Esc always leaves the (reduced) dialog, so a dialog whose
+       options are all host-only can never trap the player (PT8). */
+    if (coop_lite_is_client_role()
+        && msg->type == TIG_MESSAGE_KEYBOARD
+        && msg->data.keyboard.pressed
+        && msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE) {
+        dialog_ui_end_dialog(entry->state.pc_obj, 0);
+        return true;
+    }
+
     option = intgame_dialog_get_option(msg);
     if (option == -1) {
         sub_5517A0(msg);
@@ -410,6 +489,8 @@ void dialog_ui_execute_script(DialogUiEntry* entry, int line)
 void dialog_ui_display(DialogUiEntry* entry)
 {
     int index;
+    int out;
+    bool filter;
 
     dialog_ui_npc_say(entry->state.npc_obj,
         entry->state.pc_obj,
@@ -419,6 +500,39 @@ void dialog_ui_display(DialogUiEntry* entry)
         entry->state.speech_id);
 
     if (player_is_local_pc_obj(entry->state.pc_obj)) {
+        /*
+         * Non-host companions: blank out quest/story responses in place.
+         * Indices must not move — the dialog engine reads fixed slots
+         * (e.g. rumor/skill/spell replies use options/field_17F0/field_1804[1]).
+         * dialog_ui_process_option rejects the blanked entries.
+         */
+        /* Not tig_net_is_active(): the client's talk runs under local
+           suspension, where net reads inactive (Playtest 7: no filter). */
+        filter = coop_lite_is_client_role();
+        if (filter) {
+            out = 0;
+            for (index = 0; index < entry->state.num_options; index++) {
+                if (coop_lite_dialog_option_allowed(entry->state.actions[index],
+                        entry->state.field_17F0[index])) {
+                    out++;
+                    continue;
+                }
+                strncpy(entry->state.options[index], "(Only the party leader can discuss this.)",
+                    sizeof(entry->state.options[0]) - 1);
+                entry->state.options[index][sizeof(entry->state.options[0]) - 1] = '\0';
+            }
+            if (out == 0) {
+                /* Nothing selectable: leave a harmless goodbye so the
+                   dialog can be closed. */
+                strncpy(entry->state.options[0], "(Leave.)",
+                    sizeof(entry->state.options[0]) - 1);
+                entry->state.options[0][sizeof(entry->state.options[0]) - 1] = '\0';
+                entry->state.actions[0] = NULL;
+                entry->state.field_17F0[0] = 1; /* end dialog */
+                entry->state.num_options = 1;
+            }
+        }
+
         intgame_dialog_clear();
 
         for (index = 0; index < entry->state.num_options; index++) {
