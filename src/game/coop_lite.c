@@ -155,6 +155,10 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/portrait.h"
 #include "game/portal.h"
 #include "game/skill.h"
+#include "game/quest.h"
+#include "game/rumor.h"
+#include "game/reputation.h"
+#include "ui/logbook_ui.h"
 #include "game/random.h"
 #include "game/gfade.h"
 #include "ui/wmap_ui.h"
@@ -1040,6 +1044,9 @@ static void coop_lite_barter_end(int slot, const char* why);
 static void coop_lite_host_victim_watch(unsigned int now_ms);
 static void coop_lite_host_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
+static void coop_lite_host_story_tick(unsigned int now_ms);
+static void coop_lite_client_story_tick(unsigned int now_ms);
+static void coop_lite_story_reset(void);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 void coop_lite_client_dev_loot_tick(unsigned int now_ms);
@@ -1929,6 +1936,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_ROSTER: /* other clients' PCs → client */
     case PACKET_COOP_OBJ_BLOB: /* item blob → client (P1-2) */
     case PACKET_COOP_WORLD_STATE: /* §7 world state → client */
+    case PACKET_COOP_STORY_SYNC: /* PT35 quests / rumors / reputation → client */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -2344,6 +2352,345 @@ bool coop_lite_packet_allowed(int type, bool receiver_is_host, int sender_slot)
     return role != COOP_MP_PKT_HOST_RESOLVE;
 }
 
+/* ---- PT35: story sync, pure part (blob codec, merge, chunking) ------------ */
+
+#define COOP_STORY_MAGIC 0x59525453u /* 'STRY' */
+#define COOP_STORY_REC 12 /* every record is 12 bytes, 4 for global quests */
+#define COOP_STORY_BOTCHED 0x100
+#define COOP_STORY_STATES 7 /* QUEST_STATE_COUNT */
+
+static int coop_story_applying;
+
+bool coop_lite_story_write_blocked(void)
+{
+    return tig_net_is_active() && !tig_net_is_host() && coop_story_applying == 0;
+}
+
+void coop_story_clear(CoopStory* s)
+{
+    memset(s, 0, sizeof(*s));
+    memset(s->gquest, COOP_STORY_GQUEST_DEFAULT, sizeof(s->gquest));
+}
+
+static void coop_story_put16(unsigned char** p, unsigned int v)
+{
+    unsigned short x = (unsigned short)v;
+
+    memcpy(*p, &x, 2);
+    *p += 2;
+}
+
+static void coop_story_put32(unsigned char** p, unsigned int v)
+{
+    memcpy(*p, &v, 4);
+    *p += 4;
+}
+
+static void coop_story_put64(unsigned char** p, uint64_t v)
+{
+    memcpy(*p, &v, 8);
+    *p += 8;
+}
+
+static unsigned int coop_story_get16(const unsigned char** p)
+{
+    unsigned short x;
+
+    memcpy(&x, *p, 2);
+    *p += 2;
+    return x;
+}
+
+static unsigned int coop_story_get32(const unsigned char** p)
+{
+    unsigned int x;
+
+    memcpy(&x, *p, 4);
+    *p += 4;
+    return x;
+}
+
+static uint64_t coop_story_get64(const unsigned char** p)
+{
+    uint64_t x;
+
+    memcpy(&x, *p, 8);
+    *p += 8;
+    return x;
+}
+
+size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap)
+{
+    unsigned char* p = out;
+    unsigned int nq = 0;
+    unsigned int ng = 0;
+    unsigned int nr = 0;
+    unsigned int n;
+    int i;
+    int nrep;
+    size_t need;
+
+    for (i = 0; i < COOP_STORY_QUESTS; i++) {
+        nq += s->quest_state[i] != 0;
+    }
+    for (i = 0; i < COOP_STORY_GQUESTS; i++) {
+        ng += s->gquest[i] != COOP_STORY_GQUEST_DEFAULT;
+    }
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        nr += s->rumor_ts[i] != 0 || s->rumor_quelled[i] != 0;
+    }
+    nrep = s->n_rep < 0 ? 0 : (s->n_rep > COOP_STORY_REPS ? COOP_STORY_REPS : s->n_rep);
+    need = 4 + 2 + (size_t)nq * COOP_STORY_REC + 2 + (size_t)ng * 4 + 2 + (size_t)nr * COOP_STORY_REC
+        + 2 + (size_t)nrep * COOP_STORY_REC;
+    if (need > cap) {
+        return 0;
+    }
+    coop_story_put32(&p, COOP_STORY_MAGIC);
+    coop_story_put16(&p, nq);
+    for (i = 0; i < COOP_STORY_QUESTS; i++) {
+        if (s->quest_state[i] != 0) {
+            coop_story_put16(&p, (unsigned int)i);
+            coop_story_put16(&p, s->quest_state[i]);
+            coop_story_put64(&p, s->quest_ts[i]);
+        }
+    }
+    coop_story_put16(&p, ng);
+    for (i = 0; i < COOP_STORY_GQUESTS; i++) {
+        if (s->gquest[i] != COOP_STORY_GQUEST_DEFAULT) {
+            coop_story_put16(&p, (unsigned int)i);
+            coop_story_put16(&p, s->gquest[i]);
+        }
+    }
+    coop_story_put16(&p, nr);
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        if (s->rumor_ts[i] != 0 || s->rumor_quelled[i] != 0) {
+            coop_story_put16(&p, (unsigned int)i);
+            coop_story_put16(&p, s->rumor_quelled[i] != 0 ? 1u : 0u);
+            coop_story_put64(&p, s->rumor_ts[i]);
+        }
+    }
+    n = (unsigned int)nrep;
+    coop_story_put16(&p, n);
+    for (i = 0; i < nrep; i++) {
+        coop_story_put32(&p, s->rep[i]);
+        coop_story_put64(&p, s->rep_ts[i]);
+    }
+    return (size_t)(p - out);
+}
+
+bool coop_story_decode(const unsigned char* blob, size_t size, CoopStory* s)
+{
+    const unsigned char* p = blob;
+    const unsigned char* end = blob + size;
+    unsigned int n;
+    unsigned int i;
+
+    coop_story_clear(s);
+    if (blob == NULL || size < 4 + 2 * 4) {
+        return false;
+    }
+    if (coop_story_get32(&p) != COOP_STORY_MAGIC) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_QUESTS || (size_t)(end - p) < (size_t)n * COOP_STORY_REC) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int idx = coop_story_get16(&p);
+        unsigned int st = coop_story_get16(&p);
+        uint64_t ts = coop_story_get64(&p);
+
+        if (idx >= COOP_STORY_QUESTS || st == 0 || (st & ~(unsigned int)COOP_STORY_BOTCHED) >= COOP_STORY_STATES) {
+            return false;
+        }
+        s->quest_state[idx] = (unsigned short)st;
+        s->quest_ts[idx] = ts;
+    }
+    if (end - p < 2) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_GQUESTS || (size_t)(end - p) < (size_t)n * 4) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int idx = coop_story_get16(&p);
+        unsigned int st = coop_story_get16(&p);
+
+        if (idx >= COOP_STORY_GQUESTS || st >= COOP_STORY_STATES) {
+            return false;
+        }
+        s->gquest[idx] = (unsigned char)st;
+    }
+    if (end - p < 2) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_RUMORS || (size_t)(end - p) < (size_t)n * COOP_STORY_REC) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int idx = coop_story_get16(&p);
+        unsigned int fl = coop_story_get16(&p);
+        uint64_t ts = coop_story_get64(&p);
+
+        if (idx >= COOP_STORY_RUMORS || fl > 1) {
+            return false;
+        }
+        s->rumor_ts[idx] = ts;
+        s->rumor_quelled[idx] = (unsigned char)fl;
+    }
+    if (end - p < 2) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_REPS || (size_t)(end - p) != (size_t)n * COOP_STORY_REC) {
+        return false; /* also: no trailing bytes */
+    }
+    for (i = 0; i < n; i++) {
+        s->rep[i] = coop_story_get32(&p);
+        s->rep_ts[i] = coop_story_get64(&p);
+    }
+    s->n_rep = (int)n;
+    return true;
+}
+
+unsigned int coop_story_blob_sig(const unsigned char* blob, size_t size)
+{
+    unsigned int h = 2166136261u;
+    size_t i;
+
+    for (i = 0; i < size; i++) {
+        h = (h ^ blob[i]) * 16777619u;
+    }
+    return h;
+}
+
+void coop_story_merge(CoopStory* dst, const CoopStory* src)
+{
+    int i;
+    int k;
+
+    for (i = 0; i < COOP_STORY_QUESTS; i++) {
+        unsigned int a = dst->quest_state[i];
+        unsigned int b = src->quest_state[i];
+        unsigned int ab = a & ~(unsigned int)COOP_STORY_BOTCHED;
+        unsigned int bb = b & ~(unsigned int)COOP_STORY_BOTCHED;
+
+        if (b == 0) {
+            continue;
+        }
+        if (a == 0 || bb > ab || (bb == ab && (b & COOP_STORY_BOTCHED) != 0 && (a & COOP_STORY_BOTCHED) == 0)) {
+            dst->quest_state[i] = (unsigned short)b;
+            dst->quest_ts[i] = src->quest_ts[i];
+        }
+    }
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        if (src->rumor_ts[i] != 0 && (dst->rumor_ts[i] == 0 || src->rumor_ts[i] < dst->rumor_ts[i])) {
+            dst->rumor_ts[i] = src->rumor_ts[i];
+        }
+    }
+    for (i = 0; i < src->n_rep && i < COOP_STORY_REPS; i++) {
+        for (k = 0; k < dst->n_rep; k++) {
+            if (dst->rep[k] == src->rep[i]) {
+                break;
+            }
+        }
+        if (k == dst->n_rep && dst->n_rep < COOP_STORY_REPS) {
+            dst->rep[dst->n_rep] = src->rep[i];
+            dst->rep_ts[dst->n_rep] = src->rep_ts[i];
+            dst->n_rep++;
+        }
+    }
+}
+
+int coop_story_chunk_count(size_t size)
+{
+    size_t n;
+
+    if (size == 0 || size > COOP_STORY_MAX_BLOB) {
+        return 0;
+    }
+    n = (size + COOP_STORY_CHUNK - 1) / COOP_STORY_CHUNK;
+    return (int)n;
+}
+
+void coop_story_chunk_fill(PacketCoopStorySync* pkt, unsigned int snap, const unsigned char* blob,
+    size_t size, int index)
+{
+    int count = coop_story_chunk_count(size);
+    size_t off = (size_t)index * COOP_STORY_CHUNK;
+    size_t len = 0;
+
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = PACKET_COOP_STORY_SYNC;
+    pkt->snap = snap;
+    pkt->total = (unsigned int)size;
+    pkt->sig = coop_story_blob_sig(blob, size);
+    pkt->count = (unsigned short)count;
+    pkt->index = (unsigned short)index;
+    if (index >= 0 && index < count) {
+        len = size - off < COOP_STORY_CHUNK ? size - off : COOP_STORY_CHUNK;
+        memcpy(pkt->data, blob + off, len);
+    }
+    pkt->len = (unsigned short)len;
+}
+
+bool coop_story_chunk_valid(const PacketCoopStorySync* pkt, int size)
+{
+    int count;
+    unsigned int want;
+
+    if (pkt == NULL || size < (int)offsetof(PacketCoopStorySync, data) || pkt->type != PACKET_COOP_STORY_SYNC) {
+        return false;
+    }
+    count = coop_story_chunk_count(pkt->total);
+    if (count <= 0 || pkt->count != count || pkt->index >= count) {
+        return false;
+    }
+    want = pkt->index + 1 < count ? COOP_STORY_CHUNK : pkt->total - (unsigned int)(count - 1) * COOP_STORY_CHUNK;
+    return pkt->len == want && (size_t)size >= offsetof(PacketCoopStorySync, data) + want;
+}
+
+void coop_story_rx_reset(CoopStoryRx* rx)
+{
+    memset(rx, 0, offsetof(CoopStoryRx, blob));
+}
+
+int coop_story_rx_add(CoopStoryRx* rx, const PacketCoopStorySync* pkt, int size)
+{
+    unsigned int full;
+
+    if (!coop_story_chunk_valid(pkt, size)) {
+        return -1;
+    }
+    if (rx->count == 0 || rx->snap != pkt->snap) {
+        coop_story_rx_reset(rx);
+        rx->snap = pkt->snap;
+        rx->total = pkt->total;
+        rx->sig = pkt->sig;
+        rx->count = pkt->count;
+    } else if (rx->total != pkt->total || rx->count != pkt->count || rx->sig != pkt->sig) {
+        return -1;
+    }
+    if (rx->complete) {
+        return 0; /* a repeat of what we already hold */
+    }
+    memcpy(rx->blob + (size_t)pkt->index * COOP_STORY_CHUNK, pkt->data, pkt->len);
+    rx->mask |= 1u << pkt->index;
+    full = rx->count >= 32 ? 0xFFFFFFFFu : (1u << rx->count) - 1u;
+    if (rx->mask != full) {
+        return 0;
+    }
+    if (coop_story_blob_sig(rx->blob, rx->total) != rx->sig) {
+        coop_story_rx_reset(rx);
+        return -1;
+    }
+    rx->complete = true;
+    return 1;
+}
+
 size_t coop_lite_coop_packet_min_size(int type)
 {
     switch (type) {
@@ -2378,6 +2725,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopWorldReq);
     case PACKET_COOP_WORLD_STATE:
         return offsetof(PacketCoopWorldState, entries);
+    case PACKET_COOP_STORY_SYNC:
+        return offsetof(PacketCoopStorySync, data);
     case PACKET_COOP_PC_STATS:
         return sizeof(PacketCoopPcStats);
     case PACKET_COOP_FOLLOWERS:
@@ -5609,6 +5958,7 @@ static void coop_lite_host_resync_after_reload(void)
         return;
     }
     coop_reload_resync_pending = false;
+    coop_lite_story_reset(); /* clients get a fresh story snapshot */
     coop_lite_follow_armed = true; /* the load had no spawn teleport to arm it */
     multiplayer_bind_slot_pc(0, player_get_local_pc_obj());
     memset(&pkt, 0, sizeof(pkt));
@@ -6228,6 +6578,7 @@ void coop_lite_ping(unsigned int now_ms)
         coop_lite_keep_remote_sectors();
         if (coop_lite_client_in_session) {
             coop_lite_client_pc_stats_tick(now_ms);
+            coop_lite_client_story_tick(now_ms);
         }
         if (coop_lite_client_in_session
             && coop_lite_interval_elapsed(coop_roster_reconcile_ms, now_ms, 1000u)) {
@@ -6322,6 +6673,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_barter_watch(now_ms);
     coop_lite_host_victim_watch(now_ms);
     coop_lite_host_pc_stats_tick(now_ms);
+    coop_lite_host_story_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -7622,6 +7974,282 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
     coop_lite_pc_stats_send(sub_529520(), pc, 0, -1);
     tig_debug_printf("CoopLite: PC stats: my build changed — sent to the host (unspent %d)\n",
         b.stats[STAT_UNSPENT_POINTS]);
+}
+
+/* ---- PT35: story sync, engine part ---------------------------------------- */
+
+static CoopStory coop_story_host;
+static CoopStory coop_story_slot;
+static CoopStory coop_story_other;
+static PcQuestState coop_story_qflat[COOP_STORY_QUESTS];
+static uint64_t coop_story_rflat[MAX_RUMORS];
+static unsigned char coop_story_txblob[COOP_STORY_MAX_BLOB];
+static CoopStoryRx coop_story_rx;
+static unsigned int coop_story_snap;
+static unsigned int coop_story_host_ms;
+static unsigned int coop_story_sent_sig[8];
+static unsigned int coop_story_sent_ms[8];
+static int64_t coop_story_sent_pc[8];
+static bool coop_story_sent_valid[8];
+static unsigned int coop_story_applied_sig;
+static bool coop_story_applied_valid;
+static bool coop_story_pending;
+static unsigned int coop_story_client_ms;
+
+static void coop_lite_story_reset(void)
+{
+    coop_story_rx_reset(&coop_story_rx);
+    coop_story_pending = false;
+    coop_story_applied_valid = false;
+    memset(coop_story_sent_valid, 0, sizeof(coop_story_sent_valid));
+}
+
+/* One PC's quest / rumor / reputation arrays (the globals are read apart). */
+static void coop_story_read_pc(int64_t pc, CoopStory* s)
+{
+    int i;
+    int n;
+
+    coop_story_clear(s);
+    if (pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return;
+    }
+    memset(coop_story_qflat, 0, sizeof(coop_story_qflat));
+    obj_arrayfield_pc_quest_copy_to_flat(pc, OBJ_F_PC_QUEST_IDX, COOP_STORY_QUESTS - 1, coop_story_qflat);
+    for (i = 0; i < COOP_STORY_QUESTS; i++) {
+        unsigned int st = (unsigned int)coop_story_qflat[i].state;
+
+        if (st != 0 && st <= 0x1FFu && (st & ~(unsigned int)COOP_STORY_BOTCHED) < COOP_STORY_STATES) {
+            s->quest_state[i] = (unsigned short)st;
+            s->quest_ts[i] = coop_story_qflat[i].datetime.value;
+        }
+    }
+    memset(coop_story_rflat, 0, sizeof(coop_story_rflat));
+    obj_arrayfield_pc_rumor_copy_to_flat(pc, OBJ_F_PC_RUMOR_IDX, MAX_RUMORS - 1, coop_story_rflat);
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        s->rumor_ts[i] = coop_story_rflat[i];
+    }
+    n = obj_arrayfield_length_get(pc, OBJ_F_PC_REPUTATION_IDX);
+    if (n > COOP_STORY_REPS) {
+        n = COOP_STORY_REPS;
+    }
+    for (i = 0; i < n; i++) {
+        s->rep[i] = obj_arrayfield_uint32_get(pc, OBJ_F_PC_REPUTATION_IDX, i);
+        s->rep_ts[i] = (uint64_t)obj_arrayfield_int64_get(pc, OBJ_F_PC_REPUTATION_TS_IDX, i);
+    }
+    s->n_rep = n;
+}
+
+static void coop_story_read_globals(CoopStory* s)
+{
+    int i;
+
+    for (i = 0; i < COOP_STORY_GQUESTS; i++) {
+        int st = quest_global_state_raw_get(i);
+
+        s->gquest[i] = (unsigned char)(st >= 0 && st < COOP_STORY_STATES ? st : COOP_STORY_GQUEST_DEFAULT);
+    }
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        s->rumor_quelled[i] = rumor_qstate_raw_get(i) ? 1 : 0;
+    }
+}
+
+static void coop_story_send_to(int slot, const unsigned char* blob, size_t size)
+{
+    PacketCoopStorySync pkt;
+    int count = coop_story_chunk_count(size);
+    int i;
+    int depth;
+
+    coop_story_snap++;
+    depth = tig_net_local_suspend_pause();
+    for (i = 0; i < count; i++) {
+        coop_story_chunk_fill(&pkt, coop_story_snap, blob, size, i);
+        tig_net_send_app(&pkt, (int)(offsetof(PacketCoopStorySync, data) + pkt.len), slot);
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+/* Host: every 500 ms, rebuild each client's journal (the story PC's record
+   folded with the client PC's own, plus the global quest / rumor bits) and
+   send it when its signature changed, the client joined or its PC changed,
+   or 30 s passed (cheap insurance for a client that lost its copy). */
+static void coop_lite_host_story_tick(unsigned int now_ms)
+{
+    int slot;
+    int64_t host_pc;
+    bool read_host = false;
+
+    if (!coop_lite_interval_elapsed(coop_story_host_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_story_host_ms = now_ms;
+    host_pc = coop_lite_host_pc_obj();
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        size_t size;
+        unsigned int sig;
+
+        if (pc == OBJ_HANDLE_NULL || !tig_net_client_is_active(slot)) {
+            coop_story_sent_valid[slot] = false;
+            continue;
+        }
+        if (host_pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        if (!read_host) {
+            coop_story_read_pc(host_pc, &coop_story_host);
+            coop_story_read_globals(&coop_story_host);
+            read_host = true;
+        }
+        memcpy(&coop_story_slot, &coop_story_host, sizeof(coop_story_slot));
+        if (pc != host_pc) {
+            coop_story_read_pc(pc, &coop_story_other);
+            coop_story_merge(&coop_story_slot, &coop_story_other);
+        }
+        size = coop_story_encode(&coop_story_slot, coop_story_txblob, sizeof(coop_story_txblob));
+        if (size == 0) {
+            continue;
+        }
+        sig = coop_story_blob_sig(coop_story_txblob, size);
+        if (coop_story_sent_valid[slot] && sig == coop_story_sent_sig[slot] && pc == coop_story_sent_pc[slot]
+            && !coop_lite_interval_elapsed(coop_story_sent_ms[slot], now_ms, 30000u)) {
+            continue;
+        }
+        coop_story_sent_valid[slot] = true;
+        coop_story_sent_sig[slot] = sig;
+        coop_story_sent_pc[slot] = pc;
+        coop_story_sent_ms[slot] = now_ms;
+        coop_story_send_to(slot, coop_story_txblob, size);
+        tig_debug_printf("CoopLite: story: slot %d snapshot sent (%d bytes, %d chunks, sig %08x)\n", slot,
+            (int)size, coop_story_chunk_count(size), sig);
+    }
+}
+
+/* Client: write the host's story into our own PC and the global tables. */
+static bool coop_story_apply_local(const CoopStory* s)
+{
+    int64_t pc = player_get_local_pc_obj();
+    int i;
+    int n;
+    int cur;
+    int changed = 0;
+    int added = 0;
+
+    if (pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return false;
+    }
+    multiplayer_lock();
+    coop_lite_apply_begin();
+    coop_story_applying++;
+
+    memset(coop_story_qflat, 0, sizeof(coop_story_qflat));
+    obj_arrayfield_pc_quest_copy_to_flat(pc, OBJ_F_PC_QUEST_IDX, COOP_STORY_QUESTS - 1, coop_story_qflat);
+    for (i = 0; i < COOP_STORY_QUESTS; i++) {
+        unsigned int have = (unsigned int)coop_story_qflat[i].state;
+
+        if (have != s->quest_state[i] || (s->quest_state[i] != 0 && coop_story_qflat[i].datetime.value != s->quest_ts[i])) {
+            PcQuestState q;
+
+            memset(&q, 0, sizeof(q));
+            q.state = s->quest_state[i];
+            q.datetime.value = s->quest_ts[i];
+            obj_arrayfield_pc_quest_set(pc, OBJ_F_PC_QUEST_IDX, i, &q);
+            changed++;
+            added += s->quest_state[i] != 0;
+        }
+    }
+    for (i = 0; i < COOP_STORY_GQUESTS; i++) {
+        if (quest_global_state_raw_get(i) != s->gquest[i]) {
+            quest_global_state_raw_set(i, s->gquest[i]);
+            changed++;
+        }
+    }
+    memset(coop_story_rflat, 0, sizeof(coop_story_rflat));
+    obj_arrayfield_pc_rumor_copy_to_flat(pc, OBJ_F_PC_RUMOR_IDX, MAX_RUMORS - 1, coop_story_rflat);
+    for (i = 0; i < COOP_STORY_RUMORS; i++) {
+        if (coop_story_rflat[i] != s->rumor_ts[i]) {
+            obj_arrayfield_int64_set(pc, OBJ_F_PC_RUMOR_IDX, i, (int64_t)s->rumor_ts[i]);
+            changed++;
+            added += s->rumor_ts[i] != 0;
+        }
+        if (rumor_qstate_raw_get(i) != (s->rumor_quelled[i] != 0)) {
+            rumor_qstate_raw_set(i, s->rumor_quelled[i] != 0);
+            changed++;
+        }
+    }
+    cur = obj_arrayfield_length_get(pc, OBJ_F_PC_REPUTATION_IDX);
+    n = s->n_rep;
+    if (cur > n) {
+        obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_IDX, n);
+        obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_TS_IDX, n);
+        changed++;
+        cur = n;
+    }
+    for (i = 0; i < n; i++) {
+        if (i >= cur || obj_arrayfield_uint32_get(pc, OBJ_F_PC_REPUTATION_IDX, i) != s->rep[i]
+            || (uint64_t)obj_arrayfield_int64_get(pc, OBJ_F_PC_REPUTATION_TS_IDX, i) != s->rep_ts[i]) {
+            obj_arrayfield_uint32_set(pc, OBJ_F_PC_REPUTATION_IDX, i, s->rep[i]);
+            obj_arrayfield_int64_set(pc, OBJ_F_PC_REPUTATION_TS_IDX, i, (int64_t)s->rep_ts[i]);
+            changed++;
+            added += i >= cur;
+        }
+    }
+
+    coop_story_applying--;
+    coop_lite_apply_end();
+    multiplayer_unlock();
+    if (added > 0) {
+        ui_toggle_primary_button(UI_PRIMARY_BUTTON_LOGBOOK, true);
+    }
+    if (changed > 0) {
+        logbook_ui_coop_reload(); /* an open journal shows it now */
+    }
+    tig_debug_printf("CoopLite: story: applied (%d field changes, %d new entries)\n", changed, added);
+    return true;
+}
+
+static void coop_lite_client_story_tick(unsigned int now_ms)
+{
+    if (!coop_story_pending || !coop_lite_interval_elapsed(coop_story_client_ms, now_ms, 250u)) {
+        return;
+    }
+    coop_story_client_ms = now_ms;
+    if (!coop_story_rx.complete) {
+        coop_story_pending = false;
+        return;
+    }
+    if (coop_story_applied_valid && coop_story_rx.sig == coop_story_applied_sig) {
+        coop_story_pending = false;
+        return;
+    }
+    if (!coop_story_decode(coop_story_rx.blob, coop_story_rx.total, &coop_story_host)) {
+        tig_debug_printf("CoopLite: story: snapshot %08x does not parse - dropped\n", coop_story_rx.sig);
+        coop_story_rx_reset(&coop_story_rx);
+        coop_story_pending = false;
+        return;
+    }
+    if (coop_story_apply_local(&coop_story_host)) {
+        coop_story_applied_sig = coop_story_rx.sig;
+        coop_story_applied_valid = true;
+        coop_story_pending = false;
+    }
+}
+
+void coop_lite_handle_story_sync(PacketCoopStorySync* pkt)
+{
+    int r;
+
+    if (pkt == NULL || !tig_net_is_active() || tig_net_is_host()) {
+        return;
+    }
+    r = coop_story_rx_add(&coop_story_rx, pkt, tig_net_last_message_size());
+    if (r < 0) {
+        tig_debug_printf("CoopLite: story: bad chunk dropped\n");
+    } else if (r > 0) {
+        coop_story_pending = true; /* applied by the client tick, once the world is ready */
+        tig_debug_printf("CoopLite: story: snapshot %u complete (%u bytes)\n", coop_story_rx.snap, coop_story_rx.total);
+    }
 }
 
 static unsigned int coop_victim_watch_ms;
@@ -13393,6 +14021,7 @@ static void coop_lite_session_reset_extra(void)
     memset(coop_pcs_sig, 0, sizeof(coop_pcs_sig));
     memset(coop_pcs_obj, 0, sizeof(coop_pcs_obj));
     coop_client_pcs_sig = 0;
+    coop_lite_story_reset();
     memset(coop_remote_fallen, 0, sizeof(coop_remote_fallen));
     memset(coop_slot_hp_damage, 0, sizeof(coop_slot_hp_damage));
     memset(coop_world_prev_ground_cnt, 0, sizeof(coop_world_prev_ground_cnt));

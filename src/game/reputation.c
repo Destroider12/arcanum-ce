@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "game/critter.h"
+#include "game/coop_lite.h"
 #include "game/mes.h"
 #include "game/obj.h"
 #include "game/player.h"
@@ -452,6 +453,11 @@ void reputation_add(int64_t pc_obj, int reputation)
         return;
     }
 
+    // Co-op: a client's reputations are the host's.
+    if (coop_lite_story_write_blocked()) {
+        return;
+    }
+
     // Append reputation and current time to the reputation field arrays.
     index = obj_arrayfield_length_get(pc_obj, OBJ_F_PC_REPUTATION_IDX);
     obj_arrayfield_uint32_set(pc_obj, OBJ_F_PC_REPUTATION_IDX, index, reputation);
@@ -490,6 +496,10 @@ void reputation_remove(int64_t pc_obj, int reputation)
 
     if (index >= cnt) {
         // Index not found, attempt to remove reputation which is not added.
+        return;
+    }
+
+    if (coop_lite_story_write_blocked()) {
         return;
     }
 

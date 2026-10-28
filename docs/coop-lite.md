@@ -1825,3 +1825,27 @@ critter flags, spell flags, blit flags/colour/alpha/scale).
   other options, then close this copy. Join address: a valid host[:port] on the
   clipboard, else `coop_join.txt` (last used; written by `-join` too), else
   127.0.0.1. CLI flags unchanged.
+
+## PT35: story sync (protocol 26)
+
+The client's journal (logbook) reads the PC's quest / rumor / reputation
+arrays and the global quest and quelled-rumor tables. The host owns them:
+
+- `PACKET_COOP_STORY_SYNC` (147, host -> client). Every 500 ms the host builds
+  each client's journal (story PC record merged with the client PC's own record:
+  the further quest state wins, rumors and reputations are unioned, plus the
+  global quest states and quelled bits) and sends it when its FNV signature
+  changed, on join / PC change / host save load, and every 30 s as insurance.
+- A snapshot is a sparse blob (`coop_story_encode`, strict `coop_story_decode`)
+  cut into 2048-byte chunks (at most 32; worst case about 58 KB). The client
+  reassembles (any order, duplicates ignored, signature checked) and applies it
+  to its own PC and the global tables with net sends and scripts suppressed.
+  What the host does not list is cleared locally. An open logbook reloads.
+- The client never writes this state: quest_state_set(_internal), quest_unbotch,
+  quest_global_state_set, rumor_known_set, rumor_qstate_set and
+  reputation_add / remove return early on a co-op client
+  (`coop_lite_story_write_blocked`), except inside the apply scope.
+- Not synced: kill / injury statistics and the background text (separate
+  logbook pages), global variables / flags (the logbook does not read them).
+- Test: `coop_story_test` (codec round trip, strict decode, merge, worst-case
+  chunking and reassembly, packet policy).

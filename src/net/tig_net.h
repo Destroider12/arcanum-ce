@@ -31,7 +31,7 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 25
+#define TIG_NET_PROTOCOL 26
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

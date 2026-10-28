@@ -44,6 +44,8 @@ int quest_state_set(int64_t pc_obj, int num, int state, int64_t npc_obj);
 int quest_unbotch(int64_t obj, int num);
 int quest_global_state_get(int num);
 int quest_global_state_set(int num, int state);
+int quest_global_state_raw_get(int idx);
+void quest_global_state_raw_set(int idx, int state);
 void quest_copy_description(int64_t obj, int quest_id, char* buffer, size_t maxlen);
 int quest_get_logbook_data(int64_t obj, QuestLogbookEntry* logbook_entries);
 int quest_get_xp(int xp_level);

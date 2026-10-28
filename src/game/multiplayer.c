@@ -1158,6 +1158,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_PC_STATS:
         coop_lite_handle_pc_stats((PacketCoopPcStats*)msg);
         break;
+    case PACKET_COOP_STORY_SYNC:
+        coop_lite_handle_story_sync((PacketCoopStorySync*)msg);
+        break;
     case 81:
         coop_lite_host_handle_inven_transfer((struct Packet81*)msg);
         break;

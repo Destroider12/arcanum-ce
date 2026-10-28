@@ -33,7 +33,8 @@ extern "C" {
 #define PACKET_COOP_PC_STATS 144 /* PT19: PC build, host → clients and owner → host */
 #define PACKET_COOP_SWING 145 /* PT25: host → owner: your PC swung at this target */
 #define PACKET_COOP_NPC_REQ 146 /* PT26: client → host: NPC_POS named these unknown NPCs (PacketCoopObjReq layout) */
-#define PACKET_COOP_TYPE_LIMIT 147
+#define PACKET_COOP_STORY_SYNC 147 /* PT35: host → client: quests, rumors, reputation (chunked snapshot) */
+#define PACKET_COOP_TYPE_LIMIT 148
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -1111,5 +1112,88 @@ int coop_interp_offset(int oa, int ob, int64_t d, unsigned int num, unsigned int
 
 bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone_y,
     int64_t* out_x, int64_t* out_y);
+
+/*
+ * PT35 story sync (PACKET_COOP_STORY_SYNC). The host is authoritative for
+ * what the logbook shows: the PC quest array, the global quest states, the
+ * PC rumor array and the quelled bits, and the PC reputation arrays. The
+ * host sends a snapshot of the story PC (merged with the slot's own PC) to
+ * every client when it joins, after a host save load, and whenever the
+ * 500 ms signature check sees a change. A snapshot is a flat blob (sparse
+ * records) cut into COOP_STORY_CHUNK byte chunks; the client reassembles
+ * and applies it with its local PC changes suppressed. A client never
+ * writes this state itself (coop_lite_story_write_blocked).
+ */
+#define COOP_STORY_QUESTS 2000 /* PC quest array, index == quest number */
+#define COOP_STORY_GQUESTS 1000 /* global quest states, index == number - 1000 */
+#define COOP_STORY_RUMORS 2000 /* rumor index == number - 1000 */
+#define COOP_STORY_REPS 512
+#define COOP_STORY_GQUEST_DEFAULT 2 /* QUEST_STATE_ACCEPTED: nothing to send */
+#define COOP_STORY_CHUNK 2048
+#define COOP_STORY_MAX_CHUNKS 32
+#define COOP_STORY_MAX_BLOB (COOP_STORY_CHUNK * COOP_STORY_MAX_CHUNKS)
+
+typedef struct CoopStory {
+    unsigned short quest_state[COOP_STORY_QUESTS]; /* raw: state | 0x100 botched */
+    uint64_t quest_ts[COOP_STORY_QUESTS];
+    unsigned char gquest[COOP_STORY_GQUESTS];
+    uint64_t rumor_ts[COOP_STORY_RUMORS]; /* 0 = unknown */
+    unsigned char rumor_quelled[COOP_STORY_RUMORS];
+    int n_rep;
+    unsigned int rep[COOP_STORY_REPS];
+    uint64_t rep_ts[COOP_STORY_REPS];
+} CoopStory;
+
+typedef struct PacketCoopStorySync {
+    /* 0000 */ int type;
+    /* 0004 */ unsigned int snap; /* snapshot id, one per send */
+    /* 0008 */ unsigned int total; /* blob size in bytes */
+    /* 000C */ unsigned int sig; /* coop_story_blob_sig of the blob */
+    /* 0010 */ unsigned short index; /* chunk number */
+    /* 0012 */ unsigned short count; /* chunks in this snapshot */
+    /* 0014 */ unsigned short len; /* bytes of data in this chunk */
+    /* 0016 */ unsigned short reserved;
+    /* 0018 */ unsigned char data[COOP_STORY_CHUNK];
+} PacketCoopStorySync;
+
+COOP_STATIC_ASSERT(sizeof(PacketCoopStorySync) <= 4096, "story chunk fits 4 KB");
+COOP_STATIC_ASSERT(offsetof(PacketCoopStorySync, data) == 0x18, "PacketCoopStorySync layout");
+COOP_STATIC_ASSERT(COOP_STORY_MAX_BLOB <= 65536, "story blob cap");
+
+typedef struct CoopStoryRx {
+    unsigned int snap;
+    unsigned int total;
+    unsigned int sig;
+    int count;
+    unsigned int mask; /* chunks received (COOP_STORY_MAX_CHUNKS <= 32) */
+    bool complete;
+    unsigned char blob[COOP_STORY_MAX_BLOB];
+} CoopStoryRx;
+
+COOP_STATIC_ASSERT(COOP_STORY_MAX_CHUNKS <= 32, "chunk mask is 32 bits");
+
+void coop_story_clear(CoopStory* s); /* nothing known; global quests default */
+/* Sparse blob of `s`. Returns the size, or 0 when `cap` is too small. */
+size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap);
+/* Strict parse: false on any bad count / index / trailing byte. */
+bool coop_story_decode(const unsigned char* blob, size_t size, CoopStory* s);
+unsigned int coop_story_blob_sig(const unsigned char* blob, size_t size);
+/* Fold `src` (another PC's record, host-side) into `dst`: the further quest
+   state wins, rumors/reputations are unioned. Globals are not touched. */
+void coop_story_merge(CoopStory* dst, const CoopStory* src);
+/* Cut a blob into packets: number of chunks, 0 if too big. Chunk i is built
+   by coop_story_chunk_fill. */
+int coop_story_chunk_count(size_t size);
+void coop_story_chunk_fill(PacketCoopStorySync* pkt, unsigned int snap, const unsigned char* blob,
+    size_t size, int index);
+bool coop_story_chunk_valid(const PacketCoopStorySync* pkt, int size);
+void coop_story_rx_reset(CoopStoryRx* rx);
+/* 1: snapshot complete (rx->blob / rx->total); 0: waiting; -1: bad chunk. */
+int coop_story_rx_add(CoopStoryRx* rx, const PacketCoopStorySync* pkt, int size);
+
+/* True on a co-op client outside the story-apply scope: quest / rumor /
+   reputation writes are refused (the host owns them). */
+bool coop_lite_story_write_blocked(void);
+void coop_lite_handle_story_sync(PacketCoopStorySync* pkt);
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */
