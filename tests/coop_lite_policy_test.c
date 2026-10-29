@@ -1103,6 +1103,14 @@ static int test_packet_hardening(void)
             fprintf(stderr, "float damage delta wrong\n");
             return 1;
         }
+        {
+            int64_t h[6] = { 7, 0, 9, 7, 0, 3 };
+            if (coop_lite_inv_compact_handles(h, 6) != 3 || h[0] != 7 || h[1] != 9 || h[2] != 3
+                || coop_lite_inv_compact_handles(h, 0) != 0) {
+                fprintf(stderr, "PT48 inventory compact wrong\n");
+                return 1;
+            }
+        }
         if (coop_lite_skill_merge_training(5, (2 << 6) | 9) != ((2 << 6) | 5)
             || coop_lite_skill_merge_training((1 << 6) | 3, 3) != 3
             || coop_lite_pcs_portrait_unpack(coop_lite_pcs_portrait_pack(1, 4021)) != 4021

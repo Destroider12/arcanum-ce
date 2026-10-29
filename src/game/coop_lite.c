@@ -11228,6 +11228,59 @@ static void coop_lite_fix_inven_num(int64_t owner)
     }
 }
 
+/* PT48: a parked-PC restore can leave the inventory list with null or
+   duplicate handles while items still name the PC as parent: those items
+   were invisible on the client and the host's sync thought them "there". */
+static int coop_lite_inv_list_repair(int64_t owner)
+{
+    int list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+        ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
+        : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+    int64_t h[512];
+    int n = obj_arrayfield_length_get(owner, list_fld);
+    int i;
+    int k;
+
+    if (n > 512) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        int64_t parent = OBJ_HANDLE_NULL;
+
+        h[i] = obj_arrayfield_handle_get(owner, list_fld, i);
+        if (h[i] != OBJ_HANDLE_NULL
+            && ((obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
+                || !item_parent(h[i], &parent) || parent != owner)) {
+            h[i] = OBJ_HANDLE_NULL;
+        }
+    }
+    k = coop_lite_inv_compact_handles(h, n);
+    if (k != n) {
+        for (i = 0; i < k; i++) {
+            obj_arrayfield_obj_set(owner, list_fld, i, h[i]);
+        }
+        obj_arrayfield_length_set(owner, list_fld, k);
+        tig_debug_printf("CoopLite: inven: list repaired (%d bad entries dropped)\n", n - k);
+    }
+    return n - k;
+}
+
+static bool coop_lite_inv_list_has(int64_t owner, int64_t item)
+{
+    int list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+        ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
+        : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+    int n = obj_arrayfield_length_get(owner, list_fld);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (obj_arrayfield_handle_get(owner, list_fld, i) == item) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -11259,6 +11312,7 @@ static void coop_lite_client_apply_inven_batch(void)
         if (owner_obj[o] == OBJ_HANDLE_NULL) {
             continue;
         }
+        coop_lite_inv_list_repair(owner_obj[o]);
         cnt = item_list_get(owner_obj[o], &items);
         for (i = 0; i < cnt; i++) {
             /* PT26: a container's stacks are listed by OID too. */
@@ -11331,6 +11385,20 @@ static void coop_lite_client_apply_inven_batch(void)
                     continue;
                 }
                 created++;
+            } else if (item_parent(item, &parent) && parent == owner
+                && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_INVENTORY) != 0
+                && !coop_lite_inv_list_has(owner, item)) {
+                /* PT48: names the owner as parent but missing from its list
+                   (invisible): put the handle back, then place it below. */
+                int list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+                    ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
+                    : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+
+                obj_arrayfield_obj_set(owner, list_fld, obj_arrayfield_length_get(owner, list_fld), item);
+                coop_lite_fix_inven_num(owner);
+                tig_debug_printf("CoopLite: inven: orphaned item re-listed in its owner\n");
+                moved++;
+                goto flags;
             } else if (item_parent(item, &parent) && parent == owner) {
                 /* Already there; our own PC keeps its local backpack
                    arrangement, but what is worn/wielded follows the host
@@ -13686,6 +13754,31 @@ int coop_lite_float_delta(int prev, int now, int hp_max)
         now = hp_max;
     }
     return now - prev;
+}
+
+int coop_lite_inv_compact_handles(int64_t* h, int n)
+{
+    int i;
+    int j;
+    int k = 0;
+
+    for (i = 0; i < n; i++) {
+        bool dup = false;
+
+        if (h[i] == 0) {
+            continue;
+        }
+        for (j = 0; j < k; j++) {
+            if (h[j] == h[i]) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            h[k++] = h[i];
+        }
+    }
+    return k;
 }
 
 int coop_lite_skill_merge_training(int local_value, int host_value)

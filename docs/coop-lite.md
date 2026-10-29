@@ -2118,3 +2118,7 @@ craft validity, fate recipients).
 - Trainer levels: the owner-mode PC_STATS apply now also takes the host's training bits (>= bit 6) of basic/tech skills on every tick, not only the PT45 FORCE send (`coop_lite_skill_merge_training`). Gold comes with the inventory sync.
 - Portrait: OBJ_F_CRITTER_PORTRAIT rides in the high 16 bits of PC_STATS `flags` (no layout change; protocol stays 31). Applied to non-local PCs; party UI refreshed. Host includes it in the build signature; clients send once after joining.
 - Auto-follow/guard: `F` toggles following the nearest other player PC (moves via normal anim goals, host-authoritative). Within 4 tiles it attacks an NPC whose combat focus is that PC. Any left click, death, map change or >25 tiles cancels.
+
+## PT48
+
+- Client "forgot" inventory items after a rejoin (build 538878cd logs): the parked-PC restore left null/duplicate handles in the PC's inventory list ("Inventory entry is null", "duplicate handle"), while the items still named the PC as parent. INVEN_SYNC saw `item_parent == owner` and counted them as present, so they stayed invisible. Now each batch repairs the owner's list first (drops null/destroyed/foreign/duplicate handles, `coop_lite_inv_compact_handles`) and re-lists any item whose parent is the owner but is missing from the list. The host's periodic resync then restores the client's view.

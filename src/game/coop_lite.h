@@ -1027,6 +1027,8 @@ bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target
 void coop_lite_host_pc_changed(int64_t pc, bool stats);
 /* PT46: loot move at the client's cell failed: retry with host placement. */
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source);
+/* PT48: drop null/duplicate inventory handles; returns new count. */
+int coop_lite_inv_compact_handles(int64_t* h, int n);
 /* PT47 */
 int coop_lite_skill_merge_training(int local_value, int host_value);
 unsigned int coop_lite_pcs_portrait_pack(unsigned int flags, int portrait);
