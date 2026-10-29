@@ -1027,6 +1027,12 @@ bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target
 void coop_lite_host_pc_changed(int64_t pc, bool stats);
 /* PT46: loot move at the client's cell failed: retry with host placement. */
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source);
+/* PT47 */
+int coop_lite_skill_merge_training(int local_value, int host_value);
+unsigned int coop_lite_pcs_portrait_pack(unsigned int flags, int portrait);
+int coop_lite_pcs_portrait_unpack(unsigned int flags);
+void coop_lite_follow_toggle(void);
+void coop_lite_follow_cancel(void);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);

@@ -1103,6 +1103,15 @@ static int test_packet_hardening(void)
             fprintf(stderr, "float damage delta wrong\n");
             return 1;
         }
+        if (coop_lite_skill_merge_training(5, (2 << 6) | 9) != ((2 << 6) | 5)
+            || coop_lite_skill_merge_training((1 << 6) | 3, 3) != 3
+            || coop_lite_pcs_portrait_unpack(coop_lite_pcs_portrait_pack(1, 4021)) != 4021
+            || (coop_lite_pcs_portrait_pack(1, 4021) & 0xFFFFu) != 1
+            || coop_lite_pcs_portrait_unpack(coop_lite_pcs_portrait_pack(0, -5)) != 0
+            || coop_lite_pcs_portrait_unpack(coop_lite_pcs_portrait_pack(0, 0x9000)) != 0) {
+            fprintf(stderr, "PT47 training/portrait wrong\n");
+            return 1;
+        }
         if (!coop_lite_loot_retry_auto_slot(false, false, true) || coop_lite_loot_retry_auto_slot(true, false, true)
             || coop_lite_loot_retry_auto_slot(false, true, true) || coop_lite_loot_retry_auto_slot(false, false, false)) {
             fprintf(stderr, "loot retry rule wrong\n");

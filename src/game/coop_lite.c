@@ -6928,6 +6928,116 @@ static void coop_lite_force_auto_settings(void)
 #endif
 }
 
+/* ---- PT47: auto-follow / guard (F toggles; any left click cancels) ------ */
+
+#ifndef COOP_LITE_TEST_STUBS
+static ObjectID coop_follow_oid;
+static bool coop_follow_on;
+static unsigned int coop_follow_ms;
+
+void coop_lite_follow_cancel(void)
+{
+    if (coop_follow_on) {
+        coop_follow_on = false;
+        tig_debug_printf("CoopLite: follow: off\n");
+    }
+}
+
+void coop_lite_follow_toggle(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    int64_t best = OBJ_HANDLE_NULL;
+    int64_t best_d = 0;
+    ObjectList objects;
+    ObjectNode* node;
+
+    if (coop_follow_on) {
+        coop_lite_follow_cancel();
+        return;
+    }
+    if (pc == OBJ_HANDLE_NULL || !tig_net_is_active()) {
+        return;
+    }
+    object_list_vicinity(pc, OBJ_TM_PC, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        int64_t d;
+
+        if (node->obj == pc || coop_lite_slot_of_obj(node->obj) < 0 || critter_is_dead(node->obj)) {
+            continue;
+        }
+        d = location_dist(obj_field_int64_get(node->obj, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION));
+        if (best == OBJ_HANDLE_NULL || d < best_d) {
+            best = node->obj;
+            best_d = d;
+        }
+    }
+    object_list_destroy(&objects);
+    if (best != OBJ_HANDLE_NULL) {
+        coop_follow_oid = obj_get_id(best);
+        coop_follow_on = true;
+        coop_follow_ms = 0;
+        tig_debug_printf("CoopLite: follow: on (slot %d's PC, %d tiles)\n", coop_lite_slot_of_obj(best), (int)best_d);
+    }
+}
+
+static void coop_lite_follow_tick(unsigned int now_ms)
+{
+    int64_t pc;
+    int64_t target;
+    int64_t d;
+
+    if (!coop_follow_on || !coop_lite_interval_elapsed(coop_follow_ms, now_ms, 700u)) {
+        return;
+    }
+    coop_follow_ms = now_ms;
+    pc = player_get_local_pc_obj();
+    target = obj_pool_perm_lookup(coop_follow_oid);
+    if (pc == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL || critter_is_dead(pc) || critter_is_dead(target)
+        || coop_lite_slot_of_obj(target) < 0 || map_is_clearing_objects()) {
+        coop_lite_follow_cancel();
+        return;
+    }
+    if (anim_is_current_goal_type(pc, AG_ATTACK, NULL)) {
+        return;
+    }
+    d = location_dist(obj_field_int64_get(target, OBJ_F_LOCATION), obj_field_int64_get(pc, OBJ_F_LOCATION));
+    if (d > 25) {
+        coop_lite_follow_cancel(); /* lost (other map / too far) */
+        return;
+    }
+    if (d <= 4) {
+        /* Guard: an NPC whose combat focus is the target, close by. */
+        ObjectList objects;
+        ObjectNode* node;
+        int64_t foe = OBJ_HANDLE_NULL;
+
+        object_list_vicinity(target, OBJ_TM_NPC, &objects);
+        for (node = objects.head; node != NULL; node = node->next) {
+            if (!critter_is_dead(node->obj)
+                && obj_field_handle_get(node->obj, OBJ_F_NPC_COMBAT_FOCUS) == target
+                && location_dist(obj_field_int64_get(node->obj, OBJ_F_LOCATION),
+                       obj_field_int64_get(target, OBJ_F_LOCATION)) <= 6) {
+                foe = node->obj;
+                break;
+            }
+        }
+        object_list_destroy(&objects);
+        if (foe != OBJ_HANDLE_NULL) {
+            if (tig_net_is_coop_client()) {
+                coop_lite_client_send_attack_intent(pc, foe);
+            } else {
+                anim_goal_attack(pc, foe);
+            }
+        }
+        return;
+    }
+    anim_goal_move_to_tile(pc, obj_field_int64_get(target, OBJ_F_LOCATION));
+}
+#else
+void coop_lite_follow_cancel(void) { }
+void coop_lite_follow_toggle(void) { }
+#endif
+
 void coop_lite_ping(unsigned int now_ms)
 {
     coop_obj_now_ms = now_ms;
@@ -6935,6 +7045,8 @@ void coop_lite_ping(unsigned int now_ms)
     int slot;
     int64_t obj;
     PacketCoopPcPos pkt;
+
+    coop_lite_follow_tick(now_ms);
 
     if (coop_lite_host_left_menu_due(coop_host_left_menu_armed, coop_host_left_menu_ms, now_ms)) {
         coop_host_left_menu_armed = false;
@@ -8379,6 +8491,20 @@ static void coop_lite_pc_build_apply(int64_t pc, const CoopPcBuild* b, int mode)
             if (caught_up || b->stats[STAT_LEVEL] > local_level) {
                 obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_UNSPENT_POINTS, b->stats[STAT_UNSPENT_POINTS]);
             }
+            /* PT47: training (bits >= 6) is host-only (trainers); take it on
+               every tick, not just the FORCE send, keeping our points. */
+            for (i = 0; i < COOP_PCB_BASIC; i++) {
+                int v = coop_lite_skill_merge_training(mine.basic[i], b->basic[i]);
+                if (v != mine.basic[i]) {
+                    obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_BASIC_SKILL_IDX, i, v);
+                }
+            }
+            for (i = 0; i < COOP_PCB_TECH; i++) {
+                int v = coop_lite_skill_merge_training(mine.tech[i], b->tech[i]);
+                if (v != mine.tech[i]) {
+                    obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_TECH_SKILL_IDX, i, v);
+                }
+            }
         }
         return;
     }
@@ -8473,7 +8599,7 @@ static void coop_lite_pc_stats_send(int slot, int64_t pc, unsigned int flags, in
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_PC_STATS;
     pkt.slot = slot;
-    pkt.flags = flags;
+    pkt.flags = coop_lite_pcs_portrait_pack(flags, obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT));
     memcpy(pkt.oid, &oid, sizeof(pkt.oid));
     coop_lite_pc_build_fill(pc, &pkt.build);
     depth = tig_net_local_suspend_pause();
@@ -8529,7 +8655,8 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
             level_recalc(pc);
         }
         coop_lite_pc_build_fill(pc, &b);
-        sig = coop_lite_pc_build_sig(&b);
+        sig = coop_lite_pc_build_sig(&b)
+            ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) * 0x9E3779B1u); /* PT47 */
         if (sig == coop_pcs_sig[slot]) {
             continue;
         }
@@ -8559,6 +8686,7 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
     sig = coop_lite_pc_build_sig(&b);
     if (coop_client_pcs_sig == 0) {
         coop_client_pcs_sig = sig; /* the join bundle carried this one */
+        coop_lite_pc_stats_send(sub_529520(), pc, 0, -1); /* PT47: portrait */
         return;
     }
     if (sig == coop_client_pcs_sig) {
@@ -12600,6 +12728,20 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
     if (pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return;
     }
+    {
+        /* PT47: portrait rides in flags' high bits (no layout change). */
+        int portrait = coop_lite_pcs_portrait_unpack(pkt->flags);
+
+        if (portrait > 0 && pc != player_get_local_pc_obj()
+            && (!tig_net_is_host() || sub_4A2B60(sub_52A530()) == pc)
+            && obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) != portrait) {
+            obj_field_int32_set(pc, OBJ_F_CRITTER_PORTRAIT, portrait);
+            tig_debug_printf("CoopLite: PC stats: slot %d portrait -> %d\n", pkt->slot, portrait);
+            if (coop_party_ui_refresh_hook != NULL) {
+                coop_party_ui_refresh_hook();
+            }
+        }
+    }
     if (tig_net_is_host()) {
         CoopPcBuild have;
         int sender = sub_52A530();
@@ -13544,6 +13686,25 @@ int coop_lite_float_delta(int prev, int now, int hp_max)
         now = hp_max;
     }
     return now - prev;
+}
+
+int coop_lite_skill_merge_training(int local_value, int host_value)
+{
+    return (local_value & 0x3F) | (host_value & ~0x3F);
+}
+
+unsigned int coop_lite_pcs_portrait_pack(unsigned int flags, int portrait)
+{
+    flags &= 0xFFFFu;
+    if (portrait > 0 && portrait < 0x8000) {
+        flags |= (unsigned int)portrait << 16;
+    }
+    return flags;
+}
+
+int coop_lite_pcs_portrait_unpack(unsigned int flags)
+{
+    return (int)((flags >> 16) & 0x7FFFu);
 }
 
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source)

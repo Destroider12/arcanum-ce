@@ -1967,6 +1967,7 @@ bool sub_54B5D0(TigMessage* msg)
             }
             break;
         case TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP:
+            coop_lite_follow_cancel(); /* PT47: a manual command ends follow */
             if (inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
                 sub_57DC20();
             }
@@ -2508,6 +2509,12 @@ bool sub_54B5D0(TigMessage* msg)
                     intgame_secondary_button_toggle(INTGAME_SECONDARY_BUTTON_SKILLS, ROTWIN_TYPE_SKILLS);
                 }
                 return true;
+            case SDL_SCANCODE_F:
+                if (!mainmenu_ui_is_active() && tig_net_is_active()) {
+                    coop_lite_follow_toggle(); /* PT47: follow/guard nearest player */
+                    return true;
+                }
+                break;
             case SDL_SCANCODE_M:
                 if (!mainmenu_ui_is_active()) {
                     intgame_secondary_button_toggle(INTGAME_SECONDARY_BUTTON_SPELLS, ROTWIN_TYPE_SPELLS);

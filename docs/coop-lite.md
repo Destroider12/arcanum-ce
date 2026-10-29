@@ -2112,3 +2112,9 @@ craft validity, fate recipients).
   own copy of the pack; on the host that cell can be taken (packs drift),
   so `item_transfer_ex` fails. Now the host retries with `item_transfer`
   (its own placement) — `coop_lite_loot_retry_auto_slot`.
+
+## PT47
+
+- Trainer levels: the owner-mode PC_STATS apply now also takes the host's training bits (>= bit 6) of basic/tech skills on every tick, not only the PT45 FORCE send (`coop_lite_skill_merge_training`). Gold comes with the inventory sync.
+- Portrait: OBJ_F_CRITTER_PORTRAIT rides in the high 16 bits of PC_STATS `flags` (no layout change; protocol stays 31). Applied to non-local PCs; party UI refreshed. Host includes it in the build signature; clients send once after joining.
+- Auto-follow/guard: `F` toggles following the nearest other player PC (moves via normal anim goals, host-authoritative). Within 4 tiles it attacks an NPC whose combat focus is that PC. Any left click, death, map change or >25 tiles cancels.
