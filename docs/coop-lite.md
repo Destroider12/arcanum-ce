@@ -2025,3 +2025,15 @@ item/sector/obj changes are compiled only.
 
 Tests: `coop_lite_policy_test` (packet sizes, roles, TYPE_LIMIT 152, skill /
 craft validity, fate recipients).
+
+## PT41: Stage 2, party dialogs (protocol 30)
+
+- **Party dialog (E).** A client talking to a story NPC (bark policy) sends DIALOG kind START (header + NPC OID).
+  - The host checks the slot, a living PC, and an NPC within 5 tiles of the speaker and 18 tiles of the host PC. It also checks that no other dialog is running and the host is not in combat, with a 1 s rate limit.
+  - The host then runs SAP_DIALOG with the client's PC, so checks use that PC's stats.
+  - The state goes out through the PT36 viewer to everyone, the host included. STATE `votes[7]` holds the speaking slot.
+  - The speaker's panel clicks send CHOOSE (line + index; -1/Esc leaves). The host accepts them only from the speaker, for the current line and a valid index, at most one per 250 ms.
+  - Others vote as before. Barter, charedit, map and schematic results close the party dialog.
+  - Merchants are still talked to locally. If the speaker disconnects, the dialog ends.
+- **Traps.** A WORLD_STATE portal/container entry carries `reserved[0]` = COOP_WORLD_TRAP_ARMED. A client drops a trap the host has disarmed (`trap_remove`). Locks already travel in `kind_flags`.
+- **Barter diagnosis.** The `CoopLite: barter:` lines cover the client request (sent / not sent), each failed barter check, sell/buy refusal, low gold, and every completed buy/sell with prices and gold.

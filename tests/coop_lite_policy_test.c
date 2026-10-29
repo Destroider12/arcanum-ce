@@ -952,7 +952,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 29
+        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 30
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -972,6 +972,68 @@ static int test_packet_hardening(void)
         d.type = PACKET_COOP_DOOR_USE + 1;
         if (coop_lite_door_use_valid(&d, sizeof(d))) {
             fprintf(stderr, "door use accepted a wrong type\n");
+            return 1;
+        }
+    }
+    /* PT41: party dialog START / CHOOSE, speaker slot in STATE votes[7] */
+    {
+        PacketCoopDialogState d;
+        unsigned char oid[24];
+        const char* opts[2] = { "a", "b" };
+
+        memset(oid, 7, sizeof(oid));
+        coop_dialog_fill_start(&d, oid);
+        if (coop_dialog_wire_size(&d) != COOP_DIALOG_HDR_SIZE + 24
+            || !coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE + 24, false)
+            || coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, false)
+            || coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE + 24, true)) {
+            fprintf(stderr, "PT41 start packet wrong\n");
+            return 1;
+        }
+        d.line = 3;
+        if (coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE + 24, false)) {
+            fprintf(stderr, "PT41 start accepted junk\n");
+            return 1;
+        }
+        coop_dialog_fill_choose(&d, 9, -1);
+        if (!coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, false) || d.kind != COOP_DIALOG_KIND_CHOOSE
+            || coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE + 1, false)) {
+            fprintf(stderr, "PT41 choose packet wrong\n");
+            return 1;
+        }
+        d.vote_index = 5;
+        if (coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, false)) {
+            fprintf(stderr, "PT41 choose accepted index 5\n");
+            return 1;
+        }
+        coop_dialog_fill_state(&d, 4, 2, "npc", "hi", 2, opts, NULL);
+        d.votes[COOP_DIALOG_SPEAKER_AT] = 3;
+        if (!coop_dialog_packet_valid(&d, sizeof(d), true)) {
+            fprintf(stderr, "PT41 speaker slot rejected\n");
+            return 1;
+        }
+        d.votes[COOP_DIALOG_SPEAKER_AT] = 8;
+        if (coop_dialog_packet_valid(&d, sizeof(d), true)) {
+            fprintf(stderr, "PT41 speaker slot 8 accepted\n");
+            return 1;
+        }
+        if (coop_lite_party_talk_check(2, 1, 10, false) != 0 || coop_lite_party_talk_check(0, 1, 1, false) != 1
+            || coop_lite_party_talk_check(2, COOP_PARTY_TALK_MAX_DIST + 1, 1, false) != 2
+            || coop_lite_party_talk_check(2, 1, COOP_PARTY_TALK_MAX_HOST_DIST + 1, false) != 3
+            || coop_lite_party_talk_check(2, 1, -1, false) != 3 || coop_lite_party_talk_check(2, 1, 1, true) != 4) {
+            fprintf(stderr, "PT41 party talk check wrong\n");
+            return 1;
+        }
+        if (!coop_lite_party_choose_ok(2, 2, 5, 5, 1, 2) || !coop_lite_party_choose_ok(2, 2, 5, 5, -1, 2)
+            || coop_lite_party_choose_ok(2, 3, 5, 5, 1, 2) /* not the speaker */
+            || coop_lite_party_choose_ok(2, 2, 4, 5, 1, 2) /* stale line */
+            || coop_lite_party_choose_ok(2, 2, 5, 5, 2, 2) /* out of range */
+            || coop_lite_party_choose_ok(-1, -1, 5, 5, 0, 2)) {
+            fprintf(stderr, "PT41 choose check wrong\n");
+            return 1;
+        }
+        if (sizeof(CoopWorldEntry) != 0x40) {
+            fprintf(stderr, "PT41 world entry size changed\n");
             return 1;
         }
     }

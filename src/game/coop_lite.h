@@ -563,8 +563,9 @@ typedef struct CoopWorldEntry {
     /* 0028 */ int hp_damage; /* NPC */
     /* 002C */ int proto; /* ground item */
     /* 0030 */ int64_t loc;
-    /* 0038 */ uint8_t reserved[8];
+    /* 0038 */ uint8_t reserved[8]; /* PT41: [0] = COOP_WORLD_TRAP_ARMED (portal/container) */
 } CoopWorldEntry;
+#define COOP_WORLD_TRAP_ARMED 1u
 
 typedef struct PacketCoopWorldState {
     /* 0000 */ int type;
@@ -825,6 +826,7 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_WMAP_OPEN 14 /* PT26: host is on the world map (resent every 3 s) */
 #define COOP_PARTY_WMAP_CLOSE 15 /* PT26: host left the world map */
 #define COOP_PARTY_SKILL_FAILED 16 /* PT40: your pick lock / disarm attempt failed */
+#define COOP_PARTY_TALK_REFUSED 17 /* PT41: party dialog refused (leader too far / busy) */
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
@@ -1281,6 +1283,12 @@ void coop_lite_handle_story_sync(PacketCoopStorySync* pkt);
 #define COOP_DIALOG_OPT_MAX 384
 #define COOP_DIALOG_KIND_STATE 1
 #define COOP_DIALOG_KIND_VOTE 2
+#define COOP_DIALOG_KIND_START 3 /* PT41 client->host: header + npc OID (24) in npc_name */
+#define COOP_DIALOG_KIND_CHOOSE 4 /* PT41 client->host: speaker's answer (line, vote_index; -1 = leave) */
+#define COOP_DIALOG_SPEAKER_AT 7 /* PT41: STATE votes[7] = speaking slot (0 = host) */
+#define COOP_PARTY_TALK_MAX_HOST_DIST 18
+#define COOP_PARTY_TALK_MAX_DIST 5
+#define COOP_PARTY_TALK_INTERVAL_MS 1000u
 #define COOP_DIALOG_ACT_CLOSE 0
 #define COOP_DIALOG_ACT_OPEN 1
 #define COOP_DIALOG_MAX_VOTES 7 /* client slots 1..7 */
@@ -1336,6 +1344,22 @@ void coop_dialog_fill_state(PacketCoopDialogState* pkt, unsigned int seq, unsign
     const char* reply, int num_options, const char* const* options, const unsigned char* votes);
 void coop_dialog_fill_close(PacketCoopDialogState* pkt, unsigned int seq, unsigned int line);
 void coop_dialog_fill_vote(PacketCoopDialogState* pkt, unsigned int line, int option);
+/* PT41 party dialog: START carries the NPC OID (24 bytes), CHOOSE the answer. */
+void coop_dialog_fill_start(PacketCoopDialogState* pkt, const unsigned char* oid24);
+void coop_dialog_fill_choose(PacketCoopDialogState* pkt, unsigned int line, int option);
+/* 0 ok; 1 bad slot, 2 speaker too far, 3 leader too far, 4 busy. */
+int coop_lite_party_talk_check(int slot, int speaker_dist, int host_dist, bool busy);
+/* CHOOSE accepted: from the speaker, current line, option in range or -1. */
+bool coop_lite_party_choose_ok(int speaker, int slot, unsigned int line, unsigned int cur_line, int option,
+    int num_options);
+/* Client: story NPC talk -> START to the host. true: handled (sent or rate-limited). */
+bool coop_lite_client_party_talk(int64_t npc_obj, int64_t pc_obj);
+/* Host: the client PC running a party dialog, OBJ_HANDLE_NULL when none. */
+int64_t coop_lite_party_dialog_pc(void);
+void coop_lite_party_dialog_ended(int64_t pc_obj);
+void coop_lite_set_party_choose_hook(bool (*choose)(int option));
+/* Client viewer: leave the party dialog (speaker only). */
+bool coop_lite_client_dialog_leave(void);
 /* Bytes to put on the wire for `pkt` (header only for close / vote). */
 int coop_dialog_wire_size(const PacketCoopDialogState* pkt);
 /* Strict check; from_host = the receiver is a client (so kind must be STATE). */

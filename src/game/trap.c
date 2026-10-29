@@ -310,6 +310,12 @@ void trap_remove_internal(int64_t trap_obj)
     }
 }
 
+/* Coop Lite (PT41): a client drops a trap the host disarmed. */
+void trap_remove(int64_t trap_obj)
+{
+    trap_remove_internal(trap_obj);
+}
+
 // 0x4BC2E0
 bool trap_use_on_obj(int64_t pc_obj, int64_t item_obj, int64_t target_obj)
 {

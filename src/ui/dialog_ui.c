@@ -142,6 +142,7 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     char path[TIG_MAX_PATH];
     char str[2000];
     CoopTalkPolicy talk_policy;
+    bool party;
 
     /*
      * Coop Lite: clients only talk to merchants (reduced dialog, story nodes
@@ -149,6 +150,14 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
      * other players' followers, citizens — just barks.
      */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
+    party = pc_obj != OBJ_HANDLE_NULL && pc_obj == coop_lite_party_dialog_pc();
+    if (party) {
+        talk_policy = COOP_TALK_ALLOW; /* PT41: host runs a client's story dialog */
+    } else if (coop_lite_party_dialog_pc() != OBJ_HANDLE_NULL) {
+        /* single dialog entry: busy with a client's party dialog */
+        dialog_ui_float_line(npc_obj, pc_obj, "(Another player is talking.)", -1);
+        return;
+    }
     if (tig_net_is_coop_enabled()) {
         char npc_name[256];
 
@@ -162,7 +171,7 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     /* Coop host: a remote client's PC never runs dialog here — its owner
        runs its own (merchant-only) dialog. Doing it here would also take
        the single dialog entry from the host's own conversation. */
-    if (tig_net_is_coop_enabled() && tig_net_is_host() && !player_is_local_pc_obj(pc_obj)
+    if (!party && tig_net_is_coop_enabled() && tig_net_is_host() && !player_is_local_pc_obj(pc_obj)
         && pc_obj != OBJ_HANDLE_NULL && obj_field_int32_get(pc_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
         tig_debug_printf("DialogUI: remote PC dialog skipped on host\n");
         return;
@@ -172,6 +181,11 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     }
     if (talk_policy == COOP_TALK_BARK || talk_policy == COOP_TALK_BARK_FOLLOWER) {
         int speech_id = -1;
+
+        /* PT41: a client's story talk goes to the host (party dialog). */
+        if (talk_policy == COOP_TALK_BARK && coop_lite_client_party_talk(npc_obj, pc_obj)) {
+            return;
+        }
 
         str[0] = '\0';
         if (talk_policy == COOP_TALK_BARK) {
@@ -295,6 +309,7 @@ void dialog_ui_end_dialog(int64_t obj, int a2)
         dialog_ui_local_pc_dialog_active = 0;
         coop_lite_host_dialog_closed();
     }
+    coop_lite_party_dialog_ended(obj);
 
     dialog_unload(entry->dlg);
 
@@ -558,6 +573,8 @@ void dialog_ui_display(DialogUiEntry* entry)
         for (index = 0; index < entry->state.num_options; index++) {
             intgame_dialog_set_option(index, dialog_ui_option_label(entry, index));
         }
+    } else if (entry->state.pc_obj == coop_lite_party_dialog_pc()) {
+        dialog_ui_coop_publish(entry);
     }
 }
 
@@ -703,7 +720,8 @@ static void dialog_ui_coop_publish(DialogUiEntry* entry)
     char npc_name[256];
     int index;
 
-    if (!tig_net_is_coop_enabled() || !tig_net_is_host() || !player_is_local_pc_obj(entry->state.pc_obj)) {
+    if (!tig_net_is_coop_enabled() || !tig_net_is_host()
+        || (!player_is_local_pc_obj(entry->state.pc_obj) && entry->state.pc_obj != coop_lite_party_dialog_pc())) {
         return;
     }
     npc_name[0] = '\0';
@@ -764,6 +782,10 @@ static bool cdv_message_filter(TigMessage* msg)
         return false;
     }
     if (msg->type == TIG_MESSAGE_KEYBOARD) {
+        if (msg->data.keyboard.pressed && msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE
+            && coop_lite_client_dialog_leave()) {
+            return true;
+        }
         if (msg->data.keyboard.pressed && msg->data.keyboard.scancode == SDL_SCANCODE_V
             && cdv_view.num_options > 0) {
             coop_lite_client_dialog_vote((cdv_view.my_vote + 1) % cdv_view.num_options);
@@ -1088,6 +1110,24 @@ static tig_font_handle_t cdv_font_make(int r, int g, int b)
     return handle;
 }
 
+/* Host: the speaking client's answer (validated by coop_lite). */
+static bool dialog_ui_party_choose(int option)
+{
+    DialogUiEntry* entry = sub_567420(OBJ_HANDLE_NULL);
+
+    if (!entry->field_1850 || entry->state.pc_obj != coop_lite_party_dialog_pc()
+        || option < 0 || option >= entry->state.num_options) {
+        return false;
+    }
+    dialog_ui_process_option(entry, option);
+    if (entry->field_1850 && entry->state.field_17E8 >= 3 && entry->state.field_17E8 != 4) {
+        /* barter / charedit / map / schematic windows are the speaker's own
+           UI: close the party dialog (merchants are talked to locally). */
+        dialog_ui_end_dialog(entry->state.pc_obj, 0);
+    }
+    return true;
+}
+
 static void dialog_ui_coop_view_init(void)
 {
     cdv_font_name = cdv_font_make(230, 200, 110);
@@ -1096,6 +1136,7 @@ static void dialog_ui_coop_view_init(void)
     cdv_font_mine = cdv_font_make(120, 230, 120);
     cdv_font_hint = cdv_font_make(130, 130, 150);
     cdv_fonts_ready = true;
+    coop_lite_set_party_choose_hook(dialog_ui_party_choose);
     coop_lite_set_dialog_view_hooks(dialog_ui_coop_view_show, dialog_ui_coop_view_close, dialog_ui_coop_refresh_votes);
 }
 
