@@ -1572,6 +1572,13 @@ bool skill_invocation_run(SkillInvocation* skill_invocation)
     // Determine if roll is successful - the skill succeds if it's success rate
     // is greater than difficulty plus random modifier, or the invocation is a
     // forced success.
+    /* PT45: co-op gift (host PC puts an item into a teammate's pack). */
+    if (skill == SKILL_PICK_POCKET && tig_net_is_coop_enabled() && target_obj != OBJ_HANDLE_NULL
+        && coop_lite_party_gift(obj_field_int32_get(source_obj, OBJ_F_TYPE) == OBJ_TYPE_PC,
+            obj_field_int32_get(target_obj, OBJ_F_TYPE) == OBJ_TYPE_PC,
+            (skill_invocation->flags & SKILL_INVOCATION_0x02) == 0)) {
+        skill_invocation->flags |= SKILL_INVOCATION_FORCED;
+    }
     is_success = difficulty + rnd_difficulty_roll <= effectiveness
         || (skill_invocation->flags & SKILL_INVOCATION_FORCED) != 0;
 
@@ -1746,6 +1753,8 @@ bool skill_invocation_run(SkillInvocation* skill_invocation)
                     if (!moved) {
                         is_success = false;
                         is_critical = false;
+                    } else {
+                        coop_lite_host_pc_changed(target_obj, false); /* PT45 */
                     }
                 }
             } else {

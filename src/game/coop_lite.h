@@ -1022,6 +1022,9 @@ bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);
 #define COOP_SKILL_USE_ITEM 1000 /* PacketCoopSkillUse.skill: use item_oid on target_oid */
 /* PT44b: obj_deallocate unmaps an OID only if it still names this object. */
 bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj);
+/* PT45: PC -> another player's PC, into their pack: a gift (no roll). */
+bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target);
+void coop_lite_host_pc_changed(int64_t pc, bool stats);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);

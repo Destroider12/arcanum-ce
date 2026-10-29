@@ -2089,3 +2089,17 @@ craft validity, fate recipients).
   restores the original's mapping when the copy goes.
 - The inventory batch closes an open loot window before destroying items of
   its target.
+
+## PT45 — trainers for clients, gifts between players
+
+- Trainers: a client's talk to a non-merchant NPC already runs as the PT41
+  host party dialog with the client's PC as speaker, so `dialog_perform_training`
+  trains that PC on the host and pays from its gold. New
+  `coop_lite_host_pc_changed(pc, true)` then forces the PC build to its owner
+  (PC_STATS, COOP_PC_STATS_F_FORCE) and resyncs its inventory. A client's
+  local merchant dialog refuses the training menu (it would train a copy).
+- Gifts: in the pickpocket window on another living player's PC, putting an
+  item into their pack is a gift (`coop_lite_party_gift`): no roll, always
+  succeeds — host-side for client requests, and in `skill_invocation_run`
+  for the host's own PC; both packs are resynced. Taking still rolls
+  (pickpocket). No new packet, protocol stays 31.

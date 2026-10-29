@@ -1103,6 +1103,11 @@ static int test_packet_hardening(void)
             fprintf(stderr, "float damage delta wrong\n");
             return 1;
         }
+        if (!coop_lite_party_gift(true, true, false) || coop_lite_party_gift(true, true, true)
+            || coop_lite_party_gift(true, false, false) || coop_lite_party_gift(false, true, false)) {
+            fprintf(stderr, "party gift rule wrong\n");
+            return 1;
+        }
         if (!coop_lite_oid_unmap_ok(5, 5) || !coop_lite_oid_unmap_ok(0, 5)
             || coop_lite_oid_unmap_ok(7, 5)) {
             fprintf(stderr, "duplicate OID unmap wrong\n");

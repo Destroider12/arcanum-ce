@@ -9869,6 +9869,20 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         /* gui3 BUG C: the roll ran here, so the thief's own "You succeed." /
            failure line has to be sent (vanilla prints it on the host only). */
         coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_STEAL_FAILED);
+    } else if (coop_lite_party_gift(true, true, from_target)) {
+        /* PT45: putting an item into another player's pack is a gift, not
+           a plant: no roll, always lands (host-authoritative, both synced). */
+        int t = obj_field_int32_get(item, OBJ_F_TYPE);
+
+        if (t == OBJ_TYPE_GOLD) {
+            ok = item_gold_transfer(from, to, qty, item);
+        } else if (t == OBJ_TYPE_AMMO) {
+            ok = item_ammo_transfer(from, to, qty, obj_field_int32_get(item, OBJ_F_AMMO_TYPE), item);
+        } else {
+            ok = item_transfer(item, to);
+        }
+        result = ok ? "given" : "failed";
+        coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_SKILL_FAILED);
     } else {
         SkillInvocation si;
         int effectiveness;
@@ -13522,6 +13536,11 @@ int coop_lite_float_delta(int prev, int now, int hp_max)
     return now - prev;
 }
 
+bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)
+{
+    return source_is_pc && target_is_pc && !from_target;
+}
+
 bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj)
 {
     return mapped == obj || mapped == OBJ_HANDLE_NULL;
@@ -13902,6 +13921,25 @@ void coop_lite_host_party_fate_point(int64_t earner)
         tig_debug_printf("CoopLite: party fate point to slot %d\n", slot);
     }
 }
+/* PT45: host — a slot PC changed outside a client request (host PC's gift,
+   trainer dialog): push its inventory, and with stats its build (forced). */
+void coop_lite_host_pc_changed(int64_t pc, bool stats)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    slot = coop_lite_slot_of_obj(pc);
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    if (stats) {
+        coop_lite_pc_stats_send(slot, pc, COOP_PC_STATS_F_FORCE, slot);
+        tig_debug_printf("CoopLite: slot %d trained (host), build forced to owner\n", slot);
+    }
+    coop_lite_host_sync_slot_inven(slot);
+}
 #else
 void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
@@ -13913,6 +13951,7 @@ bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int6
 bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
 void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
 void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }
+void coop_lite_host_pc_changed(int64_t pc, bool stats) { (void)pc; (void)stats; }
 #endif
 
 bool coop_lite_client_local_goal_obj(int64_t obj)
