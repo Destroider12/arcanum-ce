@@ -2122,3 +2122,7 @@ craft validity, fate recipients).
 ## PT48
 
 - Client "forgot" inventory items after a rejoin (build 538878cd logs): the parked-PC restore left null/duplicate handles in the PC's inventory list ("Inventory entry is null", "duplicate handle"), while the items still named the PC as parent. INVEN_SYNC saw `item_parent == owner` and counted them as present, so they stayed invisible. Now each batch repairs the owner's list first (drops null/destroyed/foreign/duplicate handles, `coop_lite_inv_compact_handles`) and re-lists any item whose parent is the owner but is missing from the list. The host's periodic resync then restores the client's view.
+
+## PT49
+
+- Party dialog (PT41) no longer needs the NPC near the host PC: the host-distance cap went from 18 to 1000 tiles. The host still needs the NPC object loaded (resolved by OID; clients' surroundings are kept loaded) and it must be within 5 tiles of the speaking client PC, alive, with no other dialog/combat running. Barter/trainers already only check the client PC ↔ NPC range.

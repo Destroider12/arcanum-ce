@@ -1316,7 +1316,7 @@ void coop_lite_handle_story_sync(PacketCoopStorySync* pkt);
 #define COOP_DIALOG_KIND_START 3 /* PT41 client->host: header + npc OID (24) in npc_name */
 #define COOP_DIALOG_KIND_CHOOSE 4 /* PT41 client->host: speaker's answer (line, vote_index; -1 = leave) */
 #define COOP_DIALOG_SPEAKER_AT 7 /* PT41: STATE votes[7] = speaking slot (0 = host) */
-#define COOP_PARTY_TALK_MAX_HOST_DIST 18
+#define COOP_PARTY_TALK_MAX_HOST_DIST 1000 /* PT49: was 18; NPC resolved on the host = loaded */
 #define COOP_PARTY_TALK_MAX_DIST 5
 #define COOP_PARTY_TALK_INTERVAL_MS 1000u
 #define COOP_DIALOG_ACT_CLOSE 0
