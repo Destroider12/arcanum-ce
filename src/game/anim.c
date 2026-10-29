@@ -11738,7 +11738,9 @@ bool sub_4305D0(AnimRunInfo* run_info)
                     offset_y = 0;
                 }
 
-                if ((spell_flags & (OSF_FLOATING | OSF_BODY_OF_AIR)) == 0) {
+                /* Coop Lite PT42: a client never springs a floor trap;
+                   the host does it from the PC's pose (host-authoritative). */
+                if ((spell_flags & (OSF_FLOATING | OSF_BODY_OF_AIR)) == 0 && !tig_net_is_coop_client()) {
                     ObjectList traps;
 
                     object_list_location(new_loc, OBJ_TM_TRAP, &traps);

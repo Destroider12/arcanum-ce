@@ -2037,3 +2037,14 @@ craft validity, fate recipients).
   - Merchants are still talked to locally. If the speaker disconnects, the dialog ends.
 - **Traps.** A WORLD_STATE portal/container entry carries `reserved[0]` = COOP_WORLD_TRAP_ARMED. A client drops a trap the host has disarmed (`trap_remove`). Locks already travel in `kind_flags`.
 - **Barter diagnosis.** The `CoopLite: barter:` lines cover the client request (sent / not sent), each failed barter check, sell/buy refusal, low gold, and every completed buy/sell with prices and gold.
+
+## PT42: floor traps (protocol 31)
+
+- **Sync.** WORLD_STATE has a new entry kind, COOP_WORLD_TRAP (5), for OBJ_TYPE_TRAP objects.
+  - Each entry carries OF_TRAP_SPOTTED, OF_DONTDRAW and OF_TRAP_PC, plus an armed bit.
+  - A spot from the host is shared with clients. It is only ever added, so a client's own spot is never cleared.
+  - When the host reports a trap as disarmed or spent, the client destroys its copy. Unlisted traps within the prune radius are destroyed too.
+- **Triggering.** Clients never spring floor traps; anim's walk skips them on a coop client. On each accepted client PC_POS, the host walks the line from the old tile to the new one (up to 16 tiles) and springs the first armed trap it finds with the client's PC (SAP_USE). It then refreshes the world, and damage reaches clients through the normal state sync.
+- **Disarm.** This uses the existing SKILL_USE (150).
+  - The host refuses targets that have no armed trap.
+  - For a trap the host has no spot for, the host makes its own Spot Trap roll for that PC first. On success the spot is shared.

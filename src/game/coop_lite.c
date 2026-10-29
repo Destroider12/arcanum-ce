@@ -7220,6 +7220,53 @@ static void coop_lite_client_map_mismatch(const PacketCoopPcPos* pkt)
 }
 #endif
 
+#ifndef COOP_LITE_TEST_STUBS
+/* PT42: a client PC stepped from `from` to `to` (the pose stream may skip
+   tiles): the host springs the first armed floor trap on that line, as
+   anim's walk does for a local mover. */
+static void coop_lite_host_pc_trap_walk(int slot, int64_t pc, int64_t from, int64_t to)
+{
+    int64_t loc = from;
+    int steps;
+    unsigned int spell_flags;
+
+    if (from == to || pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+        return;
+    }
+    spell_flags = (unsigned int)obj_field_int32_get(pc, OBJ_F_SPELL_FLAGS);
+    if ((spell_flags & (OSF_FLOATING | OSF_BODY_OF_AIR)) != 0) {
+        return;
+    }
+    for (steps = 0; steps < COOP_TRAP_WALK_MAX && loc != to; steps++) {
+        ObjectList traps;
+        ObjectNode* node;
+        int64_t next;
+
+        if (!location_in_dir(loc, location_rot(loc, to), &next) || next == loc) {
+            break;
+        }
+        loc = next;
+        object_list_location(loc, OBJ_TM_TRAP, &traps);
+        for (node = traps.head; node != NULL; node = node->next) {
+            if (trap_type(node->obj) != TRAP_TYPE_INVALID) {
+                break;
+            }
+        }
+        if (node != NULL) {
+            int64_t trap = node->obj;
+
+            object_list_destroy(&traps);
+            tig_debug_printf("CoopLite: trap: slot %d PC springs a floor trap at %d,%d\n", slot,
+                (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+            object_script_execute(pc, trap, trap, SAP_USE, 0);
+            coop_lite_host_world_dirty();
+            return;
+        }
+        object_list_destroy(&traps);
+    }
+}
+#endif
+
 void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -7313,7 +7360,12 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
             coop_last_pc_pos_valid[sender] = false;
             return;
         }
-        coop_lite_apply_pc_pos(obj, pkt);
+        {
+            int64_t from_loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+
+            coop_lite_apply_pc_pos(obj, pkt);
+            coop_lite_host_pc_trap_walk(sender, obj, from_loc, pkt->loc);
+        }
         coop_client_applied[sender] = *pkt;
         coop_client_applied_valid[sender] = true;
         coop_pose_force_active[sender] = false;
@@ -7554,11 +7606,20 @@ bool coop_lite_world_state_valid(const PacketCoopWorldState* pkt, int size)
         return false;
     }
     for (i = 0; i < pkt->count; i++) {
-        if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_GROUND_ITEM) {
+        if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_TRAP) {
             return false;
         }
     }
     return true;
+}
+
+unsigned int coop_lite_world_trap_flags_merge(unsigned int have, unsigned int host)
+{
+    if ((host & COOP_WORLD_OF_TRAP_SPOTTED) != 0) {
+        have |= COOP_WORLD_OF_TRAP_SPOTTED;
+        have &= ~COOP_WORLD_OF_DONTDRAW;
+    }
+    return have;
 }
 
 bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
@@ -12477,6 +12538,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     int n_container = 0;
     int n_npc = 0;
     int n_item = 0;
+    int n_trap = 0;
     Uint64 t0;
 
     if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
@@ -12523,6 +12585,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             }
             type = obj_field_int32_get(obj, OBJ_F_TYPE);
             if (type != OBJ_TYPE_PORTAL && type != OBJ_TYPE_CONTAINER && type != OBJ_TYPE_NPC
+                && type != OBJ_TYPE_TRAP
                 && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
                 continue;
             }
@@ -12562,6 +12625,12 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
                     containers[num_containers++] = obj;
                 }
                 n_container++;
+                break;
+            case OBJ_TYPE_TRAP:
+                e->kind = COOP_WORLD_TRAP;
+                e->of_flags = flags & COOP_WORLD_TRAP_OF_MASK;
+                e->kind_flags = trap_type(obj) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
+                n_trap++;
                 break;
             case OBJ_TYPE_NPC:
                 e->kind = COOP_WORLD_NPC;
@@ -12617,8 +12686,8 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             coop_lite_host_send_inven_batch(slot, &containers[i], 1);
         }
     }
-    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items (%.2f ms)\n",
-        slot, n_portal, n_container, n_npc, n_item, (double)(SDL_GetTicksNS() - t0) / 1e6);
+    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items, %d traps (%.2f ms)\n",
+        slot, n_portal, n_container, n_npc, n_item, n_trap, (double)(SDL_GetTicksNS() - t0) / 1e6);
 #else
     (void)pkt;
 #endif
@@ -12634,7 +12703,7 @@ static CoopOidSet coop_world_npc_seen_set;
 static CoopOidSet* const coop_world_npc_seen = &coop_world_npc_seen_set;
 static bool coop_world_rx_active;
 static int coop_world_rx_map;
-static int coop_world_stats[5]; /* per kind: applied changes */
+static int coop_world_stats[6]; /* per kind: applied changes */
 static int coop_world_req_key = -1;
 static unsigned int coop_world_req_ms;
 static unsigned int coop_world_ready_ms;
@@ -12681,6 +12750,9 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
     }
     if (e->kind == COOP_WORLD_NPC) {
         coop_oid_set_add(coop_world_npc_seen, e->oid); /* PT31 */
+    }
+    if (e->kind == COOP_WORLD_TRAP) {
+        coop_oid_set_add(coop_world_seen, e->oid); /* PT42: unlisted floor traps prune */
     }
     if (obj == OBJ_HANDLE_NULL) {
         /* Unknown ground item: asked for after the batch (a request sent
@@ -12739,6 +12811,32 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
             coop_world_stats[e->kind]++;
         }
         coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_NPC_OF_MASK, e->kind);
+        break;
+    case COOP_WORLD_TRAP:
+        if (type != OBJ_TYPE_TRAP) {
+            return;
+        }
+        if ((e->kind_flags & COOP_WORLD_TRAP_ARMED) == 0) {
+            /* disarmed / spent at the host */
+            object_destroy(obj);
+            coop_world_stats[e->kind]++;
+            tig_debug_printf("CoopLite: world: floor trap dropped (spent at host)\n");
+            return;
+        }
+        {
+            unsigned int have = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS);
+            unsigned int want = coop_lite_world_trap_flags_merge(have, e->of_flags);
+
+            if ((want & ~have) != 0) {
+                object_flags_set(obj, want & ~have);
+            }
+            if ((have & ~want) != 0) {
+                object_flags_unset(obj, have & ~want);
+            }
+            if (want != have) {
+                coop_world_stats[e->kind]++;
+            }
+        }
         break;
     case COOP_WORLD_GROUND_ITEM:
         if (!item_is_item(obj)) {
@@ -12823,6 +12921,7 @@ static int coop_lite_world_prune(void)
             /* PT26: a junk pile the host destroyed when it was emptied
                stayed here with stale contents ("transfer refused"). */
             if (!item_is_item(obj)
+                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_TRAP /* PT42 */
                 && !(obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
                     && sub_49B290(obj) == BP_JUNK_PILE)) {
                 continue;
@@ -13461,6 +13560,32 @@ void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
         tig_debug_printf("CoopLite: slot %d skill %d refused: %d tiles away\n", slot, pkt->skill,
             (int)object_dist(pc, target));
         return;
+    }
+    if (pkt->skill == SKILL_DISARM_TRAPS && trap_type(target) == TRAP_TYPE_INVALID) {
+        tig_debug_printf("CoopLite: slot %d disarm refused: no armed trap\n", slot);
+        coop_lite_host_slot_notice(slot, COOP_PARTY_SKILL_FAILED);
+        coop_lite_host_world_dirty();
+        return;
+    }
+    if (pkt->skill == SKILL_DISARM_TRAPS && !trap_is_spotted(pc, target)) {
+        /* PT42: the client spotted it locally; the host's copy only knows
+           shared spots. Its own Spot Trap roll for that PC decides. */
+        SkillInvocation spot;
+
+        skill_invocation_init(&spot);
+        sub_4440E0(pc, &(spot.source));
+        sub_4440E0(target, &(spot.target));
+        spot.skill = SKILL_SPOT_TRAP;
+        if (!magictech_check_env_sf(OSF_DETECTING_TRAPS)
+            && (!skill_invocation_run(&spot) || (spot.flags & SKILL_INVOCATION_SUCCESS) == 0)) {
+            tig_debug_printf("CoopLite: slot %d disarm refused: trap not spotted (host roll)\n", slot);
+            coop_lite_host_slot_notice(slot, COOP_PARTY_SKILL_FAILED);
+            return;
+        }
+        object_flags_set(target, OF_TRAP_SPOTTED);
+        if (obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_TRAP) {
+            object_flags_unset(target, OF_DONTDRAW);
+        }
     }
     skill_invocation_init(&si);
     sub_4440E0(pc, &(si.source));

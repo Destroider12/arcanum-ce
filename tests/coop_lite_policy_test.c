@@ -952,7 +952,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 30
+        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 31
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -1759,6 +1759,26 @@ static int test_world_state(void)
         || coop_lite_world_state_valid(&pkt, 8)
         || coop_lite_world_state_valid(NULL, 16)) {
         fprintf(stderr, "world: size mismatch accepted\n");
+        return 1;
+    }
+    /* PT42: floor traps */
+    pkt.entries[1].kind = COOP_WORLD_TRAP;
+    if (!coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
+        fprintf(stderr, "world: trap entry refused\n");
+        return 1;
+    }
+    pkt.entries[1].kind = COOP_WORLD_TRAP + 1;
+    if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
+        fprintf(stderr, "world: kind past trap accepted\n");
+        return 1;
+    }
+    if (coop_lite_world_trap_flags_merge(COOP_WORLD_OF_DONTDRAW, COOP_WORLD_OF_TRAP_SPOTTED)
+            != COOP_WORLD_OF_TRAP_SPOTTED
+        || coop_lite_world_trap_flags_merge(COOP_WORLD_OF_TRAP_SPOTTED, COOP_WORLD_OF_DONTDRAW)
+            != COOP_WORLD_OF_TRAP_SPOTTED /* own spot kept */
+        || coop_lite_world_trap_flags_merge(COOP_WORLD_OF_DONTDRAW | 0x4u, 0u) != (COOP_WORLD_OF_DONTDRAW | 0x4u)
+        || (COOP_WORLD_TRAP_OF_MASK & 0x02000100u) != 0x02000100u) {
+        fprintf(stderr, "world: trap flag merge wrong\n");
         return 1;
     }
     pkt.entries[1].kind = 9;

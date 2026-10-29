@@ -471,7 +471,15 @@ typedef enum CoopWorldKind {
     COOP_WORLD_CONTAINER = 2,
     COOP_WORLD_NPC = 3,
     COOP_WORLD_GROUND_ITEM = 4,
+    COOP_WORLD_TRAP = 5, /* PT42: floor trap object; kind_flags = COOP_WORLD_TRAP_ARMED */
 } CoopWorldKind;
+/* PT42: floor-trap flags the host shares (spotted / hidden / PC-placed). */
+#define COOP_WORLD_TRAP_OF_MASK 0x03000100u
+#define COOP_WORLD_OF_TRAP_SPOTTED 0x02000000u
+#define COOP_WORLD_OF_DONTDRAW 0x00000100u
+/* PT42: a client's floor-trap flags after the host's: spotting is shared and
+   only ever added (a client's own spot is kept), DONTDRAW cleared with it. */
+unsigned int coop_lite_world_trap_flags_merge(unsigned int have, unsigned int host);
 
 /* Object flags the snapshot may set or clear, per kind. */
 #define COOP_WORLD_PORTAL_OF_MASK (OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT)
@@ -566,6 +574,7 @@ typedef struct CoopWorldEntry {
     /* 0038 */ uint8_t reserved[8]; /* PT41: [0] = COOP_WORLD_TRAP_ARMED (portal/container) */
 } CoopWorldEntry;
 #define COOP_WORLD_TRAP_ARMED 1u
+#define COOP_TRAP_WALK_MAX 16 /* PT42: tiles checked per client pose step */
 
 typedef struct PacketCoopWorldState {
     /* 0000 */ int type;
