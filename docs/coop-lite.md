@@ -2103,3 +2103,12 @@ craft validity, fate recipients).
   succeeds — host-side for client requests, and in `skill_invocation_run`
   for the host's own PC; both packs are resynced. Taking still rolls
   (pickpocket). No new packet, protocol stays 31.
+
+## PT46 — loot items the client could not take
+
+- Host log: "takes 'Old Revolver' / 'Wool Jacket' from target: failed" with
+  the same OIDs on both sides (host took G_92E2F532… itself later), so not
+  an OID mismatch. The client's Packet81 names the inventory cell of its
+  own copy of the pack; on the host that cell can be taken (packs drift),
+  so `item_transfer_ex` fails. Now the host retries with `item_transfer`
+  (its own placement) — `coop_lite_loot_retry_auto_slot`.

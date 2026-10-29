@@ -9848,6 +9848,16 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         copy->field_88 = obj_get_id(target);
         sub_460960(copy); /* inven_ui's transfer (sub_578EA0); frees `copy` */
         ok = coop_lite_is_stackable(item) || (item_parent(item, &parent) && parent == to);
+        if (coop_lite_loot_retry_auto_slot(ok, coop_lite_is_stackable(item),
+                item_parent(item, &parent) && parent == from)) {
+            /* PT46: the client picked a grid cell / slot of its own copy of
+               the pack; on the host that cell is taken (packs drift), so
+               the vanilla move failed. Let the host place it. */
+            ok = item_transfer(item, to);
+            if (ok) {
+                tig_debug_printf("CoopLite: loot: slot %d item placed by the host (client's cell was taken)\n", slot);
+            }
+        }
         result = ok ? "done" : "failed";
     } else if (obj_field_int32_get(target, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         SkillInvocation si;
@@ -13534,6 +13544,11 @@ int coop_lite_float_delta(int prev, int now, int hp_max)
         now = hp_max;
     }
     return now - prev;
+}
+
+bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source)
+{
+    return !moved && !stackable && still_at_source;
 }
 
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)

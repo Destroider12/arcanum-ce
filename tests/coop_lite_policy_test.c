@@ -1103,6 +1103,11 @@ static int test_packet_hardening(void)
             fprintf(stderr, "float damage delta wrong\n");
             return 1;
         }
+        if (!coop_lite_loot_retry_auto_slot(false, false, true) || coop_lite_loot_retry_auto_slot(true, false, true)
+            || coop_lite_loot_retry_auto_slot(false, true, true) || coop_lite_loot_retry_auto_slot(false, false, false)) {
+            fprintf(stderr, "loot retry rule wrong\n");
+            return 1;
+        }
         if (!coop_lite_party_gift(true, true, false) || coop_lite_party_gift(true, true, true)
             || coop_lite_party_gift(true, false, false) || coop_lite_party_gift(false, true, false)) {
             fprintf(stderr, "party gift rule wrong\n");
