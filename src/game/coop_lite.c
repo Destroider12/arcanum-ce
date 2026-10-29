@@ -620,8 +620,18 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound)
     return bound && slot >= 0 && slot < 8 && slot != mover_slot;
 }
 
+static bool coop_preshop;
+
+bool coop_lite_client_preshop_active(void)
+{
+    return coop_preshop;
+}
+
 bool coop_lite_is_client_role(void)
 {
+    if (coop_preshop) {
+        return false; /* PT40: the pre-session shop is single player */
+    }
     /* Local suspension is only used by clients running their own PC's SP
        path (move/talk); the dialog it opens is still a client dialog. */
     if (tig_net_is_locally_suspended()) {
@@ -1923,6 +1933,8 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_OBJ_REQ: /* item blob request (P1-2) */
     case PACKET_COOP_NPC_REQ: /* PT26 unknown NPC request */
     case PACKET_COOP_DOOR_USE: /* PT37 client door use → host */
+    case PACKET_COOP_SKILL_USE: /* PT40 pick lock / disarm intent */
+    case PACKET_COOP_CRAFT: /* PT40 schematic combine intent */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
     case PACKET_COOP_WORLD_REQ: /* §7 world state request */
         return COOP_MP_PKT_HOST_RESOLVE;
@@ -2956,6 +2968,10 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopPcStats);
     case PACKET_COOP_DOOR_USE:
         return sizeof(PacketCoopDoorUse);
+    case PACKET_COOP_SKILL_USE:
+        return sizeof(PacketCoopSkillUse);
+    case PACKET_COOP_CRAFT:
+        return sizeof(PacketCoopCraft);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -5814,6 +5830,9 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
         break;
     case COOP_PARTY_STEAL_OK:
         snprintf(buf, size, "%s", "You succeed.");
+        break;
+    case COOP_PARTY_SKILL_FAILED:
+        snprintf(buf, size, "%s", "You failed.");
         break;
     case COOP_PARTY_REST_BEGIN:
         snprintf(buf, size, "%s", local_is_host ? "" : "The party leader rests - time passes for everyone.");
@@ -12965,6 +12984,23 @@ bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size)
     return pkt != NULL && pkt->type == PACKET_COOP_DOOR_USE && size >= (int)sizeof(PacketCoopDoorUse);
 }
 
+bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_SKILL_USE && size >= (int)sizeof(PacketCoopSkillUse)
+        && pkt->flags == 0 && pkt->modifier >= -100 && pkt->modifier <= 100;
+}
+
+bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_CRAFT && size >= (int)sizeof(PacketCoopCraft)
+        && pkt->schematic >= 0 && pkt->schematic < 100000;
+}
+
+bool coop_lite_fate_party_target(bool pc_present, bool slot_active, bool is_earner, int slot)
+{
+    return pc_present && !is_earner && slot >= 0 && slot < 8 && (slot == 0 || slot_active);
+}
+
 void coop_lite_host_portal_changed(void)
 {
     if (tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled()) {
@@ -13054,9 +13090,178 @@ void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
     coop_portal_changed = false;
     coop_lite_host_world_dirty();
 }
+
+/* ---- PT40: pick lock / disarm trap, crafting, fate, pre-session shop ---- */
+
+void coop_lite_client_preshop_begin(void)
+{
+    if (coop_preshop || !tig_net_is_coop_client() || coop_lite_client_in_session) {
+        return;
+    }
+    coop_preshop = true;
+    tig_net_local_suspend_begin();
+    tig_debug_printf("CoopLite: new-game shop runs locally (kit goes in the character bundle)\n");
+}
+
+void coop_lite_client_preshop_end(void)
+{
+    if (!coop_preshop) {
+        return;
+    }
+    coop_preshop = false;
+    tig_net_local_suspend_end();
+}
+
+bool coop_lite_client_skill_intent(struct SkillInvocation* si)
+{
+    PacketCoopSkillUse pkt;
+    int64_t pc = player_get_local_pc_obj();
+    int depth;
+
+    if (si == NULL || coop_preshop || !tig_net_is_coop_client() || !coop_lite_client_in_session
+        || (si->skill != SKILL_PICK_LOCKS && si->skill != SKILL_DISARM_TRAPS)
+        || pc == OBJ_HANDLE_NULL || si->source.obj != pc || si->target.obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_SKILL_USE;
+    pkt.skill = si->skill;
+    pkt.modifier = si->modifier < -100 ? -100 : (si->modifier > 100 ? 100 : si->modifier);
+    coop_lite_put_oid(pkt.target_oid, si->target.obj);
+    if (si->item.obj != OBJ_HANDLE_NULL) {
+        coop_lite_put_oid(pkt.item_oid, si->item.obj);
+    }
+    pkt.target_loc = si->target_loc;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: skill %d on target sent to host\n", si->skill);
+    return true;
+}
+
+void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
+{
+    SkillInvocation si;
+    int slot;
+    int64_t pc;
+    int64_t target;
+    int64_t item = OBJ_HANDLE_NULL;
+    int64_t parent = OBJ_HANDLE_NULL;
+    bool ok;
+
+    if (!tig_net_is_active() || !tig_net_is_host()
+        || !coop_lite_skill_use_valid(pkt, tig_net_last_message_size())
+        || (pkt->skill != SKILL_PICK_LOCKS && pkt->skill != SKILL_DISARM_TRAPS)) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    target = coop_lite_get_oid_obj(pkt->target_oid);
+    if (pkt->item_oid[0] != 0) {
+        item = coop_lite_get_oid_obj(pkt->item_oid);
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc) {
+            item = OBJ_HANDLE_NULL; /* not ours: roll without the tool */
+        }
+    }
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || target == OBJ_HANDLE_NULL
+        || (obj_field_int32_get(target, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
+        return;
+    }
+    if (object_dist(pc, target) > 4) {
+        tig_debug_printf("CoopLite: slot %d skill %d refused: %d tiles away\n", slot, pkt->skill,
+            (int)object_dist(pc, target));
+        return;
+    }
+    skill_invocation_init(&si);
+    sub_4440E0(pc, &(si.source));
+    sub_4440E0(target, &(si.target));
+    sub_4440E0(item, &(si.item));
+    si.skill = pkt->skill;
+    si.modifier = pkt->modifier;
+    si.target_loc = obj_field_int64_get(target, OBJ_F_LOCATION);
+    ok = skill_invocation_run(&si) && (si.flags & SKILL_INVOCATION_SUCCESS) != 0;
+    tig_debug_printf("CoopLite: slot %d %s: %s\n", slot,
+        pkt->skill == SKILL_PICK_LOCKS ? "pick lock" : "disarm trap", ok ? "success" : "failed");
+    coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_SKILL_FAILED);
+    coop_portal_changed = false;
+    coop_lite_host_world_dirty();
+    coop_lite_host_sync_slot_inven(slot);
+}
+
+bool coop_lite_client_craft_intent(int schematic)
+{
+    PacketCoopCraft pkt;
+    int depth;
+
+    if (coop_preshop || !tig_net_is_coop_client() || !coop_lite_client_in_session || schematic < 0) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_CRAFT;
+    pkt.schematic = schematic;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: schematic %d combine sent to host\n", schematic);
+    return true;
+}
+
+void coop_lite_handle_craft(PacketCoopCraft* pkt)
+{
+    int slot;
+    int64_t pc;
+
+    if (!tig_net_is_active() || !tig_net_is_host()
+        || !coop_lite_craft_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+        return;
+    }
+    /* schematic_ui_process finds both ingredients in pc's pack and (PT40)
+       checks the expertise; the product gets a host OID. */
+    ui_schematic_process(pkt->schematic, pc, pc);
+    tig_debug_printf("CoopLite: slot %d combined schematic %d\n", slot, pkt->schematic);
+    coop_lite_host_sync_slot_inven(slot);
+}
+
+void coop_lite_host_party_fate_point(int64_t earner)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || earner == OBJ_HANDLE_NULL
+        || coop_lite_slot_of_obj(earner) < 0) {
+        return;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (!coop_lite_fate_party_target(pc != OBJ_HANDLE_NULL,
+                slot > 0 && tig_net_client_is_active(slot), pc == earner, slot)) {
+            continue;
+        }
+        stat_base_set(pc, STAT_FATE_POINTS, stat_base_get(pc, STAT_FATE_POINTS) + 1);
+        tig_debug_printf("CoopLite: party fate point to slot %d\n", slot);
+    }
+}
 #else
 void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
+void coop_lite_client_preshop_begin(void) { }
+void coop_lite_client_preshop_end(void) { }
+bool coop_lite_client_skill_intent(struct SkillInvocation* si) { (void)si; return false; }
+void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt) { (void)pkt; }
+bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
+void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
+void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }
 #endif
 
 bool coop_lite_client_local_goal_obj(int64_t obj)

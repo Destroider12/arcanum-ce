@@ -2180,6 +2180,7 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             stat_base_set(a1->pc_obj,
                 STAT_FATE_POINTS,
                 stat_base_get(a1->pc_obj, STAT_FATE_POINTS) + 1);
+            coop_lite_host_party_fate_point(a1->pc_obj); /* PT40 */
             break;
         case DIALOG_ACTION_SU:
             dialog_copy_npc_order_ok_msg(a1->npc_obj, a1->pc_obj, a1->reply, &(a1->speech_id));

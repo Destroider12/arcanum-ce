@@ -1662,6 +1662,7 @@ void sub_5412E0(bool a1)
 
     if (mainmenu_ui_active) {
         gameuilib_wants_mainmenu_unset();
+        coop_lite_client_preshop_end(); /* PT40: back online before CHAR_OFFER */
 
         pc_obj = player_get_local_pc_obj();
 
@@ -4751,6 +4752,7 @@ void mainmenu_ui_shop_destroy(void)
     if (inven_ui_is_created()) {
         inven_ui_destroy();
     }
+    coop_lite_client_preshop_end();
 }
 
 // 0x545E40
@@ -4781,6 +4783,9 @@ void mainmenu_ui_shop_refresh(TigRect* rect)
     (void)rect;
 
     pc_obj = player_get_local_pc_obj();
+    /* PT40: a coop client buys its kit locally (single player); the bundle
+       carries it to the host. Ends in sub_5412E0 / shop destroy. */
+    coop_lite_client_preshop_begin();
     item_generate_inventory(pc_obj);
     if (map_by_type(MAP_TYPE_SHOPPING_MAP) == 0) {
         sub_5412D0();

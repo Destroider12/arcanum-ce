@@ -633,7 +633,7 @@ static int test_packet_hardening(void)
             4, 8, 9, 11, 26, 27, 28, 29, 57, 81, 98, 100, 125,
             PACKET_COOP_ATTACK_INTENT, PACKET_COOP_CHAR_OFFER, PACKET_COOP_PC_POS,
             PACKET_COOP_BARTER, PACKET_COOP_OBJ_REQ, PACKET_COOP_CHAR_BUNDLE,
-            PACKET_COOP_WORLD_REQ, PACKET_COOP_DOOR_USE,
+            PACKET_COOP_WORLD_REQ, PACKET_COOP_DOOR_USE, PACKET_COOP_SKILL_USE, PACKET_COOP_CRAFT,
         };
         static const int host_sends[] = {
             2, 3, 8, 9, 10, 11, 58, 60, 61, 68, 69, 70, 71, 72, 73, 74, 75, 76,
@@ -952,7 +952,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 150 || TIG_NET_PROTOCOL < 28
+        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 29
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -972,6 +972,62 @@ static int test_packet_hardening(void)
         d.type = PACKET_COOP_DOOR_USE + 1;
         if (coop_lite_door_use_valid(&d, sizeof(d))) {
             fprintf(stderr, "door use accepted a wrong type\n");
+            return 1;
+        }
+    }
+    /* PT40: skill use / craft intents, fate recipients */
+    {
+        PacketCoopSkillUse k;
+        PacketCoopCraft c;
+
+        if (sizeof(PacketCoopSkillUse) != 0x48 || sizeof(PacketCoopCraft) != 8
+            || PACKET_COOP_SKILL_USE != 150 || PACKET_COOP_CRAFT != 151
+            || coop_lite_coop_packet_min_size(PACKET_COOP_SKILL_USE) != (int)sizeof(PacketCoopSkillUse)
+            || coop_lite_coop_packet_min_size(PACKET_COOP_CRAFT) != (int)sizeof(PacketCoopCraft)
+            || coop_lite_packet_allowed(PACKET_COOP_SKILL_USE, false, 0)
+            || !coop_lite_packet_allowed(PACKET_COOP_SKILL_USE, true, 1)
+            || coop_lite_packet_allowed(PACKET_COOP_CRAFT, false, 0)
+            || !coop_lite_packet_allowed(PACKET_COOP_CRAFT, true, 1)) {
+            fprintf(stderr, "PT40 packet layout or role wrong\n");
+            return 1;
+        }
+        memset(&k, 0, sizeof(k));
+        k.type = PACKET_COOP_SKILL_USE;
+        if (!coop_lite_skill_use_valid(&k, sizeof(k)) || coop_lite_skill_use_valid(&k, sizeof(k) - 1)
+            || coop_lite_skill_use_valid(NULL, sizeof(k))) {
+            fprintf(stderr, "skill use validity wrong\n");
+            return 1;
+        }
+        k.flags = 0x10; /* e.g. FORCED: never from a client */
+        if (coop_lite_skill_use_valid(&k, sizeof(k))) {
+            fprintf(stderr, "skill use accepted client flags\n");
+            return 1;
+        }
+        k.flags = 0;
+        k.modifier = 500;
+        if (coop_lite_skill_use_valid(&k, sizeof(k))) {
+            fprintf(stderr, "skill use accepted an absurd modifier\n");
+            return 1;
+        }
+        memset(&c, 0, sizeof(c));
+        c.type = PACKET_COOP_CRAFT;
+        c.schematic = 12;
+        if (!coop_lite_craft_valid(&c, sizeof(c)) || coop_lite_craft_valid(&c, 4)) {
+            fprintf(stderr, "craft validity wrong\n");
+            return 1;
+        }
+        c.schematic = -1;
+        if (coop_lite_craft_valid(&c, sizeof(c))) {
+            fprintf(stderr, "craft accepted a negative schematic\n");
+            return 1;
+        }
+        if (!coop_lite_fate_party_target(true, false, false, 0) /* host PC */
+            || !coop_lite_fate_party_target(true, true, false, 2)
+            || coop_lite_fate_party_target(true, false, false, 2) /* inactive slot */
+            || coop_lite_fate_party_target(true, true, true, 2) /* earner: already got it */
+            || coop_lite_fate_party_target(false, true, false, 3)
+            || coop_lite_fate_party_target(true, true, false, 8)) {
+            fprintf(stderr, "fate recipients wrong\n");
             return 1;
         }
     }

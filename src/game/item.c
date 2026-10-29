@@ -2093,7 +2093,8 @@ void sub_463E20(int64_t obj)
     int idx;
     int64_t item_obj;
 
-    if (tig_net_is_coop_client() && tig_net_is_locally_suspended()) {
+    if (tig_net_is_coop_client() && tig_net_is_locally_suspended()
+        && !coop_lite_client_preshop_active()) { /* PT40: the new-game shop stocks locally */
         /* PT33: the window's local open-time prep (suspended) used to roll
            loot here with the client's own RNG; the host sync then deleted
            it. Only the host generates loot. */

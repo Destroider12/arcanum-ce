@@ -1979,3 +1979,49 @@ validity). Everything else is compiled only.
 
 Tests: `coop_lite_policy_test` (throw policy; 0x04 still refused). Dialog panel,
 item/sector/obj changes are compiled only.
+
+## PT40: Stage 2, skills and economy (protocol 29)
+
+1. **Starting gear (fixed, compiled only).** A coop client skipped nothing in
+   the new-game shop, but the shop ran as a coop client: `sub_463E20` only sent
+   a request (empty merchant), `inven_ui_open` took the coop path (barter
+   request to a host that has no session yet) and every purchase was a
+   Packet81 the host refused. Now `mainmenu_ui_shop_refresh` starts a
+   pre-session "preshop" (`coop_lite_client_preshop_begin`: local suspension,
+   `coop_lite_is_client_role()` false, `sub_463E20` stocks locally); it ends in
+   `sub_5412E0` (before CHAR_OFFER) and on shop destroy. The bought kit is in
+   the PC's inventory and rides to the host in the v2 character bundle (the
+   host skips its own kit when the PC already has items). Pregens have no shop
+   (vanilla) and keep the host kit.
+2. **In-game merchant trade (reviewed, no change).** The barter path (client
+   window, `COOP_BARTER_OPEN`, Packet81 flags 0x01/0x21, host price, gold,
+   identify, INVEN_SYNC of PC/merchant/store) was re-read end to end; no defect
+   was found without a log. Next playtest: look for `CoopLite: barter:` /
+   `inven: ... refused` lines in the host log.
+3. **Pick Locks / Disarm Traps (new, compiled only).** `skill_invocation_run`
+   on a coop client for its own PC and these two skills sends
+   `PACKET_COOP_SKILL_USE` (150, 72 B, client → host; flags must be 0,
+   modifier in [-100, 100]) and returns false locally. The host checks the
+   slot PC, the target (≤ 4 tiles), the lockpicks (dropped if not the PC's),
+   runs the vanilla invocation (lock / trap state, XP through party XP,
+   lockpick use), then WORLD_DIRTY, the slot's INVEN_SYNC and a notice
+   ("You succeed." / "You failed.", new kind 16).
+4. **Schematics (new, compiled only).** The Combine button on a client sends
+   `PACKET_COOP_CRAFT` (151, 8 B). The host runs `schematic_ui_process` on the
+   client PC: ingredients from its pack, expertise check (now also inside
+   `schematic_ui_process`), product created with a host OID, INVEN_SYNC.
+5. **Fate points (new).** Dialog action `fp` and script "grant one fate point"
+   call `coop_lite_host_party_fate_point`: every other present PC of an active
+   slot (and the host's) gets one; PC_STATS carries it to the owners.
+6. **Party-skill dialogs (deferred).** Design: allow `coop_lite_can_talk` for
+   story NPCs when the host PC is within 18 tiles; the client sends
+   DIALOG_STATE kind START (npc OID); the host opens the dialog with the
+   client's PC as `pc_obj` (checks use its INT/CHA/Persuasion), publishes it
+   through the existing viewer to everyone including the speaker, and the
+   speaker's panel gets clickable options sent as kind CHOOSE (line id +
+   index, validated like VOTE). Needs the host dialog engine to run for a
+   non-local PC (dialog_ui entries are keyed by pc_obj, intgame windows are
+   local-only), so it is a round of its own.
+
+Tests: `coop_lite_policy_test` (packet sizes, roles, TYPE_LIMIT 152, skill /
+craft validity, fate recipients).

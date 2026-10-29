@@ -2600,6 +2600,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
             int fate_points = stat_base_get(obj, STAT_FATE_POINTS);
             stat_base_set(obj, STAT_FATE_POINTS, fate_points + 1);
+            coop_lite_host_party_fate_point(obj); /* PT40 */
         }
         return NEXT;
     }

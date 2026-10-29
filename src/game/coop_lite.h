@@ -36,7 +36,9 @@ extern "C" {
 #define PACKET_COOP_STORY_SYNC 147 /* PT35: host → client: quests, rumors, reputation (chunked snapshot) */
 #define PACKET_COOP_DIALOG_STATE 148 /* PT36: host → client dialog view; client → host vote (kind field) */
 #define PACKET_COOP_DOOR_USE 149 /* PT37: client → host: I used this door (portal OID) */
-#define PACKET_COOP_TYPE_LIMIT 150
+#define PACKET_COOP_SKILL_USE 150 /* PT40: client → host: pick lock / disarm trap intent */
+#define PACKET_COOP_CRAFT 151 /* PT40: client → host: combine this schematic */
+#define PACKET_COOP_TYPE_LIMIT 152
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -358,6 +360,27 @@ typedef struct PacketCoopDoorUse {
     /* 0008 */ uint8_t oid[24];
 } PacketCoopDoorUse;
 COOP_STATIC_ASSERT(sizeof(PacketCoopDoorUse) == 0x20, "PacketCoopDoorUse size");
+
+/* PT40: client → host. The client's own PC reached the target and would
+   roll Pick Locks / Disarm Traps; the host rolls instead (flags must be 0). */
+typedef struct PacketCoopSkillUse {
+    /* 0000 */ int type;
+    /* 0004 */ int skill;
+    /* 0008 */ unsigned int flags;
+    /* 000C */ int modifier;
+    /* 0010 */ uint8_t target_oid[24];
+    /* 0028 */ uint8_t item_oid[24]; /* lockpicks; all zero = none */
+    /* 0040 */ int64_t target_loc;
+} PacketCoopSkillUse;
+COOP_STATIC_ASSERT(sizeof(PacketCoopSkillUse) == 0x48, "PacketCoopSkillUse size");
+
+/* PT40: client → host, combine schematic `schematic` from the sender's PC
+   inventory (host checks ingredients and expertise, creates the product). */
+typedef struct PacketCoopCraft {
+    /* 0000 */ int type;
+    /* 0004 */ int schematic;
+} PacketCoopCraft;
+COOP_STATIC_ASSERT(sizeof(PacketCoopCraft) == 0x08, "PacketCoopCraft size");
 
 typedef struct PacketCoopObjReq {
     /* 0000 */ int type;
@@ -801,6 +824,7 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_WORLD_DIRTY 13 /* PT25: host dropped an item: refresh world state soon */
 #define COOP_PARTY_WMAP_OPEN 14 /* PT26: host is on the world map (resent every 3 s) */
 #define COOP_PARTY_WMAP_CLOSE 15 /* PT26: host left the world map */
+#define COOP_PARTY_SKILL_FAILED 16 /* PT40: your pick lock / disarm attempt failed */
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
@@ -980,6 +1004,25 @@ void coop_lite_host_portal_changed(void);
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt);
 /* Door request is the right size for the received byte count. */
 bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size);
+/* PT40 */
+bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size);
+bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);
+void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt);
+void coop_lite_handle_craft(PacketCoopCraft* pkt);
+/* Client: true = the roll was sent to the host (do not resolve locally). */
+struct SkillInvocation;
+bool coop_lite_client_skill_intent(struct SkillInvocation* si);
+/* Client: true = the combine was sent to the host. */
+bool coop_lite_client_craft_intent(int schematic);
+/* Fate point recipient: a present PC of an active slot other than the earner. */
+bool coop_lite_fate_party_target(bool pc_present, bool slot_active, bool is_earner, int slot);
+/* Host: `earner` got a fate point; every other active player PC gets one. */
+void coop_lite_host_party_fate_point(int64_t earner);
+/* Client before its session: the new-game shop runs as single player so the
+   bought kit rides in the v2 character bundle. */
+void coop_lite_client_preshop_begin(void);
+void coop_lite_client_preshop_end(void);
+bool coop_lite_client_preshop_active(void);
 
 #define COOP_PICKUP_QUEUE_MAX 8
 typedef struct CoopPickupQueue {

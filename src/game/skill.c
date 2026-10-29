@@ -1,4 +1,5 @@
 #include "game/skill.h"
+#include "game/coop_lite.h"
 
 #include "game/ai.h"
 #include "game/anim.h"
@@ -1532,6 +1533,11 @@ bool skill_invocation_run(SkillInvocation* skill_invocation)
     bool is_success;
     bool is_critical;
     bool is_fate = false;
+
+    /* PT40: a coop client's Pick Locks / Disarm Traps is rolled by the host. */
+    if (coop_lite_client_skill_intent(skill_invocation)) {
+        return false;
+    }
 
     source_obj = skill_invocation->source.obj;
     target_obj = skill_invocation->target.obj;
