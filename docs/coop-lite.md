@@ -2075,3 +2075,17 @@ craft validity, fate recipients).
   change, protocol stays 31.
 - Town map: clients may open the map button when their sector has a town
   map; world/continent modes and spell-select remain host-only.
+
+## PT44b — looted corpse items back on revisit, loot crash
+
+- A client revisiting a sector loads the corpse's original items from its
+  own map data, with the same OIDs as the items that now live in a PC's
+  pack (looted on the host). The load re-pointed the OID table at the copy;
+  the host's inventory sync then destroyed the copy ("loot vanished") and
+  `obj_deallocate` removed the OID entry outright, leaving the live item
+  unresolvable / handles dangling — the next loot crashed.
+- `obj_deallocate` now unmaps an OID only if it still names that object
+  (`coop_lite_oid_unmap_ok`); a coop client remembers duplicate loads and
+  restores the original's mapping when the copy goes.
+- The inventory batch closes an open loot window before destroying items of
+  its target.

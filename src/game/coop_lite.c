@@ -164,6 +164,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/random.h"
 #include "game/gfade.h"
 #include "ui/wmap_ui.h"
+#include "ui/inven_ui.h"
 #include "ui/sleep_ui.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
@@ -11121,6 +11122,19 @@ static void coop_lite_client_apply_inven_batch(void)
         item_list_free(items);
     }
 
+    /* PT44b: the loot window lists item handles of its target; this batch
+       is about to destroy some of them (stale copies the host no longer
+       has). Close it first instead of leaving dangling handles on screen. */
+    if (inven_ui_is_created() && sub_573600() != OBJ_HANDLE_NULL) {
+        for (i = 0; i < num_doomed; i++) {
+            if (doomed_parent[i] == sub_573600()) {
+                tig_debug_printf("CoopLite: inven: loot window closed (host removed its items)\n");
+                inven_ui_destroy();
+                break;
+            }
+        }
+    }
+
     /* Listed items: into their owner (created with the host's OID if new). */
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         int64_t owner = owner_obj[o];
@@ -13506,6 +13520,11 @@ int coop_lite_float_delta(int prev, int now, int hp_max)
         now = hp_max;
     }
     return now - prev;
+}
+
+bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj)
+{
+    return mapped == obj || mapped == OBJ_HANDLE_NULL;
 }
 
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap)

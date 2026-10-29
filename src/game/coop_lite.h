@@ -1020,6 +1020,8 @@ bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size);
 bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);
 /* PT44 */
 #define COOP_SKILL_USE_ITEM 1000 /* PacketCoopSkillUse.skill: use item_oid on target_oid */
+/* PT44b: obj_deallocate unmaps an OID only if it still names this object. */
+bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);

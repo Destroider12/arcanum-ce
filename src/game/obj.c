@@ -4,6 +4,7 @@
 
 #include "game/item.h"
 #include "net/tig_net.h"
+#include "game/coop_lite.h"
 #include "game/obj_file.h"
 #include "game/obj_find.h"
 #include "game/obj_private.h"
@@ -64,6 +65,8 @@ static bool obj_proto_write_file(TigFile* stream, int64_t obj);
 static bool obj_proto_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid);
 static bool obj_inst_write_file(TigFile* stream, int64_t obj);
 static bool obj_inst_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid);
+static void obj_dup_oid_remember(ObjectID oid, int64_t copy);
+static void obj_dup_oid_restore(ObjectID oid, int64_t copy);
 static void obj_proto_write_mem(WriteBuffer* wb, int64_t obj);
 static bool obj_proto_read_mem(uint8_t* data, int64_t* obj_ptr);
 static void obj_inst_write_mem(WriteBuffer* wb, int64_t obj);
@@ -947,7 +950,15 @@ void obj_deallocate(int64_t obj)
     }
 
     if (object->oid.type != OID_TYPE_NULL) {
-        obj_pool_perm_oid_remove(object->oid);
+        /* PT44b: only drop the OID mapping if it is ours; a duplicate copy
+           (coop client reloading a sector whose items were looted into a
+           PC) must not unmap the live original. */
+        int64_t mapped = obj_pool_perm_lookup(object->oid);
+
+        if (coop_lite_oid_unmap_ok(mapped, obj)) {
+            obj_pool_perm_oid_remove(object->oid);
+            obj_dup_oid_restore(object->oid, obj);
+        }
     }
 
     if (object->prototype_oid.type != OID_TYPE_BLOCKED) {
@@ -2417,6 +2428,53 @@ void obj_debug_aid(tig_art_id_t aid)
     tig_debug_printf("\n");
 }
 
+/* PT44b: a coop client loads a sector copy of an item that already lives
+   elsewhere under the same OID (looted into a PC on the host, never saved
+   in the client's .dif). The load re-points the OID at the copy; when the
+   host's sync destroys the copy, the mapping must return to the original. */
+#define OBJ_DUP_OID_MAX 64
+static struct {
+    ObjectID oid;
+    int64_t copy;
+    int64_t orig;
+} obj_dup_oids[OBJ_DUP_OID_MAX];
+static int obj_dup_oid_next;
+
+static void obj_dup_oid_remember(ObjectID oid, int64_t copy)
+{
+    int64_t orig;
+
+    if (!tig_net_is_coop_client()) {
+        return;
+    }
+    orig = obj_pool_perm_lookup(oid);
+    if (orig == OBJ_HANDLE_NULL || orig == copy || !obj_handle_is_valid(orig)) {
+        return;
+    }
+    obj_dup_oids[obj_dup_oid_next].oid = oid;
+    obj_dup_oids[obj_dup_oid_next].copy = copy;
+    obj_dup_oids[obj_dup_oid_next].orig = orig;
+    obj_dup_oid_next = (obj_dup_oid_next + 1) % OBJ_DUP_OID_MAX;
+    tig_debug_printf("CoopLite: duplicate OID loaded (copy of a live object)\n");
+}
+
+static void obj_dup_oid_restore(ObjectID oid, int64_t copy)
+{
+    int i;
+
+    for (i = 0; i < OBJ_DUP_OID_MAX; i++) {
+        if (obj_dup_oids[i].copy == copy && copy != OBJ_HANDLE_NULL
+            && objid_is_equal(obj_dup_oids[i].oid, oid)) {
+            int64_t orig = obj_dup_oids[i].orig;
+
+            obj_dup_oids[i].copy = OBJ_HANDLE_NULL;
+            if (orig != copy && obj_handle_is_valid(orig)) {
+                obj_pool_perm_oid_set(oid, orig);
+            }
+        }
+    }
+}
+
 // 0x408710
 Object* obj_allocate(int64_t* obj_ptr)
 {
@@ -3204,6 +3262,7 @@ bool obj_inst_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid)
     memset(object->transient_properties, 0, sizeof(object->transient_properties));
 
     if (object->oid.type != OID_TYPE_NULL) {
+        obj_dup_oid_remember(object->oid, obj);
         obj_pool_perm_oid_set(object->oid, obj);
     }
 

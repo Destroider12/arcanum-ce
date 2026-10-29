@@ -1103,6 +1103,11 @@ static int test_packet_hardening(void)
             fprintf(stderr, "float damage delta wrong\n");
             return 1;
         }
+        if (!coop_lite_oid_unmap_ok(5, 5) || !coop_lite_oid_unmap_ok(0, 5)
+            || coop_lite_oid_unmap_ok(7, 5)) {
+            fprintf(stderr, "duplicate OID unmap wrong\n");
+            return 1;
+        }
         if (!coop_lite_worldmap_open_allowed(true, true, 0)
             || !coop_lite_worldmap_open_allowed(false, false, 3)
             || coop_lite_worldmap_open_allowed(false, false, 0)
