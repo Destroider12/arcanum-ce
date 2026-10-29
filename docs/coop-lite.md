@@ -2060,3 +2060,18 @@ craft validity, fate recipients).
   menu for teammates. Bars guard max==0.
 - Town Map: teammates on the same town map get a blue/white square, the local
   PC keeps the cross. Protocol unchanged (31).
+
+## PT44 — damage floats, client consumables, town map
+
+- Floating damage: death writes hp damage 32000 (critter_kill / death path),
+  which NPC_POS and the vitals watch turned into "-31988"-style hits that
+  looked like one-shots. `coop_lite_float_delta()` clamps the float to the
+  remaining hp pool (0 when already at/over max).
+- Client consumables (potions, food, healing kits): used locally, the effect
+  and destroy were undone by host vitals/inventory sync. Now
+  `item_use_on_obj` on a client sends `PACKET_COOP_SKILL_USE` with
+  `skill = COOP_SKILL_USE_ITEM` (item OID, optional target OID); the host
+  checks ownership, uses the item and resyncs the slot inventory. No layout
+  change, protocol stays 31.
+- Town map: clients may open the map button when their sector has a town
+  map; world/continent modes and spell-select remain host-only.

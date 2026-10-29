@@ -1148,7 +1148,12 @@ void wmap_ui_open_internal(void)
         return;
     }
 
-    if (!coop_lite_can_use_worldmap()) {
+    /* PT44: a coop client may still open its own town map (same button);
+       world/continent modes stay host-only (see wmap_ui_mode_set). */
+    if (!coop_lite_worldmap_open_allowed(coop_lite_can_use_worldmap(), wmap_ui_selecting,
+            player_get_local_pc_obj() != OBJ_HANDLE_NULL
+                ? townmap_get(sector_id_from_loc(obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION)))
+                : TOWNMAP_NONE)) {
         MesFileEntry blocked_mes;
         UiMessage blocked_ui;
 
@@ -1264,6 +1269,13 @@ void wmap_ui_open_internal(void)
 
     if (wmap_ui_townmap != TOWNMAP_NONE) {
         wmap_ui_mode_set(WMAP_UI_MODE_TOWN);
+        if (!coop_lite_can_use_worldmap() && wmap_ui_mode != WMAP_UI_MODE_TOWN) {
+            wmap_ui_close();
+            return;
+        }
+    } else if (!coop_lite_can_use_worldmap()) {
+        wmap_ui_close();
+        return;
     } else if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
         /* Vanilla MP: no world map outside town mode. PT25: this used to
            fall through into refresh() on the just-destroyed window - the
@@ -2537,6 +2549,10 @@ void wmap_ui_mode_set(WmapUiMode mode)
 
     if (wmap_ui_mode == mode) {
         return;
+    }
+
+    if (mode != WMAP_UI_MODE_TOWN && !coop_lite_can_use_worldmap()) {
+        return; /* PT44: coop client — town map only, no world travel */
     }
 
     switch (mode) {

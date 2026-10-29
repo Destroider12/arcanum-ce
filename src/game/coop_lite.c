@@ -5627,9 +5627,10 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
     }
 }
 
-static void coop_lite_float_damage(int64_t obj, int delta)
+static void coop_lite_float_damage(int64_t obj, int prev, int now)
 {
     char str[32];
+    int delta = coop_lite_float_delta(prev, now, object_hp_max(obj));
 
     if (delta <= 0) {
         return;
@@ -5821,7 +5822,7 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
         }
         hp = coop_lite_npc_hp_slot(obj);
         if (hp->obj == obj && e->hp_damage > hp->hp_damage) {
-            coop_lite_float_damage(obj, e->hp_damage - hp->hp_damage);
+            coop_lite_float_damage(obj, hp->hp_damage, e->hp_damage);
         }
         hp->obj = obj;
         hp->hp_damage = e->hp_damage;
@@ -6593,7 +6594,7 @@ static void coop_lite_client_watch_vitals(void)
         }
         dmg = object_hp_damage_get(pc);
         if (coop_slot_hp_valid[slot] && dmg > coop_slot_hp_damage[slot]) {
-            coop_lite_float_damage(pc, dmg - coop_slot_hp_damage[slot]);
+            coop_lite_float_damage(pc, coop_slot_hp_damage[slot], dmg);
         }
         coop_slot_hp_damage[slot] = dmg;
         coop_slot_hp_valid[slot] = true;
@@ -13494,6 +13495,30 @@ bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size)
         && pkt->schematic >= 0 && pkt->schematic < 100000;
 }
 
+/* PT44: death writes hp damage 32000 (critter_kill / death path); floats
+   showed that marker as "-31988"-style hits. Clamp to the hp pool. */
+int coop_lite_float_delta(int prev, int now, int hp_max)
+{
+    if (hp_max <= 0 || prev < 0 || prev >= hp_max || now <= prev) {
+        return 0;
+    }
+    if (now > hp_max) {
+        now = hp_max;
+    }
+    return now - prev;
+}
+
+bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap)
+{
+    return can_use_worldmap || (!selecting && townmap != 0);
+}
+
+bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size)
+{
+    return coop_lite_skill_use_valid(pkt, size) && pkt->skill == COOP_SKILL_USE_ITEM
+        && pkt->item_oid[0] != 0;
+}
+
 bool coop_lite_fate_party_target(bool pc_present, bool slot_active, bool is_earner, int slot)
 {
     return pc_present && !is_earner && slot >= 0 && slot < 8 && (slot == 0 || slot_active);
@@ -13637,6 +13662,83 @@ bool coop_lite_client_skill_intent(struct SkillInvocation* si)
     return true;
 }
 
+/* PT44: potions / food / healing kits used by a client PC. Locally the
+   item spell and the destroy were undone by the host's inventory and vitals
+   sync, so the client never healed. The host uses the item instead. */
+static bool coop_lite_item_host_usable(int64_t item)
+{
+    int type = obj_field_int32_get(item, OBJ_F_TYPE);
+
+    if (type == OBJ_TYPE_FOOD) {
+        return true;
+    }
+    return type == OBJ_TYPE_GENERIC
+        && (obj_field_int32_get(item, OBJ_F_GENERIC_FLAGS) & OGF_IS_HEALING_ITEM) != 0;
+}
+
+bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj)
+{
+    PacketCoopSkillUse pkt;
+    int64_t pc = player_get_local_pc_obj();
+    int64_t parent = OBJ_HANDLE_NULL;
+    int depth;
+
+    if (coop_preshop || !tig_net_is_coop_client() || !coop_lite_client_in_session
+        || pc == OBJ_HANDLE_NULL || source_obj != pc || item_obj == OBJ_HANDLE_NULL
+        || !item_parent(item_obj, &parent) || parent != pc || !coop_lite_item_host_usable(item_obj)
+        || (target_obj == OBJ_HANDLE_NULL
+            && (obj_field_int32_get(item_obj, OBJ_F_ITEM_FLAGS) & OIF_NEEDS_TARGET) != 0)) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_SKILL_USE;
+    pkt.skill = COOP_SKILL_USE_ITEM;
+    coop_lite_put_oid(pkt.item_oid, item_obj);
+    if (target_obj != OBJ_HANDLE_NULL) {
+        coop_lite_put_oid(pkt.target_oid, target_obj);
+    }
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: item use sent to host\n");
+    return true;
+}
+
+static void coop_lite_host_use_item(PacketCoopSkillUse* pkt)
+{
+    int slot = sub_52A530();
+    int64_t pc;
+    int64_t item;
+    int64_t target = OBJ_HANDLE_NULL;
+    int64_t parent = OBJ_HANDLE_NULL;
+
+    if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    item = coop_lite_get_oid_obj(pkt->item_oid);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || item == OBJ_HANDLE_NULL
+        || !item_parent(item, &parent) || parent != pc || !coop_lite_item_host_usable(item)) {
+        tig_debug_printf("CoopLite: slot %d item use refused\n", slot);
+        coop_lite_host_sync_slot_inven(slot);
+        return;
+    }
+    if (pkt->target_oid[0] != 0) {
+        target = coop_lite_get_oid_obj(pkt->target_oid);
+        if (target == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE))
+            || object_dist(pc, target) > 4) {
+            target = pc;
+        }
+    } else if ((obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) & OIF_NEEDS_TARGET) == 0) {
+        target = OBJ_HANDLE_NULL;
+    } else {
+        target = pc;
+    }
+    item_use_on_obj(pc, item, target);
+    tig_debug_printf("CoopLite: slot %d used an item (host)\n", slot);
+    coop_lite_host_sync_slot_inven(slot);
+}
+
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
 {
     SkillInvocation si;
@@ -13647,6 +13749,11 @@ void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
     int64_t parent = OBJ_HANDLE_NULL;
     bool ok;
 
+    if (tig_net_is_active() && tig_net_is_host()
+        && coop_lite_use_item_valid(pkt, tig_net_last_message_size())) {
+        coop_lite_host_use_item(pkt);
+        return;
+    }
     if (!tig_net_is_active() || !tig_net_is_host()
         || !coop_lite_skill_use_valid(pkt, tig_net_last_message_size())
         || (pkt->skill != SKILL_PICK_LOCKS && pkt->skill != SKILL_DISARM_TRAPS)) {
@@ -13783,6 +13890,7 @@ void coop_lite_client_preshop_begin(void) { }
 void coop_lite_client_preshop_end(void) { }
 bool coop_lite_client_skill_intent(struct SkillInvocation* si) { (void)si; return false; }
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt) { (void)pkt; }
+bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj) { (void)source_obj; (void)item_obj; (void)target_obj; return false; }
 bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
 void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
 void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }

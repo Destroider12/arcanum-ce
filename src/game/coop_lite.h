@@ -1018,6 +1018,12 @@ bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size);
 /* PT40 */
 bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size);
 bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);
+/* PT44 */
+#define COOP_SKILL_USE_ITEM 1000 /* PacketCoopSkillUse.skill: use item_oid on target_oid */
+int coop_lite_float_delta(int prev, int now, int hp_max);
+bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
+bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);
+bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj);
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt);
 void coop_lite_handle_craft(PacketCoopCraft* pkt);
 /* Client: true = the roll was sent to the host (do not resolve locally). */

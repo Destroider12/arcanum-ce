@@ -1092,6 +1092,45 @@ static int test_packet_hardening(void)
             fprintf(stderr, "fate recipients wrong\n");
             return 1;
         }
+        /* PT44: death marker 32000 must not float as a 31988 hit. */
+        if (coop_lite_float_delta(12, 32000, 40) != 28
+            || coop_lite_float_delta(0, 3999, 51) != 51
+            || coop_lite_float_delta(5, 9, 40) != 4
+            || coop_lite_float_delta(40, 32000, 40) != 0
+            || coop_lite_float_delta(9, 5, 40) != 0
+            || coop_lite_float_delta(-1, 5, 40) != 0
+            || coop_lite_float_delta(0, 5, 0) != 0) {
+            fprintf(stderr, "float damage delta wrong\n");
+            return 1;
+        }
+        if (!coop_lite_worldmap_open_allowed(true, true, 0)
+            || !coop_lite_worldmap_open_allowed(false, false, 3)
+            || coop_lite_worldmap_open_allowed(false, false, 0)
+            || coop_lite_worldmap_open_allowed(false, true, 3)) {
+            fprintf(stderr, "town map gate wrong\n");
+            return 1;
+        }
+        {
+            PacketCoopSkillUse u;
+
+            memset(&u, 0, sizeof(u));
+            u.type = PACKET_COOP_SKILL_USE;
+            u.skill = COOP_SKILL_USE_ITEM;
+            if (coop_lite_use_item_valid(&u, sizeof(u))) {
+                fprintf(stderr, "item use accepted without an item\n");
+                return 1;
+            }
+            u.item_oid[0] = 1;
+            if (!coop_lite_use_item_valid(&u, sizeof(u)) || coop_lite_use_item_valid(&u, sizeof(u) - 1)) {
+                fprintf(stderr, "item use validation wrong\n");
+                return 1;
+            }
+            u.skill = 1;
+            if (coop_lite_use_item_valid(&u, sizeof(u))) {
+                fprintf(stderr, "item use accepted a skill packet\n");
+                return 1;
+            }
+        }
     }
     if (coop_lite_coop_packet_min_size(PACKET_COOP_FOLLOWERS) != 8
         || coop_lite_coop_packet_min_size(PACKET_COOP_NPC_POS) != 8

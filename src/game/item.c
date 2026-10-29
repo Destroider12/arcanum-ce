@@ -1427,6 +1427,11 @@ void item_use_on_obj(int64_t source_obj, int64_t item_obj, int64_t target_obj)
         return;
     }
 
+    /* PT44: coop client — the host uses consumables for us. */
+    if (coop_lite_client_use_item_intent(source_obj, item_obj, target_obj)) {
+        return;
+    }
+
     item_parent(item_obj, &parent_obj);
 
     item_type = obj_field_int32_get(item_obj, OBJ_F_TYPE);
