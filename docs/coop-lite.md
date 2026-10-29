@@ -2048,3 +2048,15 @@ craft validity, fate recipients).
 - **Disarm.** This uses the existing SKILL_USE (150).
   - The host refuses targets that have no armed trap.
   - For a trap the host has no spot for, the host makes its own Spot Trap roll for that PC first. On success the spot is shared.
+
+## PT43 — party portraits and town-map markers (Stage 3 UX)
+
+- Left party column (follower_ui) appends other players' PCs after NPC followers
+  (`coop_lite_party_teammates`: active slots only, valid live PC handles, no
+  local PC / duplicates, max 8). Live HP/Fatigue bars; a 300 ms coop tick
+  rebuilds on join/leave/death and redraws on HP/fatigue change.
+- Left-click on a teammate centers the camera; in spell/skill/item targeting the
+  click goes through the normal path (host-authoritative cast). No right-click
+  menu for teammates. Bars guard max==0.
+- Town Map: teammates on the same town map get a blue/white square, the local
+  PC keeps the cross. Protocol unchanged (31).

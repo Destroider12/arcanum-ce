@@ -3,6 +3,8 @@
 #include <stdio.h>
 
 #include "game/broadcast.h"
+#include "game/coop_lite.h"
+#include "game/location.h"
 #include "game/critter.h"
 #include "game/hrp.h"
 #include "game/mes.h"
@@ -433,6 +435,7 @@ bool follower_ui_init(GameInitInfo* init_info)
 
     follower_ui_initialized = true;
     follower_ui_visible = true;
+    coop_lite_set_party_ui_hooks(follower_ui_refresh, follower_ui_update);
     follower_ui_drop_down_menu_window = TIG_WINDOW_HANDLE_INVALID;
 
     return true;
@@ -799,6 +802,16 @@ bool follower_ui_message_filter(TigMessage* msg)
                 if (msg->data.button.button_handle == follower_ui_buttons[index]) {
                     sub_444130(&follower_ui_followers[follower_ui_top_index + index]);
                     target_descriptor_set_obj(&td, follower_ui_followers[follower_ui_top_index + index].obj);
+                    // PT43: plain click on a co-op teammate centers the camera;
+                    // spell/skill/item targeting goes through the normal path.
+                    if (td.obj != OBJ_HANDLE_NULL
+                        && intgame_mode_get() != INTGAME_MODE_SPELL
+                        && intgame_mode_get() != INTGAME_MODE_SKILL
+                        && intgame_mode_get() != INTGAME_MODE_ITEM
+                        && coop_lite_is_teammate_pc(td.obj)) {
+                        location_origin_set(obj_field_int64_get(td.obj, OBJ_F_LOCATION));
+                        return true;
+                    }
                     sub_54EA80(&td);
                     return true;
                 }
@@ -823,7 +836,8 @@ bool follower_ui_message_filter(TigMessage* msg)
                     // Confirm the top-most window at the cursor position is
                     // the expected slot window before opening the menu.
                     if (tig_window_get_at_position(msg->data.mouse.x, msg->data.mouse.y, &window_handle) == TIG_OK
-                        && window_handle == follower_ui_windows[index]) {
+                        && window_handle == follower_ui_windows[index]
+                        && !coop_lite_is_teammate_pc(follower_ui_followers[follower_ui_top_index + index].obj)) {
                         follower_ui_drop_down_menu_create(index);
                     }
                     break;
@@ -1039,7 +1053,7 @@ void follower_ui_update(void)
         }
 
         // Draw health bar.
-        hp_percent = 100 * object_hp_current(follower_obj) / object_hp_max(follower_obj);
+        hp_percent = object_hp_max(follower_obj) > 0 ? 100 * object_hp_current(follower_obj) / object_hp_max(follower_obj) : 0;
         if (stat_level_get(follower_obj, STAT_POISON_LEVEL) > FOLLOWER_UI_POISON_LEVEL_THRESHOLD) {
             follower_ui_draw(follower_ui_windows[index], FOLLOWER_UI_POISON_BAR_ART, 3, 39, hp_percent, 100);
         } else {
@@ -1052,7 +1066,7 @@ void follower_ui_update(void)
         }
 
         // Draw fatigue bar.
-        fatigue_percent = 100 * critter_fatigue_current(follower_obj) / critter_fatigue_max(follower_obj);
+        fatigue_percent = critter_fatigue_max(follower_obj) > 0 ? 100 * critter_fatigue_current(follower_obj) / critter_fatigue_max(follower_obj) : 0;
         follower_ui_draw(follower_ui_windows[index], FOLLOWER_UI_FATIGUE_BAR_ART, 3, 44, fatigue_percent, 100);
     }
 
@@ -1067,7 +1081,8 @@ void follower_ui_update(void)
 void follower_ui_update_obj(int64_t obj)
 {
     if (follower_ui_visible) {
-        if (critter_pc_leader_get(obj) == player_get_local_pc_obj()) {
+        if (critter_pc_leader_get(obj) == player_get_local_pc_obj()
+            || coop_lite_is_teammate_pc(obj)) {
             follower_ui_update();
         }
     }
@@ -1172,6 +1187,8 @@ void follower_ui_refresh(void)
     int64_t pc_obj;
     ObjectList followers;
     ObjectNode* node;
+    int64_t teammates[8];
+    int teammates_count;
 
     if (!follower_ui_initialized) {
         return;
@@ -1192,6 +1209,10 @@ void follower_ui_refresh(void)
         node = node->next;
     }
 
+    // PT43: co-op teammates' PCs follow the NPC followers.
+    teammates_count = coop_lite_party_teammates(teammates, 8);
+    follower_ui_followers_count += teammates_count;
+
     // Grow the followers array if needed.
     if (follower_ui_followers_count > follower_ui_followers_capacity) {
         follower_ui_followers_capacity = follower_ui_followers_count + FOLLOWER_UI_FOLLOWERS_CAPACITY_INCREMENT;
@@ -1204,6 +1225,9 @@ void follower_ui_refresh(void)
     while (node != NULL) {
         sub_4440E0(node->obj, &(follower_ui_followers[index++]));
         node = node->next;
+    }
+    for (int t = 0; t < teammates_count; t++) {
+        sub_4440E0(teammates[t], &(follower_ui_followers[index++]));
     }
     follower_ui_followers_count = index;
 

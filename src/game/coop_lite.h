@@ -1398,4 +1398,13 @@ bool coop_lite_client_dialog_vote(int option);
 void coop_lite_set_dialog_view_hooks(void (*show)(const CoopDialogView* view), void (*close)(void),
     void (*host_refresh)(void));
 
+/* PT43: other players' PCs on this map (not the local PC), slot order, at
+   most `max` (8). Strict: active slot, valid live handle, not destroyed/off. */
+int coop_lite_party_teammates(int64_t* out, int max);
+bool coop_lite_is_teammate_pc(int64_t obj);
+/* Pure: dedup / filter step used by the above (tests). */
+bool coop_lite_teammate_accept(int64_t obj, int64_t local_pc, const int64_t* have, int num, int max);
+/* UI registers: rebuild the party column / redraw its bars. */
+void coop_lite_set_party_ui_hooks(void (*refresh)(void), void (*update)(void));
+
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

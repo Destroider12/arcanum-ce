@@ -4842,7 +4842,38 @@ void wmap_town_refresh_rect(TigRect* rect)
     }
     object_list_destroy(&objects);
 
-    if (tig_net_is_active()) {
+    // PT43: co-op teammates on this town map get a distinct marker (blue
+    // square with a white border), local PC keeps the cross.
+    if (tig_net_is_coop_enabled()) {
+        int64_t mates[8];
+        int mates_count = coop_lite_party_teammates(mates, 8);
+        TigRect mark;
+        TigRect clip;
+
+        for (int m = 0; m < mates_count; m++) {
+            loc = obj_field_int64_get(mates[m], OBJ_F_LOCATION);
+            if (townmap_get(sector_id_from_loc(loc)) != wmap_ui_townmap) {
+                continue;
+            }
+            townmap_loc_to_coords(&wmap_ui_tmi, loc, &offset_x, &offset_y);
+            offset_x -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_34;
+            offset_y -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_38;
+            mark.x = bounds.x + (int)offset_x - 4;
+            mark.y = bounds.y + (int)offset_y - 4;
+            mark.width = 9;
+            mark.height = 9;
+            if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
+                tig_window_fill(wmap_ui_window, &clip, tig_color_make(255, 255, 255));
+            }
+            mark.x += 2;
+            mark.y += 2;
+            mark.width = 5;
+            mark.height = 5;
+            if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
+                tig_window_fill(wmap_ui_window, &clip, tig_color_make(40, 120, 255));
+            }
+        }
+    } else if (tig_net_is_active()) {
         object_list_party(player_get_local_pc_obj(), &objects);
         node = objects.head;
         while (node != NULL) {

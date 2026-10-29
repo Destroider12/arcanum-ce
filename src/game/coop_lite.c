@@ -1060,6 +1060,7 @@ static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
 static void coop_lite_story_reset(void);
 static void coop_lite_host_dialog_tick(unsigned int now_ms);
+static void coop_lite_party_ui_tick(unsigned int now_ms);
 static void coop_lite_dialog_reset(void);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
@@ -7083,6 +7084,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_pc_stats_tick(now_ms);
     coop_lite_host_story_tick(now_ms);
     coop_lite_host_dialog_tick(now_ms);
+    coop_lite_party_ui_tick(now_ms);
 
     {
         Uint64 t0 = SDL_GetTicksNS();
@@ -7224,6 +7226,101 @@ static void coop_lite_client_map_mismatch(const PacketCoopPcPos* pkt)
 /* PT42: a client PC stepped from `from` to `to` (the pose stream may skip
    tiles): the host springs the first armed floor trap on that line, as
    anim's walk does for a local mover. */
+/* ---- PT43: party portraits ---- */
+static void (*coop_party_ui_refresh_hook)(void);
+static void (*coop_party_ui_update_hook)(void);
+static unsigned int coop_party_ui_ms;
+static int64_t coop_party_ui_have[8];
+static int coop_party_ui_num;
+static unsigned int coop_party_ui_sig;
+
+void coop_lite_set_party_ui_hooks(void (*refresh)(void), void (*update)(void))
+{
+    coop_party_ui_refresh_hook = refresh;
+    coop_party_ui_update_hook = update;
+}
+
+int coop_lite_party_teammates(int64_t* out, int max)
+{
+    int64_t local_pc;
+    int slot;
+    int num = 0;
+    int depth;
+
+    if (out == NULL || max <= 0 || !tig_net_is_coop_enabled() || !map_is_valid()) {
+        return 0;
+    }
+    if (max > 8) {
+        max = 8;
+    }
+    local_pc = player_get_local_pc_obj();
+    depth = tig_net_local_suspend_pause(); /* slot table reads need the live session */
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc == OBJ_HANDLE_NULL || !obj_handle_is_valid(pc)
+            || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC
+            || (obj_field_int32_get(pc, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF | OF_INVENTORY)) != 0) {
+            continue;
+        }
+        if (coop_lite_teammate_accept(pc, local_pc, out, num, max)) {
+            out[num++] = pc;
+        }
+    }
+    tig_net_local_suspend_resume(depth);
+    return num;
+}
+
+bool coop_lite_is_teammate_pc(int64_t obj)
+{
+    int64_t list[8];
+    int n = coop_lite_party_teammates(list, 8);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (list[i] == obj) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Join / leave / death: rebuild the column; HP / fatigue: redraw. */
+static void coop_lite_party_ui_tick(unsigned int now_ms)
+{
+    int64_t list[8];
+    unsigned int sig = 2166136261u;
+    bool changed;
+    int n;
+    int i;
+
+    if (!coop_lite_interval_elapsed(coop_party_ui_ms, now_ms, 300u)) {
+        return;
+    }
+    coop_party_ui_ms = now_ms;
+    n = coop_lite_party_teammates(list, 8);
+    changed = n != coop_party_ui_num || memcmp(list, coop_party_ui_have, sizeof(list[0]) * (size_t)n) != 0;
+    for (i = 0; i < n; i++) {
+        sig = (sig ^ (unsigned int)object_hp_current(list[i])) * 16777619u;
+        sig = (sig ^ (unsigned int)critter_fatigue_current(list[i])) * 16777619u;
+        sig = (sig ^ (critter_is_dead(list[i]) ? 1u : 0u)) * 16777619u;
+    }
+    if (changed) {
+        memcpy(coop_party_ui_have, list, sizeof(list[0]) * (size_t)n);
+        coop_party_ui_num = n;
+        coop_party_ui_sig = sig;
+        tig_debug_printf("CoopLite: party ui: %d teammate portrait(s)\n", n);
+        if (coop_party_ui_refresh_hook != NULL) {
+            coop_party_ui_refresh_hook();
+        }
+    } else if (sig != coop_party_ui_sig) {
+        coop_party_ui_sig = sig;
+        if (coop_party_ui_update_hook != NULL) {
+            coop_party_ui_update_hook();
+        }
+    }
+}
+
 static void coop_lite_host_pc_trap_walk(int slot, int64_t pc, int64_t from, int64_t to)
 {
     int64_t loc = from;
@@ -7607,6 +7704,21 @@ bool coop_lite_world_state_valid(const PacketCoopWorldState* pkt, int size)
     }
     for (i = 0; i < pkt->count; i++) {
         if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_TRAP) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool coop_lite_teammate_accept(int64_t obj, int64_t local_pc, const int64_t* have, int num, int max)
+{
+    int i;
+
+    if (obj == OBJ_HANDLE_NULL || obj == local_pc || num >= max) {
+        return false;
+    }
+    for (i = 0; i < num; i++) {
+        if (have[i] == obj) {
             return false;
         }
     }

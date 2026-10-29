@@ -1781,6 +1781,15 @@ static int test_world_state(void)
         fprintf(stderr, "world: trap flag merge wrong\n");
         return 1;
     }
+    {
+        int64_t have[2] = { 11, 12 };
+        if (coop_lite_teammate_accept(0, 5, have, 0, 8) || coop_lite_teammate_accept(5, 5, have, 0, 8)
+            || coop_lite_teammate_accept(12, 5, have, 2, 8) || coop_lite_teammate_accept(13, 5, have, 2, 2)
+            || !coop_lite_teammate_accept(13, 5, have, 2, 8)) {
+            fprintf(stderr, "party: teammate accept wrong\n");
+            return 1;
+        }
+    }
     pkt.entries[1].kind = 9;
     if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
         fprintf(stderr, "world: bad kind accepted\n");
