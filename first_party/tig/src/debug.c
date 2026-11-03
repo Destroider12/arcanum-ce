@@ -16,9 +16,13 @@
 static FILE* tig_debug_log_file;
 static bool tig_debug_log_file_tried;
 static char tig_debug_log_path[1024];
+/* PT53c: tig_debug_printf may run off the main thread (net); its static
+   line buffer and the log-file repeat state are guarded by this lock. */
+static SDL_SpinLock tig_debug_lock;
 
 void tig_debug_set_log_file(const char* path)
 {
+    SDL_LockSpinlock(&tig_debug_lock);
     if (tig_debug_log_file != NULL) {
         fclose(tig_debug_log_file);
         tig_debug_log_file = NULL;
@@ -28,6 +32,7 @@ void tig_debug_set_log_file(const char* path)
         SDL_strlcpy(tig_debug_log_path, path, sizeof(tig_debug_log_path));
     }
     tig_debug_log_file_tried = false;
+    SDL_UnlockSpinlock(&tig_debug_lock);
 }
 
 static void tig_debug_log_write(const char* str)
@@ -124,6 +129,9 @@ void tig_debug_printf(const char* format, ...)
 
     va_start(args, format);
     SDL_vsnprintf(tmp, sizeof(tmp), format, args);
+    va_end(args);
+
+    SDL_LockSpinlock(&tig_debug_lock);
 
     // NOTE: Typically, debug messages in Arcanum conclude with a newline.
     // However, in certain situations where the developers intended to display
@@ -134,6 +142,11 @@ void tig_debug_printf(const char* format, ...)
     // of the logs. To support the previous approach, messages that do not end
     // with a newline are buffered.
     len = SDL_strlcat(buffer, tmp, sizeof(buffer));
+    /* PT53c: strlcat returns the length it wanted; past the end the line
+       is truncated and must be flushed (no read past buffer[]). */
+    if (len > sizeof(buffer) - 1) {
+        len = sizeof(buffer) - 1;
+    }
     if (len != 0 && (len == sizeof(buffer) - 1 || buffer[len - 1] == '\n')) {
         SDL_Log("%s", buffer);
         tig_debug_log_write(buffer);
@@ -142,8 +155,7 @@ void tig_debug_printf(const char* format, ...)
         }
         buffer[0] = '\0';
     }
-
-    va_end(args);
+    SDL_UnlockSpinlock(&tig_debug_lock);
 }
 
 // 0x4FEBC0

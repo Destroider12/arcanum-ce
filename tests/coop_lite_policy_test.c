@@ -2089,6 +2089,80 @@ static int test_review_fixes(void)
     return 0;
 }
 
+/* PT53c: inventory batch handle helpers and ObjectID value equality. */
+static int test_pt53c(void)
+{
+    /* Ring freed while also doomed (ring moved PC -> container in one batch). */
+    int64_t rings[16];
+    int num_rings = 0;
+    int64_t doomed[4] = { 0x100, 0x200, 0x100, 0x300 };
+    int64_t listed[3] = { 0x200, 0x500, 0x200 }; /* 0x200 listed by two owners */
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        if (!coop_lite_handle_list_contains(rings, num_rings, listed[i])) {
+            rings[num_rings++] = listed[i];
+        }
+    }
+    if (num_rings != 2) {
+        fprintf(stderr, "PT53c: cross-owner duplicate ring queued twice (%d)\n", num_rings);
+        return 1;
+    }
+    if (coop_lite_handle_list_clear(doomed, 4, 0x100) != 2 || doomed[0] != 0 || doomed[2] != 0
+        || doomed[1] != 0x200 || doomed[3] != 0x300) {
+        fprintf(stderr, "PT53c: freed ring left in the doomed list\n");
+        return 1;
+    }
+    if (coop_lite_handle_list_clear(doomed, 4, 0x999) != 0 || coop_lite_handle_list_contains(rings, 0, 0x200)) {
+        fprintf(stderr, "PT53c: handle list helpers wrong on misses\n");
+        return 1;
+    }
+
+    /* Same OID (24-byte layout: int16 type at 0, payload at 8) with
+       different padding / union tail bytes. */
+    {
+        uint8_t a[24];
+        uint8_t b[24];
+        int16_t type = 1; /* A */
+        int v = 1234;
+
+        memset(a, 0x00, sizeof(a));
+        memset(b, 0xAB, sizeof(b));
+        memcpy(a, &type, 2);
+        memcpy(b, &type, 2);
+        memcpy(a + 8, &v, 4);
+        memcpy(b + 8, &v, 4);
+        if (!coop_lite_oid_raw_equal(a, b)) {
+            fprintf(stderr, "PT53c: type-A OIDs with dirty padding compared unequal\n");
+            return 1;
+        }
+        b[8] ^= 1;
+        if (coop_lite_oid_raw_equal(a, b)) {
+            fprintf(stderr, "PT53c: different OIDs compared equal\n");
+            return 1;
+        }
+        type = 3; /* P: 16 payload bytes */
+        memset(a, 0x00, sizeof(a));
+        memset(b, 0x55, sizeof(b));
+        memcpy(a, &type, 2);
+        memcpy(b, &type, 2);
+        memset(a + 8, 7, 16);
+        memset(b + 8, 7, 16);
+        if (!coop_lite_oid_raw_equal(a, b)) {
+            fprintf(stderr, "PT53c: type-P OIDs with dirty padding compared unequal\n");
+            return 1;
+        }
+        type = 1;
+        memcpy(b, &type, 2);
+        if (coop_lite_oid_raw_equal(a, b)) {
+            fprintf(stderr, "PT53c: OIDs of different types compared equal\n");
+            return 1;
+        }
+    }
+    printf("PT53c helpers OK\n");
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -2118,6 +2192,9 @@ int main(int argc, char** argv)
         return 1;
     }
     if (test_obj_blob() != 0) {
+        return 1;
+    }
+    if (test_pt53c() != 0) {
         return 1;
     }
     if (test_review_fixes() != 0) {

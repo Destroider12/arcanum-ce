@@ -2358,3 +2358,17 @@ Regression fix for the PT53 layout intent (client crash after a host save load a
   the client converges. Each distinct refusal is logged once with OID+reason.
 - Log file: identical consecutive lines collapse to "last message repeated N
   times"; above 20 MB only CoopLite/tig_net lines are written (hard stop 40 MB).
+
+## PT53c: static-analysis fixes (no protocol change)
+
+From the gcc -fanalyzer / cppcheck / clang-tidy review of PT53b (protocol unchanged, no wire format change):
+
+- Client inventory batch: a key ring that is re-fetched (freed) is cleared from the doomed list first, so the doomed loop never touches a freed handle; a ring listed by two owners is queued (and freed) only once (`coop_lite_handle_list_contains/clear`).
+- The doomed list grows on demand (was a silent 256 cap).
+- The dragged-item guard closes the inventory window whatever pane the doomed dragged item came from (was the loot target only).
+- ObjectID comparisons in coop code use `coop_lite_oid_raw_equal` (by type/payload) instead of `memcmp` over padding and union tails (PC_POS ownership, follower table, inventory listing, rejoin slot, finish sync).
+- `tig_debug_printf`: an overflowing partial line no longer reads past the 1024-byte buffer or stalls all later logging; the line buffer and the log-file repeat collapse are guarded by a spinlock (net thread).
+- `dialog_ui_option_label` checks the option index before indexing `options[5]`.
+- Character bundle build frees its buffer when the header write fails; obj-blob ground defer checks the pending entry.
+
+Tests: `coop_lite_policy` (PT53c helpers), new `tig_debug_long_line` (fails under ASan on PT53b).

@@ -701,11 +701,14 @@ static const char* dialog_ui_option_label(DialogUiEntry* entry, int index)
 {
     int votes;
 
+    if (index < 0 || index >= 5) { /* PT53c: options[5] */
+        return "";
+    }
     if (!tig_net_is_coop_enabled() || !tig_net_is_host() || !player_is_local_pc_obj(entry->state.pc_obj)) {
         return entry->state.options[index];
     }
     votes = coop_lite_host_dialog_vote_count(index);
-    if (votes <= 0 || index >= 5) {
+    if (votes <= 0) {
         return entry->state.options[index];
     }
     snprintf(dialog_ui_marked_options[index], sizeof(dialog_ui_marked_options[index]), "%s  [%d]",

@@ -1553,4 +1553,9 @@ bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 
 int coop_lite_inv_sanitize(int64_t owner); /* PT53b */
 
+/* PT53c */
+bool coop_lite_oid_raw_equal(const void* a, const void* b);
+bool coop_lite_handle_list_contains(const int64_t* list, int n, int64_t h);
+int coop_lite_handle_list_clear(int64_t* list, int n, int64_t h);
+
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

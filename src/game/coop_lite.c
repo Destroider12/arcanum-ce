@@ -262,6 +262,7 @@ static bool coop_lite_build_char_bundle(int64_t pc, CoopCharBundleBuf* out)
         return false;
     }
     if (!coop_char_bundle_begin(&buf, count + 1)) {
+        coop_char_bundle_free(&buf); /* PT53c: begin may have allocated */
         return false;
     }
 
@@ -390,6 +391,74 @@ static char coop_reload_request_name[TIG_MAX_PATH];
 static bool coop_reload_resync_pending;
 static bool coop_reload_raise[8];
 #endif
+
+/* PT53c: ObjectID equality by value on the 24-byte wire/struct layout
+   (type int16 at 0, union at 8). Padding bytes 2..7 and the unused union
+   tail are not zeroed everywhere, so memcmp could call equal IDs different.
+   Layout-only so the stub test builds (no obj_id.h) can use it. */
+bool coop_lite_oid_raw_equal(const void* a, const void* b)
+{
+    const uint8_t* x = (const uint8_t*)a;
+    const uint8_t* y = (const uint8_t*)b;
+    int16_t tx;
+    int16_t ty;
+    size_t n;
+
+    memcpy(&tx, x, sizeof(tx));
+    memcpy(&ty, y, sizeof(ty));
+    if (tx != ty) {
+        return false;
+    }
+    switch (tx) {
+    case 0: /* OID_TYPE_NULL */
+        return true;
+    case 1: /* OID_TYPE_A: int */
+        n = 4;
+        break;
+    case 2: /* OID_TYPE_GUID */
+    case 3: /* OID_TYPE_P: int64 location, int temp_id, int map */
+        n = 16;
+        break;
+    default: /* handle / blocked: int64 */
+        n = 8;
+        break;
+    }
+    return memcmp(x + 8, y + 8, n) == 0;
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+_Static_assert(sizeof(ObjectID) == 24 && offsetof(ObjectID, d) == 8, "PT53c: ObjectID layout");
+_Static_assert(OID_TYPE_NULL == 0 && OID_TYPE_A == 1 && OID_TYPE_GUID == 2 && OID_TYPE_P == 3, "PT53c: OID types");
+_Static_assert(sizeof(TigGuid) == 16 && sizeof(ObjectID_P) == 16, "PT53c: OID payloads");
+#endif
+
+/* PT53c: small handle-list helpers (unit-tested). */
+bool coop_lite_handle_list_contains(const int64_t* list, int n, int64_t h)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (list[i] == h) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int coop_lite_handle_list_clear(int64_t* list, int n, int64_t h)
+{
+    int i;
+    int cleared = 0;
+
+    for (i = 0; i < n; i++) {
+        if (list[i] == h) {
+            list[i] = OBJ_HANDLE_NULL;
+            cleared++;
+        }
+    }
+    return cleared;
+}
+
 /* Client: follow packet seen — carry other PCs on the next own teleport. */
 static bool coop_follow_carry_pending;
 static int64_t coop_follow_host_loc;
@@ -4220,7 +4289,7 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
         return;
     }
     local_oid = obj_get_id(local_pc);
-    if (memcmp(&local_oid, pkt->client_pc_oid, sizeof(local_oid)) != 0) {
+    if (!coop_lite_oid_raw_equal(&local_oid, pkt->client_pc_oid)) {
         if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
             /* Expected: the menu character stands in until the parked PC
                blob replaces it (coop_lite_client_request_own_pc). */
@@ -4524,7 +4593,7 @@ static int64_t coop_lite_resolve_remote_pc(int slot, const ObjectID* oid, int64_
         return obj;
     }
     if (slot < 0 || slot >= 8 || !coop_slot_pc[slot].valid
-        || memcmp(&coop_slot_pc[slot].oid, oid, sizeof(*oid)) != 0) {
+        || !coop_lite_oid_raw_equal(&coop_slot_pc[slot].oid, oid)) {
         return OBJ_HANDLE_NULL;
     }
     coop_lite_keep_sector(slot, loc);
@@ -5467,7 +5536,7 @@ void coop_lite_handle_followers(PacketCoopFollowers* pkt)
     /* Dropped by the host since last table. */
     for (i = 0; i < coop_client_followers_cnt; i++) {
         for (j = 0; j < now_cnt; j++) {
-            if (memcmp(&now_list[j], &coop_client_followers[i], sizeof(ObjectID)) == 0) {
+            if (coop_lite_oid_raw_equal(&now_list[j], &coop_client_followers[i])) {
                 break;
             }
         }
@@ -7502,7 +7571,7 @@ void coop_lite_handle_pc_pos(PacketCoopPcPos* pkt)
         sender = sub_52A530();
         /* Review M3: ownership before anything (sector loads included). */
         if (sender <= 0 || sender >= 8 || !coop_slot_pc[sender].valid
-            || memcmp(&coop_slot_pc[sender].oid, &oid, sizeof(oid)) != 0) {
+            || !coop_lite_oid_raw_equal(&coop_slot_pc[sender].oid, &oid)) {
             obj = obj_pool_perm_lookup(oid);
             if (obj == OBJ_HANDLE_NULL || sender <= 0 || sender >= 8 || sub_4A2B60(sender) != obj) {
                 tig_debug_printf("CoopLite: PC_POS from slot %d for a PC it does not own — dropped\n", sender);
@@ -10546,7 +10615,7 @@ static bool coop_lite_inv_listed(const CoopInvBufOwner* o, ObjectID oid)
     int i;
 
     for (i = o->first; i < o->first + o->count; i++) {
-        if (memcmp(coop_inv_entry[i].oid, &oid, sizeof(oid)) == 0) {
+        if (coop_lite_oid_raw_equal(coop_inv_entry[i].oid, &oid)) {
             return true;
         }
     }
@@ -10721,6 +10790,9 @@ bool coop_lite_client_want_ground_blob(const unsigned char oid[24], int64_t loc,
         return false;
     }
     p = coop_lite_obj_pending_find(oid);
+    if (p == NULL) { /* PT53c */
+        return false;
+    }
     p->ground = true;
     p->ground_loc = loc;
     p->ground_proto = proto;
@@ -11542,8 +11614,9 @@ static void coop_lite_client_apply_inven_batch(void)
     int num_rings = 0;
     int refreshed = 0;
     int64_t owner_obj[COOP_INV_BUF_OWNERS];
-    int64_t doomed[256];
-    int64_t doomed_parent[256];
+    int64_t* doomed = NULL; /* PT53c: no fixed cap */
+    int64_t* doomed_parent = NULL;
+    int doomed_cap = 0;
     int num_doomed = 0;
     int64_t local_pc = player_get_local_pc_obj();
     int moved = 0;
@@ -11575,7 +11648,25 @@ static void coop_lite_client_apply_inven_batch(void)
                 && obj_type_is_critter(obj_field_int32_get(owner_obj[o], OBJ_F_TYPE))) {
                 continue;
             }
-            if (!coop_lite_inv_listed(&coop_inv_owner[o], obj_get_id(items[i])) && num_doomed < 256) {
+            if (!coop_lite_inv_listed(&coop_inv_owner[o], obj_get_id(items[i]))) {
+                if (num_doomed == doomed_cap) {
+                    int new_cap = doomed_cap != 0 ? doomed_cap * 2 : 64;
+                    int64_t* nd = (int64_t*)realloc(doomed, sizeof(*nd) * (size_t)new_cap);
+                    int64_t* np;
+
+                    if (nd == NULL) {
+                        tig_debug_printf("CoopLite: inven sync: doomed list alloc failed (%d)\n", new_cap);
+                        continue;
+                    }
+                    doomed = nd;
+                    np = (int64_t*)realloc(doomed_parent, sizeof(*np) * (size_t)new_cap);
+                    if (np == NULL) {
+                        tig_debug_printf("CoopLite: inven sync: doomed list alloc failed (%d)\n", new_cap);
+                        continue;
+                    }
+                    doomed_parent = np;
+                    doomed_cap = new_cap;
+                }
                 doomed_parent[num_doomed] = owner_obj[o];
                 doomed[num_doomed++] = items[i];
             }
@@ -11586,14 +11677,14 @@ static void coop_lite_client_apply_inven_batch(void)
     /* PT44b: the loot window lists item handles of its target; this batch
        is about to destroy some of them (stale copies the host no longer
        has). Close it first instead of leaving dangling handles on screen. */
-    if (inven_ui_is_created() && sub_573600() != OBJ_HANDLE_NULL) {
+    if (inven_ui_is_created() && inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
         for (i = 0; i < num_doomed; i++) {
             /* PT53: only a doomed item in hand (drag) dangles; the
                slot grids are rebuilt by ui_update_inven at the end, the
                same as for the PC's own pane. Keep the window open. */
-            if (doomed_parent[i] == sub_573600()
-                && doomed[i] == inven_ui_drag_item_obj_get()) {
-                tig_debug_printf("CoopLite: inven: loot window closed (host removed the dragged item)\n");
+            /* PT53c: whatever pane the drag came from. */
+            if (doomed[i] == inven_ui_drag_item_obj_get()) {
+                tig_debug_printf("CoopLite: inven: inventory window closed (host removed the dragged item)\n");
                 inven_ui_destroy();
                 break;
             }
@@ -11757,7 +11848,8 @@ static void coop_lite_client_apply_inven_batch(void)
                     refreshed++;
                 }
                 /* Keys added to (or taken off) a ring: fetch the host's ring. */
-                if (coop_lite_item_keyring_hash(item) != e->keyring_hash && num_rings < 16) {
+                if (coop_lite_item_keyring_hash(item) != e->keyring_hash && num_rings < 16
+                    && !coop_lite_handle_list_contains(rings, num_rings, item)) { /* PT53c: listed by two owners */
                     rings[num_rings++] = item;
                 }
             }
@@ -11782,6 +11874,8 @@ static void coop_lite_client_apply_inven_batch(void)
         if (local_pc != OBJ_HANDLE_NULL) {
             coop_lite_inv_list_drop(local_pc, rings[i]);
         }
+        /* PT53c: a ring unlisted elsewhere may also be doomed: never touch it after the free. */
+        coop_lite_handle_list_clear(doomed, num_doomed, rings[i]);
         obj_deallocate(rings[i]);
         coop_lite_obj_blob_defer((const uint8_t*)&oid);
         refreshed++;
@@ -11794,7 +11888,7 @@ static void coop_lite_client_apply_inven_batch(void)
         for (i = 0; i < num_doomed; i++) {
             int64_t parent = OBJ_HANDLE_NULL;
 
-            if (item_parent(doomed[i], &parent) && parent == doomed_parent[i]) {
+            if (doomed[i] != OBJ_HANDLE_NULL && item_parent(doomed[i], &parent) && parent == doomed_parent[i]) {
                 object_destroy(doomed[i]);
                 destroyed++;
             }
@@ -11861,6 +11955,8 @@ static void coop_lite_client_apply_inven_batch(void)
     }
     coop_lite_client_layout_note_host(local_pc); /* PT53 */
     ui_update_inven(OBJ_HANDLE_NULL);
+    free(doomed);
+    free(doomed_parent);
 }
 #endif
 
@@ -12151,7 +12247,7 @@ void coop_lite_handle_roster(PacketCoopRoster* pkt)
         if (old != OBJ_HANDLE_NULL && old != player_get_local_pc_obj()) {
             ObjectID old_oid = obj_get_id(old);
 
-            if (memcmp(&old_oid, &oid, sizeof(oid)) != 0) {
+            if (!coop_lite_oid_raw_equal(&old_oid, &oid)) {
                 multiplayer_lock();
                 tig_net_local_suspend_begin();
                 object_destroy(old);
