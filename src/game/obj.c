@@ -2432,7 +2432,7 @@ void obj_debug_aid(tig_art_id_t aid)
    elsewhere under the same OID (looted into a PC on the host, never saved
    in the client's .dif). The load re-points the OID at the copy; when the
    host's sync destroys the copy, the mapping must return to the original. */
-#define OBJ_DUP_OID_MAX 64
+#define OBJ_DUP_OID_MAX 1024 /* PT52d: was a 64 ring; free entries are reused */
 static struct {
     ObjectID oid;
     int64_t copy;
@@ -2451,10 +2451,29 @@ static void obj_dup_oid_remember(ObjectID oid, int64_t copy)
     if (orig == OBJ_HANDLE_NULL || orig == copy || !obj_handle_is_valid(orig)) {
         return;
     }
-    obj_dup_oids[obj_dup_oid_next].oid = oid;
-    obj_dup_oids[obj_dup_oid_next].copy = copy;
-    obj_dup_oids[obj_dup_oid_next].orig = orig;
-    obj_dup_oid_next = (obj_dup_oid_next + 1) % OBJ_DUP_OID_MAX;
+    {
+        int i;
+        int slot = -1;
+
+        for (i = 0; i < OBJ_DUP_OID_MAX; i++) {
+            int j = (obj_dup_oid_next + i) % OBJ_DUP_OID_MAX;
+
+            if (obj_dup_oids[j].copy == OBJ_HANDLE_NULL || !obj_handle_is_valid(obj_dup_oids[j].copy)) {
+                slot = j;
+                break;
+            }
+        }
+        if (slot < 0) {
+            /* all live: overwrite the oldest (its copy then keeps the OID
+               when destroyed; the next host sync re-sends the original) */
+            slot = obj_dup_oid_next;
+            tig_debug_printf("CoopLite: duplicate OID table full, oldest record dropped\n");
+        }
+        obj_dup_oids[slot].oid = oid;
+        obj_dup_oids[slot].copy = copy;
+        obj_dup_oids[slot].orig = orig;
+        obj_dup_oid_next = (slot + 1) % OBJ_DUP_OID_MAX;
+    }
     tig_debug_printf("CoopLite: duplicate OID loaded (copy of a live object)\n");
 }
 

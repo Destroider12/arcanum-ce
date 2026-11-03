@@ -35,6 +35,13 @@ void coop_upnp_format(CoopUpnpState state, int port, const char* ext_ip, const c
 
 #include "tig/debug.h"
 
+/* Invariant (PT52d): coop_upnp_ext/err/port are written only while the
+   state is OFF or BUSY (start on the main thread, then the worker), and the
+   worker publishes MAPPED/FAILED with SDL_SetAtomicInt after the write.
+   coop_upnp_format reads the strings only for MAPPED/FAILED, so no reader
+   overlaps a writer. Keep it that way (or add a mutex) when adding states.
+   Lease "0" (permanent) on purpose: many IGDv1 routers reject finite leases
+   (725 OnlyPermanentLeasesSupported); stop/atexit removes the mapping. */
 static SDL_Thread* coop_upnp_thread;
 static SDL_AtomicInt coop_upnp_st; /* CoopUpnpState */
 static int coop_upnp_port;

@@ -6962,7 +6962,7 @@ void coop_lite_follow_toggle(void)
         coop_lite_follow_cancel();
         return;
     }
-    if (pc == OBJ_HANDLE_NULL || !tig_net_is_active()) {
+    if (pc == OBJ_HANDLE_NULL || !tig_net_is_active() || !tig_net_is_coop_enabled()) { /* PT52d */
         return;
     }
     object_list_vicinity(pc, OBJ_TM_PC, &objects);
@@ -12920,7 +12920,7 @@ static void coop_world_full_free(int slot)
     coop_world_full_oid_cnt[slot] = 0;
 }
 
-static void coop_world_full_snapshot(int slot)
+static bool coop_world_full_snapshot(int slot)
 {
     int64_t obj;
     int iter;
@@ -12929,6 +12929,9 @@ static void coop_world_full_snapshot(int slot)
     coop_world_full_free(slot);
     coop_world_full_first[slot] = true;
     coop_world_full_oids[slot] = (ObjectID*)MALLOC(sizeof(ObjectID) * COOP_WORLD_FULL_MAX_OIDS);
+    if (coop_world_full_oids[slot] == NULL) {
+        return false; /* PT52d: caller falls back to the radius reply */
+    }
     if (obj_inst_first(&obj, &iter)) {
         do {
             int type;
@@ -12948,6 +12951,7 @@ static void coop_world_full_snapshot(int slot)
         } while (obj_inst_next(&obj, &iter));
     }
     coop_world_full_oid_cnt[slot] = n;
+    return true;
 }
 
 static bool coop_world_full_next(int slot, int* cursor, int64_t* obj_ptr)
@@ -13227,7 +13231,9 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
         tig_debug_printf("CoopLite: world req from slot %d for map %d (host %d) — ignored\n", slot, pkt->map, key);
         return;
     }
+    /* PT52d: a new map key / PC is never rate-limited (first full snapshot) */
     if (coop_world_req_host_seen[slot]
+        && coop_world_full_key[slot] == key && coop_world_full_pc[slot] == pc
         && !coop_lite_interval_elapsed(coop_world_req_host_ms[slot], coop_obj_now_ms, 3000u)) {
         return;
     }
@@ -13246,7 +13252,13 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
         coop_world_full_active[slot] = true;
         coop_world_full_cursor[slot] = 0;
         coop_world_full_ms[slot] = 0;
-        coop_world_full_snapshot(slot);
+        if (!coop_world_full_snapshot(slot)) {
+            coop_world_full_active[slot] = false;
+            coop_world_full_key[slot] = -1;
+            tig_debug_printf("CoopLite: PT52d full snapshot alloc failed, radius reply\n");
+            (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
+            return;
+        }
         tig_debug_printf("CoopLite: PT51 full-map world snapshot → slot %d (map key %d)\n", slot, key);
         return;
     }
@@ -16200,6 +16212,7 @@ static bool coop_travel_far; /* client: host said we are out of range */
 static bool coop_travel_pressed;
 static bool coop_client_busy[8]; /* PT52 host: last BUSY/IDLE a client reported */
 static int64_t coop_travel_start_loc; /* PT52 host: where the check started */
+static int coop_travel_told_mask; /* PT52d host: slots that got TRAVEL_START */
 
 static void coop_travel_send(int op, int a, int b, int slot)
 {
@@ -16295,6 +16308,13 @@ void coop_lite_pt52_slot_gone(int slot)
 {
     if (slot > 0 && slot < 8) {
         coop_client_busy[slot] = false;
+        coop_travel_state[slot] = -1; /* PT52d: a rejoin is not READY */
+        coop_travel_told_mask &= ~(1 << slot);
+        coop_world_full_active[slot] = false;
+        coop_world_full_key[slot] = -1;
+        coop_world_full_pc[slot] = OBJ_HANDLE_NULL;
+        coop_world_full_cursor[slot] = 0;
+        coop_world_full_first[slot] = false;
         coop_world_full_free(slot);
     }
 }
@@ -16356,6 +16376,7 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
     coop_travel_active = true;
     coop_travel_draw_ms = 0;
     coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, 0, -1);
+    coop_travel_told_mask = 0xFE;
     tig_debug_printf("CoopLite: PT50 host travel deferred, ready check (living=%d far=0x%x)\n", living, far_mask);
     return true;
 }
@@ -16403,6 +16424,10 @@ static void coop_travel_tick(unsigned int now_ms)
         if (st != coop_travel_client_sent) {
             coop_travel_client_sent = st;
             coop_travel_send(COOP_CTRL_TRAVEL_STATE, st, 0, -1);
+            /* PT52d: became busy during a check: say who is waiting */
+            if (coop_travel_active && st == COOP_TRAVEL_BUSY && coop_travel_show_hook != NULL) {
+                coop_travel_show_hook("Лидер группы ждёт вас: закройте окно или нажмите Y.");
+            }
         }
         return;
     }
@@ -16419,6 +16444,20 @@ static void coop_travel_tick(unsigned int now_ms)
             tig_debug_printf("CoopLite: PT52 travel check cancelled\n");
             coop_lite_travel_reset();
             return;
+        }
+    }
+    {
+        int far_mask;
+        int slot;
+
+        /* PT52d: a client that joined during the check gets TRAVEL_START */
+        coop_travel_count(NULL, &far_mask, NULL, 0);
+        for (slot = 1; slot < 8; slot++) {
+            if ((coop_travel_told_mask & (1 << slot)) == 0 && sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
+                coop_travel_told_mask |= 1 << slot;
+                coop_travel_state[slot] = -1;
+                coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, 0, slot);
+            }
         }
     }
     living = coop_travel_count(&ready, NULL, names, sizeof(names));

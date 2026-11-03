@@ -2196,3 +2196,19 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
   on session reset), so proactive BUSY/IDLE resumes after pressing Y. Host
   client-disconnect clears that slot's busy flag and frees its snapshot list.
 - Protocol unchanged (32).
+
+### PT52d (second review)
+
+- Slot disconnect clears its travel state (-1, never a stale READY), the
+  TRAVEL_START mask bit and the whole full-snapshot state.
+- A client that joins during a running travel check gets TRAVEL_START
+  (host tick, per-slot mask) and is waited for like the others.
+- A client that turns BUSY during a check sees the panel ("leader waits").
+- `obj_dup_oids`: 1024 entries, free/stale entries reused, overflow logged.
+- Full snapshot: allocation failure falls back to the radius reply; the
+  list (16384 × 24 B ≈ 384 KB) exists only while a slot's snapshot runs.
+- WORLD_REQ for a new map key / PC bypasses the 3 s rate limit.
+- `coop_lite_follow_toggle` requires coop mode.
+- Kept: UPnP permanent lease (IGDv1 routers often refuse finite leases;
+  removed on stop/atexit). String invariant documented in coop_upnp.c.
+- Protocol unchanged (32).
