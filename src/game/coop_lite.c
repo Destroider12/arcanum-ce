@@ -16355,8 +16355,13 @@ void coop_lite_pt52_slot_gone(int slot)
 
 void coop_lite_travel_session_reset(void)
 {
+    int slot;
+
     coop_lite_travel_reset();
     memset(coop_client_busy, 0, sizeof(coop_client_busy));
+    for (slot = 0; slot < 8; slot++) {
+        coop_travel_state[slot] = -1; /* PT52g: 0 is COOP_TRAVEL_BUSY */
+    }
 }
 
 static void coop_travel_go(const char* why)

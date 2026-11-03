@@ -1181,6 +1181,11 @@ static void dialog_ui_travel_show(const char* text)
     if (count > 4) {
         count = 4;
     }
+    /* PT52g: same size -> redraw in place, no window churn every 500 ms */
+    if (ctn_window != TIG_WINDOW_HANDLE_INVALID && tig_window_data(ctn_window, &window_data) == TIG_OK
+        && window_data.rect.height == 2 * CDV_PAD + cdv_lh * count) {
+        goto draw;
+    }
     dialog_ui_travel_hide();
     window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
     window_data.rect.x = CDV_MARGIN;
@@ -1194,6 +1199,7 @@ static void dialog_ui_travel_show(const char* text)
         ctn_window = TIG_WINDOW_HANDLE_INVALID;
         return;
     }
+draw:
     rect.x = 0;
     rect.y = 0;
     rect.width = window_data.rect.width;

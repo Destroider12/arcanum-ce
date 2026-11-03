@@ -84,6 +84,12 @@ static int SDLCALL coop_upnp_worker(void* arg)
         return 0;
     }
     coop_upnp_have_urls = true;
+    if (igd == 1 && (coop_upnp_urls.controlURL == NULL || coop_upnp_urls.controlURL[0] == '\0'
+                        || coop_upnp_data.first.servicetype[0] == '\0')) {
+        snprintf(coop_upnp_err, sizeof(coop_upnp_err), "gateway without WAN control URL"); /* PT52g */
+        SDL_SetAtomicInt(&coop_upnp_st, COOP_UPNP_FAILED);
+        return 0;
+    }
     if (igd != 1) {
         snprintf(coop_upnp_err, sizeof(coop_upnp_err), "gateway not connected or private address");
         SDL_SetAtomicInt(&coop_upnp_st, COOP_UPNP_FAILED);
@@ -92,6 +98,13 @@ static int SDLCALL coop_upnp_worker(void* arg)
     snprintf(port_str, sizeof(port_str), "%d", coop_upnp_port);
     rc = UPNP_AddPortMapping(coop_upnp_urls.controlURL, coop_upnp_data.first.servicetype, port_str, port_str,
         coop_upnp_lan, "Arcanum Coop", "UDP", NULL, "0");
+    if (rc != UPNPCOMMAND_SUCCESS) {
+        /* PT52g: a stale mapping (crash, 718 ConflictInMappingEntry): drop it, retry once */
+        tig_debug_printf("CoopUPnP: AddPortMapping %d, delete + retry\n", rc);
+        UPNP_DeletePortMapping(coop_upnp_urls.controlURL, coop_upnp_data.first.servicetype, port_str, "UDP", NULL);
+        rc = UPNP_AddPortMapping(coop_upnp_urls.controlURL, coop_upnp_data.first.servicetype, port_str, port_str,
+            coop_upnp_lan, "Arcanum Coop", "UDP", NULL, "0");
+    }
     if (rc != UPNPCOMMAND_SUCCESS) {
         snprintf(coop_upnp_err, sizeof(coop_upnp_err), "AddPortMapping %d %s", rc, strupnperror(rc));
         SDL_SetAtomicInt(&coop_upnp_st, COOP_UPNP_FAILED);

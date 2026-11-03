@@ -1,3 +1,4 @@
+#include "net/coop_upnp.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -318,6 +319,7 @@ int main(int argc, char** argv)
     intgame_set_iso_window_width(init_info.width);
     intgame_set_iso_window_height(init_info.height);
     if (!intgame_create_iso_window(&(game_init_info.iso_window_handle))) {
+        coop_upnp_stop(); /* PT52g: before SDL quits; atexit stays as guard */
         tig_exit();
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
     }
@@ -330,6 +332,7 @@ int main(int argc, char** argv)
 
     if (!gamelib_init(&game_init_info)) {
         tig_window_destroy(game_init_info.iso_window_handle);
+        coop_upnp_stop(); /* PT52g: before SDL quits; atexit stays as guard */
         tig_exit();
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
     }
@@ -373,6 +376,7 @@ int main(int argc, char** argv)
     if (!gameuilib_init(&game_init_info)) {
         gameuilib_exit();
         tig_window_destroy(game_init_info.iso_window_handle);
+        coop_upnp_stop(); /* PT52g: before SDL quits; atexit stays as guard */
         tig_exit();
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
     }
@@ -403,6 +407,7 @@ int main(int argc, char** argv)
     if (!mainmenu_ui_handle()) {
         gameuilib_exit();
         gamelib_exit();
+        coop_upnp_stop(); /* PT52g: before SDL quits; atexit stays as guard */
         tig_exit();
         tig_memory_print_stats(TIG_MEMORY_STATS_PRINT_ALL_BLOCKS);
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.

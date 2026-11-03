@@ -2238,3 +2238,5 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - Client local-dialog training refusal text is Russian, like the other coop UI strings.
 - `dialog_perform_training` checks the PC handle before `coop_lite_host_pc_changed`.
 - Notes: portrait is set only at character creation (no change-send needed); PC_STATS flags high 16 bits carry the portrait (no room for more flags there); party talk to an NPC not loaded on the host is refused (code 5), not hung.
+- (PT52g, follow-up commit) Travel panel redraws in place when its size is unchanged; `coop_travel_state` is set to -1 on session reset (0 is BUSY). Panel click policy kept: clicks over the panel are swallowed, only left-up means ready/go.
+- UPnP: empty control URL / service type is a clean failure; a failed AddPortMapping (stale mapping after a crash, 718) is retried once after DeletePortMapping; `coop_upnp_stop` is called before `tig_exit` in main (atexit stays as an idempotent guard). Stop/join is bounded by the discovery (1.5 s) and miniupnpc HTTP timeouts.
