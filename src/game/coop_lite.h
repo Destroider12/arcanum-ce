@@ -1457,6 +1457,8 @@ bool coop_lite_travel_slot_ready(int state, int64_t dist);
 bool coop_lite_host_travel_gate(const struct TeleportData* td);
 /* Y key / panel click: client = "ready", host = "go now". True if consumed. */
 bool coop_lite_travel_key(void);
+void coop_lite_travel_reset(void);
+void coop_lite_travel_session_reset(void);
 void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt);
 bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size);
 /* Client: ask the host to end own maintained spell (host mt_id). True if sent. */

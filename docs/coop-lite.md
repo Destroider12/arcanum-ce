@@ -2148,3 +2148,26 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
   - A snapshot of everything, not a changed-only delta: "changed vs. pristine" is not tracked.
 - **UPnP (optional, `ARCANUM_UPNP` CMake option, ON by default).** miniupnpc 2.2.8 (BSD-3-Clause) is vendored in `third_party/miniupnpc`. It builds as a static library and links ws2_32 and iphlpapi on mingw-w64. `tig_net_start_server` maps UDP `listen_port` (default 7777) on a worker thread: 1.5 s discovery, then AddPortMapping and GetExternalIPAddress. `tig_net_reset_connection` and atexit remove the mapping. The PT33 menu line reads "Co-op Mode: Hosting on port N - UPnP: UDP N open, external IP x.x.x.x", or "failed (…), forward UDP N by hand". The log shows "CoopUPnP: …". Kill switch: `ARCANUM_COOP_NO_UPNP=1`. The menu line is drawn when the menu opens, so a mapping that finishes later shows on the next menu redraw.
 - **Deferred:** Steam Networking Sockets / relay, ReForged integration.
+
+## PT52 — pre-release review
+
+- **Full snapshot paging (PT51 fix):** the FULL dump now takes the ObjectID
+  list in one pass when it starts and pages over it (64 per page); each oid
+  is re-resolved with `obj_pool_perm_lookup` and skipped if gone, destroyed
+  or picked up. Creating/destroying objects mid-dump no longer shifts the
+  cursor (objects were skipped and then pruned on the client). The last page
+  (LAST + FULL, FIRST when it is also the first) is always sent, even empty.
+- **Travel gate (PT50 fix):** clients report BUSY/IDLE (inventory, barter,
+  dialog) whenever it changes, not only during a check; the host keeps it per
+  slot and measures distance itself. Everyone alive within 25 tiles and free
+  → travel immediately, no panel. A running check is dropped (TRAVEL_END
+  sent) on session reset, save load, host death, host entering combat, or the
+  host walking more than 3 tiles from where it started (clicked elsewhere).
+- **Item use (PT44 fix):** scrolls and items with a `SAP_USE` script are used
+  on the host too; written items and keys stay local. A targeted use whose
+  target is gone, not a critter or farther than 4 tiles is refused (inventory
+  resynced) instead of being redirected onto the user.
+- **Follow guard (PT47 fix):** the guard uses `anim_goal_attack` on host and
+  client (client: walk-in through `coop_lite_client_attack_approach`, then the
+  intent); `coop_follow_on` is cleared on session reset.
+- Protocol unchanged (32).

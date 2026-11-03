@@ -2232,6 +2232,23 @@ int main(int argc, char** argv)
         }
         printf("PT51 full snapshot scope + upnp status OK\n");
     }
+    /* PT52: proactive BUSY/IDLE drives the no-panel path; stub resets are safe */
+    {
+        if (!coop_lite_travel_slot_ready(COOP_TRAVEL_IDLE, COOP_TRAVEL_RANGE)
+            || coop_lite_travel_slot_ready(COOP_TRAVEL_BUSY, 1)
+            || coop_lite_travel_slot_ready(COOP_TRAVEL_IDLE, COOP_TRAVEL_RANGE + 1)
+            || !coop_lite_travel_slot_ready(COOP_TRAVEL_READY, 999)) {
+            fprintf(stderr, "PT52 travel readiness wrong\n");
+            return 1;
+        }
+        coop_lite_travel_reset();
+        coop_lite_travel_session_reset();
+        if (coop_lite_host_travel_gate(NULL)) {
+            fprintf(stderr, "PT52 gate with no data must not hold\n");
+            return 1;
+        }
+        printf("PT52 travel gate state OK\n");
+    }
     return 0;
     }
 }
