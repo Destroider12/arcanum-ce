@@ -62,10 +62,16 @@ static int SDLCALL coop_upnp_worker(void* arg)
         SDL_SetAtomicInt(&coop_upnp_st, COOP_UPNP_FAILED);
         return 0;
     }
+    /* PT52b: a restart after coop_upnp_stop reuses the statics */
+    memset(&coop_upnp_urls, 0, sizeof(coop_upnp_urls));
+    memset(&coop_upnp_data, 0, sizeof(coop_upnp_data));
     igd = UPNP_GetValidIGD(devs, &coop_upnp_urls, &coop_upnp_data, coop_upnp_lan, sizeof(coop_upnp_lan), wan,
         sizeof(wan));
     freeUPNPDevlist(devs);
     if (igd <= 0) {
+        if (coop_upnp_urls.controlURL != NULL) {
+            FreeUPNPUrls(&coop_upnp_urls); /* defensive: never leak a partial fill */
+        }
         snprintf(coop_upnp_err, sizeof(coop_upnp_err), "no internet gateway device");
         SDL_SetAtomicInt(&coop_upnp_st, COOP_UPNP_FAILED);
         return 0;

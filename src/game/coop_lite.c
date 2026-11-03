@@ -12720,6 +12720,7 @@ COOP_STATIC_ASSERT(OF_OFF_BIT == OF_OFF, "OF_OFF bit");
 COOP_STATIC_ASSERT(OF_FLAT_BIT == OF_FLAT, "OF_FLAT bit");
 
 #define COOP_WORLD_MAX_CONTAINERS 64
+#define COOP_WORLD_FULL_CONTAINERS 8
 #define COOP_WORLD_NPC_DEAD 0x1
 
 static unsigned int coop_world_req_host_ms[8];
@@ -13002,7 +13003,9 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
             CoopWorldEntry* e;
             ObjectID oid;
 
-            if (full && chunks >= max_chunks) {
+            /* PT52b: also at most COOP_WORLD_FULL_CONTAINERS containers per
+               page/tick: each one is a reliable INVEN_SYNC batch. */
+            if (full && (chunks >= max_chunks || num_containers >= COOP_WORLD_FULL_CONTAINERS)) {
                 (*cursor)--; /* not consumed: first entry of the next page */
                 done = false;
                 break;

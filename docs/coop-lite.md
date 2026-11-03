@@ -2171,3 +2171,17 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
   client (client: walk-in through `coop_lite_client_attack_approach`, then the
   intent); `coop_follow_on` is cleared on session reset.
 - Protocol unchanged (32).
+
+### PT52b
+
+- **Full snapshot containers:** a FULL page now also ends after 8 containers
+  (`COOP_WORLD_FULL_CONTAINERS`), since each sends its own reliable INVEN_SYNC
+  batch; the snapshot index continues next tick. INVEN_SYNC between FIRST and
+  LAST is fine on the client: contents become OF_INVENTORY, which the prune
+  never touches, and the container itself is already in the seen set.
+- **UPnP restart:** `coop_upnp_urls`/`data` are zeroed before
+  `UPNP_GetValidIGD`; `have_urls` is set only for igd > 0 (freed in stop).
+  The ext/err strings are only rewritten while the state is BUSY/OFF and are
+  only read by describe for MAPPED/FAILED (set after the write, atomic), so
+  there is no read/write overlap.
+- Protocol unchanged (32).
