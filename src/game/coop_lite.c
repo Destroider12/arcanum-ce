@@ -1985,6 +1985,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_PC_POS: /* owner PC pos: client→host, host→others */
     case PACKET_COOP_PC_STATS: /* PT19 PC build: owner→host, host→all */
     case PACKET_COOP_DIALOG_STATE: /* PT36: host view → clients, client vote → host (kind-checked) */
+    case PACKET_COOP_PARTY_CTRL: /* PT50: travel check / spell end (op-checked) */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3027,6 +3028,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopSkillUse);
     case PACKET_COOP_CRAFT:
         return sizeof(PacketCoopCraft);
+    case PACKET_COOP_PARTY_CTRL:
+        return sizeof(PacketCoopPartyCtrl);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -7038,9 +7041,12 @@ void coop_lite_follow_cancel(void) { }
 void coop_lite_follow_toggle(void) { }
 #endif
 
+static void coop_travel_tick(unsigned int now_ms);
+
 void coop_lite_ping(unsigned int now_ms)
 {
     coop_obj_now_ms = now_ms;
+    coop_travel_tick(now_ms);
 #ifndef COOP_LITE_TEST_STUBS
     int slot;
     int64_t obj;
@@ -15905,4 +15911,304 @@ static void coop_lite_session_reset_extra(void)
     memset(coop_vitals_sent_hp, 0, sizeof(coop_vitals_sent_hp));
     memset(coop_vitals_sent_fat, 0, sizeof(coop_vitals_sent_fat));
 }
+#endif
+
+/* ===== PT50: travel tether / ready check, client spell-end intent ===== */
+
+bool coop_lite_travel_slot_ready(int state, int64_t dist)
+{
+    if (state == COOP_TRAVEL_READY) {
+        return true;
+    }
+    return state == COOP_TRAVEL_IDLE && dist >= 0 && dist <= COOP_TRAVEL_RANGE;
+}
+
+bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_PARTY_CTRL && size >= (int)sizeof(PacketCoopPartyCtrl)
+        && pkt->op >= COOP_CTRL_TRAVEL_START && pkt->op <= COOP_CTRL_SPELL_END;
+}
+
+static bool (*coop_travel_busy_hook)(void);
+static void (*coop_travel_show_hook)(const char* text);
+static void (*coop_travel_hide_hook)(void);
+
+void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* text), void (*hide)(void))
+{
+    coop_travel_busy_hook = busy;
+    coop_travel_show_hook = show;
+    coop_travel_hide_hook = hide;
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static bool coop_travel_active; /* host: ready check running; client: notice shown */
+static bool coop_travel_bypass;
+static TeleportData coop_travel_td;
+static unsigned int coop_travel_start_ms;
+static unsigned int coop_travel_draw_ms;
+static int coop_travel_state[8];
+static int coop_travel_client_sent; /* client: last state sent */
+static bool coop_travel_far; /* client: host said we are out of range */
+static bool coop_travel_pressed;
+
+static void coop_travel_send(int op, int a, int b, int slot)
+{
+    PacketCoopPartyCtrl pkt;
+
+    pkt.type = PACKET_COOP_PARTY_CTRL;
+    pkt.op = op;
+    pkt.a = a;
+    pkt.b = b;
+    if (slot < 0) {
+        int depth = tig_net_local_suspend_pause();
+
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+        tig_net_local_suspend_resume(depth);
+    } else {
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+    }
+}
+
+static void coop_travel_hide(void)
+{
+    if (coop_travel_hide_hook != NULL) {
+        coop_travel_hide_hook();
+    }
+}
+
+/* Host: living clients and how many are ready; mask of far ones. */
+static int coop_travel_count(int* ready_ptr, int* far_mask_ptr, char* names, size_t size)
+{
+    int64_t host_pc = player_get_local_pc_obj();
+    int64_t host_loc;
+    int slot;
+    int living = 0;
+    int ready = 0;
+    int far_mask = 0;
+
+    if (names != NULL && size > 0) {
+        names[0] = '\0';
+    }
+    if (host_pc == OBJ_HANDLE_NULL) {
+        return 0;
+    }
+    host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t dist;
+
+        if (pc == OBJ_HANDLE_NULL || pc == host_pc || critter_is_dead(pc)) {
+            continue; /* dead / disconnected never hold the party */
+        }
+        living++;
+        dist = location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), host_loc);
+        if (dist > COOP_TRAVEL_RANGE) {
+            far_mask |= 1 << slot;
+        }
+        if (coop_lite_travel_slot_ready(coop_travel_state[slot], dist)) {
+            ready++;
+        } else if (names != NULL && strlen(names) + 16 < size) {
+            char name[64];
+
+            object_examine(pc, pc, name);
+            name[15] = '\0';
+            strncat(names, " ", size - strlen(names) - 1);
+            strncat(names, name, size - strlen(names) - 1);
+        }
+    }
+    if (ready_ptr != NULL) {
+        *ready_ptr = ready;
+    }
+    if (far_mask_ptr != NULL) {
+        *far_mask_ptr = far_mask;
+    }
+    return living;
+}
+
+static void coop_travel_go(const char* why)
+{
+    TeleportData td = coop_travel_td;
+
+    coop_travel_active = false;
+    coop_travel_send(COOP_CTRL_TRAVEL_END, 0, 0, -1);
+    coop_travel_hide();
+    tig_debug_printf("CoopLite: PT50 travel check done (%s), host leaves\n", why);
+    coop_travel_bypass = true;
+    teleport_do(&td);
+    coop_travel_bypass = false;
+}
+
+bool coop_lite_host_travel_gate(const TeleportData* td)
+{
+    int living;
+    int far_mask;
+    int slot;
+
+    if (td == NULL || coop_travel_bypass || !tig_net_is_coop_enabled() || !tig_net_is_active()
+        || !tig_net_is_host() || !coop_lite_follow_armed || coop_lite_applying_follow
+        || !player_is_local_pc_obj(td->obj) || td->map <= 0) {
+        return false;
+    }
+    if (coop_travel_active) {
+        /* the host repeated the action: go now with the newest target */
+        coop_travel_td = *td;
+        coop_travel_go("forced by host");
+        return true;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        coop_travel_state[slot] = -1;
+    }
+    living = coop_travel_count(NULL, &far_mask, NULL, 0);
+    if (living == 0) {
+        return false;
+    }
+    coop_travel_td = *td;
+    coop_travel_active = true;
+    coop_travel_start_ms = coop_obj_now_ms;
+    coop_travel_draw_ms = 0;
+    coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, (int)(COOP_TRAVEL_TIMEOUT_MS / 1000u), -1);
+    tig_debug_printf("CoopLite: PT50 host travel deferred, ready check (living=%d far=0x%x)\n", living, far_mask);
+    return true;
+}
+
+bool coop_lite_travel_key(void)
+{
+    if (!tig_net_is_active() || !coop_travel_active) {
+        return false;
+    }
+    if (tig_net_is_host()) {
+        coop_travel_go("host pressed Y");
+    } else {
+        coop_travel_pressed = true;
+        coop_travel_client_sent = COOP_TRAVEL_READY;
+        coop_travel_send(COOP_CTRL_TRAVEL_STATE, COOP_TRAVEL_READY, 0, -1);
+        if (coop_travel_show_hook != NULL) {
+            coop_travel_show_hook("Лидер группы собирается в путь. Вы готовы — ждём остальных.");
+        }
+    }
+    return true;
+}
+
+static void coop_travel_tick(unsigned int now_ms)
+{
+    char text[256];
+    char names[128];
+    int living;
+    int ready;
+    int left;
+
+    if (!coop_travel_active) {
+        return;
+    }
+    if (!tig_net_is_active()) {
+        coop_travel_active = false;
+        coop_travel_hide();
+        return;
+    }
+    if (!tig_net_is_host()) {
+        int st;
+
+        if (coop_travel_pressed) {
+            return;
+        }
+        st = coop_travel_busy_hook != NULL && coop_travel_busy_hook() ? COOP_TRAVEL_BUSY : COOP_TRAVEL_IDLE;
+        if (st != coop_travel_client_sent) {
+            coop_travel_client_sent = st;
+            coop_travel_send(COOP_CTRL_TRAVEL_STATE, st, 0, -1);
+        }
+        return;
+    }
+    living = coop_travel_count(&ready, NULL, names, sizeof(names));
+    if (living == 0 || ready >= living) {
+        coop_travel_go("all ready");
+        return;
+    }
+    if (coop_lite_interval_elapsed(coop_travel_start_ms, now_ms, COOP_TRAVEL_TIMEOUT_MS)) {
+        coop_travel_go("timeout");
+        return;
+    }
+    if (coop_travel_draw_ms != 0 && !coop_lite_interval_elapsed(coop_travel_draw_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_travel_draw_ms = now_ms != 0 ? now_ms : 1;
+    left = (int)((COOP_TRAVEL_TIMEOUT_MS - (now_ms - coop_travel_start_ms)) / 1000u);
+    snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Через %d с отправимся; Y — сразу.", ready, living,
+        names, left);
+    if (coop_travel_show_hook != NULL) {
+        coop_travel_show_hook(text);
+    }
+}
+
+static void coop_travel_host_spell_end(int slot, int mt_id)
+{
+    MagicTechRunInfo* run_info;
+    int64_t pc = sub_4A2B60(slot);
+
+    if (pc == OBJ_HANDLE_NULL || !magictech_id_to_run_info(mt_id, &run_info)
+        || run_info->parent_obj.obj != pc || run_info->action != MAGICTECH_ACTION_MAINTAIN) {
+        tig_debug_printf("CoopLite: PT50 slot %d spell end %d rejected\n", slot, mt_id);
+        return;
+    }
+    tig_debug_printf("CoopLite: PT50 slot %d ends maintained spell %d\n", slot, mt_id);
+    magictech_interrupt(mt_id); /* END path sends Packet61 to the owner */
+}
+
+void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !coop_lite_party_ctrl_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (tig_net_is_host()) {
+        slot = sub_52A530();
+        if (slot <= 0 || slot >= 8) {
+            return;
+        }
+        if (pkt->op == COOP_CTRL_TRAVEL_STATE && pkt->a >= COOP_TRAVEL_BUSY && pkt->a <= COOP_TRAVEL_READY) {
+            if (coop_travel_active) {
+                coop_travel_state[slot] = pkt->a;
+                coop_travel_draw_ms = 0;
+            }
+        } else if (pkt->op == COOP_CTRL_SPELL_END) {
+            coop_travel_host_spell_end(slot, pkt->a);
+        }
+        return;
+    }
+    if (pkt->op == COOP_CTRL_TRAVEL_START) {
+        int my = sub_529520();
+        bool busy = coop_travel_busy_hook != NULL && coop_travel_busy_hook();
+
+        coop_travel_active = true;
+        coop_travel_pressed = false;
+        coop_travel_far = my > 0 && my < 8 && (pkt->a & (1 << my)) != 0;
+        coop_travel_client_sent = busy ? COOP_TRAVEL_BUSY : COOP_TRAVEL_IDLE;
+        coop_travel_send(COOP_CTRL_TRAVEL_STATE, coop_travel_client_sent, 0, -1);
+        if ((coop_travel_far || busy) && coop_travel_show_hook != NULL) {
+            char text[200];
+
+            snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов (через %d с — без вас).",
+                coop_travel_far ? " (вы далеко)" : "", pkt->b);
+            coop_travel_show_hook(text);
+        }
+    } else if (pkt->op == COOP_CTRL_TRAVEL_END) {
+        coop_travel_active = false;
+        coop_travel_hide();
+    }
+}
+
+bool coop_lite_client_spell_end(int mt_id)
+{
+    if (!tig_net_is_coop_enabled() || !tig_net_is_active() || tig_net_is_host()) {
+        return false;
+    }
+    coop_travel_send(COOP_CTRL_SPELL_END, mt_id, 0, -1);
+    return true;
+}
+#else
+bool coop_lite_host_travel_gate(const TeleportData* td) { (void)td; return false; }
+bool coop_lite_travel_key(void) { return false; }
+void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
+bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }
+static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 #endif

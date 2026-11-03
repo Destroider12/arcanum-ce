@@ -952,7 +952,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 152 || TIG_NET_PROTOCOL < 31
+        || PACKET_COOP_TYPE_LIMIT != 153 || TIG_NET_PROTOCOL < 32
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -2183,6 +2183,28 @@ int main(int argc, char** argv)
             return 1;
         }
         printf("PASS: coop_lite dialog/save/follow-offset policy\n");
-        return 0;
+        /* PT50: travel ready check + client spell-end packet */
+    {
+        PacketCoopPartyCtrl c = { PACKET_COOP_PARTY_CTRL, COOP_CTRL_TRAVEL_STATE, COOP_TRAVEL_READY, 0 };
+
+        if (PACKET_COOP_PARTY_CTRL != 152 || TIG_NET_PROTOCOL != 32 || sizeof(PacketCoopPartyCtrl) != 16
+            || coop_lite_coop_packet_min_size(PACKET_COOP_PARTY_CTRL) != (int)sizeof(PacketCoopPartyCtrl)
+            || !coop_lite_party_ctrl_valid(&c, 16) || coop_lite_party_ctrl_valid(&c, 12)
+            || !coop_lite_travel_slot_ready(COOP_TRAVEL_READY, 500)
+            || !coop_lite_travel_slot_ready(COOP_TRAVEL_IDLE, 25)
+            || coop_lite_travel_slot_ready(COOP_TRAVEL_IDLE, 26)
+            || coop_lite_travel_slot_ready(COOP_TRAVEL_BUSY, 1)
+            || coop_lite_travel_slot_ready(-1, 1)) {
+            fprintf(stderr, "PT50 party ctrl / travel ready rules wrong\n");
+            return 1;
+        }
+        c.op = 9;
+        if (coop_lite_party_ctrl_valid(&c, 16)) {
+            fprintf(stderr, "PT50 bad op accepted\n");
+            return 1;
+        }
+        printf("PT50 travel ready check OK\n");
+    }
+    return 0;
     }
 }

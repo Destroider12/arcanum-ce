@@ -1128,6 +1128,90 @@ static bool dialog_ui_party_choose(int option)
     return true;
 }
 
+/* PT50: travel ready-check notice. Small solid panel in the top-left corner
+   (PT39 style; never full-screen or centred). Click or Y = ready / go now. */
+static tig_window_handle_t ctn_window = TIG_WINDOW_HANDLE_INVALID;
+
+static bool ctn_message_filter(TigMessage* msg)
+{
+    if (msg->type == TIG_MESSAGE_MOUSE) {
+        TigWindowData wd;
+
+        if (ctn_window == TIG_WINDOW_HANDLE_INVALID || tig_window_data(ctn_window, &wd) != TIG_OK
+            || msg->data.mouse.x < wd.rect.x || msg->data.mouse.y < wd.rect.y
+            || msg->data.mouse.x >= wd.rect.x + wd.rect.width || msg->data.mouse.y >= wd.rect.y + wd.rect.height) {
+            return false;
+        }
+        if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP) {
+            coop_lite_travel_key();
+        }
+        return msg->data.mouse.event != TIG_MESSAGE_MOUSE_MOVE;
+    }
+    return false;
+}
+
+static void dialog_ui_travel_hide(void)
+{
+    if (ctn_window != TIG_WINDOW_HANDLE_INVALID) {
+        tig_window_destroy(ctn_window);
+        ctn_window = TIG_WINDOW_HANDLE_INVALID;
+    }
+}
+
+static void dialog_ui_travel_show(const char* text)
+{
+    TigWindowData window_data;
+    TigRect rect;
+    int starts[CDV_MAX_WRAP_LINES];
+    int lens[CDV_MAX_WRAP_LINES];
+    char line[CDV_TMP];
+    int count;
+    int index;
+    int w = 380;
+    int text_w;
+
+    if (!cdv_fonts_ready || text == NULL) {
+        return;
+    }
+    if (cdv_lh <= 0) {
+        cdv_layout();
+    }
+    text_w = w - 2 * CDV_PAD;
+    count = cdv_wrap(cdv_font_text, text, text_w, starts, lens);
+    if (count > 4) {
+        count = 4;
+    }
+    dialog_ui_travel_hide();
+    window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
+    window_data.rect.x = CDV_MARGIN;
+    window_data.rect.y = CDV_MARGIN;
+    window_data.rect.width = w;
+    window_data.rect.height = 2 * CDV_PAD + cdv_lh * count;
+    window_data.background_color = tig_color_make(20, 16, 12);
+    window_data.color_key = 0;
+    window_data.message_filter = ctn_message_filter;
+    if (tig_window_create(&window_data, &ctn_window) != TIG_OK) {
+        ctn_window = TIG_WINDOW_HANDLE_INVALID;
+        return;
+    }
+    rect.x = 0;
+    rect.y = 0;
+    rect.width = window_data.rect.width;
+    rect.height = window_data.rect.height;
+    tig_window_fill(ctn_window, &rect, tig_color_make(20, 16, 12));
+    tig_window_box(ctn_window, &rect, tig_color_make(160, 130, 70));
+    for (index = 0; index < count; index++) {
+        snprintf(line, sizeof(line), "%.*s", lens[index] > CDV_TMP - 8 ? CDV_TMP - 8 : lens[index], text + starts[index]);
+        cdv_write(index == 0 ? cdv_font_name : cdv_font_text, line, CDV_PAD, CDV_PAD + cdv_lh * index, text_w,
+            cdv_lh);
+    }
+}
+
+static bool dialog_ui_travel_busy(void)
+{
+    return inven_ui_is_created() || dialog_ui_is_local_pc_in_dialog() || cdv_view.open;
+}
+
 static void dialog_ui_coop_view_init(void)
 {
     cdv_font_name = cdv_font_make(230, 200, 110);
@@ -1138,6 +1222,7 @@ static void dialog_ui_coop_view_init(void)
     cdv_fonts_ready = true;
     coop_lite_set_party_choose_hook(dialog_ui_party_choose);
     coop_lite_set_dialog_view_hooks(dialog_ui_coop_view_show, dialog_ui_coop_view_close, dialog_ui_coop_refresh_votes);
+    coop_lite_set_travel_ui_hooks(dialog_ui_travel_busy, dialog_ui_travel_show, dialog_ui_travel_hide);
 }
 
 static void dialog_ui_coop_view_exit(void)
@@ -1146,6 +1231,8 @@ static void dialog_ui_coop_view_exit(void)
         return;
     }
     dialog_ui_coop_view_close();
+    dialog_ui_travel_hide();
+    coop_lite_set_travel_ui_hooks(NULL, NULL, NULL);
     tig_font_destroy(cdv_font_name);
     tig_font_destroy(cdv_font_text);
     tig_font_destroy(cdv_font_option);

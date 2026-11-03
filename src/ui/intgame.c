@@ -2509,6 +2509,11 @@ bool sub_54B5D0(TigMessage* msg)
                     intgame_secondary_button_toggle(INTGAME_SECONDARY_BUTTON_SKILLS, ROTWIN_TYPE_SKILLS);
                 }
                 return true;
+            case SDL_SCANCODE_Y:
+                if (!mainmenu_ui_is_active() && coop_lite_travel_key()) {
+                    return true; /* PT50: travel ready / host go now */
+                }
+                break;
             case SDL_SCANCODE_F:
                 if (!mainmenu_ui_is_active() && tig_net_is_active()) {
                     coop_lite_follow_toggle(); /* PT47: follow/guard nearest player */

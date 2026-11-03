@@ -121,6 +121,11 @@ void teleport_ping(tig_timestamp_t timestamp)
 // 0x4D3380
 bool teleport_do(TeleportData* teleport_data)
 {
+    /* PT50: host leaving with clients far / busy -> ready check first. */
+    if (coop_lite_host_travel_gate(teleport_data)) {
+        return false;
+    }
+
     if (teleport_pending) {
         if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0) {
             return false;

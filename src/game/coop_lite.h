@@ -38,7 +38,8 @@ extern "C" {
 #define PACKET_COOP_DOOR_USE 149 /* PT37: client → host: I used this door (portal OID) */
 #define PACKET_COOP_SKILL_USE 150 /* PT40: client → host: pick lock / disarm trap intent */
 #define PACKET_COOP_CRAFT 151 /* PT40: client → host: combine this schematic */
-#define PACKET_COOP_TYPE_LIMIT 152
+#define PACKET_COOP_PARTY_CTRL 152 /* PT50: travel ready check (both ways) + client spell-end intent */
+#define PACKET_COOP_TYPE_LIMIT 153
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -381,6 +382,24 @@ typedef struct PacketCoopCraft {
     /* 0004 */ int schematic;
 } PacketCoopCraft;
 COOP_STATIC_ASSERT(sizeof(PacketCoopCraft) == 0x08, "PacketCoopCraft size");
+
+/* PT50 */
+#define COOP_CTRL_TRAVEL_START 1 /* host -> clients: a = far slot mask, b = timeout s */
+#define COOP_CTRL_TRAVEL_END 2 /* host -> clients: close the notice */
+#define COOP_CTRL_TRAVEL_STATE 3 /* client -> host: a = COOP_TRAVEL_* */
+#define COOP_CTRL_SPELL_END 4 /* client -> host: a = host mt_id of own maintained spell */
+#define COOP_TRAVEL_BUSY 0
+#define COOP_TRAVEL_IDLE 1
+#define COOP_TRAVEL_READY 2
+#define COOP_TRAVEL_RANGE 25
+#define COOP_TRAVEL_TIMEOUT_MS 30000u
+typedef struct PacketCoopPartyCtrl {
+    /* 0000 */ int type;
+    /* 0004 */ int op;
+    /* 0008 */ int a;
+    /* 000C */ int b;
+} PacketCoopPartyCtrl;
+COOP_STATIC_ASSERT(sizeof(PacketCoopPartyCtrl) == 0x10, "PacketCoopPartyCtrl size");
 
 typedef struct PacketCoopObjReq {
     /* 0000 */ int type;
@@ -1427,5 +1446,20 @@ bool coop_lite_is_teammate_pc(int64_t obj);
 bool coop_lite_teammate_accept(int64_t obj, int64_t local_pc, const int64_t* have, int num, int max);
 /* UI registers: rebuild the party column / redraw its bars. */
 void coop_lite_set_party_ui_hooks(void (*refresh)(void), void (*update)(void));
+
+/* PT50: travel tether / ready check. */
+struct TeleportData;
+/* Pure: is this client slot ready for the host to leave? state = COOP_TRAVEL_*
+   or -1 (no reply yet); dist = tiles from the host PC. */
+bool coop_lite_travel_slot_ready(int state, int64_t dist);
+/* Host teleport_do hook: true = deferred (ready check started), do not teleport now. */
+bool coop_lite_host_travel_gate(const struct TeleportData* td);
+/* Y key / panel click: client = "ready", host = "go now". True if consumed. */
+bool coop_lite_travel_key(void);
+void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt);
+bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size);
+/* Client: ask the host to end own maintained spell (host mt_id). True if sent. */
+bool coop_lite_client_spell_end(int mt_id);
+void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* text), void (*hide)(void));
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */
