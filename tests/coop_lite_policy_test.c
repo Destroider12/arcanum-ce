@@ -2210,7 +2210,7 @@ int main(int argc, char** argv)
     {
         int64_t list[3];
         int cnt = 0;
-        char buf[128];
+        char buf[256];
 
         if (!coop_lite_sector_list_add(list, &cnt, 3, 10) || !coop_lite_sector_list_add(list, &cnt, 3, 10)
             || cnt != 1 || !coop_lite_sector_list_add(list, &cnt, 3, 11) || !coop_lite_sector_list_add(list, &cnt, 3, 12)

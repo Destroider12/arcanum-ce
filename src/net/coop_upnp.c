@@ -11,18 +11,18 @@ void coop_upnp_format(CoopUpnpState state, int port, const char* ext_ip, const c
     }
     switch (state) {
     case COOP_UPNP_BUSY:
-        snprintf(buf, size, "UPnP: mapping UDP %d...", port);
+        snprintf(buf, size, "UPnP: проброс / mapping UDP %d...", port);
         break;
     case COOP_UPNP_MAPPED:
-        snprintf(buf, size, "UPnP: UDP %d open, external IP %s", port,
+        snprintf(buf, size, "UPnP: UDP %d открыт / open, IP %s", port,
             ext_ip != NULL && ext_ip[0] != '\0' ? ext_ip : "?");
         break;
     case COOP_UPNP_FAILED:
-        snprintf(buf, size, "UPnP: failed (%s), forward UDP %d by hand", err != NULL && err[0] != '\0' ? err : "?",
-            port);
+        snprintf(buf, size, "UPnP: ошибка / failed (%s), UDP %d вручную / by hand",
+            err != NULL && err[0] != '\0' ? err : "?", port);
         break;
     default:
-        snprintf(buf, size, "UPnP: off");
+        snprintf(buf, size, "UPnP: выкл / off");
         break;
     }
 }

@@ -3371,7 +3371,7 @@ void dialog_offer_training(int* skills, int cnt, int back_response_val, DialogSt
        own copy; training runs in the host's party dialog instead. */
     if (tig_net_is_coop_client() && coop_lite_party_dialog_pc() == OBJ_HANDLE_NULL) {
         snprintf(state->reply, sizeof(state->reply), "%s",
-            "Здесь я вас обучить не могу. (Кооп: обучение — в общем диалоге с лидером группы.)");
+            "Здесь я вас обучить не могу. (Кооп: обучение — в общем диалоге с лидером группы.) / I cannot train you here. (Co-op: training happens in the party dialog with the host.)");
         state->num_options = 1;
         dialog_copy_pc_class_specific_msg(state->options[0], state, 1000);
         state->field_17F0[0] = 0;

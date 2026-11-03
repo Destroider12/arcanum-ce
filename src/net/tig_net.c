@@ -423,20 +423,20 @@ bool tig_net_describe_coop_mode(char* buf, size_t size)
     }
     if (want_host) {
 #ifdef ARCANUM_UPNP
-        char upnp[128];
+        char upnp[256];
 
         coop_upnp_state(); /* reaps a finished worker, logs once */
         coop_upnp_describe(upnp, sizeof(upnp));
-        snprintf(buf, size, "Co-op Mode: Hosting on port %d - %s", listen_port, upnp);
+        snprintf(buf, size, "Кооп: хост / Co-op: host, port %d - %s", listen_port, upnp);
 #else
-        snprintf(buf, size, "Co-op Mode: Hosting on port %d", listen_port);
+        snprintf(buf, size, "Кооп: хост / Co-op: host, port %d", listen_port);
 #endif
     } else if (want_join && active) {
-        snprintf(buf, size, "Co-op Mode: Connected to %s:%d", join_host, join_port);
+        snprintf(buf, size, "Кооп: подключено / Co-op: connected, %s:%d", join_host, join_port);
     } else if (want_join) {
-        snprintf(buf, size, "Co-op Mode: Joining %s:%d", join_host, join_port);
+        snprintf(buf, size, "Кооп: подключение / Co-op: joining %s:%d", join_host, join_port);
     } else {
-        snprintf(buf, size, "Co-op Mode");
+        snprintf(buf, size, "Кооп / Co-op Mode");
     }
     return true;
 }

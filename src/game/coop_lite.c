@@ -5875,49 +5875,49 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
     switch (kind) {
     case COOP_PARTY_HOST_DOWN:
         snprintf(buf, size, "%s", local_is_host
-                ? "You have fallen. Your companions can resurrect you."
-                : "The party leader has fallen! Resurrect them to continue.");
+                ? "Вы пали. Спутники могут вас воскресить. / You have fallen. Your companions can resurrect you."
+                : "Лидер группы пал! Воскресите его, чтобы продолжить. / The party leader has fallen! Resurrect them to continue.");
         break;
     case COOP_PARTY_HOST_UP:
-        snprintf(buf, size, "%s", local_is_host ? "You have been resurrected." : "The party leader is back on their feet.");
+        snprintf(buf, size, "%s", local_is_host ? "Вас воскресили. / You have been resurrected." : "Лидер группы снова на ногах. / The party leader is back on their feet.");
         break;
     case COOP_PARTY_WIPE:
-        snprintf(buf, size, "The whole party has fallen. Reloading the last save in %u seconds...",
+        snprintf(buf, size, "Вся группа пала. Загрузка последнего сохранения через %u с... / The whole party has fallen. Reloading the last save in %u seconds...",
             (countdown_ms + 999u) / 1000u);
         break;
     case COOP_PARTY_WIPE_CANCEL:
-        snprintf(buf, size, "%s", "Someone got back up - reload cancelled.");
+        snprintf(buf, size, "%s", "Кто-то поднялся — загрузка отменена. / Someone got back up - reload cancelled.");
         break;
     case COOP_PARTY_RELOADING:
-        snprintf(buf, size, "%s", "Reloading the party leader's last save...");
+        snprintf(buf, size, "%s", "Загружаем последнее сохранение лидера... / Reloading the party leader's last save...");
         break;
     case COOP_PARTY_RESYNC:
-        snprintf(buf, size, "%s", "The party leader reloaded. Rejoining...");
+        snprintf(buf, size, "%s", "Лидер группы загрузился. Переподключение... / The party leader reloaded. Rejoining...");
         break;
     case COOP_PARTY_NO_SAVE:
-        snprintf(buf, size, "%s", "No save to reload - the party gets back up.");
+        snprintf(buf, size, "%s", "Нет сохранения — группа поднимается. / No save to reload - the party gets back up.");
         break;
     case COOP_PARTY_CAUGHT_THIEF:
-        snprintf(buf, size, "%s", "Caught pickpocketing!");
+        snprintf(buf, size, "%s", "Пойман на краже! / Caught pickpocketing!");
         break;
     case COOP_PARTY_STEAL_FAILED:
-        snprintf(buf, size, "%s", "Your pickpocket attempt failed.");
+        snprintf(buf, size, "%s", "Кража не удалась. / Your pickpocket attempt failed.");
         break;
     case COOP_PARTY_STEAL_OK:
-        snprintf(buf, size, "%s", "You succeed.");
+        snprintf(buf, size, "%s", "Получилось. / You succeed.");
         break;
     case COOP_PARTY_SKILL_FAILED:
-        snprintf(buf, size, "%s", "You failed.");
+        snprintf(buf, size, "%s", "Не получилось. / You failed.");
         break;
     case COOP_PARTY_TALK_REFUSED:
-        snprintf(buf, size, "%s", "The party leader must be close by (and free) to talk.");
+        snprintf(buf, size, "%s", "Для разговора лидер группы должен быть рядом и свободен. / The party leader must be close by (and free) to talk.");
         break;
     case COOP_PARTY_REST_BEGIN:
-        snprintf(buf, size, "%s", local_is_host ? "" : "The party leader rests - time passes for everyone.");
+        snprintf(buf, size, "%s", local_is_host ? "" : "Лидер группы отдыхает — время идёт для всех. / The party leader rests - time passes for everyone.");
         break;
     case COOP_PARTY_WMAP_OPEN:
         snprintf(buf, size, "%s", local_is_host ? ""
-                : "The party leader is on the world map - you travel together. Please wait...");
+                : "Лидер группы на карте мира — вы путешествуете вместе. Подождите... / The party leader is on the world map - you travel together. Please wait...");
         break;
     default:
         buf[0] = '\0';
@@ -5929,7 +5929,7 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
 static void coop_lite_host_party_notice(int kind, int slot, unsigned int countdown_ms)
 {
     PacketCoopPartyState pkt;
-    char str[160];
+    char str[512];
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_PARTY_STATE;
@@ -5952,7 +5952,7 @@ bool coop_lite_client_rest_refused(void)
     if (!tig_net_is_active() || tig_net_is_host()) {
         return false;
     }
-    coop_lite_show_notice("Only the party leader can rest or wait.", TF_TYPE_RED);
+    coop_lite_show_notice("Отдыхать или ждать может только лидер группы. / Only the party leader can rest or wait.", TF_TYPE_RED);
     tig_debug_printf("CoopLite: rest/wait refused on the client (the host owns game time)\n");
     return true;
 }
@@ -6319,7 +6319,7 @@ static void coop_lite_host_watch_party(unsigned int now_ms)
     int slot;
     int64_t pc;
     char name[64];
-    char str[160];
+    char str[512];
 
     for (slot = 0; slot < 8; slot++) {
         pc = sub_4A2B60(slot);
@@ -6339,7 +6339,7 @@ static void coop_lite_host_watch_party(unsigned int now_ms)
         }
         if ((fell & (1u << slot)) != 0) {
             coop_lite_copy_pc_name(pc, name, sizeof(name));
-            snprintf(str, sizeof(str), "%s has fallen.", name);
+            snprintf(str, sizeof(str), "%s пал. / %s has fallen.", name, name);
             tf_add(pc, TF_TYPE_RED, str);
             tig_debug_printf("CoopLite: slot %d PC fell — corpse until resurrected\n", slot);
         } else if ((rose & (1u << slot)) != 0) {
@@ -6538,13 +6538,13 @@ static void coop_lite_client_resync(void)
         proto = BP_GENERIC_PC;
     }
     coop_lite_copy_pc_name(pc, name, sizeof(name));
-    coop_lite_show_notice("The party leader reloaded. Rejoining...", TF_TYPE_WHITE);
+    coop_lite_show_notice("Лидер группы загрузился. Переподключение... / The party leader reloaded. Rejoining...", TF_TYPE_WHITE);
     coop_lite_client_offer_character(proto, name);
 }
 
 void coop_lite_handle_party_state(PacketCoopPartyState* pkt)
 {
-    char str[160];
+    char str[512];
 
     if (pkt == NULL || pkt->type != PACKET_COOP_PARTY_STATE) {
         return;
@@ -6656,7 +6656,7 @@ static void coop_lite_client_watch_vitals(void)
         object_flags_set(local_pc, OF_FLAT | OF_NO_BLOCK);
         tig_net_local_suspend_end();
         multiplayer_unlock();
-        coop_lite_show_notice("You have fallen. A companion can resurrect you.", TF_TYPE_RED);
+        coop_lite_show_notice("Вы пали. Спутник может вас воскресить. / You have fallen. A companion can resurrect you.", TF_TYPE_RED);
         tig_debug_printf("CoopLite: local PC fell\n");
     } else if (!critter_is_dead(local_pc) && coop_client_fallen) {
         coop_client_fallen = false;
@@ -6669,7 +6669,7 @@ static void coop_lite_client_watch_vitals(void)
         object_set_current_aid(local_pc, art_id);
         tig_net_local_suspend_end();
         multiplayer_unlock();
-        coop_lite_show_notice("You have been resurrected.", TF_TYPE_GREEN);
+        coop_lite_show_notice("Вас воскресили. / You have been resurrected.", TF_TYPE_GREEN);
         tig_debug_printf("CoopLite: local PC revived\n");
     }
 }
@@ -9958,7 +9958,7 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
 static void coop_lite_host_slot_notice(int slot, int kind)
 {
     PacketCoopPartyState pkt;
-    char str[160];
+    char str[512];
 
     if (slot == 0) {
         coop_lite_party_notice_text(kind, 0, true, str, sizeof(str));
@@ -9979,7 +9979,7 @@ static void coop_lite_host_slot_notice(int slot, int kind)
  * Loot (container, corpse): the inventory window's own transfer, like
  * barter at price 0. Pickpocket: the host rolls — against an NPC the vanilla
  * skill invocation (item move, alignment, detection and ai_attack); against
- * a PC the same odds, and a failure is "Caught pickpocketing!" for both.
+ * a PC the same odds, and a failure is "Пойман на краже! / Caught pickpocketing!" for both.
  */
 static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target, struct Packet81* pkt,
     int64_t item, int64_t from, int64_t to, int qty)
@@ -10041,7 +10041,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         skill_invocation_run(&si);
         ok = (si.flags & SKILL_INVOCATION_SUCCESS) != 0;
         result = ok ? "succeeded" : "failed";
-        /* gui3 BUG C: the roll ran here, so the thief's own "You succeed." /
+        /* gui3 BUG C: the roll ran here, so the thief's own "Получилось. / You succeed." /
            failure line has to be sent (vanilla prints it on the host only). */
         coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_STEAL_FAILED);
     } else if (coop_lite_party_gift(true, true, from_target)) {
@@ -12254,7 +12254,7 @@ void coop_lite_client_host_left(void)
     if (player_get_local_pc_obj() != OBJ_HANDLE_NULL && coop_lite_client_world_ready()) {
         coop_lite_export_local_character_impl();
     }
-    coop_lite_show_notice("The host left the game. Your character was saved; returning to the main menu.", TF_TYPE_RED);
+    coop_lite_show_notice("Хост вышел из игры. Ваш персонаж сохранён; возврат в главное меню. / The host left the game. Your character was saved; returning to the main menu.", TF_TYPE_RED);
     coop_host_left_menu_armed = true;
     coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
 #endif
@@ -16434,7 +16434,7 @@ bool coop_lite_travel_key(void)
         coop_travel_client_sent = COOP_TRAVEL_READY;
         coop_travel_send(COOP_CTRL_TRAVEL_STATE, COOP_TRAVEL_READY, 0, -1);
         if (coop_travel_show_hook != NULL) {
-            coop_travel_show_hook("Лидер группы собирается в путь. Вы готовы — ждём остальных.");
+            coop_travel_show_hook("Лидер группы собирается в путь. Вы готовы — ждём остальных.\nParty leader is setting off. You are ready - waiting for the others.");
         }
     }
     return true;
@@ -16442,7 +16442,7 @@ bool coop_lite_travel_key(void)
 
 static void coop_travel_tick(unsigned int now_ms)
 {
-    char text[256];
+    char text[512];
     char names[128];
     int living;
     int ready;
@@ -16467,7 +16467,7 @@ static void coop_travel_tick(unsigned int now_ms)
             coop_travel_send(COOP_CTRL_TRAVEL_STATE, st, 0, -1);
             /* PT52d: became busy during a check: say who is waiting */
             if (coop_travel_active && st == COOP_TRAVEL_BUSY && coop_travel_show_hook != NULL) {
-                coop_travel_show_hook("Лидер группы ждёт вас: закройте окно или нажмите Y.");
+                coop_travel_show_hook("Лидер группы ждёт вас: закройте окно или нажмите Y.\nParty leader is waiting: close the window or press Y.");
             }
         }
         return;
@@ -16510,7 +16510,7 @@ static void coop_travel_tick(unsigned int now_ms)
         return;
     }
     coop_travel_draw_ms = now_ms != 0 ? now_ms : 1;
-    snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Y — отправиться сразу.", ready, living, names);
+    snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Y — отправиться сразу.\nReady %d/%d. Waiting:%s. Y - go now.", ready, living, names, ready, living, names);
     if (coop_travel_show_hook != NULL) {
         coop_travel_show_hook(text);
     }
@@ -16565,10 +16565,10 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
         coop_travel_client_sent = busy ? COOP_TRAVEL_BUSY : COOP_TRAVEL_IDLE;
         coop_travel_send(COOP_CTRL_TRAVEL_STATE, coop_travel_client_sent, 0, -1);
         if ((coop_travel_far || busy) && coop_travel_show_hook != NULL) {
-            char text[200];
+            char text[512];
 
-            snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов.",
-                coop_travel_far ? " (вы далеко)" : "");
+            snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов.\nParty leader is setting off%s. Y - ready.",
+                coop_travel_far ? " (вы далеко)" : "", coop_travel_far ? " (you are far)" : "");
             coop_travel_show_hook(text);
         }
     } else if (pkt->op == COOP_CTRL_SPELL_END) {

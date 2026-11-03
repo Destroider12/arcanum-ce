@@ -896,7 +896,7 @@ static int cdv_wrap(tig_font_handle_t font, const char* str, int max_width, int*
     int word_end;
 
     while (str[pos] != '\0' && count < CDV_MAX_WRAP_LINES) {
-        while (str[pos] == ' ') {
+        while (str[pos] == ' ' || str[pos] == '\n') { /* PT52h: '\n' = forced break */
             pos++;
         }
         if (str[pos] == '\0') {
@@ -909,7 +909,7 @@ static int cdv_wrap(tig_font_handle_t font, const char* str, int max_width, int*
             while (str[word_end] == ' ') {
                 word_end++;
             }
-            while (str[word_end] != ' ' && str[word_end] != '\0') {
+            while (str[word_end] != ' ' && str[word_end] != '\0' && str[word_end] != '\n') {
                 word_end++;
             }
             if (word_end == end || word_end - pos > CDV_TMP - 1
@@ -918,13 +918,13 @@ static int cdv_wrap(tig_font_handle_t font, const char* str, int max_width, int*
             }
             last = word_end;
             end = word_end;
-            if (str[end] == '\0') {
+            if (str[end] == '\0' || str[end] == '\n') {
                 break;
             }
         }
         if (last == pos) { /* a single word wider than the panel: cut it */
             last = pos + 1;
-            while (str[last] != '\0' && last - pos < CDV_TMP - 1
+            while (str[last] != '\0' && str[last] != '\n' && last - pos < CDV_TMP - 1
                 && cdv_measure(font, str + pos, last + 1 - pos) <= max_width) {
                 last++;
             }
@@ -1049,7 +1049,7 @@ static void cdv_draw(void)
             cdv_opt_y + index * cdv_lh, text_w, cdv_lh);
     }
 
-    cdv_write(cdv_font_hint, "Host's dialog. Click/V: vote", CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
+    cdv_write(cdv_font_hint, "Клик/V: голос / Click/V: vote", CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
         cdv_lh);
 }
 
@@ -1167,7 +1167,7 @@ static void dialog_ui_travel_show(const char* text)
     char line[CDV_TMP];
     int count;
     int index;
-    int w = 380;
+    int w = 460; /* PT52h: RU + EN lines */
     int text_w;
 
     if (!cdv_fonts_ready || text == NULL) {
@@ -1178,8 +1178,8 @@ static void dialog_ui_travel_show(const char* text)
     }
     text_w = w - 2 * CDV_PAD;
     count = cdv_wrap(cdv_font_text, text, text_w, starts, lens);
-    if (count > 4) {
-        count = 4;
+    if (count > 8) {
+        count = 8;
     }
     /* PT52g: same size -> redraw in place, no window churn every 500 ms */
     if (ctn_window != TIG_WINDOW_HANDLE_INVALID && tig_window_data(ctn_window, &window_data) == TIG_OK
