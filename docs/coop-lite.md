@@ -2275,3 +2275,48 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - Подсчёт готовности к переходу вынесен в чистые `coop_lite_travel_tally`/`coop_lite_travel_untold`; обрезка имени UTF-8-безопасна.
 - Тесты: `coop_lite_fuzz8` (oid_hash_set 16384, rate_bucket, travel_soak 400k), новый `coop_lite_net8` (7 ENet-клиентов, шторм валидных/битых пакетов, переподключение слотов).
 - Нет лимитов пока для ATTACK_INTENT и PC_STATS.
+
+## PT53
+
+Playtest pt53 (client log1 / host log2). Protocol **33** (new packet 153).
+
+1. **Ring pickup / potion re-equipped the old sword (items 1, 7).** The client's own-pack moves
+   (equip, grid rearrange, hotkey bar) were local only: the client log has no `own move` line
+   at all. Each host resync (ring pickup at host 171.7 `item op: ... (weapon now 'Short Sword')`,
+   potion at 207.5) carried the host's stale layout, and worn slots follow the host, so the
+   old sword came back. Fix: `PACKET_COOP_INVEN_LAYOUT` (client → host intent). After every
+   INVEN_SYNC the client notes the host's layout hash for its PC (order-independent sum of
+   oid+loc terms). When its local layout differs, it sends the oid/location of every non-stack
+   item at once; the same layout is repeated at most every 3 s, and nothing is sent mid-drag.
+   The host checks that the sender owns the PC, that each item is already in that PC's pack,
+   and that each location is legal (grid 0..119, wear 1000..1008, hotkey 2000..2009).
+   A worn item that `item_check_remove` refuses stays put. The host then removes the moved
+   items and re-inserts each one at the requested place if it is legal (wear: free slot and
+   wieldable; hotkey: free; grid: room). Otherwise the item goes back to its old place, or to
+   any free cell. The host then echoes an INVEN_SYNC.
+2. **The host doesn't know the quickbar (item 3b).** Same root cause: hotkey locations now
+   reach the host through the layout.
+3. **Corpse armour/weapon loot fails (item 2).** The host logs `takes 'Robes' ... failed`, and
+   the PT46 auto-place retry fails too, so this is not the client's cell choice. The reason is
+   not in the logs. The likely cause is the host's stale copy of the pack (the shovel still
+   on the grid there, so no room) or weight. Item 1's fix removes the stale copy. A new
+   `loot: slot N why: remove R, insert I, src loc L` line names the `ITEM_CANNOT_*` code next
+   time.
+4. **The window closes when the host gives an item (item 3a).** On the host, a plant on a
+   teammate PC went through `skill_plant_item` (animation), which closes the window every
+   time. It is now a direct host `item_transfer`, and the window stays open. On the client,
+   PT44b closed the loot/pickpocket window whenever the host removed any of the target's
+   items (`loot window closed (host removed its items)` ×4). It now closes only if the
+   removed item is the one being dragged; the slot grids are rebuilt by `ui_update_inven`.
+5. **Cyrillic garbage (item 4).** All bilingual co-op strings go through `coop_lite_lang()`:
+   English by default, and `ARCANUM_COOP_LANG=ru` restores the "RU / EN" text. This covers
+   notices, party notices, the travel panel, the vote hint, the training reply and the main
+   menu labels.
+6. **The travel panel is empty or at the edge (item 5).** Its text was written into
+   `cdv_window` (the vote panel, normally closed). The host shows `tig_window_text_write:
+   Empty WinID` ×12 at 552.1. Text now goes to the panel's own window, and the panel is
+   centred in the iso viewport at any resolution (`coop_lite_center_rect`).
+7. **Rat crits / double damage (item 6).** Not confirmable: there are no damage or crit lines
+   in either log. Host combat used the host's stale equipment for the client's PC (old
+   sword and armour), and the layout fix makes that copy current. Crits are rolled on the
+   host only; no double-apply path was found.

@@ -1079,6 +1079,7 @@ static void coop_lite_dialog_reset(void);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 void coop_lite_client_dev_loot_tick(unsigned int now_ms);
+void coop_lite_client_layout_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
 static void coop_lite_host_party_inven_tick(unsigned int now_ms);
@@ -1953,6 +1954,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_DOOR_USE: /* PT37 client door use → host */
     case PACKET_COOP_SKILL_USE: /* PT40 pick lock / disarm intent */
     case PACKET_COOP_CRAFT: /* PT40 schematic combine intent */
+    case PACKET_COOP_INVEN_LAYOUT: /* PT53 own-pack layout intent */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
     case PACKET_COOP_WORLD_REQ: /* §7 world state request */
         return COOP_MP_PKT_HOST_RESOLVE;
@@ -3045,6 +3047,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopSkillUse);
     case PACKET_COOP_CRAFT:
         return sizeof(PacketCoopCraft);
+    case PACKET_COOP_INVEN_LAYOUT:
+        return offsetof(PacketCoopInvenLayout, entries);
     case PACKET_COOP_PARTY_CTRL:
         return sizeof(PacketCoopPartyCtrl);
     case PACKET_COOP_DIALOG_STATE:
@@ -5869,6 +5873,7 @@ static void coop_lite_show_notice(const char* str, int tf_type)
     if (str == NULL) {
         return;
     }
+    str = coop_lite_lang(str); /* PT53 */
     ui_message.type = UI_MSG_TYPE_FEEDBACK;
     ui_message.str = (char*)str;
     ui_display_msg(&ui_message);
@@ -7100,6 +7105,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_loot_tick(now_ms);
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
+            coop_lite_client_layout_tick(now_ms); /* PT53 */
             coop_lite_client_door_tick();
             coop_lite_client_attack_tick(now_ms);
         }
@@ -8246,6 +8252,14 @@ void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local
     default:
         buf[0] = '\0';
         break;
+    }
+    {
+        /* PT53: English unless ARCANUM_COOP_LANG=ru. */
+        const char* en = coop_lite_lang(buf);
+
+        if (en != buf) {
+            memmove(buf, en, strlen(en) + 1);
+        }
     }
 }
 
@@ -10128,6 +10142,12 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
             }
         }
         result = ok ? "done" : "failed";
+        if (!ok && item_parent(item, &parent) && parent == from) {
+            /* PT53: say why (worn-on-corpse / too heavy / no room on the
+               host's copy of the pack), so a refusal is diagnosable. */
+            tig_debug_printf("CoopLite: loot: slot %d why: remove %d, insert %d, src loc %d\n", slot,
+                item_check_remove(item), item_check_insert(item, to, NULL), item_inventory_location_get(item));
+        }
     } else if (obj_field_int32_get(target, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         SkillInvocation si;
 
@@ -10513,6 +10533,9 @@ typedef struct CoopInvBufOwner {
     int count;
 } CoopInvBufOwner;
 static CoopInvBufOwner coop_inv_owner[COOP_INV_BUF_OWNERS];
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_client_layout_note_host(int64_t local_pc);
+#endif
 static int coop_inv_owner_cnt;
 static PacketCoopInvenEntry coop_inv_entry[COOP_INV_BUF_ENTRIES];
 static int coop_inv_entry_cnt;
@@ -11490,8 +11513,12 @@ static void coop_lite_client_apply_inven_batch(void)
        has). Close it first instead of leaving dangling handles on screen. */
     if (inven_ui_is_created() && sub_573600() != OBJ_HANDLE_NULL) {
         for (i = 0; i < num_doomed; i++) {
-            if (doomed_parent[i] == sub_573600()) {
-                tig_debug_printf("CoopLite: inven: loot window closed (host removed its items)\n");
+            /* PT53: only a doomed item in hand (drag) dangles; the
+               slot grids are rebuilt by ui_update_inven at the end, the
+               same as for the PC's own pane. Keep the window open. */
+            if (doomed_parent[i] == sub_573600()
+                && doomed[i] == inven_ui_drag_item_obj_get()) {
+                tig_debug_printf("CoopLite: inven: loot window closed (host removed the dragged item)\n");
                 inven_ui_destroy();
                 break;
             }
@@ -11726,6 +11753,7 @@ static void coop_lite_client_apply_inven_batch(void)
             coop_inv_owner_cnt, coop_inv_entry_cnt, moved, created, num_doomed,
             local_pc != OBJ_HANDLE_NULL ? item_gold_get(local_pc) : -1);
     }
+    coop_lite_client_layout_note_host(local_pc); /* PT53 */
     ui_update_inven(OBJ_HANDLE_NULL);
 }
 #endif
@@ -16398,6 +16426,7 @@ bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
 static bool (*coop_travel_busy_hook)(void);
 static void (*coop_travel_show_hook)(const char* text);
 static void (*coop_travel_hide_hook)(void);
+#define coop_travel_show_text(t) coop_travel_show_hook(coop_lite_lang(t)) /* PT53 */
 
 void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* text), void (*hide)(void))
 {
@@ -16626,7 +16655,7 @@ bool coop_lite_travel_key(void)
         coop_travel_client_sent = COOP_TRAVEL_READY;
         coop_travel_send(COOP_CTRL_TRAVEL_STATE, COOP_TRAVEL_READY, 0, -1);
         if (coop_travel_show_hook != NULL) {
-            coop_travel_show_hook("Лидер группы собирается в путь. Вы готовы — ждём остальных.\nParty leader is setting off. You are ready - waiting for the others.");
+            coop_travel_show_text("Лидер группы собирается в путь. Вы готовы — ждём остальных.\nParty leader is setting off. You are ready - waiting for the others.");
         }
     }
     return true;
@@ -16659,7 +16688,7 @@ static void coop_travel_tick(unsigned int now_ms)
             coop_travel_send(COOP_CTRL_TRAVEL_STATE, st, 0, -1);
             /* PT52d: became busy during a check: say who is waiting */
             if (coop_travel_active && st == COOP_TRAVEL_BUSY && coop_travel_show_hook != NULL) {
-                coop_travel_show_hook("Лидер группы ждёт вас: закройте окно или нажмите Y.\nParty leader is waiting: close the window or press Y.");
+                coop_travel_show_text("Лидер группы ждёт вас: закройте окно или нажмите Y.\nParty leader is waiting: close the window or press Y.");
             }
         }
         return;
@@ -16713,7 +16742,7 @@ static void coop_travel_tick(unsigned int now_ms)
     coop_travel_draw_ms = now_ms != 0 ? now_ms : 1;
     snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Y — отправиться сразу.\nReady %d/%d. Waiting:%s. Y - go now.", ready, living, names, ready, living, names);
     if (coop_travel_show_hook != NULL) {
-        coop_travel_show_hook(text);
+        coop_travel_show_text(text);
     }
 }
 
@@ -16770,7 +16799,7 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
 
             snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов.\nParty leader is setting off%s. Y - ready.",
                 coop_travel_far ? " (вы далеко)" : "", coop_travel_far ? " (you are far)" : "");
-            coop_travel_show_hook(text);
+            coop_travel_show_text(text);
         }
     } else if (pkt->op == COOP_CTRL_SPELL_END) {
         /* PT52e: host has no such maintained spell; end the local shadow */
@@ -16826,4 +16855,293 @@ bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id)
         }
     }
     return false;
+}
+
+/* ---- PT53: client own-pack layout intent ---------------------------- */
+
+bool coop_lite_inven_layout_loc_ok(int loc)
+{
+    return (loc >= 0 && loc < 120) || (loc >= 1000 && loc <= 1008) || (loc >= 2000 && loc <= 2009);
+}
+
+bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_INVEN_LAYOUT
+        && size >= (int)offsetof(PacketCoopInvenLayout, entries)
+        && pkt->count >= 0 && pkt->count <= COOP_INVEN_LAYOUT_MAX
+        && (size_t)size >= offsetof(PacketCoopInvenLayout, entries) + (size_t)pkt->count * sizeof(PacketCoopInvenLayoutEntry);
+}
+
+unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc)
+{
+    unsigned int h = 2166136261u;
+    int k;
+
+    for (k = 0; k < 24; k++) {
+        h = (h ^ oid24[k]) * 16777619u;
+    }
+    h = (h ^ (unsigned int)loc) * 16777619u;
+    return h;
+}
+
+bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int last_sent_hash,
+    unsigned int last_sent_ms, unsigned int now_ms)
+{
+    if (local_hash == host_hash) {
+        return false;
+    }
+    /* A new layout goes at once (before a later pickup reaches the host);
+       the same one is repeated at most every 3 s if the host refused it. */
+    return local_hash != last_sent_hash || (unsigned int)(now_ms - last_sent_ms) >= 3000u;
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static unsigned int coop_layout_host_hash;
+static bool coop_layout_host_valid;
+static unsigned int coop_layout_sent_hash;
+static unsigned int coop_layout_sent_ms;
+
+static unsigned int coop_lite_local_layout_hash(int64_t pc, PacketCoopInvenLayout* out)
+{
+    unsigned int h = 0;
+    int cnt;
+    int i;
+
+    if (out != NULL) {
+        out->count = 0;
+    }
+    cnt = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    for (i = 0; i < cnt; i++) {
+        int64_t item = obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        ObjectID oid;
+        int loc;
+
+        if (item == OBJ_HANDLE_NULL || coop_lite_is_stackable(item)) {
+            continue;
+        }
+        oid = obj_get_id(item);
+        loc = item_inventory_location_get(item);
+        h += coop_lite_inven_layout_term((const uint8_t*)&oid, loc);
+        if (out != NULL && out->count < COOP_INVEN_LAYOUT_MAX) {
+            memcpy(out->entries[out->count].oid, &oid, sizeof(out->entries[0].oid));
+            out->entries[out->count].inventory_location = loc;
+            out->entries[out->count].reserved = 0;
+            out->count++;
+        }
+    }
+    return h;
+}
+
+/* Called at the end of an INVEN_SYNC apply: the host's view of our pack. */
+static void coop_lite_client_layout_note_host(int64_t local_pc)
+{
+    int o;
+    int i;
+    unsigned int h = 0;
+
+    for (o = 0; o < coop_inv_owner_cnt; o++) {
+        if (local_pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid) != local_pc) {
+            continue;
+        }
+        for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
+            if ((coop_inv_entry[i].state_flags & COOP_INVEN_E_STACK) != 0) {
+                continue;
+            }
+            h += coop_lite_inven_layout_term(coop_inv_entry[i].oid, coop_inv_entry[i].inventory_location);
+        }
+        coop_layout_host_hash = h;
+        coop_layout_host_valid = true;
+    }
+}
+
+void coop_lite_client_layout_tick(unsigned int now_ms)
+{
+    static PacketCoopInvenLayout pkt;
+    int64_t pc;
+    unsigned int h;
+    ObjectID oid;
+    int depth;
+
+    if (!tig_net_is_active() || tig_net_is_host() || !coop_layout_host_valid) {
+        return;
+    }
+    pc = player_get_local_pc_obj();
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
+        return; /* not mid-drag: a held item has no location yet */
+    }
+    h = coop_lite_local_layout_hash(pc, NULL);
+    if (!coop_lite_inven_layout_send_due(h, coop_layout_host_hash, coop_layout_sent_hash, coop_layout_sent_ms, now_ms)) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_INVEN_LAYOUT;
+    oid = obj_get_id(pc);
+    memcpy(pkt.pc_oid, &oid, sizeof(pkt.pc_oid));
+    coop_lite_local_layout_hash(pc, &pkt);
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, (int)(offsetof(PacketCoopInvenLayout, entries) + (size_t)pkt.count * sizeof(pkt.entries[0])));
+    tig_net_local_suspend_resume(depth);
+    coop_layout_sent_hash = h;
+    coop_layout_sent_ms = now_ms;
+    tig_debug_printf("CoopLite: inven: layout sent (%d items)\n", pkt.count);
+}
+
+static bool coop_lite_layout_place_ok(int64_t pc, int64_t item, int loc)
+{
+    int slots[960];
+
+    if (IS_WEAR_INV_LOC(loc)) {
+        return sub_465690(pc, loc) == OBJ_HANDLE_NULL && sub_464D20(item, loc, pc) == ITEM_CANNOT_OK;
+    }
+    if (IS_HOTKEY_INV_LOC(loc)) {
+        return sub_465690(pc, loc) == OBJ_HANDLE_NULL;
+    }
+    item_inventory_slots_get(pc, slots);
+    return item_inventory_slots_has_room_for(item, pc, loc, slots);
+}
+
+void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
+{
+    int64_t moved_item[COOP_INVEN_LAYOUT_MAX];
+    int old_loc[COOP_INVEN_LAYOUT_MAX];
+    int want_loc[COOP_INVEN_LAYOUT_MAX];
+    int n = 0;
+    int refused = 0;
+    int slot;
+    int64_t pc;
+    int i;
+
+    if (!tig_net_is_host() || !coop_lite_inven_layout_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(pkt->pc_oid) != pc || critter_is_dead(pc)) {
+        tig_debug_printf("CoopLite: inven: slot %d layout for a PC it does not own\n", slot);
+        return;
+    }
+    /* Phase 1: take out every item that should move (and may). */
+    for (i = 0; i < pkt->count; i++) {
+        int64_t item = coop_lite_get_oid_obj(pkt->entries[i].oid);
+        int64_t parent = OBJ_HANDLE_NULL;
+        int loc = pkt->entries[i].inventory_location;
+        int cur;
+
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc
+            || coop_lite_is_stackable(item) || !coop_lite_inven_layout_loc_ok(loc)) {
+            refused++;
+            continue;
+        }
+        cur = item_inventory_location_get(item);
+        if (cur == loc) {
+            continue;
+        }
+        if (IS_WEAR_INV_LOC(cur) && item_check_remove(item) != ITEM_CANNOT_OK) {
+            refused++; /* e.g. cursed: stays worn */
+            continue;
+        }
+        moved_item[n] = item;
+        old_loc[n] = cur;
+        want_loc[n] = loc;
+        n++;
+    }
+    if (n == 0) {
+        if (refused != 0) {
+            coop_lite_host_sync_slot_inven(slot);
+        }
+        return;
+    }
+    multiplayer_lock();
+    for (i = 0; i < n; i++) {
+        item_remove(moved_item[i]);
+    }
+    /* Phase 2: requested place if legal, else the old one, else any room. */
+    for (i = 0; i < n; i++) {
+        int loc = want_loc[i];
+
+        if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
+            refused++;
+            loc = old_loc[i];
+            if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
+                int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);
+
+                if (free_loc != -1) {
+                    loc = free_loc;
+                }
+            }
+        }
+        item_insert(moved_item[i], pc, loc);
+    }
+    multiplayer_unlock();
+    tig_debug_printf("CoopLite: inven: slot %d layout applied (%d moved, %d refused)\n", slot, n, refused);
+    coop_lite_host_sync_slot_inven(slot);
+    coop_slot_inven_sig[slot] = coop_lite_pc_inven_sig(pc);
+    coop_slot_inven_sig_valid[slot] = true;
+}
+#else
+void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
+{
+    (void)pkt;
+}
+void coop_lite_client_layout_tick(unsigned int now_ms)
+{
+    (void)now_ms;
+}
+#endif
+
+/* ---- PT53: language pick for bilingual co-op strings ----------------- */
+
+const char* coop_lite_lang_pick(const char* s, bool ru)
+{
+    const char* sep;
+    const char* p;
+    bool cyr = false;
+
+    if (s == NULL || ru) {
+        return s;
+    }
+    sep = strchr(s, '\n');
+    if (sep == NULL) {
+        sep = strstr(s, " / ");
+    }
+    if (sep == NULL) {
+        return s;
+    }
+    /* Only a Cyrillic first half is dropped: plain English stays whole. */
+    for (p = s; p < sep; p++) {
+        if ((unsigned char)*p == 0xD0 || (unsigned char)*p == 0xD1) {
+            cyr = true;
+            break;
+        }
+    }
+    if (!cyr) {
+        return s;
+    }
+    return *sep == '\n' ? sep + 1 : sep + 3;
+}
+
+bool coop_lite_lang_ru(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char* v = getenv("ARCANUM_COOP_LANG");
+
+        cached = v != NULL && (v[0] == 'r' || v[0] == 'R') && (v[1] == 'u' || v[1] == 'U') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+const char* coop_lite_lang(const char* s)
+{
+    return coop_lite_lang_pick(s, coop_lite_lang_ru());
+}
+
+void coop_lite_center_rect(int sw, int sh, int w, int h, int* x, int* y)
+{
+    *x = sw > w ? (sw - w) / 2 : 0;
+    *y = sh > h ? (sh - h) / 2 : 0;
 }

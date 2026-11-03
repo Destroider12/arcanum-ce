@@ -1170,6 +1170,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_CRAFT:
         coop_lite_handle_craft((PacketCoopCraft*)msg);
         break;
+    case PACKET_COOP_INVEN_LAYOUT:
+        coop_lite_host_handle_inven_layout((PacketCoopInvenLayout*)msg);
+        break;
     case PACKET_COOP_PARTY_CTRL:
         coop_lite_handle_party_ctrl((PacketCoopPartyCtrl*)msg);
         break;

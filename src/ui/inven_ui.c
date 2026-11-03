@@ -2347,6 +2347,15 @@ bool sub_575100(bool* a1)
         return true;
     }
 
+    /* PT53: host PC gives to a co-op teammate: a plain host-side transfer,
+       no pickpocket animation, and the window stays open for more gifts. */
+    if (tig_net_is_coop_enabled() && tig_net_is_host()
+        && obj_field_int32_get(qword_682C78, OBJ_F_TYPE) == OBJ_TYPE_PC
+        && coop_lite_party_gift(true, true, false)) {
+        item_transfer(v1, qword_682C78);
+        return true;
+    }
+
     if (skill_plant_item(inven_ui_pc_obj, qword_682C78, v1)) {
         *a1 = true;
     }

@@ -217,11 +217,66 @@ static int test_policy(void)
     return 0;
 }
 
+/* PT53: own-pack layout intent, language pick, travel panel centring. */
+static int test_pt53(void)
+{
+    static PacketCoopInvenLayout lay;
+    uint8_t a[24];
+    uint8_t b[24];
+    int x;
+    int y;
+    int hdr = (int)offsetof(PacketCoopInvenLayout, entries);
+
+    CHECK(PACKET_COOP_INVEN_LAYOUT == 153 && PACKET_COOP_TYPE_LIMIT == 154, "layout packet id");
+    CHECK(coop_lite_packet_allowed(PACKET_COOP_INVEN_LAYOUT, true, 1), "client may send layout to host");
+    CHECK(!coop_lite_packet_allowed(PACKET_COOP_INVEN_LAYOUT, false, 0), "host never sends layout");
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_INVEN_LAYOUT) == hdr, "layout min size");
+    memset(&lay, 0, sizeof(lay));
+    lay.type = PACKET_COOP_INVEN_LAYOUT;
+    lay.count = 2;
+    CHECK(coop_lite_inven_layout_valid(&lay, hdr + 2 * 32), "layout valid");
+    CHECK(!coop_lite_inven_layout_valid(&lay, hdr + 32), "layout short");
+    lay.count = COOP_INVEN_LAYOUT_MAX + 1;
+    CHECK(!coop_lite_inven_layout_valid(&lay, (int)sizeof(lay)), "layout count cap");
+    lay.count = -1;
+    CHECK(!coop_lite_inven_layout_valid(&lay, (int)sizeof(lay)), "layout negative count");
+    CHECK(coop_lite_inven_layout_loc_ok(0) && coop_lite_inven_layout_loc_ok(119)
+            && coop_lite_inven_layout_loc_ok(1004) && coop_lite_inven_layout_loc_ok(2009),
+        "legal locations");
+    CHECK(!coop_lite_inven_layout_loc_ok(-1) && !coop_lite_inven_layout_loc_ok(120)
+            && !coop_lite_inven_layout_loc_ok(1009) && !coop_lite_inven_layout_loc_ok(2010),
+        "illegal locations");
+    memset(a, 1, sizeof(a));
+    memset(b, 2, sizeof(b));
+    CHECK(coop_lite_inven_layout_term(a, 3) + coop_lite_inven_layout_term(b, 1004)
+            == coop_lite_inven_layout_term(b, 1004) + coop_lite_inven_layout_term(a, 3),
+        "layout hash order-independent");
+    CHECK(coop_lite_inven_layout_term(a, 1004) != coop_lite_inven_layout_term(a, 3), "hash sees the slot");
+    CHECK(!coop_lite_inven_layout_send_due(5, 5, 0, 0, 10), "in sync: nothing to send");
+    CHECK(coop_lite_inven_layout_send_due(6, 5, 0, 0, 10), "new layout: send now");
+    CHECK(!coop_lite_inven_layout_send_due(6, 5, 6, 0, 2999), "same layout: wait");
+    CHECK(coop_lite_inven_layout_send_due(6, 5, 6, 0, 3000), "same layout: retry after 3 s");
+    CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F\xD1\x80 / Hi", false), "Hi") == 0, "EN after ' / '");
+    CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F\xD1\x80\nReady 1/2. Y - go now.", false),
+              "Ready 1/2. Y - go now.") == 0,
+        "EN after newline");
+    CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F / Hi", true), "\xD0\x9F / Hi") == 0, "RU keeps both");
+    CHECK(strcmp(coop_lite_lang_pick("Click/V: a / b", false), "Click/V: a / b") == 0, "plain EN whole");
+    CHECK(coop_lite_lang_pick(NULL, false) == NULL, "NULL");
+    coop_lite_center_rect(800, 600, 460, 50, &x, &y);
+    CHECK(x == 170 && y == 275, "centre 800x600");
+    coop_lite_center_rect(1920, 1080, 460, 50, &x, &y);
+    CHECK(x == 730 && y == 515, "centre 1080p");
+    coop_lite_center_rect(300, 40, 460, 50, &x, &y);
+    CHECK(x == 0 && y == 0, "clamped on a tiny screen");
+    return 0;
+}
+
 int main(void)
 {
-    if (test_codec() || test_validation() || test_votes() || test_policy()) {
+    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53()) {
         return 1;
     }
-    printf("PASS: coop dialog viewer (codec, validation, votes, policy)\n");
+    printf("PASS: coop dialog viewer (codec, validation, votes, policy, PT53)\n");
     return 0;
 }

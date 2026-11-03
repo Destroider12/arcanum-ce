@@ -222,14 +222,9 @@ static void notice_texts(void)
                 }
                 shown++;
                 CHECK(utf8_valid(buf));
-                CHECK(strstr(buf, " / ") != NULL);
-                CHECK(has_cyrillic(buf));
+                /* PT53: English only by default (RU behind ARCANUM_COOP_LANG=ru) */
+                CHECK(!has_cyrillic(buf));
                 CHECK(strchr(buf, '%') == NULL); /* no unexpanded format */
-                /* English half has latin letters */
-                {
-                    const char* en = strstr(buf, " / ") + 3;
-                    CHECK(*en != '\0' && !has_cyrillic(en));
-                }
                 /* tiny buffer: still NUL-terminated */
                 coop_lite_party_notice_text(kind, cds[c], host != 0, small, sizeof(small));
                 CHECK(strnlen(small, sizeof(small)) < sizeof(small));

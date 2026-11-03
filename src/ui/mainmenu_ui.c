@@ -2173,8 +2173,8 @@ static void mainmenu_ui_coop_buttons_create(void)
     }
 
     coop_menu_pick_address(mainmenu_ui_coop_join_addr, sizeof(mainmenu_ui_coop_join_addr));
-    snprintf(label[0], sizeof(label[0]), "Создать кооп / Host Co-op");
-    snprintf(label[1], sizeof(label[1]), "Войти в кооп / Join Co-op (%s)", mainmenu_ui_coop_join_addr);
+    snprintf(label[0], sizeof(label[0]), "%s", coop_lite_lang("Создать кооп / Host Co-op"));
+    snprintf(label[1], sizeof(label[1]), "%s (%s)", coop_lite_lang_ru() ? "Войти в кооп / Join Co-op" : "Join Co-op", mainmenu_ui_coop_join_addr);
 
     if ((window->refresh_text_flags & 0x1) != 0) {
         font = (window->refresh_text_flags & 0x8) != 0 ? dword_64C228[0][0] : dword_64C0CC[0][0];

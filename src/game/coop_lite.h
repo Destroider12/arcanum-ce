@@ -39,7 +39,8 @@ extern "C" {
 #define PACKET_COOP_SKILL_USE 150 /* PT40: client → host: pick lock / disarm trap intent */
 #define PACKET_COOP_CRAFT 151 /* PT40: client → host: combine this schematic */
 #define PACKET_COOP_PARTY_CTRL 152 /* PT50: travel ready check (both ways) + client spell-end intent */
-#define PACKET_COOP_TYPE_LIMIT 153
+#define PACKET_COOP_INVEN_LAYOUT 153 /* PT53: client → host: my own pack layout (equip/grid/hotkeys) */
+#define PACKET_COOP_TYPE_LIMIT 154
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -337,6 +338,47 @@ unsigned int coop_lite_keyring_hash(const unsigned int* keys, int count);
 int coop_lite_blob_walk(const uint8_t* p, int size, const uint8_t* kinds, const int* elem, int n);
 COOP_STATIC_ASSERT(offsetof(PacketCoopInvenSync, entries) == 0xB0, "PacketCoopInvenSync layout");
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fits a net packet");
+
+/*
+ * PT53: PACKET_COOP_INVEN_LAYOUT. The client's own-pack moves (equip, grid
+ * rearrange, hotkey bar) used to stay local, so every host resync put the
+ * host's stale layout back (old sword re-equipped). The client now reports
+ * where its non-stack items sit; the host validates and applies, then echoes
+ * an INVEN_SYNC. Host-authoritative: the host only moves items the sender's
+ * PC already carries, and only to legal places.
+ */
+#define COOP_INVEN_LAYOUT_MAX 64
+typedef struct PacketCoopInvenLayoutEntry {
+    /* 0000 */ uint8_t oid[24];
+    /* 0018 */ int inventory_location;
+    /* 001C */ int reserved;
+} PacketCoopInvenLayoutEntry;
+
+typedef struct PacketCoopInvenLayout {
+    /* 0000 */ int type;
+    /* 0004 */ int count;
+    /* 0008 */ uint8_t pc_oid[24];
+    /* 0020 */ PacketCoopInvenLayoutEntry entries[COOP_INVEN_LAYOUT_MAX];
+} PacketCoopInvenLayout;
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayoutEntry) == 0x20, "PacketCoopInvenLayoutEntry size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayout) <= 4096, "PacketCoopInvenLayout fits a net packet");
+bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size);
+/* A location a critter's own item may be asked to sit at (grid, wear, hotkey). */
+bool coop_lite_inven_layout_loc_ok(int loc);
+/* Order-independent per-item hash term; a layout's hash is the sum. */
+unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc);
+/* Client: send now? (layout differs from the host's, not just sent, rate-limited) */
+bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int last_sent_hash,
+    unsigned int last_sent_ms, unsigned int now_ms);
+void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt);
+
+/* PT53: co-op UI strings are written "RU / EN" (or "RU\nEN"). English is
+   shown unless ARCANUM_COOP_LANG=ru. Returns a pointer into `s`. */
+const char* coop_lite_lang_pick(const char* s, bool ru);
+const char* coop_lite_lang(const char* s);
+bool coop_lite_lang_ru(void);
+/* PT53: top-left of a w x h panel centred in a sw x sh viewport (clamped to 0). */
+void coop_lite_center_rect(int sw, int sh, int w, int h, int* x, int* y);
 
 /* Bytes a PACKET_COOP_INVEN_SYNC with `count` entries occupies on the wire. */
 size_t coop_lite_inven_sync_size(int count);

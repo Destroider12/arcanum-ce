@@ -818,7 +818,18 @@ static bool cdv_message_filter(TigMessage* msg)
     return false;
 }
 
+static void cdv_write_to(tig_window_handle_t window, tig_font_handle_t font, const char* str, int x, int y,
+    int width, int height);
+
 static void cdv_write(tig_font_handle_t font, const char* str, int x, int y, int width, int height)
+{
+    cdv_write_to(cdv_window, font, str, x, y, width, height);
+}
+
+/* PT53: the travel panel wrote into cdv_window (the vote panel, usually
+   closed) - "Empty WinID" errors and a blank panel. Name the window. */
+static void cdv_write_to(tig_window_handle_t window, tig_font_handle_t font, const char* str, int x, int y,
+    int width, int height)
 {
     TigRect rect;
 
@@ -827,7 +838,7 @@ static void cdv_write(tig_font_handle_t font, const char* str, int x, int y, int
     rect.width = width;
     rect.height = height;
     tig_font_push(font);
-    tig_window_text_write(cdv_window, str, &rect);
+    tig_window_text_write(window, str, &rect);
     tig_font_pop();
 }
 
@@ -1049,7 +1060,7 @@ static void cdv_draw(void)
             cdv_opt_y + index * cdv_lh, text_w, cdv_lh);
     }
 
-    cdv_write(cdv_font_hint, "Клик/V: голос / Click/V: vote", CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
+    cdv_write(cdv_font_hint, coop_lite_lang("Клик/V: голос / Click/V: vote"), CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
         cdv_lh);
 }
 
@@ -1169,6 +1180,8 @@ static void dialog_ui_travel_show(const char* text)
     int index;
     int w = 460; /* PT52h: RU + EN lines */
     int text_w;
+    int x;
+    int y;
 
     if (!cdv_fonts_ready || text == NULL) {
         return;
@@ -1181,15 +1194,19 @@ static void dialog_ui_travel_show(const char* text)
     if (count > 8) {
         count = 8;
     }
+    /* PT53: centred in the game viewport at any resolution. */
+    coop_lite_center_rect(hrp_iso_window_width_get(), hrp_iso_window_height_get(), w,
+        2 * CDV_PAD + cdv_lh * count, &x, &y);
     /* PT52g: same size -> redraw in place, no window churn every 500 ms */
     if (ctn_window != TIG_WINDOW_HANDLE_INVALID && tig_window_data(ctn_window, &window_data) == TIG_OK
-        && window_data.rect.height == 2 * CDV_PAD + cdv_lh * count) {
+        && window_data.rect.height == 2 * CDV_PAD + cdv_lh * count
+        && window_data.rect.x == x && window_data.rect.y == y) {
         goto draw;
     }
     dialog_ui_travel_hide();
     window_data.flags = TIG_WINDOW_MESSAGE_FILTER;
-    window_data.rect.x = CDV_MARGIN;
-    window_data.rect.y = CDV_MARGIN;
+    window_data.rect.x = x;
+    window_data.rect.y = y;
     window_data.rect.width = w;
     window_data.rect.height = 2 * CDV_PAD + cdv_lh * count;
     window_data.background_color = tig_color_make(20, 16, 12);
@@ -1208,7 +1225,7 @@ draw:
     tig_window_box(ctn_window, &rect, tig_color_make(160, 130, 70));
     for (index = 0; index < count; index++) {
         snprintf(line, sizeof(line), "%.*s", lens[index] > CDV_TMP - 8 ? CDV_TMP - 8 : lens[index], text + starts[index]);
-        cdv_write(index == 0 ? cdv_font_name : cdv_font_text, line, CDV_PAD, CDV_PAD + cdv_lh * index, text_w,
+        cdv_write_to(ctn_window, index == 0 ? cdv_font_name : cdv_font_text, line, CDV_PAD, CDV_PAD + cdv_lh * index, text_w,
             cdv_lh);
     }
 }
