@@ -384,7 +384,7 @@ typedef struct PacketCoopCraft {
 COOP_STATIC_ASSERT(sizeof(PacketCoopCraft) == 0x08, "PacketCoopCraft size");
 
 /* PT50 */
-#define COOP_CTRL_TRAVEL_START 1 /* host -> clients: a = far slot mask, b = timeout s */
+#define COOP_CTRL_TRAVEL_START 1 /* host -> clients: a = far slot mask, b = 0 */
 #define COOP_CTRL_TRAVEL_END 2 /* host -> clients: close the notice */
 #define COOP_CTRL_TRAVEL_STATE 3 /* client -> host: a = COOP_TRAVEL_* */
 #define COOP_CTRL_SPELL_END 4 /* client -> host: a = host mt_id of own maintained spell */
@@ -392,7 +392,6 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopCraft) == 0x08, "PacketCoopCraft size");
 #define COOP_TRAVEL_IDLE 1
 #define COOP_TRAVEL_READY 2
 #define COOP_TRAVEL_RANGE 25
-#define COOP_TRAVEL_TIMEOUT_MS 30000u
 typedef struct PacketCoopPartyCtrl {
     /* 0000 */ int type;
     /* 0004 */ int op;

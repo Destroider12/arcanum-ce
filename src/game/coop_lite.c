@@ -15944,7 +15944,6 @@ void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* 
 static bool coop_travel_active; /* host: ready check running; client: notice shown */
 static bool coop_travel_bypass;
 static TeleportData coop_travel_td;
-static unsigned int coop_travel_start_ms;
 static unsigned int coop_travel_draw_ms;
 static int coop_travel_state[8];
 static int coop_travel_client_sent; /* client: last state sent */
@@ -16064,9 +16063,8 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
     }
     coop_travel_td = *td;
     coop_travel_active = true;
-    coop_travel_start_ms = coop_obj_now_ms;
     coop_travel_draw_ms = 0;
-    coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, (int)(COOP_TRAVEL_TIMEOUT_MS / 1000u), -1);
+    coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, 0, -1);
     tig_debug_printf("CoopLite: PT50 host travel deferred, ready check (living=%d far=0x%x)\n", living, far_mask);
     return true;
 }
@@ -16095,7 +16093,6 @@ static void coop_travel_tick(unsigned int now_ms)
     char names[128];
     int living;
     int ready;
-    int left;
 
     if (!coop_travel_active) {
         return;
@@ -16123,17 +16120,11 @@ static void coop_travel_tick(unsigned int now_ms)
         coop_travel_go("all ready");
         return;
     }
-    if (coop_lite_interval_elapsed(coop_travel_start_ms, now_ms, COOP_TRAVEL_TIMEOUT_MS)) {
-        coop_travel_go("timeout");
-        return;
-    }
     if (coop_travel_draw_ms != 0 && !coop_lite_interval_elapsed(coop_travel_draw_ms, now_ms, 500u)) {
         return;
     }
     coop_travel_draw_ms = now_ms != 0 ? now_ms : 1;
-    left = (int)((COOP_TRAVEL_TIMEOUT_MS - (now_ms - coop_travel_start_ms)) / 1000u);
-    snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Через %d с отправимся; Y — сразу.", ready, living,
-        names, left);
+    snprintf(text, sizeof(text), "Готовы %d/%d. Ждём:%s. Y — отправиться сразу.", ready, living, names);
     if (coop_travel_show_hook != NULL) {
         coop_travel_show_hook(text);
     }
@@ -16187,8 +16178,8 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
         if ((coop_travel_far || busy) && coop_travel_show_hook != NULL) {
             char text[200];
 
-            snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов (через %d с — без вас).",
-                coop_travel_far ? " (вы далеко)" : "", pkt->b);
+            snprintf(text, sizeof(text), "Лидер группы собирается в путь%s. Y — готов.",
+                coop_travel_far ? " (вы далеко)" : "");
             coop_travel_show_hook(text);
         }
     } else if (pkt->op == COOP_CTRL_TRAVEL_END) {
