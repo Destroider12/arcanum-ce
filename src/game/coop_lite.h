@@ -859,6 +859,9 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
+/* Player-visible RU / EN text of a party notice ("" when silent). */
+void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local_is_host,
+    char* buf, size_t size);
 
 /* Starting kit for a coop-created/offered PC, generated locally (suspended). */
 void coop_lite_generate_start_inventory(int64_t pc_obj);

@@ -2531,7 +2531,7 @@ size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap)
 bool coop_story_decode(const unsigned char* blob, size_t size, CoopStory* s)
 {
     const unsigned char* p = blob;
-    const unsigned char* end = blob + size;
+    const unsigned char* end;
     unsigned int n;
     unsigned int i;
 
@@ -2539,6 +2539,7 @@ bool coop_story_decode(const unsigned char* blob, size_t size, CoopStory* s)
     if (blob == NULL || size < 4 + 2 * 4) {
         return false;
     }
+    end = blob + size; /* PT52j: no arithmetic on NULL */
     if (coop_story_get32(&p) != COOP_STORY_MAGIC) {
         return false;
     }
@@ -5870,62 +5871,6 @@ static void coop_lite_show_notice(const char* str, int tf_type)
     tig_debug_printf("CoopLite: notice: %s\n", str);
 }
 
-static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local_is_host,
-    char* buf, size_t size)
-{
-    switch (kind) {
-    case COOP_PARTY_HOST_DOWN:
-        snprintf(buf, size, "%s", local_is_host
-                ? "Вы пали. Спутники могут вас воскресить. / You have fallen. Your companions can resurrect you."
-                : "Лидер группы пал! Воскресите его, чтобы продолжить. / The party leader has fallen! Resurrect them to continue.");
-        break;
-    case COOP_PARTY_HOST_UP:
-        snprintf(buf, size, "%s", local_is_host ? "Вас воскресили. / You have been resurrected." : "Лидер группы снова на ногах. / The party leader is back on their feet.");
-        break;
-    case COOP_PARTY_WIPE:
-        snprintf(buf, size, "Вся группа пала. Загрузка последнего сохранения через %u с... / The whole party has fallen. Reloading the last save in %u seconds...",
-            (countdown_ms + 999u) / 1000u, (countdown_ms + 999u) / 1000u); /* PT52i */
-        break;
-    case COOP_PARTY_WIPE_CANCEL:
-        snprintf(buf, size, "%s", "Кто-то поднялся — загрузка отменена. / Someone got back up - reload cancelled.");
-        break;
-    case COOP_PARTY_RELOADING:
-        snprintf(buf, size, "%s", "Загружаем последнее сохранение лидера... / Reloading the party leader's last save...");
-        break;
-    case COOP_PARTY_RESYNC:
-        snprintf(buf, size, "%s", "Лидер группы загрузился. Переподключение... / The party leader reloaded. Rejoining...");
-        break;
-    case COOP_PARTY_NO_SAVE:
-        snprintf(buf, size, "%s", "Нет сохранения — группа поднимается. / No save to reload - the party gets back up.");
-        break;
-    case COOP_PARTY_CAUGHT_THIEF:
-        snprintf(buf, size, "%s", "Пойман на краже! / Caught pickpocketing!");
-        break;
-    case COOP_PARTY_STEAL_FAILED:
-        snprintf(buf, size, "%s", "Кража не удалась. / Your pickpocket attempt failed.");
-        break;
-    case COOP_PARTY_STEAL_OK:
-        snprintf(buf, size, "%s", "Получилось. / You succeed.");
-        break;
-    case COOP_PARTY_SKILL_FAILED:
-        snprintf(buf, size, "%s", "Не получилось. / You failed.");
-        break;
-    case COOP_PARTY_TALK_REFUSED:
-        snprintf(buf, size, "%s", "Для разговора лидер группы должен быть рядом и свободен. / The party leader must be close by (and free) to talk.");
-        break;
-    case COOP_PARTY_REST_BEGIN:
-        snprintf(buf, size, "%s", local_is_host ? "" : "Лидер группы отдыхает — время идёт для всех. / The party leader rests - time passes for everyone.");
-        break;
-    case COOP_PARTY_WMAP_OPEN:
-        snprintf(buf, size, "%s", local_is_host ? ""
-                : "Лидер группы на карте мира — вы путешествуете вместе. Подождите... / The party leader is on the world map - you travel together. Please wait...");
-        break;
-    default:
-        buf[0] = '\0';
-        break;
-    }
-}
-
 /* Host: tell every client, and show it here too. */
 static void coop_lite_host_party_notice(int kind, int slot, unsigned int countdown_ms)
 {
@@ -8144,6 +8089,63 @@ int coop_lite_xp_split(int xp, int n, int carry[8], int out[8])
         carry[i] = owed % n;
     }
     return n;
+}
+
+/* PT52j: pure (outside the stub ifdef) so tests can check every notice. */
+void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local_is_host,
+    char* buf, size_t size)
+{
+    switch (kind) {
+    case COOP_PARTY_HOST_DOWN:
+        snprintf(buf, size, "%s", local_is_host
+                ? "Вы пали. Спутники могут вас воскресить. / You have fallen. Your companions can resurrect you."
+                : "Лидер группы пал! Воскресите его, чтобы продолжить. / The party leader has fallen! Resurrect them to continue.");
+        break;
+    case COOP_PARTY_HOST_UP:
+        snprintf(buf, size, "%s", local_is_host ? "Вас воскресили. / You have been resurrected." : "Лидер группы снова на ногах. / The party leader is back on their feet.");
+        break;
+    case COOP_PARTY_WIPE:
+        snprintf(buf, size, "Вся группа пала. Загрузка последнего сохранения через %u с... / The whole party has fallen. Reloading the last save in %u seconds...",
+            (countdown_ms + 999u) / 1000u, (countdown_ms + 999u) / 1000u); /* PT52i */
+        break;
+    case COOP_PARTY_WIPE_CANCEL:
+        snprintf(buf, size, "%s", "Кто-то поднялся — загрузка отменена. / Someone got back up - reload cancelled.");
+        break;
+    case COOP_PARTY_RELOADING:
+        snprintf(buf, size, "%s", "Загружаем последнее сохранение лидера... / Reloading the party leader's last save...");
+        break;
+    case COOP_PARTY_RESYNC:
+        snprintf(buf, size, "%s", "Лидер группы загрузился. Переподключение... / The party leader reloaded. Rejoining...");
+        break;
+    case COOP_PARTY_NO_SAVE:
+        snprintf(buf, size, "%s", "Нет сохранения — группа поднимается. / No save to reload - the party gets back up.");
+        break;
+    case COOP_PARTY_CAUGHT_THIEF:
+        snprintf(buf, size, "%s", "Пойман на краже! / Caught pickpocketing!");
+        break;
+    case COOP_PARTY_STEAL_FAILED:
+        snprintf(buf, size, "%s", "Кража не удалась. / Your pickpocket attempt failed.");
+        break;
+    case COOP_PARTY_STEAL_OK:
+        snprintf(buf, size, "%s", "Получилось. / You succeed.");
+        break;
+    case COOP_PARTY_SKILL_FAILED:
+        snprintf(buf, size, "%s", "Не получилось. / You failed.");
+        break;
+    case COOP_PARTY_TALK_REFUSED:
+        snprintf(buf, size, "%s", "Для разговора лидер группы должен быть рядом и свободен. / The party leader must be close by (and free) to talk.");
+        break;
+    case COOP_PARTY_REST_BEGIN:
+        snprintf(buf, size, "%s", local_is_host ? "" : "Лидер группы отдыхает — время идёт для всех. / The party leader rests - time passes for everyone.");
+        break;
+    case COOP_PARTY_WMAP_OPEN:
+        snprintf(buf, size, "%s", local_is_host ? ""
+                : "Лидер группы на карте мира — вы путешествуете вместе. Подождите... / The party leader is on the world map - you travel together. Please wait...");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
 }
 
 bool coop_lite_party_notice_is_good(int kind)
@@ -16310,10 +16312,16 @@ static int coop_travel_count(int* ready_ptr, int* far_mask_ptr, char* names, siz
         if (coop_lite_travel_slot_ready(coop_travel_state[slot], dist)) {
             ready++;
         } else if (names != NULL && strlen(names) + 16 < size) {
-            char name[64];
+            char name[128];
+
+            int cut = 15;
 
             object_examine(pc, pc, name);
-            name[15] = '\0';
+            /* PT52j: cut on a UTF-8 boundary (Cyrillic names are 2 bytes/char) */
+            while (cut > 0 && ((unsigned char)name[cut] & 0xC0) == 0x80) {
+                cut--;
+            }
+            name[cut] = '\0';
             strncat(names, " ", size - strlen(names) - 1);
             strncat(names, name, size - strlen(names) - 1);
         }

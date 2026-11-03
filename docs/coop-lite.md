@@ -2256,3 +2256,13 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - `inv_list_repair`: guards against SIZE_MAX overflow before growing the buffer.
 - Follow toggle: resolves `pc_obj` first and calls the travel close hook only when `pc_obj` is valid.
 - Rejected / OK by audit: radius rate-limit after a full snapshot (full_key/full_pc persist), UPnP stop idempotency, cdv_wrap '\n' handling, close_all recursion (send-only).
+
+## PT52j (deep analysis: static, sanitizers, fuzz, 8 players)
+
+- Tools: cppcheck 2.22, gcc -fanalyzer, gcc -Wall -Wextra -Wformat=2 -Wshadow, ASan+UBSan build (`/workspace/nbuild-asan`, Debug, SDL console build).
+- New test `coop_lite_fuzz8` checks three things. It fuzzes every pure packet validator and decoder: WORLD_STATE, INVEN_SYNC, OBJ_BLOB/REQ, STORY chunk and rx, CHAR chunk rx, the char bundle, story decode, DIALOG_STATE and PARTY_CTRL. It checks the party notice texts: RU / EN, valid UTF-8, no truncation, no stray `%`. It checks the 8-player pure logic: roster slots 1..7, 7 dialog votes, travel ready and the 0xFE mask, per-slot pose order, batch limits, OID set overflow.
+- `coop_lite_party_notice_text` moved out of the stub ifdef and exported, so tests can reach it.
+- `coop_story_decode`: no pointer arithmetic on NULL. This was a UB finding from cppcheck.
+- Travel panel: the waiting-names list cuts each name on a UTF-8 boundary, because Cyrillic names were split mid-character. The name buffer is now 128 bytes.
+- tig `tig_find_first_file`: frees the empty SDL_GlobDirectory result. LSan flagged the leak.
+- 8 players, audit: per-slot arrays are [8], loops `slot < 8`, masks are int (bit 7 OK). Party dialog is one-at-a-time (`coop_party_slot`). WORLD_REQ is rate-limited per slot (3 s). Full snapshot is paged per slot: 7 x 16384 x 24 B = 2.7 MB host RAM and about 7 x 41 KB/s while streaming.

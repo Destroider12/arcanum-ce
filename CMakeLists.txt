@@ -532,6 +532,27 @@ if(NOT WIN32)
 endif()
 
 
+# PT52j: validator fuzz + notice text + 8-player pure logic.
+add_executable(coop_lite_fuzz8_test
+    "tests/coop_lite_fuzz8_test.c"
+    "src/net/coop_upnp.c"
+    "src/net/tig_net.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_fuzz8_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_fuzz8_test PRIVATE enet)
+target_compile_definitions(coop_lite_fuzz8_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_fuzz8_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_fuzz8 COMMAND coop_lite_fuzz8_test)
+
 # SDL HID on Android requires C++ linker.
 if(ANDROID)
     enable_language(CXX)
