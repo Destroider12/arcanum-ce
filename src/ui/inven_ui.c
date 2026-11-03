@@ -1197,6 +1197,8 @@ void inven_ui_destroy(void)
         intgame_mode_set(INTGAME_MODE_MAIN);
     }
     intgame_mode_set(INTGAME_MODE_MAIN);
+    /* PT52g: a drag from a window that closed under it is dropped */
+    inven_ui_drag_item_obj = OBJ_HANDLE_NULL;
 }
 
 // 0x573590

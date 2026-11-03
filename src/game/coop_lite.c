@@ -8684,6 +8684,9 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
         coop_lite_pc_build_fill(pc, &b);
         sig = coop_lite_pc_build_sig(&b)
             ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) * 0x9E3779B1u); /* PT47 */
+        if (sig == 0) {
+            sig = 1; /* PT52g: 0 = none yet */
+        }
         if (sig == coop_pcs_sig[slot]) {
             continue;
         }
@@ -8711,6 +8714,9 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
     coop_client_pcs_ms = now_ms;
     coop_lite_pc_build_fill(pc, &b);
     sig = coop_lite_pc_build_sig(&b);
+    if (sig == 0) {
+        sig = 1; /* PT52g: 0 = none yet */
+    }
     if (coop_client_pcs_sig == 0) {
         coop_client_pcs_sig = sig; /* the join bundle carried this one */
         coop_lite_pc_stats_send(sub_529520(), pc, 0, -1); /* PT47: portrait */
@@ -11288,7 +11294,9 @@ static int coop_lite_inv_list_repair(int64_t owner)
         int64_t parent = OBJ_HANDLE_NULL;
 
         h[i] = obj_arrayfield_handle_get(owner, list_fld, i);
-        if (h[i] != OBJ_HANDLE_NULL
+        if (h[i] != OBJ_HANDLE_NULL && !obj_handle_is_valid(h[i])) {
+            h[i] = OBJ_HANDLE_NULL; /* PT52g */
+        } else if (h[i] != OBJ_HANDLE_NULL
             && ((obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
                 || !item_parent(h[i], &parent) || parent != owner)) {
             h[i] = OBJ_HANDLE_NULL;

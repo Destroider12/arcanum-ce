@@ -25,6 +25,7 @@
 #include "game/timeevent.h"
 #include "game/ui.h"
 #include "game/coop_lite.h"
+#include "game/obj_pool.h"
 
 typedef enum GeneratedDialog {
     GD_PC2M,
@@ -3370,7 +3371,7 @@ void dialog_offer_training(int* skills, int cnt, int back_response_val, DialogSt
        own copy; training runs in the host's party dialog instead. */
     if (tig_net_is_coop_client() && coop_lite_party_dialog_pc() == OBJ_HANDLE_NULL) {
         snprintf(state->reply, sizeof(state->reply), "%s",
-            "I cannot train you here. (Co-op: training happens in the party dialog with the host.)");
+            "Здесь я вас обучить не могу. (Кооп: обучение — в общем диалоге с лидером группы.)");
         state->num_options = 1;
         dialog_copy_pc_class_specific_msg(state->options[0], state, 1000);
         state->field_17F0[0] = 0;
@@ -3458,7 +3459,9 @@ void dialog_perform_training(int skill, DialogState* state)
         basic_skill_training_set(state->pc_obj, GET_BASIC_SKILL(skill), TRAINING_APPRENTICE);
     }
     /* PT45: host-run party dialog trained a client's PC (gold too). */
-    coop_lite_host_pc_changed(state->pc_obj, true);
+    if (state->pc_obj != OBJ_HANDLE_NULL && obj_handle_is_valid(state->pc_obj)) { /* PT52g */
+        coop_lite_host_pc_changed(state->pc_obj, true);
+    }
 
     // "Your apprentice training is complete."
     dialog_copy_npc_class_specific_msg(state->reply, state, 6000);
