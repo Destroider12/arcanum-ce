@@ -2320,3 +2320,24 @@ Playtest pt53 (client log1 / host log2). Protocol **33** (new packet 153).
    in either log. Host combat used the host's stale equipment for the client's PC (old
    sword and armour), and the layout fix makes that copy current. Crits are rolled on the
    host only; no double-apply path was found.
+
+## PT53a
+
+Regression fix for the PT53 layout intent (client crash after a host save load and rejoin).
+
+- **Cause:** the host looked items up by OID. After a reload, stale objects share OIDs with the
+  real ones and name the PC as parent but are not in its list. `item_force_remove` failed
+  ("Couldn't match object in parent!"), then `item_insert` appended the handle anyway, which
+  left duplicates in the inventory list (`redraw_inven_fix_bad_inven_obj` ×20). The client
+  listed items the host does not have (17 refused), its hash never matched, and it resent the
+  layout every 3 s forever. A corrupt echo could then insert an OID twice on the client.
+- **Host:** handles now come only from the PC's real list, after `coop_lite_inv_list_repair`.
+  The plan is pure: `coop_lite_inven_layout_plan`. It refuses unknown OIDs, an item asked for
+  twice, an OID held by two objects, and illegal locations. An item already in place is a
+  no-op, so a converged layout reports 0 moved. The list is repaired again after the moves,
+  and the host always echoes an INVEN_SYNC. Gold and ammo are never touched (stackables are
+  excluded).
+- **Client:** the host's echo is the truth. The acked hash is set to the local layout at each
+  echo and at each send, so a refused layout is never resent; only a new local move is sent.
+  The inventory sync apply skips a duplicate OID entry and repairs every owner's list at the
+  end.

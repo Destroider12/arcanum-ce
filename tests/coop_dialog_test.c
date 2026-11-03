@@ -217,6 +217,73 @@ static int test_policy(void)
     return 0;
 }
 
+/* PT53a: host layout plan against the PC's real list. */
+static int test_pt53a_plan(void)
+{
+    static uint8_t have[6][24];
+    int have_loc[6] = { 0, 1004, 2000, 15, 30, 30 };
+    PacketCoopInvenLayoutEntry w[8];
+    int plan[8];
+    int i;
+
+    memset(have, 0, sizeof(have));
+    for (i = 0; i < 6; i++) {
+        have[i][0] = (uint8_t)(i + 1);
+    }
+    have[5][0] = 5; /* stale duplicate object sharing item 5's OID */
+    memset(w, 0, sizeof(w));
+    /* converged: every item already where asked -> 0 moves */
+    for (i = 0; i < 4; i++) {
+        memcpy(w[i].oid, have[i], 24);
+        w[i].inventory_location = have_loc[i];
+    }
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 4, plan) == 0, "converged: 0 moved");
+    for (i = 0; i < 4; i++) {
+        CHECK(plan[i] == COOP_LAYOUT_NOOP, "no-op");
+    }
+    /* stale client view after a save reload: unknown OID refused, no move */
+    memset(w, 0, sizeof(w));
+    w[0].oid[0] = 99;
+    w[0].inventory_location = 5;
+    /* hotbar: weapon to hotkey slot, shovel from hotkey to grid */
+    memcpy(w[1].oid, have[1], 24);
+    w[1].inventory_location = 2003;
+    memcpy(w[2].oid, have[2], 24);
+    w[2].inventory_location = 40;
+    /* the same item twice in one packet */
+    memcpy(w[3].oid, have[3], 24);
+    w[3].inventory_location = 50;
+    memcpy(w[4].oid, have[3], 24);
+    w[4].inventory_location = 60;
+    /* ambiguous OID (two objects in the list) */
+    memcpy(w[5].oid, have[4], 24);
+    w[5].inventory_location = 70;
+    /* illegal location */
+    memcpy(w[6].oid, have[0], 24);
+    w[6].inventory_location = 1500;
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 7, plan) == 3, "3 legal moves");
+    CHECK(plan[0] == COOP_LAYOUT_REFUSE, "stale OID refused");
+    CHECK(plan[1] == 1 && plan[2] == 2 && plan[3] == 3, "hotbar/grid moves map to the real list");
+    CHECK(plan[4] == COOP_LAYOUT_REFUSE, "duplicate request refused");
+    CHECK(plan[5] == COOP_LAYOUT_REFUSE, "ambiguous OID refused");
+    CHECK(plan[6] == COOP_LAYOUT_REFUSE, "illegal location refused");
+    /* each list index is moved at most once -> no duplicate inserts */
+    {
+        int seen[6] = { 0 };
+
+        for (i = 0; i < 7; i++) {
+            if (plan[i] >= 0) {
+                CHECK(++seen[plan[i]] == 1, "an item moved twice");
+            }
+        }
+    }
+    /* repeated identical refused layout stays refused (deterministic) */
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 1, plan) == 0
+            && plan[0] == COOP_LAYOUT_REFUSE,
+        "refused again, still 0 moves");
+    return 0;
+}
+
 /* PT53: own-pack layout intent, language pick, travel panel centring. */
 static int test_pt53(void)
 {
@@ -252,10 +319,13 @@ static int test_pt53(void)
             == coop_lite_inven_layout_term(b, 1004) + coop_lite_inven_layout_term(a, 3),
         "layout hash order-independent");
     CHECK(coop_lite_inven_layout_term(a, 1004) != coop_lite_inven_layout_term(a, 3), "hash sees the slot");
-    CHECK(!coop_lite_inven_layout_send_due(5, 5, 0, 0, 10), "in sync: nothing to send");
-    CHECK(coop_lite_inven_layout_send_due(6, 5, 0, 0, 10), "new layout: send now");
-    CHECK(!coop_lite_inven_layout_send_due(6, 5, 6, 0, 2999), "same layout: wait");
-    CHECK(coop_lite_inven_layout_send_due(6, 5, 6, 0, 3000), "same layout: retry after 3 s");
+    CHECK(!coop_lite_inven_layout_send_due(5, 5, 0), "in sync: nothing to send");
+    CHECK(coop_lite_inven_layout_send_due(6, 5, 5), "new local move: send");
+    CHECK(!coop_lite_inven_layout_send_due(6, 5, 6), "refused layout acked by the echo: never resent");
+    CHECK(coop_lite_inven_layout_send_due(7, 5, 6), "a later move is sent again");
+    if (test_pt53a_plan()) {
+        return 1;
+    }
     CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F\xD1\x80 / Hi", false), "Hi") == 0, "EN after ' / '");
     CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F\xD1\x80\nReady 1/2. Y - go now.", false),
               "Ready 1/2. Y - go now.") == 0,

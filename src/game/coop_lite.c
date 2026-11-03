@@ -11540,7 +11540,19 @@ static void coop_lite_client_apply_inven_batch(void)
             int64_t parent = OBJ_HANDLE_NULL;
             int loc = e->inventory_location;
             int free_loc;
+            int k;
 
+            /* PT53a: an OID listed twice in one owner (corrupt host list)
+               would be inserted twice: only the first entry counts. */
+            for (k = coop_inv_owner[o].first; k < i; k++) {
+                if (memcmp(coop_inv_entry[k].oid, e->oid, sizeof(e->oid)) == 0) {
+                    break;
+                }
+            }
+            if (k < i) {
+                tig_debug_printf("CoopLite: inven sync: duplicate entry skipped\n");
+                continue;
+            }
             if (item != OBJ_HANDLE_NULL && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
                 /* Destroyed but not yet freed: never re-insert it (that left
                    a parentless duplicate in the inventory list). */
@@ -11735,6 +11747,7 @@ static void coop_lite_client_apply_inven_batch(void)
 
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         if (owner_obj[o] != OBJ_HANDLE_NULL) {
+            coop_lite_inv_list_repair(owner_obj[o]); /* PT53a: no duplicates survive */
             coop_lite_fix_inven_num(owner_obj[o]);
         }
     }
@@ -16884,22 +16897,52 @@ unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc)
     return h;
 }
 
-bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int last_sent_hash,
-    unsigned int last_sent_ms, unsigned int now_ms)
+bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int acked_hash)
 {
-    if (local_hash == host_hash) {
-        return false;
-    }
-    /* A new layout goes at once (before a later pickup reaches the host);
-       the same one is repeated at most every 3 s if the host refused it. */
-    return local_hash != last_sent_hash || (unsigned int)(now_ms - last_sent_ms) >= 3000u;
+    return local_hash != host_hash && local_hash != acked_hash;
 }
 
+int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_loc, int nhave,
+    const PacketCoopInvenLayoutEntry* want, int nwant, int* plan)
+{
+    int moves = 0;
+    int i;
+    int k;
+
+    for (i = 0; i < nwant; i++) {
+        int found = -1;
+        bool bad = !coop_lite_inven_layout_loc_ok(want[i].inventory_location);
+
+        for (k = 0; k < i && !bad; k++) {
+            if (memcmp(want[k].oid, want[i].oid, 24) == 0) {
+                bad = true; /* same item asked twice */
+            }
+        }
+        for (k = 0; k < nhave && !bad; k++) {
+            if (memcmp(have_oid[k], want[i].oid, 24) == 0) {
+                if (found != -1) {
+                    bad = true; /* two objects share the OID: ambiguous */
+                }
+                found = k;
+            }
+        }
+        if (bad || found == -1) {
+            plan[i] = COOP_LAYOUT_REFUSE;
+        } else if (have_loc[found] == want[i].inventory_location) {
+            plan[i] = COOP_LAYOUT_NOOP;
+        } else {
+            plan[i] = found;
+            moves++;
+        }
+    }
+    return moves;
+}
+
+#define COOP_LAYOUT_HAVE_MAX 512
 #ifndef COOP_LITE_TEST_STUBS
 static unsigned int coop_layout_host_hash;
 static bool coop_layout_host_valid;
-static unsigned int coop_layout_sent_hash;
-static unsigned int coop_layout_sent_ms;
+static unsigned int coop_layout_acked_hash;
 
 static unsigned int coop_lite_local_layout_hash(int64_t pc, PacketCoopInvenLayout* out)
 {
@@ -16951,6 +16994,9 @@ static void coop_lite_client_layout_note_host(int64_t local_pc)
         }
         coop_layout_host_hash = h;
         coop_layout_host_valid = true;
+        /* PT53a: the host's echo is the truth; whatever differs locally now
+           (a refused move, the client's own grid order) is not resent. */
+        coop_layout_acked_hash = coop_lite_local_layout_hash(local_pc, NULL);
     }
 }
 
@@ -16970,7 +17016,8 @@ void coop_lite_client_layout_tick(unsigned int now_ms)
         return; /* not mid-drag: a held item has no location yet */
     }
     h = coop_lite_local_layout_hash(pc, NULL);
-    if (!coop_lite_inven_layout_send_due(h, coop_layout_host_hash, coop_layout_sent_hash, coop_layout_sent_ms, now_ms)) {
+    (void)now_ms;
+    if (!coop_lite_inven_layout_send_due(h, coop_layout_host_hash, coop_layout_acked_hash)) {
         return;
     }
     memset(&pkt, 0, sizeof(pkt));
@@ -16981,8 +17028,7 @@ void coop_lite_client_layout_tick(unsigned int now_ms)
     depth = tig_net_local_suspend_pause();
     tig_net_send_app_all(&pkt, (int)(offsetof(PacketCoopInvenLayout, entries) + (size_t)pkt.count * sizeof(pkt.entries[0])));
     tig_net_local_suspend_resume(depth);
-    coop_layout_sent_hash = h;
-    coop_layout_sent_ms = now_ms;
+    coop_layout_acked_hash = h;
     tig_debug_printf("CoopLite: inven: layout sent (%d items)\n", pkt.count);
 }
 
@@ -17002,13 +17048,19 @@ static bool coop_lite_layout_place_ok(int64_t pc, int64_t item, int loc)
 
 void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
 {
+    static uint8_t have_oid[COOP_LAYOUT_HAVE_MAX][24];
+    static int64_t have_obj[COOP_LAYOUT_HAVE_MAX];
+    static int have_loc[COOP_LAYOUT_HAVE_MAX];
+    int plan[COOP_INVEN_LAYOUT_MAX];
     int64_t moved_item[COOP_INVEN_LAYOUT_MAX];
     int old_loc[COOP_INVEN_LAYOUT_MAX];
     int want_loc[COOP_INVEN_LAYOUT_MAX];
+    int nhave = 0;
     int n = 0;
     int refused = 0;
     int slot;
     int64_t pc;
+    int cnt;
     int i;
 
     if (!tig_net_is_host() || !coop_lite_inven_layout_valid(pkt, tig_net_last_message_size())) {
@@ -17023,60 +17075,79 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         tig_debug_printf("CoopLite: inven: slot %d layout for a PC it does not own\n", slot);
         return;
     }
-    /* Phase 1: take out every item that should move (and may). */
-    for (i = 0; i < pkt->count; i++) {
-        int64_t item = coop_lite_get_oid_obj(pkt->entries[i].oid);
+    /* PT53a: the PC's real list is the only source of handles (an OID
+       lookup can name a stale object whose parent field says this PC but
+       which the list does not hold: item_force_remove then failed and the
+       re-insert duplicated it). Null / duplicate handles are repaired first. */
+    coop_lite_inv_list_repair(pc);
+    coop_lite_fix_inven_num(pc);
+    cnt = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    for (i = 0; i < cnt && nhave < COOP_LAYOUT_HAVE_MAX; i++) {
+        int64_t item = obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
         int64_t parent = OBJ_HANDLE_NULL;
-        int loc = pkt->entries[i].inventory_location;
-        int cur;
+        ObjectID oid;
 
         if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc
-            || coop_lite_is_stackable(item) || !coop_lite_inven_layout_loc_ok(loc)) {
+            || coop_lite_is_stackable(item)) {
+            continue;
+        }
+        oid = obj_get_id(item);
+        memcpy(have_oid[nhave], &oid, 24);
+        have_obj[nhave] = item;
+        have_loc[nhave] = item_inventory_location_get(item);
+        nhave++;
+    }
+    coop_lite_inven_layout_plan((const uint8_t(*)[24])have_oid, have_loc, nhave, pkt->entries, pkt->count, plan);
+    for (i = 0; i < pkt->count; i++) {
+        int64_t item;
+
+        if (plan[i] == COOP_LAYOUT_REFUSE) {
             refused++;
             continue;
         }
-        cur = item_inventory_location_get(item);
-        if (cur == loc) {
+        if (plan[i] == COOP_LAYOUT_NOOP) {
             continue;
         }
-        if (IS_WEAR_INV_LOC(cur) && item_check_remove(item) != ITEM_CANNOT_OK) {
+        item = have_obj[plan[i]];
+        if (IS_WEAR_INV_LOC(have_loc[plan[i]]) && item_check_remove(item) != ITEM_CANNOT_OK) {
             refused++; /* e.g. cursed: stays worn */
             continue;
         }
         moved_item[n] = item;
-        old_loc[n] = cur;
-        want_loc[n] = loc;
+        old_loc[n] = have_loc[plan[i]];
+        want_loc[n] = pkt->entries[i].inventory_location;
         n++;
     }
-    if (n == 0) {
-        if (refused != 0) {
-            coop_lite_host_sync_slot_inven(slot);
+    if (n > 0) {
+        multiplayer_lock();
+        for (i = 0; i < n; i++) {
+            item_remove(moved_item[i]); /* in the list exactly once: verified above */
         }
-        return;
-    }
-    multiplayer_lock();
-    for (i = 0; i < n; i++) {
-        item_remove(moved_item[i]);
-    }
-    /* Phase 2: requested place if legal, else the old one, else any room. */
-    for (i = 0; i < n; i++) {
-        int loc = want_loc[i];
+        /* Requested place if legal, else the old one, else any room. */
+        for (i = 0; i < n; i++) {
+            int loc = want_loc[i];
 
-        if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
-            refused++;
-            loc = old_loc[i];
             if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
-                int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);
+                refused++;
+                loc = old_loc[i];
+                if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
+                    int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);
 
-                if (free_loc != -1) {
-                    loc = free_loc;
+                    if (free_loc != -1) {
+                        loc = free_loc;
+                    }
                 }
             }
+            item_insert(moved_item[i], pc, loc);
         }
-        item_insert(moved_item[i], pc, loc);
+        coop_lite_inv_list_repair(pc);
+        coop_lite_fix_inven_num(pc);
+        multiplayer_unlock();
     }
-    multiplayer_unlock();
-    tig_debug_printf("CoopLite: inven: slot %d layout applied (%d moved, %d refused)\n", slot, n, refused);
+    if (n > 0 || refused > 0) {
+        tig_debug_printf("CoopLite: inven: slot %d layout applied (%d moved, %d refused)\n", slot, n, refused);
+    }
+    /* Always echo: the client takes the echo as truth and stops sending. */
     coop_lite_host_sync_slot_inven(slot);
     coop_slot_inven_sig[slot] = coop_lite_pc_inven_sig(pc);
     coop_slot_inven_sig_valid[slot] = true;

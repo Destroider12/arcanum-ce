@@ -367,9 +367,18 @@ bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size);
 bool coop_lite_inven_layout_loc_ok(int loc);
 /* Order-independent per-item hash term; a layout's hash is the sum. */
 unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc);
-/* Client: send now? (layout differs from the host's, not just sent, rate-limited) */
-bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int last_sent_hash,
-    unsigned int last_sent_ms, unsigned int now_ms);
+/* PT53a: client sends only a layout it made itself since the last host
+   echo: local != host and local != acked (acked = local taken at each echo
+   and at each send). A refused layout is never resent. */
+bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_hash, unsigned int acked_hash);
+/* PT53a: host plan. have_* is the PC's actual list (non-stack items);
+   plan[i] = index into have to move, COOP_LAYOUT_NOOP (already there) or
+   COOP_LAYOUT_REFUSE (unknown OID, OID listed twice on either side, bad
+   location). Returns the number of moves. Pure. */
+#define COOP_LAYOUT_NOOP (-2)
+#define COOP_LAYOUT_REFUSE (-1)
+int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_loc, int nhave,
+    const PacketCoopInvenLayoutEntry* want, int nwant, int* plan);
 void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt);
 
 /* PT53: co-op UI strings are written "RU / EN" (or "RU\nEN"). English is
