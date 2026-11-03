@@ -175,16 +175,20 @@ static int make_packet(uint8_t* buf, int cap)
     return size;
 }
 
-static int phase_host(int seconds)
+/* PT55: COOP_RX_FUZZ_CLIENTS (1..7) rogue clients fuzz the host at once. */
+static int phase_host(int seconds, int nrogue)
 {
-    ENetHost* rogue_host;
-    ENetPeer* rogue;
+    ENetHost* rogue_host[7];
+    ENetPeer* rogue[7];
     ENetAddress addr;
     ENetEvent ev;
     static uint8_t buf[TIG_NET_MAX_PACKET + 64];
     time_t end;
+    time_t last_trace = 0;
     long sent = 0;
     int i;
+    int r;
+    int up;
 
     coop_lite_session_reset();
     tig_net_set_coop_enabled(true);
@@ -198,69 +202,102 @@ static int phase_host(int seconds)
         fprintf(stderr, "host start failed\n");
         return 1;
     }
-    rogue_host = enet_host_create(NULL, 1, 2, 0, 0);
     enet_address_set_host(&addr, "127.0.0.1");
     addr.port = PORT_F;
-    rogue = enet_host_connect(rogue_host, &addr, 2, 0);
-    for (i = 0; i < 3000 && !tig_net_client_is_active(1); i++) {
+    for (r = 0; r < nrogue; r++) {
+        rogue_host[r] = enet_host_create(NULL, 1, 2, 0, 0);
+        rogue[r] = enet_host_connect(rogue_host[r], &addr, 2, 0);
+    }
+    for (i = 0; i < 200 + 3000; i++) {
         tig_net_pump();
-        while (enet_host_service(rogue_host, &ev, 0) > 0) {
-            if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(ev.packet);
+        up = 0;
+        for (r = 0; r < nrogue; r++) {
+            while (enet_host_service(rogue_host[r], &ev, 0) > 0) {
+                if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                    enet_packet_destroy(ev.packet);
+                } else if (ev.type == ENET_EVENT_TYPE_CONNECT) {
+                    CtrlName name;
+
+                    memset(&name, 0, sizeof(name));
+                    name.magic = 2;
+                    name.slot = r + 1;
+                    snprintf(name.name, sizeof(name.name), "Rogue%d", r + 1);
+                    name.protocol = TIG_NET_PROTOCOL;
+                    enet_peer_send(rogue[r], 1, enet_packet_create(&name, sizeof(name), ENET_PACKET_FLAG_RELIABLE));
+                }
             }
+            up += tig_net_client_is_active(r + 1) ? 1 : 0;
+        }
+        if (up == nrogue && i > 200) {
+            break;
         }
         usleep(1000);
     }
-    if (!tig_net_client_is_active(1)) {
-        fprintf(stderr, "rogue did not connect\n");
+    if (up != nrogue) {
+        fprintf(stderr, "only %d of %d rogues connected\n", up, nrogue);
         return 1;
     }
-    {
-        CtrlName name;
+    end = time(NULL) + seconds;
+    while (time(NULL) < end) {
+        up = 0;
+        for (r = 0; r < nrogue; r++) {
+            if (rogue[r] == NULL) {
+                continue;
+            }
+            up++;
+            /* PT55: a sender-side backlog is harness memory, not the host's:
+               keep each rogue's ENet queue short (10-minute runs OOMed). */
+            if (enet_list_size(&rogue[r]->outgoingSendReliableCommands) + enet_list_size(&rogue[r]->outgoingCommands) > 512) {
+                continue;
+            }
+            for (i = 0; i < 32; i++) {
+                int size = make_packet(buf, (int)sizeof(buf));
+                ENetPacket* p = enet_packet_create(buf, (size_t)size, ENET_PACKET_FLAG_RELIABLE);
 
-        memset(&name, 0, sizeof(name));
-        name.magic = 2;
-        name.slot = 1;
-        strcpy(name.name, "Rogue");
-        name.protocol = TIG_NET_PROTOCOL;
-        enet_peer_send(rogue, 1, enet_packet_create(&name, sizeof(name), ENET_PACKET_FLAG_RELIABLE));
-        for (i = 0; i < 200; i++) {
-            tig_net_pump();
-            while (enet_host_service(rogue_host, &ev, 0) > 0) {
+                if (enet_peer_send(rogue[r], (enet_uint8)(rnd() % 2 == 0 ? 0 : 1), p) < 0) {
+                    enet_packet_destroy(p);
+                }
+                sent++;
+            }
+            enet_host_flush(rogue_host[r]);
+        }
+        tig_net_pump();
+        for (r = 0; r < nrogue; r++) {
+            while (enet_host_service(rogue_host[r], &ev, 0) > 0) {
                 if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
                     enet_packet_destroy(ev.packet);
                 }
             }
-            usleep(1000);
-        }
-    }
-    end = time(NULL) + seconds;
-    while (time(NULL) < end) {
-        for (i = 0; i < 32; i++) {
-            int size = make_packet(buf, (int)sizeof(buf));
-            ENetPacket* p = enet_packet_create(buf, (size_t)size, ENET_PACKET_FLAG_RELIABLE);
-
-            if (enet_peer_send(rogue, 0, p) < 0) {
-                enet_packet_destroy(p);
-            }
-            sent++;
-        }
-        enet_host_flush(rogue_host);
-        tig_net_pump();
-        while (enet_host_service(rogue_host, &ev, 0) > 0) {
-            if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
-                enet_packet_destroy(ev.packet);
+            if (rogue[r] != NULL && !tig_net_client_is_active(r + 1)) {
+                fprintf(stderr, "rogue %d dropped by host after %ld packets (ok: rate/abuse guard)\n", r + 1, sent);
+                rogue[r] = NULL;
             }
         }
-        if (!tig_net_client_is_active(1)) {
-            fprintf(stderr, "rogue dropped by host after %ld packets (ok: rate/abuse guard)\n", sent);
+        if (up == 0) {
             break;
+        }
+        if (getenv("COOP_RX_FUZZ_TRACE") != NULL && time(NULL) % 10 == 0 && time(NULL) != last_trace) {
+            size_t q = 0;
+            long pages = 0, res = 0;
+            FILE* f = fopen("/proc/self/statm", "r");
+
+            last_trace = time(NULL);
+            if (f != NULL) { if (fscanf(f, "%ld %ld", &pages, &res) != 2) res = 0; fclose(f); }
+            for (r = 0; r < nrogue; r++) {
+                if (rogue[r] != NULL) q += enet_list_size(&rogue[r]->outgoingSendReliableCommands) + enet_list_size(&rogue[r]->outgoingCommands);
+            }
+            printf("trace: rss %ld MB, rogue queued %zu\n", res * 4 / 1024, q);
+            fflush(stdout);
         }
     }
     fflush(stderr);
-    printf("host phase: %ld sent, %ld delivered to handlers\n", sent, g_delivered);
-    enet_peer_disconnect_now(rogue, 0);
-    enet_host_destroy(rogue_host);
+    printf("host phase: %d rogues, %ld sent, %ld delivered to handlers\n", nrogue, sent, g_delivered);
+    for (r = 0; r < nrogue; r++) {
+        if (rogue[r] != NULL) {
+            enet_peer_disconnect_now(rogue[r], 0);
+        }
+        enet_host_destroy(rogue_host[r]);
+    }
     tig_net_reset_connection();
     return 0;
 }
@@ -297,7 +334,13 @@ int main(void)
     if (enet_initialize() != 0) {
         return 1;
     }
-    if (phase_host(seconds > 0 ? seconds : 5) != 0) {
+    const char* envc = getenv("COOP_RX_FUZZ_CLIENTS");
+    int nrogue = envc != NULL ? atoi(envc) : 7;
+
+    if (nrogue < 1 || nrogue > 7) {
+        nrogue = 7;
+    }
+    if (phase_host(seconds > 0 ? seconds : 5, nrogue) != 0) {
         return 1;
     }
     phase_client((long)(seconds > 0 ? seconds : 5) * 20000L);

@@ -2559,3 +2559,45 @@ unit-tested) runs after inven sync apply, list drop, orphan re-list, layout
 apply and world-state prune; it logs once per mutation:
 `CoopLite: PT54d inven self-check FAILED after '<name>': <reason> (NUM n, count c)`.
 No wire change (protocol 36).
+
+## PT55: 8-slot stress / edge cases, release polish (protocol stays 36)
+
+New ctest `coop_lite_stress8` (`tests/coop_lite_stress8_test.c`): one process,
+a tig_net host and up to 9 raw-ENet clients on loopback. The host log is
+captured, so refusals are checked by their log lines.
+
+| # | Scenario | Result |
+|---|----------|--------|
+| S1 | 7 clients connect in the same frame, all named; a 9th is refused (`no free slots`), slots unchanged | pass |
+| S5 | client with protocol 35 (`refusing slot N: protocol 35 != ours 36`) and an old build's short NAME (`refusing old client`) are refused; the slot is freed and reused | pass |
+| S6 | 16384-byte app packets both ways; 16385+ dropped; a 46-char name is cut to 31 | pass |
+| S2 | 64 x 16 KB reliable data queued to all, 3 clients hard-reset mid-stream, timeout detection, rejoin into freed slots | pass |
+| S7 | one client stops servicing ENet while the host broadcasts poses and data: ENet times it out (about 6 s) and the slot is freed; RSS stays flat (non-ASan 3964 kB) | pass |
+| S8 | 20000-tick soak with pose storms, broadcasts and churn: RSS flat outside ASan; LSan clean at exit | pass |
+| S3 | ready-check tally with 7 slots (busy, near idle, far idle, dead READY, far READY, no reply, disconnect mid-check, revive) | pass |
+| S4 | pose seq and epoch wrap (70000 bumps), layout echo seq wrap 65535 -> 1, rate bucket and interval across the 2^32 ms wrap, the same door used twice in one tick, door set full | pass |
+
+`coop_lite_rx_fuzz` now fuzzes with `COOP_RX_FUZZ_CLIENTS` rogues (default 7).
+A 10-minute ASan run with 7 rogues was OOM-killed at 14 GB. The trace
+(`COOP_RX_FUZZ_TRACE=1`) showed the growth was in the rogues' own unsent
+ENet queues (harness), while host RSS stayed at 10 MB. The harness now
+keeps each rogue's backlog under 512 commands.
+
+Not reachable natively (they need the game object layer): two clients
+looting the same item in one tick, give-vs-host-move, max-size real
+inventories and world snapshots, door queues, and per-slot coop state on
+disconnect (parked PCs, travel state, layout seq).
+
+Polish:
+- **Main menu line.** The UPnP part (`UPnP: UDP 7777 открыт / open, ...`)
+  was embedded in the "RU / EN" co-op line, so the language pick split at
+  the first " / " and English users still saw Cyrillic. `tig_net_describe_coop_mode`
+  and `coop_upnp_format` now build English text unless `ARCANUM_COOP_LANG=ru`,
+  in which case the line stays bilingual. Tested in stress8 (ASCII only, < 64 chars).
+- **Log rate limit.** `tig_net_log_budget()`: the first 20, then every 1000th,
+  with a running total. Used for `validation failed`, `dropping
+  oversized/undersized` and the CHAR_OFFER slot/proto complaints. A bad
+  peer wrote 400k lines in 6 minutes.
+- -Wall -Wextra is clean on the coop files; there are no TODO/FIXME left.
+- README-RU.txt (release staging, not in the repo) was still at PT28 and
+  protocol 25. An updated copy is in `/workspace/release/README-RU.txt`.
