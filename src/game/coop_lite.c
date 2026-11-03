@@ -3137,6 +3137,7 @@ void coop_lite_host_on_client_disconnect(int slot)
         return;
     }
     coop_char_rx_free(&coop_char_rx[slot]);
+    coop_lite_pt52_slot_gone(slot); /* PT52c */
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_barter_end(slot, "disconnected");
 #endif
@@ -12908,6 +12909,7 @@ static unsigned int coop_world_full_ms[8];
 #define COOP_WORLD_FULL_MAX_OIDS 16384
 static ObjectID* coop_world_full_oids[8];
 static int coop_world_full_oid_cnt[8];
+static bool coop_world_full_first[8]; /* PT52c */
 
 static void coop_world_full_free(int slot)
 {
@@ -12925,6 +12927,7 @@ static void coop_world_full_snapshot(int slot)
     int n = 0;
 
     coop_world_full_free(slot);
+    coop_world_full_first[slot] = true;
     coop_world_full_oids[slot] = (ObjectID*)MALLOC(sizeof(ObjectID) * COOP_WORLD_FULL_MAX_OIDS);
     if (obj_inst_first(&obj, &iter)) {
         do {
@@ -12984,7 +12987,8 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
     int chunks = 0;
     bool done = true;
 
-    first = !full || *cursor == 0;
+    /* PT52c: FIRST stays pending until a page really goes out */
+    first = full ? coop_world_full_first[slot] : true;
     t0 = SDL_GetTicksNS();
     center = obj_field_int64_get(pc, OBJ_F_LOCATION);
     out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
@@ -13103,6 +13107,9 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
         } else {
             coop_lite_world_flush(out, slot, false, &first);
         }
+    }
+    if (full) {
+        coop_world_full_first[slot] = first;
     }
     FREE(out);
     if (!full) {
@@ -16283,6 +16290,15 @@ void coop_lite_travel_reset(void)
     coop_travel_client_sent = -1;
 }
 
+/* PT52c host: a disconnected slot's busy flag and snapshot list go */
+void coop_lite_pt52_slot_gone(int slot)
+{
+    if (slot > 0 && slot < 8) {
+        coop_client_busy[slot] = false;
+        coop_world_full_free(slot);
+    }
+}
+
 void coop_lite_travel_session_reset(void)
 {
     coop_lite_travel_reset();
@@ -16475,6 +16491,8 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
         }
     } else if (pkt->op == COOP_CTRL_TRAVEL_END) {
         coop_travel_active = false;
+        coop_travel_pressed = false; /* PT52c: proactive BUSY/IDLE resumes */
+        coop_travel_client_sent = -1;
         coop_travel_hide();
     }
 }
@@ -16491,6 +16509,7 @@ bool coop_lite_client_spell_end(int mt_id)
 bool coop_lite_host_travel_gate(const TeleportData* td) { (void)td; return false; }
 void coop_lite_travel_reset(void) { }
 void coop_lite_travel_session_reset(void) { }
+void coop_lite_pt52_slot_gone(int slot) { (void)slot; }
 bool coop_lite_travel_key(void) { return false; }
 void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
 bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }

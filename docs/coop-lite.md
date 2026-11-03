@@ -2185,3 +2185,14 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
   only read by describe for MAPPED/FAILED (set after the write, atomic), so
   there is no read/write overlap.
 - Protocol unchanged (32).
+
+### PT52c
+
+- FULL snapshot: the FIRST flag is kept per slot (`coop_world_full_first`,
+  set by `coop_world_full_snapshot`) and cleared only when a page is really
+  sent, so an empty early tick cannot lose it; an all-empty snapshot still
+  ends with one FIRST+LAST+FULL page.
+- Travel: the client clears `pressed` and `client_sent` on TRAVEL_END (and
+  on session reset), so proactive BUSY/IDLE resumes after pressing Y. Host
+  client-disconnect clears that slot's busy flag and frees its snapshot list.
+- Protocol unchanged (32).
