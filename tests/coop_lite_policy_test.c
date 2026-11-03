@@ -1112,6 +1112,23 @@ static int test_packet_hardening(void)
                 return 1;
             }
         }
+        {
+            /* PT54d: the f18c drift shapes (sparse array keys) */
+            int64_t ok[6] = { 5, 6, 7, 0, 0, 0 };
+            int64_t hole[6] = { 5, 0, 7, 8, 0, 0 };      /* keys {0,2,3}: count 3 */
+            int64_t tail[6] = { 5, 6, 7, 6, 7, 0 };      /* repair truncated by one key */
+            int64_t dup[6] = { 5, 6, 5, 0, 0, 0 };
+            if (coop_lite_inv_keys_check(ok, 6, 3, 3) != COOP_INV_KEYS_OK
+                || coop_lite_inv_keys_check(ok, 6, 3, 2) != COOP_INV_KEYS_NUM_MISMATCH
+                || coop_lite_inv_keys_check(hole, 6, 3, 3) != COOP_INV_KEYS_HOLE
+                || coop_lite_inv_keys_check(tail, 6, 3, 3) != COOP_INV_KEYS_STALE_TAIL
+                || coop_lite_inv_keys_check(dup, 6, 3, 3) != COOP_INV_KEYS_DUPLICATE
+                || coop_lite_inv_keys_check(ok, 0, 0, 0) != COOP_INV_KEYS_OK
+                || strcmp(coop_lite_inv_keys_check_name(COOP_INV_KEYS_HOLE), "null entry (hole)") != 0) {
+                fprintf(stderr, "PT54d inventory key check wrong\n");
+                return 1;
+            }
+        }
         if (coop_lite_skill_merge_training(5, (2 << 6) | 9) != ((2 << 6) | 5)
             || coop_lite_skill_merge_training((1 << 6) | 3, 3) != 3
             || coop_lite_pcs_portrait_unpack(coop_lite_pcs_portrait_pack(1, 4021)) != 4021

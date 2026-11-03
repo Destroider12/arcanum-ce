@@ -2532,3 +2532,30 @@ Fix:
 Log lines to check: `PT54c teleport: inventory NUM/list mismatch repaired`,
 `PT54c own PC moved off`, `resync skipped - no local PC`.
 No wire change; protocol stays 36. Verified by unit tests and a build only; not yet tested in play.
+
+## PT54d: inventory list drift — root cause
+
+Object array fields are **sparse keyed arrays** (`sa.c`):
+`obj_arrayfield_length_get()` returns the number of *present keys*, and
+`obj_arrayfield_length_set(obj, fld, k)` only **removes key k** (vanilla calls
+it only with the last index after shifting). Coop code used it as "truncate to
+k", which left keys k+1.. alive:
+
+- `coop_lite_inv_list_repair` / `coop_lite_inv_list_drop`: after compaction,
+  stale duplicate keys survived whenever 2+ entries were dropped; with holes
+  the repair read keys 0..count-1, saw a null and never saw the last key, so
+  every sync logged "list repaired (1 bad entries dropped)" + "NUM x != list
+  length y" + `!VS Inventory entry is null` again.
+- rejoin empty-inventory reset: `length_set(pc, LIST, 0)` removed only key 0
+  (the parked PC kept 16+ dangling handles).
+- reputation truncation in the story sync (same misuse).
+- orphan re-list appended at index `length_get`, overwriting a live key in a
+  holey list.
+
+Fix: `coop_lite_arr_read_keys` scans keys 0..count+256, `coop_lite_arr_rewrite`
+removes every scanned key and writes the list densely, NUM is set to the result.
+Self-check `coop_lite_inv_selfcheck` (pure core `coop_lite_inv_keys_check`,
+unit-tested) runs after inven sync apply, list drop, orphan re-list, layout
+apply and world-state prune; it logs once per mutation:
+`CoopLite: PT54d inven self-check FAILED after '<name>': <reason> (NUM n, count c)`.
+No wire change (protocol 36).

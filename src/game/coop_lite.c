@@ -386,6 +386,12 @@ static void coop_lite_pose_order_reset(void)
 static void (*coop_dialog_end_hook)(int64_t pc_obj, int a2);
 /* Coop death (PT10), see coop_lite_host_watch_party. */
 #ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_inv_list_clear(int64_t owner); /* PT54d */
+static bool coop_lite_inv_selfcheck(int64_t owner, const char* what);
+static int coop_lite_inv_list_repair(int64_t owner);
+#endif
+
+#ifndef COOP_LITE_TEST_STUBS
 static CoopPartyWatch coop_party_watch;
 static bool coop_reload_request_valid;
 static char coop_reload_request_name[TIG_MAX_PATH];
@@ -9262,8 +9268,11 @@ static bool coop_story_apply_local(const CoopStory* s)
     cur = obj_arrayfield_length_get(pc, OBJ_F_PC_REPUTATION_IDX);
     n = s->n_rep;
     if (cur > n) {
-        obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_IDX, n);
-        obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_TS_IDX, n);
+        /* PT54d: length_set removes ONE key; drop every key >= n */
+        for (i = cur + 64 - 1; i >= n; i--) {
+            obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_IDX, i);
+            obj_arrayfield_length_set(pc, OBJ_F_PC_REPUTATION_TS_IDX, i);
+        }
         changed++;
         cur = n;
     }
@@ -11267,7 +11276,9 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
     /* Its item handles did not resolve here (the items come with the next
        INVEN_SYNC as blobs): start from an empty inventory. */
     obj_field_int32_set(pc, OBJ_F_CRITTER_INVENTORY_NUM, 0);
-    obj_arrayfield_length_set(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, 0);
+    /* PT54d: length_set(0) only removed key 0 - the parked PC's other
+       unresolved handles stayed (log: "NUM 0 != list length 17"). */
+    coop_lite_inv_list_clear(pc);
     obj_field_handle_set(pc, OBJ_F_CRITTER_GOLD, OBJ_HANDLE_NULL);
     for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
         obj_field_handle_set(pc, coop_ammo_fld[t], OBJ_HANDLE_NULL);
@@ -11667,50 +11678,172 @@ static void coop_lite_fix_inven_num(int64_t owner)
 /* PT48: a parked-PC restore can leave the inventory list with null or
    duplicate handles while items still name the PC as parent: those items
    were invisible on the client and the host's sync thought them "there". */
-static int coop_lite_inv_list_repair(int64_t owner)
+/* PT54d: an object array field is a SPARSE keyed array (sa.c):
+   obj_arrayfield_length_get() is the number of PRESENT keys, and
+   obj_arrayfield_length_set(obj, fld, k) only REMOVES KEY k (vanilla only
+   ever calls it with the last index after shifting). Coop code that used it
+   to "truncate to k" left keys k+1.. alive: stale/duplicate handles, holes
+   (null reads), count != NUM, and item_insert (writes at index NUM)
+   overwriting or leaving gaps. These helpers read/write the list densely. */
+#define COOP_ARR_SCAN_SLACK 256
+
+/* Reads keys 0..count+slack; fills by_key (NULL for absent/null keys).
+   Returns the number of keys scanned (caller frees *out). */
+static int coop_lite_arr_read_keys(int64_t obj, int fld, int64_t** out)
 {
-    int list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+    int count = obj_arrayfield_length_get(obj, fld);
+    int limit;
+    int i;
+    int64_t* h;
+
+    *out = NULL;
+    if (count < 0 || count > 4096) {
+        count = count < 0 ? 0 : 4096;
+    }
+    limit = count + COOP_ARR_SCAN_SLACK;
+    h = (int64_t*)MALLOC(sizeof(*h) * (size_t)limit);
+    if (h == NULL) {
+        return 0;
+    }
+    for (i = 0; i < limit; i++) {
+        h[i] = obj_arrayfield_handle_get(obj, fld, i);
+    }
+    *out = h;
+    return limit;
+}
+
+/* Rewrites the field as exactly h[0..k-1]; every key below `scanned` is
+   removed first (length_set == remove key). */
+static void coop_lite_arr_rewrite(int64_t obj, int fld, const int64_t* h, int k, int scanned)
+{
+    int i;
+
+    for (i = scanned - 1; i >= 0; i--) {
+        obj_arrayfield_length_set(obj, fld, i);
+    }
+    for (i = 0; i < k; i++) {
+        obj_arrayfield_obj_set(obj, fld, i, h[i]);
+    }
+}
+
+static void coop_lite_inv_list_clear(int64_t owner)
+{
+    int64_t* h;
+    int scanned = coop_lite_arr_read_keys(owner, OBJ_F_CRITTER_INVENTORY_LIST_IDX, &h);
+
+    if (h != NULL) {
+        coop_lite_arr_rewrite(owner, OBJ_F_CRITTER_INVENTORY_LIST_IDX, h, 0, scanned);
+        FREE(h);
+    }
+}
+
+static int coop_lite_inv_list_fld(int64_t owner)
+{
+    return obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
         ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
         : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+}
+
+static int coop_lite_inv_num_fld(int64_t owner)
+{
+    return obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+        ? OBJ_F_CONTAINER_INVENTORY_NUM
+        : OBJ_F_CRITTER_INVENTORY_NUM;
+}
+
+/* PT54d self-check: NUM == count, keys 0..count-1 present and non-null,
+   nothing beyond, no duplicates. Logs once per mutation name. */
+#define COOP_INV_CHECK_NAMES 24
+static const char* coop_inv_check_logged[COOP_INV_CHECK_NAMES];
+
+static bool coop_lite_inv_selfcheck(int64_t owner, const char* what)
+{
     int64_t* h;
-    int n = obj_arrayfield_length_get(owner, list_fld);
+    int scanned;
+    int count;
+    int num;
+    int code;
+    int i;
+
+    if (owner == OBJ_HANDLE_NULL || !obj_handle_is_valid(owner)) {
+        return true;
+    }
+    count = obj_arrayfield_length_get(owner, coop_lite_inv_list_fld(owner));
+    num = obj_field_int32_get(owner, coop_lite_inv_num_fld(owner));
+    scanned = coop_lite_arr_read_keys(owner, coop_lite_inv_list_fld(owner), &h);
+    if (h == NULL) {
+        return true;
+    }
+    code = coop_lite_inv_keys_check(h, scanned, count, num);
+    FREE(h);
+    if (code == COOP_INV_KEYS_OK) {
+        return true;
+    }
+    for (i = 0; i < COOP_INV_CHECK_NAMES; i++) {
+        if (coop_inv_check_logged[i] == what) {
+            return false;
+        }
+        if (coop_inv_check_logged[i] == NULL) {
+            coop_inv_check_logged[i] = what;
+            break;
+        }
+    }
+    tig_debug_printf("CoopLite: PT54d inven self-check FAILED after '%s': %s (NUM %d, count %d)\n",
+        what, coop_lite_inv_keys_check_name(code), num, count);
+    return false;
+}
+
+/* PT48: a parked-PC restore can leave the inventory list with null or
+   duplicate handles while items still name the PC as parent: those items
+   were invisible on the client and the host's sync thought them "there".
+   PT54d: reads every key (sparse) and rewrites densely. */
+static int coop_lite_inv_list_repair(int64_t owner)
+{
+    int list_fld = coop_lite_inv_list_fld(owner);
+    int num_fld = coop_lite_inv_num_fld(owner);
+    int count = obj_arrayfield_length_get(owner, list_fld);
+    int num = obj_field_int32_get(owner, num_fld);
+    int64_t* h;
+    int scanned;
+    int present = 0;
     int i;
     int k;
+    int dropped;
 
-    if (n <= 0 || (size_t)n > SIZE_MAX / sizeof(*h)) { /* PT52i: size guard */
-        return 0;
-    }
-    /* PT52e: no fixed cap */
-    h = (int64_t*)MALLOC(sizeof(*h) * (size_t)n);
+    scanned = coop_lite_arr_read_keys(owner, list_fld, &h);
     if (h == NULL) {
-        tig_debug_printf("CoopLite: inven: list repair alloc failed (%d)\n", n);
+        if (scanned == 0 && count > 0) {
+            tig_debug_printf("CoopLite: inven: list repair alloc failed (%d)\n", count);
+        }
         return 0;
     }
-    for (i = 0; i < n; i++) {
+    if (coop_lite_inv_keys_check(h, scanned, count, num) == COOP_INV_KEYS_OK) {
+        FREE(h);
+        return 0;
+    }
+    for (i = 0; i < scanned; i++) {
         int64_t parent = OBJ_HANDLE_NULL;
 
-        h[i] = obj_arrayfield_handle_get(owner, list_fld, i);
-        if (h[i] != OBJ_HANDLE_NULL && !obj_handle_is_valid(h[i])) {
+        if (h[i] == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        present++;
+        if (!obj_handle_is_valid(h[i])) {
             h[i] = OBJ_HANDLE_NULL; /* PT52g */
-        } else if (h[i] != OBJ_HANDLE_NULL
-            && (!obj_type_is_item(obj_field_int32_get(h[i], OBJ_F_TYPE)) /* PT53b */
-                || (obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
-                || !item_parent(h[i], &parent) || parent != owner)) {
+        } else if (!obj_type_is_item(obj_field_int32_get(h[i], OBJ_F_TYPE)) /* PT53b */
+            || (obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
+            || !item_parent(h[i], &parent) || parent != owner) {
             h[i] = OBJ_HANDLE_NULL;
         }
     }
-    k = coop_lite_inv_compact_handles(h, n);
-    if (k != n) {
-        for (i = 0; i < k; i++) {
-            obj_arrayfield_obj_set(owner, list_fld, i, h[i]);
-        }
-        obj_arrayfield_length_set(owner, list_fld, k);
-        tig_debug_printf("CoopLite: inven: list repaired (%d bad entries dropped)\n", n - k);
-        coop_lite_fix_inven_num(owner);
-    }
+    k = coop_lite_inv_compact_handles(h, scanned);
+    coop_lite_arr_rewrite(owner, list_fld, h, k, scanned);
+    obj_field_int32_set(owner, num_fld, k);
+    dropped = present - k;
+    tig_debug_printf("CoopLite: inven: list repaired (%d bad entries dropped; NUM %d count %d -> %d)\n",
+        dropped, num, count, k);
     FREE(h);
-    coop_lite_fix_inven_num(owner); /* PT53b: always, NUM drives every loop */
-    return n - k;
+    return dropped > 0 ? dropped : 0;
 }
 
 /* PT53b: everything the inventory UI / weight code will iterate must be a
@@ -11756,31 +11889,34 @@ int coop_lite_inv_sanitize(int64_t owner)
 static void coop_lite_inv_list_drop(int64_t owner, int64_t item)
 {
     int list_fld;
-    int n;
+    int64_t* h;
+    int scanned;
     int i;
     int k = 0;
+    bool hit = false;
 
     if (!obj_handle_is_valid(owner)) {
         return;
     }
-    list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
-        ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
-        : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
-    n = obj_arrayfield_length_get(owner, list_fld);
-    for (i = 0; i < n; i++) {
-        int64_t h = obj_arrayfield_handle_get(owner, list_fld, i);
-
-        if (h != item) {
-            if (k != i) {
-                obj_arrayfield_obj_set(owner, list_fld, k, h);
-            }
-            k++;
+    list_fld = coop_lite_inv_list_fld(owner);
+    scanned = coop_lite_arr_read_keys(owner, list_fld, &h);
+    if (h == NULL) {
+        return;
+    }
+    for (i = 0; i < scanned; i++) {
+        if (h[i] == item) {
+            hit = true;
+        } else if (h[i] != OBJ_HANDLE_NULL) {
+            h[k++] = h[i];
         }
     }
-    if (k != n) {
-        obj_arrayfield_length_set(owner, list_fld, k);
-        coop_lite_fix_inven_num(owner);
+    if (hit) {
+        /* PT54d: dense rewrite (length_set only removes one key) */
+        coop_lite_arr_rewrite(owner, list_fld, h, k, scanned);
+        obj_field_int32_set(owner, coop_lite_inv_num_fld(owner), k);
+        coop_lite_inv_selfcheck(owner, "list_drop");
     }
+    FREE(h);
 }
 
 static bool coop_lite_inv_list_has(int64_t owner, int64_t item)
@@ -11979,8 +12115,10 @@ static void coop_lite_client_apply_inven_batch(void)
                     ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
                     : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
 
+                coop_lite_inv_list_repair(owner); /* PT54d: dense before append */
                 obj_arrayfield_obj_set(owner, list_fld, obj_arrayfield_length_get(owner, list_fld), item);
                 coop_lite_fix_inven_num(owner);
+                coop_lite_inv_selfcheck(owner, "orphan_relist");
                 tig_debug_printf("CoopLite: inven: orphaned item re-listed in its owner\n");
                 moved++;
                 goto flags;
@@ -12195,6 +12333,14 @@ static void coop_lite_client_apply_inven_batch(void)
     multiplayer_unlock();
     coop_lite_obj_req_flush();
 
+    { /* PT54d */
+        int oc;
+        for (oc = 0; oc < coop_inv_owner_cnt; oc++) {
+            if (owner_obj[oc] != OBJ_HANDLE_NULL) {
+                coop_lite_inv_selfcheck(owner_obj[oc], "inven_sync_apply");
+            }
+        }
+    }
     /* §7 sends one batch per container: only log containers that changed. */
     if (refreshed != 0) {
         tig_debug_printf("CoopLite: inven sync: %d item fields refreshed (durability/charges/keys)\n", refreshed);
@@ -14314,6 +14460,7 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
                 coop_world_ghosts);
             coop_world_ghosts = 0;
         }
+        coop_lite_inv_selfcheck(player_get_local_pc_obj(), "world_state_prune"); /* PT54d */
         tig_debug_printf("CoopLite: world state applied: changed portals %d, containers %d, npcs %d, ground items %d; fetched %d; %d ground items listed; %d pruned\n",
             coop_world_stats[COOP_WORLD_PORTAL], coop_world_stats[COOP_WORLD_CONTAINER],
             coop_world_stats[COOP_WORLD_NPC], coop_world_stats[COOP_WORLD_GROUND_ITEM],
@@ -14723,6 +14870,47 @@ int coop_lite_inv_compact_handles(int64_t* h, int n)
         }
     }
     return k;
+}
+
+/* PT54d: by_key[i] = handle stored at key i (0 = absent/null), for
+   i < scanned. A healthy list has keys 0..count-1 non-null, unique,
+   nothing at/after count, and NUM == count. */
+int coop_lite_inv_keys_check(const int64_t* by_key, int scanned, int count, int num)
+{
+    int i;
+    int j;
+
+    if (num != count) {
+        return COOP_INV_KEYS_NUM_MISMATCH;
+    }
+    for (i = 0; i < scanned; i++) {
+        if (i < count && by_key[i] == 0) {
+            return COOP_INV_KEYS_HOLE;
+        }
+        if (i >= count && by_key[i] != 0) {
+            return COOP_INV_KEYS_STALE_TAIL;
+        }
+    }
+    for (i = 0; i < count && i < scanned; i++) {
+        for (j = 0; j < i; j++) {
+            if (by_key[j] == by_key[i]) {
+                return COOP_INV_KEYS_DUPLICATE;
+            }
+        }
+    }
+    return COOP_INV_KEYS_OK;
+}
+
+const char* coop_lite_inv_keys_check_name(int code)
+{
+    switch (code) {
+    case COOP_INV_KEYS_OK: return "ok";
+    case COOP_INV_KEYS_NUM_MISMATCH: return "NUM != list length";
+    case COOP_INV_KEYS_HOLE: return "null entry (hole)";
+    case COOP_INV_KEYS_STALE_TAIL: return "stale key past list length";
+    case COOP_INV_KEYS_DUPLICATE: return "duplicate entry";
+    }
+    return "?";
 }
 
 int coop_lite_skill_merge_training(int local_value, int host_value)
@@ -17941,6 +18129,7 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
     }
     if (n > 0 || refused > 0) {
         tig_debug_printf("CoopLite: inven: slot %d layout applied (%d moved, %d refused)\n", slot, n, refused);
+        coop_lite_inv_selfcheck(pc, "layout_apply"); /* PT54d */
     }
     /* Always echo: the client takes the echo as truth and stops sending. */
     coop_lite_host_sync_slot_inven(slot);

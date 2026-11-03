@@ -1164,6 +1164,14 @@ void coop_lite_host_pc_changed(int64_t pc, bool stats);
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source);
 /* PT48: drop null/duplicate inventory handles; returns new count. */
 int coop_lite_inv_compact_handles(int64_t* h, int n);
+/* PT54d: inventory list self-check over a key snapshot */
+#define COOP_INV_KEYS_OK 0
+#define COOP_INV_KEYS_NUM_MISMATCH 1
+#define COOP_INV_KEYS_HOLE 2
+#define COOP_INV_KEYS_STALE_TAIL 3
+#define COOP_INV_KEYS_DUPLICATE 4
+int coop_lite_inv_keys_check(const int64_t* by_key, int scanned, int count, int num);
+const char* coop_lite_inv_keys_check_name(int code);
 /* PT47 */
 int coop_lite_skill_merge_training(int local_value, int host_value);
 unsigned int coop_lite_pcs_portrait_pack(unsigned int flags, int portrait);
