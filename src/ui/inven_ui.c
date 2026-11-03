@@ -1077,6 +1077,12 @@ bool inven_ui_create(int64_t pc_obj, int64_t target_obj, int mode)
     qword_681458 = OBJ_HANDLE_NULL;
 
     sub_4A53B0(inven_ui_pc_obj, qword_6813A8);
+    /* PT53b: co-op lists can carry stale / non-item handles: drop them
+       before the vanilla fixer touches item fields. */
+    if (tig_net_is_coop_enabled()) {
+        coop_lite_inv_sanitize(inven_ui_pc_obj);
+        coop_lite_inv_sanitize(qword_6813A8);
+    }
     redraw_inven_fix_bad_inven_obj(inven_ui_pc_obj);
     redraw_inven_fix_bad_inven_obj(qword_6813A8);
 
@@ -2905,12 +2911,24 @@ void redraw_inven_fix_bad_inven_obj(int64_t obj)
         }
     }
 
-    for (i = 0; i < cnt; i++) {
-        item_obj = obj_arrayfield_handle_get(obj, inventory_list_fld, i);
-        if (redraw_inven_fix_bad_inven(item_obj, obj) && i < cnt - 1) {
-            cnt = obj_field_int32_get(obj, inventory_num_fld);
-            i--;
+    /* PT53b: a removal that did not shrink the list (non-item handle,
+       wrong parent) looped forever here. Bounded, and only retried when
+       the count really dropped. */
+    {
+        int guard = 2 * cnt + 8;
+
+        for (i = 0; i < cnt && guard-- > 0; i++) {
+            item_obj = obj_arrayfield_handle_get(obj, inventory_list_fld, i);
+            if (redraw_inven_fix_bad_inven(item_obj, obj) && i < cnt - 1) {
+                int now = obj_field_int32_get(obj, inventory_num_fld);
+
+                if (now < cnt) {
+                    cnt = now;
+                    i--;
+                }
+            }
         }
+        cnt = obj_field_int32_get(obj, inventory_num_fld);
     }
 
     for (i = 0; i < cnt; i++) {

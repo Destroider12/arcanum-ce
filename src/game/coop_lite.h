@@ -1551,4 +1551,6 @@ void coop_lite_set_travel_close_hook(void (*close_ui)(void)); /* PT52f */
 bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id);
 bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 
+int coop_lite_inv_sanitize(int64_t owner); /* PT53b */
+
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

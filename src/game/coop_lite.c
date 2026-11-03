@@ -11159,6 +11159,9 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
             item != OBJ_HANDLE_NULL ? item_inventory_location_get(item) : -1, pkt->size);
     }
     if (item != OBJ_HANDLE_NULL) {
+        multiplayer_lock();
+        coop_lite_inv_sanitize(owner); /* PT53b */
+        multiplayer_unlock();
         /* PT13: an open inventory window showed an empty grid for items
            that arrived after it was drawn. */
         ui_update_inven(owner);
@@ -11427,7 +11430,8 @@ static int coop_lite_inv_list_repair(int64_t owner)
         if (h[i] != OBJ_HANDLE_NULL && !obj_handle_is_valid(h[i])) {
             h[i] = OBJ_HANDLE_NULL; /* PT52g */
         } else if (h[i] != OBJ_HANDLE_NULL
-            && ((obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
+            && (!obj_type_is_item(obj_field_int32_get(h[i], OBJ_F_TYPE)) /* PT53b */
+                || (obj_field_int32_get(h[i], OBJ_F_FLAGS) & OF_DESTROYED) != 0
                 || !item_parent(h[i], &parent) || parent != owner)) {
             h[i] = OBJ_HANDLE_NULL;
         }
@@ -11442,7 +11446,78 @@ static int coop_lite_inv_list_repair(int64_t owner)
         coop_lite_fix_inven_num(owner);
     }
     FREE(h);
+    coop_lite_fix_inven_num(owner); /* PT53b: always, NUM drives every loop */
     return n - k;
+}
+
+/* PT53b: everything the inventory UI / weight code will iterate must be a
+   live item whose parent is the owner, at a legal location. Bounded. */
+int coop_lite_inv_sanitize(int64_t owner)
+{
+    int bad;
+    int n;
+    int i;
+    int critter;
+
+    if (owner == OBJ_HANDLE_NULL || !obj_handle_is_valid(owner)) {
+        return 0;
+    }
+    critter = obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE));
+    if (!critter && obj_field_int32_get(owner, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
+        return 0;
+    }
+    bad = coop_lite_inv_list_repair(owner);
+    if (!critter) {
+        return bad;
+    }
+    n = obj_arrayfield_length_get(owner, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
+    for (i = 0; i < n && i < 4096; i++) {
+        int64_t it = obj_arrayfield_handle_get(owner, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        int loc = item_inventory_location_get(it);
+
+        if ((loc >= 0 && loc < 120) || (loc >= 1000 && loc <= 1008) || (loc >= 2000 && loc <= 2009)) {
+            continue;
+        }
+        {
+            int fresh = item_find_free_inv_loc_for_insertion(it, owner);
+
+            tig_debug_printf("CoopLite: inven: sanitize: bad loc %d -> %d\n", loc, fresh);
+            obj_field_int32_set(it, OBJ_F_ITEM_INV_LOCATION, fresh >= 0 && fresh < 120 ? fresh : 0);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+/* PT53b: remove every occurrence of a handle from an owner's list. */
+static void coop_lite_inv_list_drop(int64_t owner, int64_t item)
+{
+    int list_fld;
+    int n;
+    int i;
+    int k = 0;
+
+    if (!obj_handle_is_valid(owner)) {
+        return;
+    }
+    list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
+        ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
+        : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
+    n = obj_arrayfield_length_get(owner, list_fld);
+    for (i = 0; i < n; i++) {
+        int64_t h = obj_arrayfield_handle_get(owner, list_fld, i);
+
+        if (h != item) {
+            if (k != i) {
+                obj_arrayfield_obj_set(owner, list_fld, k, h);
+            }
+            k++;
+        }
+    }
+    if (k != n) {
+        obj_arrayfield_length_set(owner, list_fld, k);
+        coop_lite_fix_inven_num(owner);
+    }
 }
 
 static bool coop_lite_inv_list_has(int64_t owner, int64_t item)
@@ -11551,6 +11626,14 @@ static void coop_lite_client_apply_inven_batch(void)
             }
             if (k < i) {
                 tig_debug_printf("CoopLite: inven sync: duplicate entry skipped\n");
+                continue;
+            }
+            if (item != OBJ_HANDLE_NULL
+                && (!obj_handle_is_valid(item) || !obj_type_is_item(obj_field_int32_get(item, OBJ_F_TYPE)))) {
+                /* PT53b: the OID maps to a non-item / dead handle: never
+                   insert it; ask for the real object instead. */
+                tig_debug_printf("CoopLite: inven sync: non-item handle for OID refused\n");
+                coop_lite_obj_blob_defer(e->oid);
                 continue;
             }
             if (item != OBJ_HANDLE_NULL && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
@@ -11688,6 +11771,16 @@ static void coop_lite_client_apply_inven_batch(void)
 
         if (item_parent(rings[i], &parent) && parent != OBJ_HANDLE_NULL) {
             item_remove(rings[i]);
+        }
+        /* PT53b: a ring item_remove missed stayed listed after the
+           deallocate - a dangling (type 0) handle the inventory UI spun on. */
+        for (o = 0; o < coop_inv_owner_cnt; o++) {
+            if (owner_obj[o] != OBJ_HANDLE_NULL) {
+                coop_lite_inv_list_drop(owner_obj[o], rings[i]);
+            }
+        }
+        if (local_pc != OBJ_HANDLE_NULL) {
+            coop_lite_inv_list_drop(local_pc, rings[i]);
         }
         obj_deallocate(rings[i]);
         coop_lite_obj_blob_defer((const uint8_t*)&oid);
@@ -16893,6 +16986,11 @@ unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc)
     for (k = 0; k < 24; k++) {
         h = (h ^ oid24[k]) * 16777619u;
     }
+    /* PT53b fallback: grid cells are not synced (each side keeps its own
+       backpack order); only wear/hotkey slots count. */
+    if (loc >= 0 && loc < 120) {
+        loc = -1;
+    }
     h = (h ^ (unsigned int)loc) * 16777619u;
     return h;
 }
@@ -16928,7 +17026,10 @@ int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_l
         }
         if (bad || found == -1) {
             plan[i] = COOP_LAYOUT_REFUSE;
-        } else if (have_loc[found] == want[i].inventory_location) {
+        } else if (have_loc[found] == want[i].inventory_location
+            || (have_loc[found] >= 0 && have_loc[found] < 120
+                && want[i].inventory_location >= 0 && want[i].inventory_location < 120)) {
+            /* PT53b: grid -> grid is a no-op (backpack order is local). */
             plan[i] = COOP_LAYOUT_NOOP;
         } else {
             plan[i] = found;
@@ -17046,6 +17147,30 @@ static bool coop_lite_layout_place_ok(int64_t pc, int64_t item, int loc)
     return item_inventory_slots_has_room_for(item, pc, loc, slots);
 }
 
+/* PT53b: each distinct (OID, loc, reason) refusal is logged once. */
+static void coop_lite_layout_refusal_log(const uint8_t* oid24, int loc, const char* why)
+{
+    static unsigned int seen[128];
+    static int nseen;
+    unsigned int key = coop_lite_inven_layout_term(oid24, loc) ^ (unsigned int)(size_t)why;
+    char oid_str[40];
+    ObjectID oid;
+    int i;
+
+    for (i = 0; i < nseen; i++) {
+        if (seen[i] == key) {
+            return;
+        }
+    }
+    seen[nseen++ % 128] = key;
+    if (nseen > 128) {
+        nseen = 128;
+    }
+    memcpy(&oid, oid24, sizeof(oid));
+    objid_id_to_str(oid_str, oid);
+    tig_debug_printf("CoopLite: inven: layout refused %s loc %d: %s\n", oid_str, loc, why);
+}
+
 void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
 {
     static uint8_t have_oid[COOP_LAYOUT_HAVE_MAX][24];
@@ -17103,6 +17228,8 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
 
         if (plan[i] == COOP_LAYOUT_REFUSE) {
             refused++;
+            coop_lite_layout_refusal_log(pkt->entries[i].oid, pkt->entries[i].inventory_location,
+                "item not (uniquely) in host list or bad loc");
             continue;
         }
         if (plan[i] == COOP_LAYOUT_NOOP) {
@@ -17111,6 +17238,8 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         item = have_obj[plan[i]];
         if (IS_WEAR_INV_LOC(have_loc[plan[i]]) && item_check_remove(item) != ITEM_CANNOT_OK) {
             refused++; /* e.g. cursed: stays worn */
+            coop_lite_layout_refusal_log(pkt->entries[i].oid, pkt->entries[i].inventory_location,
+                "worn item cannot be removed");
             continue;
         }
         moved_item[n] = item;
@@ -17127,8 +17256,19 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         for (i = 0; i < n; i++) {
             int loc = want_loc[i];
 
+            if (!coop_lite_layout_place_ok(pc, moved_item[i], loc) && loc >= 0 && loc < 120) {
+                /* PT53b: grid cells are local; any free cell will do. */
+                int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);
+
+                if (free_loc >= 0 && free_loc < 120) {
+                    loc = free_loc;
+                }
+            }
             if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
+                ObjectID roid = obj_get_id(moved_item[i]);
+
                 refused++;
+                coop_lite_layout_refusal_log((const uint8_t*)&roid, loc, "slot not legal on host");
                 loc = old_loc[i];
                 if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
                     int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);

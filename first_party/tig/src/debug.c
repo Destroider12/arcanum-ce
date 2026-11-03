@@ -45,8 +45,45 @@ static void tig_debug_log_write(const char* str)
     }
     if (tig_debug_log_file != NULL) {
         unsigned long long ms = (unsigned long long)SDL_GetTicks();
+        /* PT53b: spam guard. Identical consecutive lines collapse into one
+           "repeated N times" line; past 20 MB only co-op/net lines are kept,
+           and nothing past 40 MB. */
+        static char last[1024];
+        static unsigned long long repeats;
+        static unsigned long long written;
+        static bool capped;
+        int n;
 
-        fprintf(tig_debug_log_file, "[%llu.%03llu] %s", ms / 1000ULL, ms % 1000ULL, str);
+        if (str[0] == '\n' && str[1] == '\0' && repeats != 0) {
+            return; /* tail of a collapsed over-long line */
+        }
+        if (str[0] != '\n' || str[1] != '\0') {
+            if (SDL_strcmp(str, last) == 0) {
+                repeats++;
+                return;
+            }
+            if (repeats != 0) {
+                n = fprintf(tig_debug_log_file, "[%llu.%03llu] (last message repeated %llu times)\n",
+                    ms / 1000ULL, ms % 1000ULL, repeats);
+                written += n > 0 ? (unsigned long long)n : 0;
+                repeats = 0;
+            }
+            SDL_strlcpy(last, str, sizeof(last));
+        }
+        if (written >= 20ULL * 1024 * 1024) {
+            if (!capped) {
+                capped = true;
+                fprintf(tig_debug_log_file, "[%llu.%03llu] LOG CAP: 20 MB reached - only CoopLite/tig_net lines from now on\n",
+                    ms / 1000ULL, ms % 1000ULL);
+                fflush(tig_debug_log_file);
+            }
+            if (written >= 40ULL * 1024 * 1024
+                || (SDL_strstr(str, "CoopLite") == NULL && SDL_strstr(str, "tig_net") == NULL)) {
+                return;
+            }
+        }
+        n = fprintf(tig_debug_log_file, "[%llu.%03llu] %s", ms / 1000ULL, ms % 1000ULL, str);
+        written += n > 0 ? (unsigned long long)n : 0;
         fflush(tig_debug_log_file);
     }
 }

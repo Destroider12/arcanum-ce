@@ -261,9 +261,10 @@ static int test_pt53a_plan(void)
     /* illegal location */
     memcpy(w[6].oid, have[0], 24);
     w[6].inventory_location = 1500;
-    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 7, plan) == 3, "3 legal moves");
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 7, plan) == 2, "2 legal moves (PT53b: grid->grid is a no-op)");
     CHECK(plan[0] == COOP_LAYOUT_REFUSE, "stale OID refused");
-    CHECK(plan[1] == 1 && plan[2] == 2 && plan[3] == 3, "hotbar/grid moves map to the real list");
+    CHECK(plan[1] == 1 && plan[2] == 2, "hotbar/grid moves map to the real list");
+    CHECK(plan[3] == COOP_LAYOUT_NOOP, "PT53b: grid reorder not synced");
     CHECK(plan[4] == COOP_LAYOUT_REFUSE, "duplicate request refused");
     CHECK(plan[5] == COOP_LAYOUT_REFUSE, "ambiguous OID refused");
     CHECK(plan[6] == COOP_LAYOUT_REFUSE, "illegal location refused");
@@ -281,6 +282,62 @@ static int test_pt53a_plan(void)
     CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 1, plan) == 0
             && plan[0] == COOP_LAYOUT_REFUSE,
         "refused again, still 0 moves");
+    return 0;
+}
+
+/* PT53b: reload/rejoin + client sort + weapon swap + host gift (blob
+   later): grid order never produces moves or a resend; equip does. */
+static int test_pt53b(void)
+{
+    static uint8_t have[4][24];
+    int host_loc[4] = { 1004, 3, 10, 20 }; /* sword worn, pack */
+    int sorted[4] = { 1004, 40, 0, 77 };   /* client sorted its pack */
+    PacketCoopInvenLayoutEntry w[4];
+    int plan[4];
+    unsigned int hh = 0;
+    unsigned int lh = 0;
+    int i;
+
+    memset(have, 0, sizeof(have));
+    for (i = 0; i < 4; i++) {
+        have[i][0] = (uint8_t)(i + 10);
+        hh += coop_lite_inven_layout_term(have[i], host_loc[i]);
+        lh += coop_lite_inven_layout_term(have[i], sorted[i]);
+        memcpy(w[i].oid, have[i], 24);
+        w[i].inventory_location = sorted[i];
+    }
+    CHECK(hh == lh, "sorted pack hashes like the host: nothing to send");
+    CHECK(!coop_lite_inven_layout_send_due(lh, hh, 0), "sort: no layout");
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 0, "sort: 0 moved");
+    /* weapon swap: worn sword to pack, axe (item 1) wielded */
+    w[0].inventory_location = 50;
+    w[1].inventory_location = 1004;
+    lh = 0;
+    for (i = 0; i < 4; i++) {
+        lh += coop_lite_inven_layout_term(have[i], w[i].inventory_location);
+    }
+    CHECK(coop_lite_inven_layout_send_due(lh, hh, 0), "swap: sent");
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 2
+            && plan[0] == 0 && plan[1] == 1,
+        "swap: 2 equip moves");
+    /* host applied + echoed: host hash == local -> next layout empty */
+    host_loc[0] = 7;
+    host_loc[1] = 1004;
+    hh = 0;
+    for (i = 0; i < 4; i++) {
+        hh += coop_lite_inven_layout_term(have[i], host_loc[i]);
+    }
+    CHECK(hh == lh && !coop_lite_inven_layout_send_due(lh, hh, lh), "after echo: converged");
+    /* host gift whose blob has not arrived: client does not list it, host
+       does -> the client's layout omits it, no refusal, still converged */
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 0, "echo: 0 moved");
+    /* unknown OID (stale view) refused deterministically */
+    w[0].oid[0] = 99;
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 1, plan) == 0
+            && plan[0] == COOP_LAYOUT_REFUSE,
+        "stale refused");
+    /* inventory open: only legal slots survive validation */
+    CHECK(!coop_lite_inven_layout_loc_ok(-1) && !coop_lite_inven_layout_loc_ok(5000), "bad loc caught");
     return 0;
 }
 
@@ -323,7 +380,7 @@ static int test_pt53(void)
     CHECK(coop_lite_inven_layout_send_due(6, 5, 5), "new local move: send");
     CHECK(!coop_lite_inven_layout_send_due(6, 5, 6), "refused layout acked by the echo: never resent");
     CHECK(coop_lite_inven_layout_send_due(7, 5, 6), "a later move is sent again");
-    if (test_pt53a_plan()) {
+    if (test_pt53a_plan() || test_pt53b()) {
         return 1;
     }
     CHECK(strcmp(coop_lite_lang_pick("\xD0\x9F\xD1\x80 / Hi", false), "Hi") == 0, "EN after ' / '");

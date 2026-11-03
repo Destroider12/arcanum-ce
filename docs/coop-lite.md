@@ -2341,3 +2341,20 @@ Regression fix for the PT53 layout intent (client crash after a host save load a
   echo and at each send, so a refused layout is never resent; only a new local move is sent.
   The inventory sync apply skips a duplicate OID entry and repairs every owner's list at the
   end.
+
+## PT53b: client inventory crash / layout churn
+
+- Crash: `redraw_inven_fix_bad_inven_obj` looped forever on a non-item
+  (type 0, dangling) handle in the PC's list: `item_parent` failed,
+  `item_force_remove` removed nothing, the loop did `i--` again. The loop is
+  now bounded and only retries when the list really shrank.
+- Opening the inventory in co-op first runs `coop_lite_inv_sanitize`: drops
+  invalid / non-item / destroyed / foreign-parent / duplicate handles, fixes
+  NUM, moves illegal locations to a free cell. Also run after each obj blob.
+- Sync never inserts a handle whose OID maps to a non-item; it asks for the
+  blob instead. Key rings are removed from every list before deallocation.
+- Layout fallback: grid cells are not synced (hash and plan ignore grid
+  order); only wear/hotkey moves apply. A sort sends nothing; after the echo
+  the client converges. Each distinct refusal is logged once with OID+reason.
+- Log file: identical consecutive lines collapse to "last message repeated N
+  times"; above 20 MB only CoopLite/tig_net lines are written (hard stop 40 MB).
