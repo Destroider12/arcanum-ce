@@ -7042,6 +7042,9 @@ void coop_lite_follow_toggle(void) { }
 #endif
 
 static void coop_travel_tick(unsigned int now_ms);
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_world_full_tick(unsigned int now_ms);
+#endif
 
 void coop_lite_ping(unsigned int now_ms)
 {
@@ -7053,6 +7056,7 @@ void coop_lite_ping(unsigned int now_ms)
     PacketCoopPcPos pkt;
 
     coop_lite_follow_tick(now_ms);
+    coop_world_full_tick(now_ms); /* PT51 */
 
     if (coop_lite_host_left_menu_due(coop_host_left_menu_armed, coop_host_left_menu_ms, now_ms)) {
         coop_host_left_menu_armed = false;
@@ -12780,7 +12784,7 @@ static bool coop_dev_mutate_dagger_valid;
 
 static void coop_lite_world_flush(PacketCoopWorldState* out, int slot, bool last, bool* first)
 {
-    out->flags = (*first ? COOP_WORLD_F_FIRST : 0u) | (last ? COOP_WORLD_F_LAST : 0u);
+    out->flags = (out->flags & COOP_WORLD_F_FULL) | (*first ? COOP_WORLD_F_FIRST : 0u) | (last ? COOP_WORLD_F_LAST : 0u);
     tig_net_send_app(out, coop_lite_world_state_size(out->count), slot);
     *first = false;
     out->count = 0;
@@ -12888,18 +12892,26 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
 #endif
 }
 
-void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
-{
+static int coop_world_full_key[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static int64_t coop_world_full_pc[8];
+static bool coop_world_full_active[8];
+static int coop_world_full_cursor[8];
+static unsigned int coop_world_full_ms[8];
+
 #ifndef COOP_LITE_TEST_STUBS
+/* PT51: one WORLD_STATE pass. full = whole loaded map (no radius), paged:
+   resumes after *cursor visited objects and stops after max_chunks chunks
+   (built at send time, so a page never carries older state than what the
+   live event packets already sent). Returns true when the snapshot is done. */
+static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* cursor, int max_chunks)
+{
+
     PacketCoopWorldState* out;
     int64_t containers[COOP_WORLD_MAX_CONTAINERS];
     int num_containers = 0;
-    int64_t pc;
     int64_t center;
     int64_t obj;
     int iter;
-    int slot;
-    int key;
     bool first = true;
     int n_portal = 0;
     int n_container = 0;
@@ -12908,36 +12920,20 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     int n_trap = 0;
     Uint64 t0;
 
-    if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
-        return;
-    }
-    slot = sub_52A530();
-    if (slot <= 0 || slot >= 8) {
-        return;
-    }
-    pc = sub_4A2B60(slot);
-    if (pc == OBJ_HANDLE_NULL) {
-        return;
-    }
-    key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
-    if (pkt->map != key) {
-        tig_debug_printf("CoopLite: world req from slot %d for map %d (host %d) — ignored\n", slot, pkt->map, key);
-        return;
-    }
-    if (coop_world_req_host_seen[slot]
-        && !coop_lite_interval_elapsed(coop_world_req_host_ms[slot], coop_obj_now_ms, 3000u)) {
-        return;
-    }
-    coop_world_req_host_seen[slot] = true;
-    coop_world_req_host_ms[slot] = coop_obj_now_ms;
+    int visited = 0;
+    int chunks = 0;
+    bool done = true;
 
+    first = !full || *cursor == 0;
     t0 = SDL_GetTicksNS();
     center = obj_field_int64_get(pc, OBJ_F_LOCATION);
     out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
     memset(out, 0, offsetof(PacketCoopWorldState, entries));
     out->type = PACKET_COOP_WORLD_STATE;
     out->map = key;
-    coop_world_cur_ground_cnt = 0;
+    if (!full) {
+        coop_world_cur_ground_cnt = 0;
+    }
 
     if (obj_inst_first(&obj, &iter)) {
         do {
@@ -12947,6 +12943,17 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             CoopWorldEntry* e;
             ObjectID oid;
 
+            if (full) {
+                if (visited < *cursor) {
+                    visited++;
+                    continue;
+                }
+                if (chunks >= max_chunks) {
+                    done = false;
+                    break;
+                }
+                visited++;
+            }
             if ((flags & (OF_DESTROYED | OF_INVENTORY)) != 0) {
                 continue;
             }
@@ -12960,7 +12967,9 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             /* PT31: dead / switched-off NPCs map-wide (a rejoining client's
                save still has them alive), the living ones in reach (so the
                client can drop what the host destroyed). */
-            if (type == OBJ_TYPE_NPC && (critter_is_dead(obj) || (flags & OF_OFF) != 0)) {
+            if (full) {
+                /* PT51: whole map */
+            } else if (type == OBJ_TYPE_NPC && (critter_is_dead(obj) || (flags & OF_OFF) != 0)) {
                 /* PT37: a window (COOP_WORLD_DEAD_RADIUS), not the whole map; the 100 ms
                    NPC_POS stream (DEAD flag) and the next WORLD_REQ cover the rest. */
                 if (location_dist(loc, center) > COOP_WORLD_DEAD_RADIUS) {
@@ -13009,7 +13018,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             default:
                 e->kind = COOP_WORLD_GROUND_ITEM;
                 e->proto = sub_49B290(obj);
-                if (coop_world_cur_ground_cnt < COOP_WORLD_GONE_MAX) {
+                if (!full && coop_world_cur_ground_cnt < COOP_WORLD_GONE_MAX) {
                     coop_world_cur_ground[coop_world_cur_ground_cnt++] = oid;
                 }
                 e->kind_flags = coop_lite_is_stackable(obj) ? 1u : 0u;
@@ -13025,13 +13034,27 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
                 break;
             }
             if (++out->count == COOP_WORLD_CHUNK) {
+                out->flags = full ? COOP_WORLD_F_FULL : 0u;
                 coop_lite_world_flush(out, slot, false, &first);
+                chunks++;
             }
         } while (obj_inst_next(&obj, &iter));
     }
-    coop_lite_world_flush(out, slot, true, &first);
+    if (full) {
+        *cursor = visited;
+    }
+    if (done || out->count > 0) {
+        out->flags = full ? COOP_WORLD_F_FULL : 0u;
+        if (done) {
+            coop_lite_world_flush(out, slot, true, &first);
+        } else {
+            coop_lite_world_flush(out, slot, false, &first);
+        }
+    }
     FREE(out);
-    coop_lite_host_world_ground_report(slot, center, key);
+    if (!full) {
+        coop_lite_host_world_ground_report(slot, center, key);
+    }
     if (coop_dev_mutate_dagger_valid && coop_lite_env("ARCANUM_COOP_WORLD_TRACE") != NULL) {
         int64_t d = obj_pool_perm_lookup(coop_dev_mutate_dagger);
         int64_t parent = OBJ_HANDLE_NULL;
@@ -13053,12 +13076,122 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
             coop_lite_host_send_inven_batch(slot, &containers[i], 1);
         }
     }
-    tig_debug_printf("CoopLite: world state → slot %d: %d portals, %d containers, %d npcs, %d ground items, %d traps (%.2f ms)\n",
-        slot, n_portal, n_container, n_npc, n_item, n_trap, (double)(SDL_GetTicksNS() - t0) / 1e6);
+    if (full && !done) {
+        return false;
+    }
+    tig_debug_printf("CoopLite: world state%s → slot %d: %d portals, %d containers, %d npcs, %d ground items, %d traps (%.2f ms)\n",
+        full ? " (full map, last page)" : "", slot, n_portal, n_container, n_npc, n_item, n_trap, (double)(SDL_GetTicksNS() - t0) / 1e6);
+    return true;
+}
+#endif
+
+#ifndef COOP_LITE_TEST_STUBS
+/* PT51 host: page pending full-map snapshots (rate-limited, one page per
+   slot per COOP_WORLD_FULL_PAGE_MS). Cancel on PC change / map change; the
+   client's next WORLD_REQ (map load) starts a fresh one. */
+static void coop_world_full_tick(unsigned int now_ms)
+{
+    int slot;
+    int key;
+
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+    key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc;
+
+        pc = sub_4A2B60(slot);
+        if (pc == OBJ_HANDLE_NULL) {
+            /* disconnected: a rejoin gets a full snapshot again */
+            coop_world_full_active[slot] = false;
+            coop_world_full_key[slot] = -1;
+            continue;
+        }
+        if (!coop_world_full_active[slot]) {
+            continue;
+        }
+        if (pc != coop_world_full_pc[slot] || coop_world_full_key[slot] != key) {
+            coop_world_full_active[slot] = false;
+            coop_world_full_key[slot] = -1;
+            continue;
+        }
+        if (coop_world_full_ms[slot] != 0
+            && !coop_lite_interval_elapsed(coop_world_full_ms[slot], now_ms, COOP_WORLD_FULL_PAGE_MS)) {
+            continue;
+        }
+        coop_world_full_ms[slot] = now_ms != 0 ? now_ms : 1;
+        if (coop_world_host_emit(slot, key, pc, true, &coop_world_full_cursor[slot], 1)) {
+            coop_world_full_active[slot] = false;
+        }
+    }
+}
+#endif
+
+void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    PacketCoopWorldState* out;
+    int64_t containers[COOP_WORLD_MAX_CONTAINERS];
+    int num_containers = 0;
+    int64_t pc;
+    int64_t center;
+    int64_t obj;
+    int iter;
+    int slot;
+    int key;
+    bool first = true;
+    int n_portal = 0;
+    int n_container = 0;
+    int n_npc = 0;
+    int n_item = 0;
+    int n_trap = 0;
+    Uint64 t0;
+
+    if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    key = coop_lite_pose_map_key(map_current_map(), coop_map_gen);
+    if (pkt->map != key) {
+        tig_debug_printf("CoopLite: world req from slot %d for map %d (host %d) — ignored\n", slot, pkt->map, key);
+        return;
+    }
+    if (coop_world_req_host_seen[slot]
+        && !coop_lite_interval_elapsed(coop_world_req_host_ms[slot], coop_obj_now_ms, 3000u)) {
+        return;
+    }
+    coop_world_req_host_seen[slot] = true;
+    coop_world_req_host_ms[slot] = coop_obj_now_ms;
+
+    /* PT51: first request for this map (join, rejoin, map/area entry) gets
+       the whole-map snapshot, paged from the tick. No radius reply while a
+       full stream runs: its FIRST would reset the client's snapshot. */
+    if (coop_world_full_active[slot]) {
+        return;
+    }
+    if (coop_world_full_key[slot] != key || coop_world_full_pc[slot] != pc) {
+        coop_world_full_key[slot] = key;
+        coop_world_full_pc[slot] = pc;
+        coop_world_full_active[slot] = true;
+        coop_world_full_cursor[slot] = 0;
+        coop_world_full_ms[slot] = 0;
+        tig_debug_printf("CoopLite: PT51 full-map world snapshot → slot %d (map key %d)\n", slot, key);
+        return;
+    }
+    (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
 #else
     (void)pkt;
 #endif
 }
+
 
 #ifndef COOP_LITE_TEST_STUBS
 /* Review P0-3: was MALLOC'd once and reused (never freed at exit). Static
@@ -13070,6 +13203,10 @@ static CoopOidSet coop_world_npc_seen_set;
 static CoopOidSet* const coop_world_npc_seen = &coop_world_npc_seen_set;
 static bool coop_world_rx_active;
 static int coop_world_rx_map;
+static bool coop_world_rx_full; /* PT51: this snapshot is the full-map one */
+static int64_t coop_world_rx_sectors[COOP_WORLD_FULL_SECTORS];
+static int coop_world_rx_sector_cnt;
+static bool coop_world_rx_sector_overflow;
 static int coop_world_stats[6]; /* per kind: applied changes */
 static int coop_world_req_key = -1;
 static unsigned int coop_world_req_ms;
@@ -13250,6 +13387,16 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
     }
 }
 
+/* PT51: full snapshot = only sectors the host listed something in (it had
+   them loaded); radius snapshot = PRUNE_RADIUS around the request point. */
+static bool coop_world_prune_in_scope(int64_t loc, int64_t center)
+{
+    if (coop_world_rx_full) {
+        return coop_lite_sector_list_has(coop_world_rx_sectors, coop_world_rx_sector_cnt, sector_id_from_loc(loc));
+    }
+    return location_dist(loc, center) <= COOP_WORLD_PRUNE_RADIUS;
+}
+
 /* LAST chunk: ground items near our PC the host did not list are gone. */
 static int coop_lite_world_prune(void)
 {
@@ -13265,6 +13412,9 @@ static int coop_lite_world_prune(void)
         return 0;
     }
     center = coop_world_req_center; /* PT32: not the current position */
+    if (coop_world_rx_full && coop_world_rx_sector_overflow) {
+        return 0;
+    }
     if (obj_inst_first(&obj, &iter)) {
         do {
             unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
@@ -13277,7 +13427,7 @@ static int coop_lite_world_prune(void)
                 /* PT31: an NPC in reach the host did not list is gone there
                    (corpse decayed, destroyed): a stale copy from our save. */
                 if (!coop_world_npc_seen->overflow
-                    && location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), center) <= COOP_WORLD_PRUNE_RADIUS) {
+                    && coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
                     oid = obj_get_id(obj);
                     if (!coop_oid_set_has(coop_world_npc_seen, (const uint8_t*)&oid) && num < 256) {
                         doomed[num++] = obj;
@@ -13293,7 +13443,7 @@ static int coop_lite_world_prune(void)
                     && sub_49B290(obj) == BP_JUNK_PILE)) {
                 continue;
             }
-            if (location_dist(obj_field_int64_get(obj, OBJ_F_LOCATION), center) > COOP_WORLD_PRUNE_RADIUS) {
+            if (!coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
                 continue;
             }
             oid = obj_get_id(obj);
@@ -13341,6 +13491,15 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         coop_world_fetched = 0;
         coop_world_rx_active = true;
         coop_world_rx_map = pkt->map;
+        coop_world_rx_full = (pkt->flags & COOP_WORLD_F_FULL) != 0;
+        coop_world_rx_sector_cnt = 0;
+        coop_world_rx_sector_overflow = false;
+    }
+    if (coop_world_rx_full) {
+        for (i = 0; i < pkt->count; i++) {
+            coop_world_rx_sector_overflow |= !coop_lite_sector_list_add(coop_world_rx_sectors,
+                &coop_world_rx_sector_cnt, COOP_WORLD_FULL_SECTORS, sector_id_from_loc(pkt->entries[i].loc));
+        }
     }
     if (!coop_world_rx_active || coop_world_rx_map != pkt->map) {
         return;
@@ -13441,6 +13600,15 @@ static void coop_lite_world_state_reset(void)
 {
     coop_lite_client_pickup_reset();
     memset(coop_world_req_host_seen, 0, sizeof(coop_world_req_host_seen));
+    {
+        int i;
+
+        for (i = 0; i < 8; i++) {
+            coop_world_full_key[i] = -1; /* PT51: every session starts with a full snapshot */
+            coop_world_full_active[i] = false;
+            coop_world_full_pc[i] = OBJ_HANDLE_NULL;
+        }
+    }
     coop_world_rx_active = false;
     coop_world_req_key = -1;
     coop_world_was_ready = false;
@@ -16203,3 +16371,28 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
 bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }
 static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 #endif
+
+/* PT51: small sector-id set (pure; tests). add: false only when full. */
+bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id)
+{
+    if (coop_lite_sector_list_has(list, *cnt, id)) {
+        return true;
+    }
+    if (*cnt >= max) {
+        return false;
+    }
+    list[(*cnt)++] = id;
+    return true;
+}
+
+bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id)
+{
+    int i;
+
+    for (i = 0; i < cnt; i++) {
+        if (list[i] == id) {
+            return true;
+        }
+    }
+    return false;
+}

@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include <enet/enet.h>
+#ifdef ARCANUM_UPNP
+#include "net/coop_upnp.h" /* PT51 */
+#endif
 
 #ifdef TIG_NET_TEST_STUB_DEBUG
 #include <stdio.h>
@@ -419,7 +422,15 @@ bool tig_net_describe_coop_mode(char* buf, size_t size)
         return false;
     }
     if (want_host) {
+#ifdef ARCANUM_UPNP
+        char upnp[128];
+
+        coop_upnp_state(); /* reaps a finished worker, logs once */
+        coop_upnp_describe(upnp, sizeof(upnp));
+        snprintf(buf, size, "Co-op Mode: Hosting on port %d - %s", listen_port, upnp);
+#else
         snprintf(buf, size, "Co-op Mode: Hosting on port %d", listen_port);
+#endif
     } else if (want_join && active) {
         snprintf(buf, size, "Co-op Mode: Connected to %s:%d", join_host, join_port);
     } else if (want_join) {
@@ -523,6 +534,9 @@ void tig_net_start_server(void)
     clients[0].active = true;
     strncpy(clients[0].name, local_name, TIG_NET_MAX_NAME - 1);
     tig_debug_printf("tig_net: hosting on port %d (max %d)\n", listen_port, max_players);
+#ifdef ARCANUM_UPNP
+    coop_upnp_start(listen_port); /* PT51: async, never blocks */
+#endif
     tig_net_fire_event(TIG_NET_EVENT_CONNECT, 0, NULL, 0);
 }
 
@@ -613,6 +627,12 @@ int tig_net_connect_configured(void)
 void tig_net_reset_connection(void)
 {
     int i;
+
+#ifdef ARCANUM_UPNP
+    if (is_host) {
+        coop_upnp_stop(); /* PT51: drop the router mapping */
+    }
+#endif
 
     if (enet_host != NULL) {
         if (tig_net_send_pending_flush) {

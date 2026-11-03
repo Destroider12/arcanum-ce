@@ -3,6 +3,7 @@
  * Host/client via fork; verifies worldmap/time/save gates, talk classify,
  * per-slot follow offset, and PACKET_COOP_FOLLOW_HOST.
  */
+#include "net/coop_upnp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2204,6 +2205,32 @@ int main(int argc, char** argv)
             return 1;
         }
         printf("PT50 travel ready check OK\n");
+    }
+    /* PT51: full-map snapshot sector scope + UPnP status line */
+    {
+        int64_t list[3];
+        int cnt = 0;
+        char buf[128];
+
+        if (!coop_lite_sector_list_add(list, &cnt, 3, 10) || !coop_lite_sector_list_add(list, &cnt, 3, 10)
+            || cnt != 1 || !coop_lite_sector_list_add(list, &cnt, 3, 11) || !coop_lite_sector_list_add(list, &cnt, 3, 12)
+            || coop_lite_sector_list_add(list, &cnt, 3, 13) || !coop_lite_sector_list_has(list, cnt, 11)
+            || coop_lite_sector_list_has(list, cnt, 13) || COOP_OID_SET_MAX < 4096
+            || (COOP_WORLD_F_FULL & (COOP_WORLD_F_FIRST | COOP_WORLD_F_LAST)) != 0) {
+            fprintf(stderr, "PT51 sector list wrong\n");
+            return 1;
+        }
+        coop_upnp_format(COOP_UPNP_MAPPED, 7777, "1.2.3.4", NULL, buf, sizeof(buf));
+        if (strstr(buf, "7777") == NULL || strstr(buf, "1.2.3.4") == NULL) {
+            fprintf(stderr, "PT51 upnp status wrong: %s\n", buf);
+            return 1;
+        }
+        coop_upnp_format(COOP_UPNP_FAILED, 7777, NULL, "no UPnP router found", buf, sizeof(buf));
+        if (strstr(buf, "failed") == NULL || coop_upnp_state() != COOP_UPNP_OFF) {
+            fprintf(stderr, "PT51 upnp fail status wrong: %s\n", buf);
+            return 1;
+        }
+        printf("PT51 full snapshot scope + upnp status OK\n");
     }
     return 0;
     }

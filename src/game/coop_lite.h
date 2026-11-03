@@ -483,6 +483,8 @@ void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
 #define COOP_WORLD_CHUNK 64
 #define COOP_WORLD_F_FIRST 0x1
 #define COOP_WORLD_F_LAST 0x2
+#define COOP_WORLD_F_FULL 0x4 /* PT51: whole-map snapshot page (client prunes by host-listed sectors) */
+#define COOP_WORLD_FULL_PAGE_MS 100u /* PT51: one 64-entry page per slot per 100 ms */
 
 typedef enum CoopWorldKind {
     COOP_WORLD_PORTAL = 1,
@@ -613,7 +615,7 @@ bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
     unsigned int last_req_ms, unsigned int now_ms);
 
 /* Set of OIDs listed by the snapshot (client prune). */
-#define COOP_OID_SET_MAX 1024
+#define COOP_OID_SET_MAX 4096 /* PT51: was 1024; a full-map snapshot lists more */
 typedef struct CoopOidSet {
     int count;
     bool overflow;
@@ -1460,5 +1462,10 @@ bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size);
 /* Client: ask the host to end own maintained spell (host mt_id). True if sent. */
 bool coop_lite_client_spell_end(int mt_id);
 void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* text), void (*hide)(void));
+
+/* PT51: full-map snapshot sector scope (client prune). */
+#define COOP_WORLD_FULL_SECTORS 256
+bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id);
+bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

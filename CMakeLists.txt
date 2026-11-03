@@ -18,6 +18,14 @@ add_subdirectory("third_party/zlib" EXCLUDE_FROM_ALL)
 # do not require a C++ toolchain just for networking.
 add_subdirectory("third_party/enet" EXCLUDE_FROM_ALL)
 
+# PT51: optional UPnP port mapping for the co-op host. miniupnpc 2.2.8
+# (BSD-3-Clause) vendored under third_party/miniupnpc; static, C only, links
+# ws2_32 + iphlpapi on Windows (mingw-w64 OK).
+option(ARCANUM_UPNP "Co-op host maps its UDP port via UPnP (miniupnpc)" ON)
+if(ARCANUM_UPNP)
+    add_subdirectory("third_party/miniupnpc" EXCLUDE_FROM_ALL)
+endif()
+
 add_subdirectory("first_party/bink_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/mss_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/tig" EXCLUDE_FROM_ALL)
@@ -326,6 +334,8 @@ set(SRCS
     "src/ui/written_ui.h"
     "src/net_compat.h"
     "src/net/tig_net.c"
+    "src/net/coop_upnp.c"
+    "src/net/coop_upnp.h"
     "src/net/tig_net.h"
     "src/main.c"
 )
@@ -360,6 +370,10 @@ target_link_libraries(arcanum-ce PUBLIC
     ${TIG_LIBRARY}
     enet
 )
+if(ARCANUM_UPNP)
+    target_link_libraries(arcanum-ce PRIVATE miniupnpc)
+    target_compile_definitions(arcanum-ce PRIVATE ARCANUM_UPNP=1)
+endif()
 
 # Headless transport loopback test (no game data / SDL window required).
 add_executable(tig_net_loopback_test
@@ -392,6 +406,7 @@ endif()
 
 add_executable(coop_lite_policy_test
     "tests/coop_lite_policy_test.c"
+    "src/net/coop_upnp.c"
     "src/net/tig_net.c"
     "src/game/coop_lite.c"
 )
