@@ -17629,10 +17629,17 @@ static unsigned int coop_lite_local_layout_hash(int64_t pc, PacketCoopInvenLayou
         ObjectID oid;
         int loc;
 
-        if (item == OBJ_HANDLE_NULL || coop_lite_is_stackable(item)) {
+        if (item == OBJ_HANDLE_NULL) {
             continue;
         }
         oid = obj_get_id(item);
+        if (coop_lite_is_stackable(item)) {
+            /* PT54b: gold / ammo stacks are local objects on a client (the
+               host's have other OIDs and travel as totals); name the host's
+               stack so it can be placed. Not in the host's echo either, so
+               the client's cell for a stack is the truth on both sides. */
+            coop_lite_client_map_stack_oid(&oid);
+        }
         loc = item_inventory_location_get(item);
         h += coop_lite_inven_layout_term((const uint8_t*)&oid, loc);
         if (out != NULL && out->count < COOP_INVEN_LAYOUT_MAX) {
@@ -17815,9 +17822,8 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         int64_t parent = OBJ_HANDLE_NULL;
         ObjectID oid;
 
-        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc
-            || coop_lite_is_stackable(item)) {
-            continue;
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc) {
+            continue; /* PT54b: gold / ammo stacks are placed too */
         }
         oid = obj_get_id(item);
         memcpy(have_oid[nhave], &oid, 24);

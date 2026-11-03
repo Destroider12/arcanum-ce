@@ -2496,3 +2496,18 @@ bits), updated `test_pt53a_plan`/`test_pt53b` for grid sync.
   after join / rejoin / load; the client resends its own 4x too. PC_STATS now
   carries `base_aid` (OBJ_F_AID) both ways. Logs: `portrait: slot N id P
   applied`, `PC stats: slot N base art -> XXXXXXXX applied`.
+
+## PT54b: gold / ammo stacks keep their grid cell (no protocol change)
+
+Cause: the PT53/PT54 layout path skipped stackables everywhere - the client
+left gold/ammo out of its layout hash and packet, and the host left them out
+of its list (`coop_lite_is_stackable` filters). A client's stacks are also
+local objects with their own OIDs (the host's travel as totals + head OIDs).
+Fix: the client lists its stacks under the host's stack OID
+(`coop_lite_client_map_stack_oid`), and the host places them like any item.
+The host's echo still carries stacks as totals only, so the client's cell for
+a stack stays (no revert, no loop: the layout is resent only when the local
+hash changes). Other players' stacks seen on a client are not placed.
+Logs: `inven: layout sent (N items)` now counts stacks; `inven: slot N layout
+applied (M moved, R refused)` on the host; a stack refused before the host's
+stack OID is known logs `layout refused ... item not (uniquely) in host list`.
