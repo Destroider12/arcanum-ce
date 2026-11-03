@@ -2212,3 +2212,14 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - Kept: UPnP permanent lease (IGDv1 routers often refuse finite leases;
   removed on stop/atexit). String invariant documented in coop_upnp.c.
 - Protocol unchanged (32).
+
+## PT52e — third review pass
+
+- NULL checks on net temp allocations (char chunk, inven batch, Packet81 copies, obj blob, world state page); failure logs and resyncs/aborts.
+- Removed unused locals in `coop_lite_handle_world_req`.
+- Travel: a dead client PC's travel state is reset to -1 (no stale READY after resurrect); `teleport_do` failure is logged.
+- Inventory list repair: dynamic buffer (no 512 cap) and `coop_lite_fix_inven_num` after a length change.
+- Client world rx: during a full stream, non-FULL non-FIRST pages are ignored.
+- Maintained spell end: host replies `SPELL_END` on reject; the client ends its local shadow.
+- `F` key is consumed only when follow toggled on/off.
+- Known (not fixed): a .dif copy with a live original's OID owns the OID mapping until the copy is destroyed (PT44b); objects created on the host after a full snapshot starts may be pruned on LAST and come back with the next radius snapshot; destroyed non-junk containers/doors are not pruned (vanilla does not destroy them); full snapshot may burst unknown-prototype requests (batched by obj req flush).

@@ -2515,9 +2515,8 @@ bool sub_54B5D0(TigMessage* msg)
                 }
                 break;
             case SDL_SCANCODE_F:
-                if (!mainmenu_ui_is_active() && tig_net_is_active()) {
-                    coop_lite_follow_toggle(); /* PT47: follow/guard nearest player */
-                    return true;
+                if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_follow_toggle()) {
+                    return true; /* PT47: follow/guard nearest player */
                 }
                 break;
             case SDL_SCANCODE_M:

@@ -2153,6 +2153,7 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
         return;
     }
     chunk = (PacketCoopCharChunk*)MALLOC(sizeof(*chunk));
+    if (chunk == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); coop_char_bundle_free(&buf); return; }
     for (off = 0; off < (int)buf.size; off += COOP_CHAR_CHUNK) {
         int len = (int)buf.size - off < COOP_CHAR_CHUNK ? (int)buf.size - off : COOP_CHAR_CHUNK;
 
@@ -6950,7 +6951,7 @@ void coop_lite_follow_cancel(void)
     }
 }
 
-void coop_lite_follow_toggle(void)
+bool coop_lite_follow_toggle(void)
 {
     int64_t pc = player_get_local_pc_obj();
     int64_t best = OBJ_HANDLE_NULL;
@@ -6960,10 +6961,10 @@ void coop_lite_follow_toggle(void)
 
     if (coop_follow_on) {
         coop_lite_follow_cancel();
-        return;
+        return true;
     }
     if (pc == OBJ_HANDLE_NULL || !tig_net_is_active() || !tig_net_is_coop_enabled()) { /* PT52d */
-        return;
+        return false;
     }
     object_list_vicinity(pc, OBJ_TM_PC, &objects);
     for (node = objects.head; node != NULL; node = node->next) {
@@ -6984,7 +6985,9 @@ void coop_lite_follow_toggle(void)
         coop_follow_on = true;
         coop_follow_ms = 0;
         tig_debug_printf("CoopLite: follow: on (slot %d's PC, %d tiles)\n", coop_lite_slot_of_obj(best), (int)best_d);
+        return true;
     }
+    return false; /* PT52e: nobody to follow, key not consumed */
 }
 
 static void coop_lite_follow_tick(unsigned int now_ms)
@@ -7040,7 +7043,7 @@ static void coop_lite_follow_tick(unsigned int now_ms)
 }
 #else
 void coop_lite_follow_cancel(void) { }
-void coop_lite_follow_toggle(void) { }
+bool coop_lite_follow_toggle(void) { return false; }
 #endif
 
 static void coop_travel_tick(unsigned int now_ms);
@@ -9464,6 +9467,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
         }
     }
     pkt = (PacketCoopInvenSync*)MALLOC(sizeof(*pkt));
+    if (pkt == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); return; }
     for (o = 0; o < num_owners; o++) {
         int64_t owner = owners[o];
 
@@ -9981,6 +9985,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
         /* refused */
     } else if (kind == COOP_TARGET_LOOT) {
         Packet81* copy = (Packet81*)MALLOC(sizeof(*copy));
+        if (copy == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); coop_lite_host_sync_slot_inven(slot); return; }
 
         *copy = *pkt;
         copy->field_5C = 0;
@@ -10178,6 +10183,7 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
         && (((unsigned int)pkt->field_8) & (COOP_XFER_STEAL | COOP_XFER_PLANT)) == 0
         && item_parent(item, &parent) && parent == pc && qty > 0) {
         copy = (Packet81*)MALLOC(sizeof(*copy));
+        if (copy == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); coop_lite_host_sync_slot_inven(slot); return; }
         *copy = *pkt;
         copy->field_5C = 0;
         copy->field_70.type = OID_TYPE_NULL;
@@ -10245,6 +10251,7 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
     }
 
     copy = (Packet81*)MALLOC(sizeof(*copy));
+    if (copy == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); coop_lite_host_sync_slot_inven(slot); return; }
     *copy = *pkt;
     copy->field_5C = cost;
     tig_debug_printf("CoopLite: inven: slot %d transfer qty %d cost %d\n", slot, qty, cost);
@@ -10736,6 +10743,7 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
         return;
     }
     out = (PacketCoopObjBlob*)MALLOC(sizeof(*out));
+    if (out == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); return; }
     for (i = 0; i < pkt->count; i++) {
         int64_t item = coop_lite_get_oid_obj(pkt->oid[i]);
         int64_t parent = OBJ_HANDLE_NULL;
@@ -11248,12 +11256,18 @@ static int coop_lite_inv_list_repair(int64_t owner)
     int list_fld = obj_field_int32_get(owner, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
         ? OBJ_F_CONTAINER_INVENTORY_LIST_IDX
         : OBJ_F_CRITTER_INVENTORY_LIST_IDX;
-    int64_t h[512];
+    int64_t* h;
     int n = obj_arrayfield_length_get(owner, list_fld);
     int i;
     int k;
 
-    if (n > 512) {
+    if (n <= 0) {
+        return 0;
+    }
+    /* PT52e: no fixed cap */
+    h = (int64_t*)MALLOC(sizeof(*h) * (size_t)n);
+    if (h == NULL) {
+        tig_debug_printf("CoopLite: inven: list repair alloc failed (%d)\n", n);
         return 0;
     }
     for (i = 0; i < n; i++) {
@@ -11273,7 +11287,9 @@ static int coop_lite_inv_list_repair(int64_t owner)
         }
         obj_arrayfield_length_set(owner, list_fld, k);
         tig_debug_printf("CoopLite: inven: list repaired (%d bad entries dropped)\n", n - k);
+        coop_lite_fix_inven_num(owner);
     }
+    FREE(h);
     return n - k;
 }
 
@@ -12996,6 +13012,7 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
     t0 = SDL_GetTicksNS();
     center = obj_field_int64_get(pc, OBJ_F_LOCATION);
     out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
+    if (out == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); return true; }
     memset(out, 0, offsetof(PacketCoopWorldState, entries));
     out->type = PACKET_COOP_WORLD_STATE;
     out->map = key;
@@ -13198,22 +13215,9 @@ static void coop_world_full_tick(unsigned int now_ms)
 void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
-    PacketCoopWorldState* out;
-    int64_t containers[COOP_WORLD_MAX_CONTAINERS];
-    int num_containers = 0;
     int64_t pc;
-    int64_t center;
-    int64_t obj;
-    int iter;
     int slot;
     int key;
-    bool first = true;
-    int n_portal = 0;
-    int n_container = 0;
-    int n_npc = 0;
-    int n_item = 0;
-    int n_trap = 0;
-    Uint64 t0;
 
     if (!tig_net_is_host() || tig_net_last_message_size() != (int)sizeof(*pkt)) {
         return;
@@ -13558,6 +13562,11 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
     if (!coop_lite_client_world_ready()
         || pkt->map != coop_lite_pose_map_key(map_current_map(), coop_map_gen)) {
         coop_world_rx_active = false;
+        return;
+    }
+    /* PT52e: a stray radius page must not mix into a running full stream */
+    if (coop_world_rx_active && coop_world_rx_full
+        && (pkt->flags & (COOP_WORLD_F_FULL | COOP_WORLD_F_FIRST)) == 0) {
         return;
     }
     if ((pkt->flags & COOP_WORLD_F_FIRST) != 0) {
@@ -16261,6 +16270,9 @@ static int coop_travel_count(int* ready_ptr, int* far_mask_ptr, char* names, siz
         int64_t dist;
 
         if (pc == OBJ_HANDLE_NULL || pc == host_pc || critter_is_dead(pc)) {
+            if (pc != OBJ_HANDLE_NULL && pc != host_pc) {
+                coop_travel_state[slot] = -1; /* PT52e: READY dies with the PC */
+            }
             continue; /* dead / disconnected never hold the party */
         }
         living++;
@@ -16334,7 +16346,9 @@ static void coop_travel_go(const char* why)
     coop_travel_hide();
     tig_debug_printf("CoopLite: PT50 travel check done (%s), host leaves\n", why);
     coop_travel_bypass = true;
-    teleport_do(&td);
+    if (!teleport_do(&td)) {
+        tig_debug_printf("CoopLite: PT52e travel: teleport_do failed\n");
+    }
     coop_travel_bypass = false;
 }
 
@@ -16483,6 +16497,8 @@ static void coop_travel_host_spell_end(int slot, int mt_id)
     if (pc == OBJ_HANDLE_NULL || !magictech_id_to_run_info(mt_id, &run_info)
         || run_info->parent_obj.obj != pc || run_info->action != MAGICTECH_ACTION_MAINTAIN) {
         tig_debug_printf("CoopLite: PT50 slot %d spell end %d rejected\n", slot, mt_id);
+        /* PT52e: tell the client, it drops its stale shadow icon */
+        coop_travel_send(COOP_CTRL_SPELL_END, mt_id, 1, slot);
         return;
     }
     tig_debug_printf("CoopLite: PT50 slot %d ends maintained spell %d\n", slot, mt_id);
@@ -16528,6 +16544,10 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
                 coop_travel_far ? " (вы далеко)" : "");
             coop_travel_show_hook(text);
         }
+    } else if (pkt->op == COOP_CTRL_SPELL_END) {
+        /* PT52e: host has no such maintained spell; end the local shadow */
+        tig_debug_printf("CoopLite: PT52e host rejected spell end %d, local end\n", pkt->a);
+        magictech_interrupt(pkt->a);
     } else if (pkt->op == COOP_CTRL_TRAVEL_END) {
         coop_travel_active = false;
         coop_travel_pressed = false; /* PT52c: proactive BUSY/IDLE resumes */
