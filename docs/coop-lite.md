@@ -2223,3 +2223,9 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - Maintained spell end: host replies `SPELL_END` on reject; the client ends its local shadow.
 - `F` key is consumed only when follow toggled on/off.
 - Known (not fixed): a .dif copy with a live original's OID owns the OID mapping until the copy is destroyed (PT44b); objects created on the host after a full snapshot starts may be pruned on LAST and come back with the next radius snapshot; destroyed non-junk containers/doors are not pruned (vanilla does not destroy them); full snapshot may burst unknown-prototype requests (batched by obj req flush).
+
+## PT52f — review follow-up
+
+- Full snapshot alloc failure already logs on the host and falls back to a radius reply (no empty full snapshot is sent).
+- `coop_lite_host_send_inven_batch` skips owners that are NULL, invalid or `OF_DESTROYED` at send time.
+- Client: before a `FOLLOW_HOST` teleport, dialog_ui closes inventory/loot/barter/pickpocket, the local dialog, the coop dialog view and the char view (`coop_lite_set_travel_close_hook`).

@@ -1212,6 +1212,21 @@ static bool dialog_ui_travel_busy(void)
     return inven_ui_is_created() || dialog_ui_is_local_pc_in_dialog() || cdv_view.open;
 }
 
+/* PT52f: forced travel closes the local UIs cleanly */
+static void dialog_ui_travel_close_all(void)
+{
+    if (inven_ui_is_created()) {
+        inven_ui_destroy(); /* inventory / loot / barter / pickpocket */
+    }
+    if (dialog_ui_is_local_pc_in_dialog()) {
+        dialog_ui_end_dialog(player_get_local_pc_obj(), 0);
+    }
+    if (cdv_view.open) {
+        dialog_ui_coop_view_close();
+    }
+    charedit_close();
+}
+
 static void dialog_ui_coop_view_init(void)
 {
     cdv_font_name = cdv_font_make(230, 200, 110);
@@ -1223,6 +1238,7 @@ static void dialog_ui_coop_view_init(void)
     coop_lite_set_party_choose_hook(dialog_ui_party_choose);
     coop_lite_set_dialog_view_hooks(dialog_ui_coop_view_show, dialog_ui_coop_view_close, dialog_ui_coop_refresh_votes);
     coop_lite_set_travel_ui_hooks(dialog_ui_travel_busy, dialog_ui_travel_show, dialog_ui_travel_hide);
+    coop_lite_set_travel_close_hook(dialog_ui_travel_close_all);
 }
 
 static void dialog_ui_coop_view_exit(void)
@@ -1233,6 +1249,7 @@ static void dialog_ui_coop_view_exit(void)
     dialog_ui_coop_view_close();
     dialog_ui_travel_hide();
     coop_lite_set_travel_ui_hooks(NULL, NULL, NULL);
+    coop_lite_set_travel_close_hook(NULL);
     tig_font_destroy(cdv_font_name);
     tig_font_destroy(cdv_font_text);
     tig_font_destroy(cdv_font_option);

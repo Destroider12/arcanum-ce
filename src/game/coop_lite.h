@@ -1465,6 +1465,7 @@ bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size);
 /* Client: ask the host to end own maintained spell (host mt_id). True if sent. */
 bool coop_lite_client_spell_end(int mt_id);
 void coop_lite_set_travel_ui_hooks(bool (*busy)(void), void (*show)(const char* text), void (*hide)(void));
+void coop_lite_set_travel_close_hook(void (*close_ui)(void)); /* PT52f */
 
 /* PT51: full-map snapshot sector scope (client prune). */
 #define COOP_WORLD_FULL_SECTORS 256

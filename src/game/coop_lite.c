@@ -53,6 +53,14 @@ const char* coop_lite_env(const char* name)
     return value;
 }
 
+
+/* PT52f: client UI close before a host-forced follow teleport (dialog_ui) */
+static void (*coop_travel_close_hook)(void);
+void coop_lite_set_travel_close_hook(void (*close_ui)(void))
+{
+    coop_travel_close_hook = close_ui;
+}
+
 #ifdef COOP_LITE_TEST_STUBS
 #include <stdio.h>
 #include <stdint.h>
@@ -1008,6 +1016,10 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
         return;
     }
 
+    /* PT52f: forced travel - close dialog/barter/inventory/char view first */
+    if (coop_travel_close_hook != NULL) {
+        coop_travel_close_hook();
+    }
     pc_obj = player_get_local_pc_obj();
     slot = sub_529520();
     dest = coop_lite_follow_loc_for_slot(pkt->loc, slot);
@@ -9471,7 +9483,9 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
     for (o = 0; o < num_owners; o++) {
         int64_t owner = owners[o];
 
-        if (owner == OBJ_HANDLE_NULL) {
+        /* PT52f: skip an owner destroyed since the list was built */
+        if (owner == OBJ_HANDLE_NULL || !obj_handle_is_valid(owner)
+            || (obj_field_int32_get(owner, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
             continue;
         }
         memset(pkt, 0, offsetof(PacketCoopInvenSync, entries));
