@@ -877,6 +877,7 @@ void coop_lite_set_inven_open_hook(bool (*hook)(int64_t pc_obj, int64_t target_o
 /* Teleport hooks (teleport.c): extra PCs to carry with the local PC, and
    placement once the teleport is done. */
 int coop_lite_party_carry_list(int64_t mover, int64_t* objs, int max);
+bool coop_lite_teleport_inv_fix(int64_t obj);
 void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc);
 
 /* Host: a party-wipe reload is due. Copies the save name; main loop loads it

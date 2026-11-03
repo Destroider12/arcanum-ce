@@ -379,6 +379,10 @@ bool schedule_teleport_obj_recursively(int64_t obj, int64_t loc)
 
         cnt = obj_field_int32_get(obj, inventory_num_fld);
         inv_size = obj_arrayfield_length_get(obj, inventory_list_fld);
+        if (cnt != inv_size && coop_lite_teleport_inv_fix(obj)) {
+            cnt = obj_field_int32_get(obj, inventory_num_fld);
+            inv_size = obj_arrayfield_length_get(obj, inventory_list_fld);
+        }
         if (cnt != inv_size) {
             tig_debug_printf("Inventory array count does not equal associated num field on teleport.  Array: %d, Field: %d\n",
                 inv_size,

@@ -918,7 +918,8 @@ int64_t coop_lite_follow_loc_for_slot(int64_t host_loc, int slot)
     }
 
     /* Spiral search outward from host (include host tile as last-resort fill). */
-    for (radius = 0; radius <= 8; radius++) {
+    /* PT54c: radius 1 up - never the host's own tile. */
+    for (radius = 1; radius <= 8; radius++) {
         for (dir = 0; dir < 8; dir++) {
             int odx = 0;
             int ody = 0;
@@ -932,10 +933,6 @@ int64_t coop_lite_follow_loc_for_slot(int64_t host_loc, int slot)
             case 5: odx = -radius; ody = -radius; break;
             case 6: odx = 0; ody = -radius; break;
             case 7: odx = radius; ody = -radius; break;
-            }
-            /* Rotate spiral start by slot so peers fan out. */
-            if (radius == 0 && dir != (slot & 7)) {
-                continue;
             }
             cand = LOCATION_MAKE(LOCATION_GET_X(host_loc) + odx,
                 LOCATION_GET_Y(host_loc) + ody);
@@ -1060,6 +1057,10 @@ static void coop_lite_client_clear_stuck_flags(int64_t pc_obj, const char* why)
 #endif
 }
 
+#ifndef COOP_LITE_TEST_STUBS
+static int coop_lite_inv_list_repair(int64_t owner);
+#endif
+
 void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
 {
     TeleportData teleport_data;
@@ -1096,6 +1097,14 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     slot = sub_529520();
     dest = coop_lite_follow_loc_for_slot(pkt->loc, slot);
     coop_lite_client_clear_stuck_flags(pc_obj, "follow");
+    /* PT54c: teleport.c refuses to schedule a critter whose inventory NUM
+       != list length - the PC then never reached the new map (client stuck
+       "not in world", host timed it out). Repair the list first. */
+#ifndef COOP_LITE_TEST_STUBS
+    if (pc_obj != OBJ_HANDLE_NULL) {
+        coop_lite_inv_list_repair(pc_obj);
+    }
+#endif
 
     memset(&teleport_data, 0, sizeof(teleport_data));
     teleport_data.flags = TELEPORT_RENDER_LOCK;
@@ -6593,6 +6602,42 @@ void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc)
             critter_is_dead(pc) ? " (corpse)" : "",
             (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
     }
+#ifndef COOP_LITE_TEST_STUBS
+    /* PT54c: the follow destination was picked on the OLD map; on the new
+       one it can be the host's tile or blocked. Step to a free tile next
+       to the host (host PC is already carried there above). */
+    if (!tig_net_is_host()) {
+        int64_t own = obj_field_int64_get(mover, OBJ_F_LOCATION);
+
+        if (own == host_loc || !coop_lite_loc_is_free_walkable(own)) {
+            loc = coop_lite_follow_loc_for_slot(host_loc, sub_529520());
+            if (loc != own && loc != host_loc) {
+                multiplayer_lock();
+                sub_43E770(mover, loc, 0, 0);
+                multiplayer_unlock();
+                tig_debug_printf("CoopLite: PT54c own PC moved off %d,%d to free tile %d,%d\n",
+                    (int)LOCATION_GET_X(own), (int)LOCATION_GET_Y(own),
+                    (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+            }
+        }
+    }
+#endif
+}
+
+/* PT54c: teleport.c hook - in co-op repair an inventory whose NUM does not
+   match its list instead of refusing the teleport. */
+bool coop_lite_teleport_inv_fix(int64_t obj)
+{
+    if (!tig_net_is_coop_enabled() || !tig_net_is_active() || obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+#ifndef COOP_LITE_TEST_STUBS
+    tig_debug_printf("CoopLite: PT54c teleport: inventory NUM/list mismatch repaired\n");
+    coop_lite_inv_list_repair(obj);
+    return true;
+#else
+    return false;
+#endif
 }
 
 /* Client, on COOP_PARTY_RESYNC: the host reloaded — re-offer our PC. */
@@ -6603,6 +6648,7 @@ static void coop_lite_client_resync(void)
     int proto;
 
     if (pc == OBJ_HANDLE_NULL) {
+        tig_debug_printf("CoopLite: resync skipped - no local PC\n");
         return;
     }
     coop_lite_session_reset();

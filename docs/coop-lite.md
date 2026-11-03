@@ -2511,3 +2511,24 @@ hash changes). Other players' stacks seen on a client are not placed.
 Logs: `inven: layout sent (N items)` now counts stacks; `inven: slot N layout
 applied (M moved, R refused)` on the host; a stack refused before the host's
 stack OID is known logs `layout refused ... item not (uniquely) in host list`.
+
+### PT54c — client stuck after a stair/door transition (Tarant ring-masters dungeon)
+
+Logs (client time): `client follow apply map=3 ...` is followed by
+`Inventory array count does not equal associated num field on teleport. Array: 19, Field: 18`.
+Vanilla `schedule_teleport_obj_recursively` refuses a critter whose inventory NUM
+differs from the list length, so the client's PC was never carried to the new map:
+the map loads, but the client is "not in world" (every later follow is
+`queued follow ... (client not in world yet)`, the resync is skipped, it sends
+nothing) and the host times the peer out (`tig_net: disconnect slot 1`) and parks its PC.
+
+Fix:
+- the client repairs its PC's inventory list (`coop_lite_inv_list_repair`) before the follow teleport;
+- `teleport.c` calls `coop_lite_teleport_inv_fix` in co-op and repairs instead of refusing;
+- `coop_lite_follow_loc_for_slot` no longer falls back to the host's own tile
+  (spiral starts at radius 1), and after the carry the client moves its own PC off the
+  host tile or a blocked tile to a free neighbour (the destination had been chosen on the old map).
+
+Log lines to check: `PT54c teleport: inventory NUM/list mismatch repaired`,
+`PT54c own PC moved off`, `resync skipped - no local PC`.
+No wire change; protocol stays 36. Verified by unit tests and a build only; not yet tested in play.
