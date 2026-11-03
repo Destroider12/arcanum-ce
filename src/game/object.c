@@ -4107,6 +4107,9 @@ bool object_locked_set(int64_t obj, bool locked)
     obj_field_int32_set(obj,
         type == OBJ_TYPE_PORTAL ? OBJ_F_PORTAL_FLAGS : OBJ_F_CONTAINER_FLAGS,
         flags);
+    if (type == OBJ_TYPE_PORTAL) {
+        coop_lite_host_portal_touch(obj); /* PT53e */
+    }
 
     return object_locked_get(obj);
 }

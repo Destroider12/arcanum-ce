@@ -163,6 +163,8 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "tig/art.h"
 #include "game/portrait.h"
 #include "game/portal.h"
+#include "game/gsound.h"
+#include "game/sfx.h"
 #include "game/skill.h"
 #include "game/trap.h"
 #include "game/quest.h"
@@ -1209,6 +1211,9 @@ static void (*coop_return_to_menu_hook)(void);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_obj_pending_reset(void);
 static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_host_door_flush_tick(unsigned int now_ms); /* PT53e */
+#endif
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
 static void coop_lite_client_world_refresh_soon(void);
@@ -2055,6 +2060,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_OBJ_BLOB: /* item blob → client (P1-2) */
     case PACKET_COOP_WORLD_STATE: /* §7 world state → client */
     case PACKET_COOP_STORY_SYNC: /* PT35 quests / rumors / reputation → client */
+    case PACKET_COOP_DOOR_STATE: /* PT53e host door state → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3112,6 +3118,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopPcStats);
     case PACKET_COOP_DOOR_USE:
         return sizeof(PacketCoopDoorUse);
+    case PACKET_COOP_DOOR_STATE:
+        return sizeof(PacketCoopDoorState);
     case PACKET_COOP_SKILL_USE:
         return sizeof(PacketCoopSkillUse);
     case PACKET_COOP_CRAFT:
@@ -7245,6 +7253,9 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_dev_world_mutate_tick(now_ms);
     coop_lite_host_dev_kill_client_tick(now_ms);
     coop_lite_host_intent_tick(now_ms);
+#ifndef COOP_LITE_TEST_STUBS
+    coop_lite_host_door_flush_tick(now_ms); /* PT53e */
+#endif
     coop_lite_host_dev_auto_resurrect_tick(now_ms);
     coop_lite_host_dev_gold_pile_tick(now_ms);
     coop_lite_dev_inven_dump_tick(now_ms);
@@ -13187,7 +13198,13 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
     {
         /* PT47: portrait rides in flags' high bits (no layout change). */
         int portrait = coop_lite_pcs_portrait_unpack(pkt->flags);
+        static int logged[8]; /* PT53e: one line per slot per new id */
 
+        if (portrait > 0 && logged[pkt->slot] != portrait) {
+            logged[pkt->slot] = portrait;
+            tig_debug_printf("CoopLite: portrait: slot %d id %d (have %d)%s\n", pkt->slot, portrait,
+                obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT), pc == player_get_local_pc_obj() ? " own PC" : "");
+        }
         if (portrait > 0 && pc != player_get_local_pc_obj()
             && (!tig_net_is_host() || sub_4A2B60(sub_52A530()) == pc)
             && obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) != portrait) {
@@ -14369,6 +14386,40 @@ bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size)
     return pkt != NULL && pkt->type == PACKET_COOP_DOOR_USE && size >= (int)sizeof(PacketCoopDoorUse);
 }
 
+bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_DOOR_STATE && size >= (int)sizeof(PacketCoopDoorState)
+        && pkt->e.kind == COOP_WORLD_PORTAL && pkt->slot >= -1 && pkt->slot < 8;
+}
+
+bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid)
+{
+    int i;
+
+    if (set == NULL || count == NULL || oid == NULL || *count < 0) {
+        return false;
+    }
+    for (i = 0; i < *count && i < max; i++) {
+        if (memcmp(set[i], oid, 24) == 0) {
+            return true; /* already pending: sent with its newest state */
+        }
+    }
+    if (*count >= max) {
+        return false;
+    }
+    memcpy(set[*count], oid, 24);
+    (*count)++;
+    return true;
+}
+
+bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found)
+{
+    if (coop && num >= 1000) {
+        return true; /* engine portrait: the same file on every machine */
+    }
+    return !alt_file_found;
+}
+
 bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_SKILL_USE && size >= (int)sizeof(PacketCoopSkillUse)
@@ -14526,13 +14577,154 @@ static void coop_lite_client_door_tick(void)
     tig_debug_printf("CoopLite: door use sent to host (%d)\n", n);
 }
 
-/* Host: a client used a door. Same SAP_USE script as a local click (lock,
-   key, toggle); then every client refreshes its world state. */
+/* PT53e: the door changes the host makes are what every client sees. */
+static uint8_t coop_door_pend[COOP_DOOR_PENDING_MAX][24];
+static int coop_door_pend_cnt;
+static int coop_door_actor_slot = -1; /* set while a client's door intent runs */
+static int coop_door_pend_slot[COOP_DOOR_PENDING_MAX];
+static unsigned int coop_door_flush_ms;
+/* last logged state per door (log once per event, not per frame) */
+static uint8_t coop_door_log_oid[COOP_DOOR_PENDING_MAX][24];
+static unsigned int coop_door_log_state[COOP_DOOR_PENDING_MAX];
+static int coop_door_log_next;
+
+void coop_lite_host_portal_touch(int64_t portal)
+{
+    int depth;
+    bool host;
+    ObjectID oid;
+    int before;
+
+    if (portal == OBJ_HANDLE_NULL) {
+        return;
+    }
+    depth = tig_net_local_suspend_pause();
+    host = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
+    tig_net_local_suspend_resume(depth);
+    if (!host || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+        return;
+    }
+    oid = obj_get_id(portal);
+    before = coop_door_pend_cnt;
+    if (coop_lite_door_pending_add(coop_door_pend, &coop_door_pend_cnt, COOP_DOOR_PENDING_MAX,
+            (const uint8_t*)&oid)
+        && coop_door_pend_cnt > before) {
+        coop_door_pend_slot[coop_door_pend_cnt - 1] = coop_door_actor_slot;
+    }
+}
+
+static void coop_lite_door_log(const uint8_t* oid, int64_t portal, int slot, const char* side)
+{
+    unsigned int flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_PORTAL_FLAGS);
+    unsigned int state = (portal_is_open(portal) ? 1u : 0u)
+        | ((flags & OPF_LOCKED) != 0 ? 2u : 0u)
+        | ((flags & OPF_JAMMED) != 0 ? 4u : 0u)
+        | ((flags & OPF_BUSTED) != 0 ? 8u : 0u);
+    char oid_str[80];
+    ObjectID id;
+    int i;
+
+    for (i = 0; i < COOP_DOOR_PENDING_MAX; i++) {
+        if (memcmp(coop_door_log_oid[i], oid, 24) == 0) {
+            if (coop_door_log_state[i] == state) {
+                return;
+            }
+            break;
+        }
+    }
+    if (i == COOP_DOOR_PENDING_MAX) {
+        i = coop_door_log_next;
+        coop_door_log_next = (coop_door_log_next + 1) % COOP_DOOR_PENDING_MAX;
+        memcpy(coop_door_log_oid[i], oid, 24);
+    }
+    coop_door_log_state[i] = state;
+    memcpy(&id, oid, sizeof(id));
+    objid_id_to_str(oid_str, id);
+    tig_debug_printf("CoopLite: door: %s open=%d locked=%d jammed=%d busted=%d from slot %d (%s)\n", oid_str,
+        (state & 1u) != 0, (state & 2u) != 0, (state & 4u) != 0, (state & 8u) != 0, slot, side);
+}
+
+/* Host tick: every 100 ms, send each changed door's current state to all. */
+static void coop_lite_host_door_flush_tick(unsigned int now_ms)
+{
+    PacketCoopDoorState pkt;
+    int depth;
+    int i;
+
+    if (coop_door_pend_cnt == 0 || !coop_lite_interval_elapsed(coop_door_flush_ms, now_ms, 100u)) {
+        return;
+    }
+    coop_door_flush_ms = now_ms;
+    if (!tig_net_is_active() || !tig_net_is_host() || !map_is_valid() || map_is_clearing_objects()) {
+        coop_door_pend_cnt = 0;
+        return;
+    }
+    depth = tig_net_local_suspend_pause();
+    for (i = 0; i < coop_door_pend_cnt; i++) {
+        int64_t portal = coop_lite_get_oid_obj(coop_door_pend[i]);
+        unsigned int flags;
+
+        if (portal == OBJ_HANDLE_NULL || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+            continue;
+        }
+        flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_FLAGS);
+        if ((flags & OF_DESTROYED) != 0) {
+            continue;
+        }
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = PACKET_COOP_DOOR_STATE;
+        pkt.map = map_current_map();
+        pkt.slot = coop_door_pend_slot[i];
+        memcpy(pkt.e.oid, coop_door_pend[i], 24);
+        pkt.e.kind = COOP_WORLD_PORTAL;
+        pkt.e.aid = (unsigned int)obj_field_int32_get(portal, OBJ_F_CURRENT_AID);
+        pkt.e.of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
+        pkt.e.kind_flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_PORTAL_FLAGS);
+        pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
+        pkt.e.reserved[0] = trap_type(portal) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+        coop_lite_door_log(coop_door_pend[i], portal, pkt.slot, "host sent");
+    }
+    tig_net_local_suspend_resume(depth);
+    coop_door_pend_cnt = 0;
+}
+
+/* Client: the host's door state, applied at once (any distance). */
+void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
+{
+    int64_t portal;
+
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_door_state_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (!coop_lite_client_world_ready() || pkt->map != map_current_map() || map_is_clearing_objects()) {
+        return; /* the map's full snapshot carries it */
+    }
+    portal = coop_lite_get_oid_obj(pkt->e.oid);
+    if (portal == OBJ_HANDLE_NULL || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+        return;
+    }
+    multiplayer_lock();
+    coop_lite_apply_begin();
+    coop_lite_world_apply(&pkt->e);
+    coop_lite_apply_end();
+    multiplayer_unlock();
+    coop_lite_door_log(pkt->e.oid, portal, pkt->slot, "client applied");
+}
+
+/* Host: a client used a door. Same steps as a local AG_ATTEMPT_OPEN_DOOR /
+   AG_ATTEMPT_CLOSE_DOOR: can open, lock/key check, the door's SAP_USE
+   script, then the toggle. PT37 only ran the script, so the host's door
+   never moved ("open now 0") and the client's local open was reverted by
+   the next world state. */
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
 {
     int slot;
     int64_t pc;
     int64_t portal;
+    char oid_str[80];
+    ObjectID oid;
 
     if (!tig_net_is_active() || !tig_net_is_host()
         || !coop_lite_door_use_valid(pkt, tig_net_last_message_size())) {
@@ -14552,14 +14744,32 @@ void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
         || (obj_field_int32_get(portal, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
         return;
     }
+    memcpy(&oid, pkt->oid, sizeof(oid));
+    objid_id_to_str(oid_str, oid);
     if (object_dist(pc, portal) > 8) {
-        tig_debug_printf("CoopLite: slot %d door use refused: %d tiles away\n", slot, (int)object_dist(pc, portal));
+        tig_debug_printf("CoopLite: door: %s use from slot %d refused: %d tiles away\n", oid_str, slot,
+            (int)object_dist(pc, portal));
         return;
     }
-    object_script_execute(pc, portal, pc, SAP_USE, 0);
+    coop_door_actor_slot = slot;
+    if (portal_is_open(portal)) {
+        if ((obj_field_int32_get(portal, OBJ_F_PORTAL_FLAGS) & OPF_MAGICALLY_HELD) != 0) {
+            tig_debug_printf("CoopLite: door: %s close from slot %d refused: held open\n", oid_str, slot);
+        } else {
+            portal_toggle(portal);
+        }
+    } else if (!critter_can_open_portals(pc)
+        || ai_attempt_open_portal(pc, portal, object_rot(pc, portal)) != AI_ATTEMPT_OPEN_PORTAL_OK) {
+        tig_debug_printf("CoopLite: door: %s open from slot %d refused: locked or jammed\n", oid_str, slot);
+        gsound_play_sfx_on_obj(sfx_portal_sound(portal, PORTAL_SOUND_LOCKED), 1, portal);
+    } else if (object_script_execute(pc, portal, pc, SAP_USE, 0)) {
+        portal_toggle(portal);
+    } else {
+        tig_debug_printf("CoopLite: door: %s open from slot %d stopped by its script\n", oid_str, slot);
+    }
+    coop_lite_host_portal_touch(portal); /* state goes back even when refused */
+    coop_door_actor_slot = -1;
     tig_debug_printf("CoopLite: slot %d used a door (open now %d)\n", slot, portal_is_open(portal) ? 1 : 0);
-    coop_portal_changed = false;
-    coop_lite_host_world_dirty();
 }
 
 /* ---- PT40: pick lock / disarm trap, crafting, fate, pre-session shop ---- */
@@ -14782,6 +14992,7 @@ void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
     tig_debug_printf("CoopLite: slot %d %s: %s\n", slot,
         pkt->skill == SKILL_PICK_LOCKS ? "pick lock" : "disarm trap", ok ? "success" : "failed");
     coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_SKILL_FAILED);
+    coop_lite_host_portal_touch(target); /* PT53e: unlocked / jammed door */
     coop_portal_changed = false;
     coop_lite_host_world_dirty();
     coop_lite_host_sync_slot_inven(slot);
@@ -14873,6 +15084,8 @@ void coop_lite_host_pc_changed(int64_t pc, bool stats)
 #else
 void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
+void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
+void coop_lite_handle_door_state(PacketCoopDoorState* pkt) { (void)pkt; }
 void coop_lite_client_preshop_begin(void) { }
 void coop_lite_client_preshop_end(void) { }
 bool coop_lite_client_skill_intent(struct SkillInvocation* si) { (void)si; return false; }

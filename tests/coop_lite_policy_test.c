@@ -953,7 +953,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 154 || TIG_NET_PROTOCOL < 33
+        || PACKET_COOP_TYPE_LIMIT != 155 || TIG_NET_PROTOCOL < 34
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -2265,7 +2265,7 @@ int main(int argc, char** argv)
     {
         PacketCoopPartyCtrl c = { PACKET_COOP_PARTY_CTRL, COOP_CTRL_TRAVEL_STATE, COOP_TRAVEL_READY, 0 };
 
-        if (PACKET_COOP_PARTY_CTRL != 152 || TIG_NET_PROTOCOL != 33 || sizeof(PacketCoopPartyCtrl) != 16
+        if (PACKET_COOP_PARTY_CTRL != 152 || TIG_NET_PROTOCOL < 33 || sizeof(PacketCoopPartyCtrl) != 16
             || coop_lite_coop_packet_min_size(PACKET_COOP_PARTY_CTRL) != (int)sizeof(PacketCoopPartyCtrl)
             || !coop_lite_party_ctrl_valid(&c, 16) || coop_lite_party_ctrl_valid(&c, 12)
             || !coop_lite_travel_slot_ready(COOP_TRAVEL_READY, 500)

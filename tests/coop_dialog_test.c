@@ -342,6 +342,50 @@ static int test_pt53b(void)
 }
 
 /* PT53: own-pack layout intent, language pick, travel panel centring. */
+static int test_pt53e(void)
+{
+    static PacketCoopDoorState ds;
+    uint8_t set[COOP_DOOR_PENDING_MAX][24];
+    uint8_t oid[24];
+    int cnt = 0;
+    int i;
+
+    CHECK(PACKET_COOP_DOOR_STATE == 154 && PACKET_COOP_TYPE_LIMIT == 155, "door state id");
+    CHECK(TIG_NET_PROTOCOL >= 34, "protocol bumped for door state");
+    CHECK(coop_lite_packet_allowed(PACKET_COOP_DOOR_STATE, false, 0), "host sends door state");
+    CHECK(!coop_lite_packet_allowed(PACKET_COOP_DOOR_STATE, true, 1), "client never sends door state");
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_STATE) == (int)sizeof(PacketCoopDoorState),
+        "door state min size");
+    memset(&ds, 0, sizeof(ds));
+    ds.type = PACKET_COOP_DOOR_STATE;
+    ds.e.kind = COOP_WORLD_PORTAL;
+    ds.slot = 1;
+    CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state valid");
+    CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds) - 1), "door state short");
+    ds.slot = 8;
+    CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state bad slot");
+    ds.slot = -1;
+    ds.e.kind = COOP_WORLD_CONTAINER;
+    CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state not a portal");
+    CHECK(!coop_lite_door_state_valid(NULL, 100), "door state null");
+    for (i = 0; i < COOP_DOOR_PENDING_MAX; i++) {
+        memset(oid, 0, sizeof(oid));
+        oid[0] = (uint8_t)i;
+        oid[1] = 7;
+        CHECK(coop_lite_door_pending_add(set, &cnt, COOP_DOOR_PENDING_MAX, oid), "pending add");
+        CHECK(coop_lite_door_pending_add(set, &cnt, COOP_DOOR_PENDING_MAX, oid), "pending dup ok");
+    }
+    CHECK(cnt == COOP_DOOR_PENDING_MAX, "pending dedupe");
+    oid[1] = 9;
+    CHECK(!coop_lite_door_pending_add(set, &cnt, COOP_DOOR_PENDING_MAX, oid) && cnt == COOP_DOOR_PENDING_MAX,
+        "pending full");
+    CHECK(coop_lite_portrait_use_number(true, 1074, true), "coop engine portrait uses the number");
+    CHECK(!coop_lite_portrait_use_number(false, 1074, true), "SP keeps the alt file");
+    CHECK(!coop_lite_portrait_use_number(true, 5, true), "user portrait keeps the alt file");
+    CHECK(coop_lite_portrait_use_number(true, 5, false), "missing alt file falls back");
+    return 0;
+}
+
 static int test_pt53(void)
 {
     static PacketCoopInvenLayout lay;
@@ -351,7 +395,7 @@ static int test_pt53(void)
     int y;
     int hdr = (int)offsetof(PacketCoopInvenLayout, entries);
 
-    CHECK(PACKET_COOP_INVEN_LAYOUT == 153 && PACKET_COOP_TYPE_LIMIT == 154, "layout packet id");
+    CHECK(PACKET_COOP_INVEN_LAYOUT == 153 && PACKET_COOP_TYPE_LIMIT >= 154, "layout packet id");
     CHECK(coop_lite_packet_allowed(PACKET_COOP_INVEN_LAYOUT, true, 1), "client may send layout to host");
     CHECK(!coop_lite_packet_allowed(PACKET_COOP_INVEN_LAYOUT, false, 0), "host never sends layout");
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_INVEN_LAYOUT) == hdr, "layout min size");
@@ -401,7 +445,7 @@ static int test_pt53(void)
 
 int main(void)
 {
-    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53()) {
+    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53() || test_pt53e()) {
         return 1;
     }
     printf("PASS: coop dialog viewer (codec, validation, votes, policy, PT53)\n");

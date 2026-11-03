@@ -2386,3 +2386,53 @@ Tests: `coop_lite_policy` (PT53c helpers), new `tig_debug_long_line` (fails unde
   stub build; their batch validators stay covered by `coop_lite_fuzz8`.
 - A 180 s ASan/UBSan run (2.78M packets sent, 399k delivered, 3.6M client
   iterations) was clean. No code changes to the game were required.
+
+## PT53e: host-authoritative doors, coop portraits (protocol 34)
+
+**Doors — root causes.**
+1. Client → host: the client's AG_ATTEMPT_OPEN_DOOR sent `DOOR_USE` and then
+   kept animating the door open locally. The host only ran the door's
+   SAP_USE script — vanilla opens the door in the anim goal *after* the
+   script, so the host door never moved (log: `slot 1 used a door (open now
+   0)`) and the next WORLD_STATE reverted the client's local open
+   ("changed portals 2").
+2. Closing on a client (AG_ATTEMPT_CLOSE_DOOR) was never sent at all.
+3. Host → client: door changes only raised WORLD_DIRTY (400 ms debounce +
+   3.5 s client delay + 3 s host per-slot limit) and the radius reply only
+   lists doors within 24 tiles of the client, so a door was late or never
+   shown.
+
+**Fix.**
+- Client: open *and* close of the own PC's door goal end locally and queue
+  `DOOR_USE` (anim.c `sub_428A10` portal case returns false; `sub_428620`
+  queues the close). No local prediction.
+- Host `coop_lite_handle_door_use`: open door → close (unless magically
+  held); closed → `critter_can_open_portals` + `ai_attempt_open_portal`
+  (lock / key / jam) → SAP_USE script → `portal_toggle`. Refusals log why.
+- New `PACKET_COOP_DOOR_STATE` 154 (host → all clients, 0x50 bytes: map,
+  slot, one `CoopWorldEntry`): `portal_open`/`portal_close` frame steps,
+  `portal_bust`, `object_locked_set` on a portal and the pick-lock intent
+  call `coop_lite_host_portal_touch`; the host flushes the pending set
+  (by OID, max 32) every 100 ms to everyone, any distance. The client
+  applies it through the WORLD_STATE portal apply (art frame, block/see
+  flags, portal flags incl. lock/jam/bust, trap). Late join / reconnect
+  keep using the full-map WORLD_STATE snapshot, which already carries
+  every door.
+- Logs (once per state change per door):
+  `CoopLite: door: <oid> open=1 locked=0 jammed=0 busted=0 from slot N (host sent)`
+  on the host, `(... client applied)` on clients; refusals:
+  `door: <oid> open from slot N refused: locked or jammed`, `... stopped by its script`,
+  `... refused: N tiles away`, `close ... refused: held open`.
+
+**Portrait — root cause.** A multiplayer PC has `OPCF_USE_ALT_DATA`, so
+`portrait_draw_func` draws `Players\<oid>.bmp`, a file that only exists on
+the machine that created the PC (host and client run from separate
+folders). The synced portrait number (PT47, PC_STATS high bits) was
+applied but never used for drawing, so other players' PCs drew blank.
+Now in coop an engine portrait (id >= 1000) is drawn from its number, and a
+missing alt file falls back to the number too (all 8 slots, both ways —
+PC_STATS already carries every slot's portrait on join/rejoin/change).
+Log: `CoopLite: portrait: slot N id P (have Q)` once per slot per new id.
+
+Tests: `coop_dialog_test` `test_pt53e` (packet id/role/size, validator,
+pending-set dedupe/cap, portrait choice).

@@ -32,6 +32,7 @@ void portal_bust(int64_t portal_obj, int64_t triggerer_obj)
         flags = obj_field_int32_get(portal_obj, OBJ_F_PORTAL_FLAGS);
         flags |= OPF_BUSTED;
         obj_field_int32_set(portal_obj, OBJ_F_PORTAL_FLAGS, flags);
+        coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
         // Update appearance.
         object_set_current_aid(portal_obj, art_id);
@@ -202,6 +203,7 @@ bool portal_open(int64_t portal_obj)
     }
 
     object_set_current_aid(portal_obj, art_id);
+    coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
     return true;
 }
@@ -289,6 +291,7 @@ bool portal_close(int64_t portal_obj)
     }
 
     object_set_current_aid(portal_obj, art_id);
+    coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
     return true;
 }

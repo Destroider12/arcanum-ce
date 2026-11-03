@@ -40,7 +40,8 @@ extern "C" {
 #define PACKET_COOP_CRAFT 151 /* PT40: client → host: combine this schematic */
 #define PACKET_COOP_PARTY_CTRL 152 /* PT50: travel ready check (both ways) + client spell-end intent */
 #define PACKET_COOP_INVEN_LAYOUT 153 /* PT53: client → host: my own pack layout (equip/grid/hotkeys) */
-#define PACKET_COOP_TYPE_LIMIT 154
+#define PACKET_COOP_DOOR_STATE 154 /* PT53e: host → clients: one door's state (open/lock/jam/bust) */
+#define PACKET_COOP_TYPE_LIMIT 155
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -647,6 +648,20 @@ typedef struct CoopWorldEntry {
 #define COOP_WORLD_TRAP_ARMED 1u
 #define COOP_TRAP_WALK_MAX 16 /* PT42: tiles checked per client pose step */
 
+/* PT53e: host → every client, right after a door changed on the host (any
+   cause: a client's door intent, the host PC, an NPC, a script, a lock).
+   The entry is the same as a WORLD_STATE portal entry. slot = who used it
+   (-1 = not a player). */
+typedef struct PacketCoopDoorState {
+    /* 0000 */ int type;
+    /* 0004 */ int map;
+    /* 0008 */ int slot;
+    /* 000C */ int reserved;
+    /* 0010 */ CoopWorldEntry e;
+} PacketCoopDoorState;
+COOP_STATIC_ASSERT(sizeof(PacketCoopDoorState) == 0x50, "PacketCoopDoorState size");
+#define COOP_DOOR_PENDING_MAX 32
+
 typedef struct PacketCoopWorldState {
     /* 0000 */ int type;
     /* 0004 */ int map;
@@ -1106,6 +1121,16 @@ void coop_lite_host_portal_changed(void);
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt);
 /* Door request is the right size for the received byte count. */
 bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size);
+/* PT53e: host marks one door changed (flushed as DOOR_STATE within 100 ms);
+   client applies it. */
+void coop_lite_host_portal_touch(int64_t portal);
+void coop_lite_handle_door_state(PacketCoopDoorState* pkt);
+bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size);
+/* PT53e: pending-door set (by OID bytes); false when full or a duplicate. */
+bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid);
+/* PT53e: a coop PC portrait is drawn from its engine portrait number when
+   it has one (Players\<oid>.bmp exists only on the machine that made it). */
+bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found);
 /* PT40 */
 bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size);
 bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);

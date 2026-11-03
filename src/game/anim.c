@@ -6492,6 +6492,14 @@ bool sub_428620(AnimRunInfo* run_info)
         return false;
     }
 
+    /* PT53e: a coop client's own PC closing a door asks the host (the
+       close used to stay local, so the host never saw it). */
+    if (run_info->params[1].obj != OBJ_HANDLE_NULL
+        && coop_lite_client_local_goal_obj(run_info->params[1].obj)) {
+        coop_lite_client_queue_door_use(door_obj);
+        return false;
+    }
+
     return true;
 }
 
@@ -6707,8 +6715,11 @@ bool sub_428A10(AnimRunInfo* run_info)
     case OBJ_TYPE_PORTAL:
         /* PT37: a coop client's own PC: the host runs the door's script. */
         if (coop_lite_client_local_goal_obj(source_obj)) {
+            /* PT53e: no local open (the host's DOOR_STATE moves it); the
+               goal ends here instead of animating a door the host may
+               refuse. */
             coop_lite_client_queue_door_use(target_obj);
-            return true;
+            return false;
         }
         if (!object_script_execute(source_obj, target_obj, source_obj, SAP_USE, 0)) {
             return false;
