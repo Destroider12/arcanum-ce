@@ -615,15 +615,32 @@ bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
     unsigned int last_req_ms, unsigned int now_ms);
 
 /* Set of OIDs listed by the snapshot (client prune). */
-#define COOP_OID_SET_MAX 4096 /* PT51: was 1024; a full-map snapshot lists more */
+#define COOP_OID_SET_MAX 16384 /* PT52k: = host COOP_WORLD_FULL_MAX_OIDS (was 4096) */
+#define COOP_OID_SET_HASH 32768 /* PT52k: open addressing, power of 2, >= 2 * MAX */
 typedef struct CoopOidSet {
     int count;
     bool overflow;
     uint8_t oid[COOP_OID_SET_MAX][24];
+    uint16_t slot[COOP_OID_SET_HASH]; /* index + 1 into oid[], 0 = empty */
 } CoopOidSet;
 void coop_oid_set_reset(CoopOidSet* set);
 void coop_oid_set_add(CoopOidSet* set, const uint8_t oid[24]);
 bool coop_oid_set_has(const CoopOidSet* set, const uint8_t oid[24]);
+
+/* PT52k: per-slot token bucket for client -> host requests. Tokens are
+   kept x1000; `cap` tokens max, `per_sec` refill. True = take `cost`. */
+typedef struct CoopRateBucket {
+    unsigned int last_ms;
+    int milli; /* tokens * 1000 */
+    bool init;
+} CoopRateBucket;
+bool coop_lite_rate_take(CoopRateBucket* b, unsigned int now_ms, int cost, int cap, int per_sec);
+#define COOP_RATE_OBJ_CAP 256 /* OIDs: client keeps <= 64 in flight, re-asks on timeout */
+#define COOP_RATE_OBJ_PER_SEC 128
+#define COOP_RATE_NPC_CAP 64
+#define COOP_RATE_NPC_PER_SEC 32
+#define COOP_RATE_ACT_CAP 20 /* door / skill / craft intents */
+#define COOP_RATE_ACT_PER_SEC 10
 
 void coop_lite_handle_world_req(PacketCoopWorldReq* pkt);
 void coop_lite_handle_world_state(PacketCoopWorldState* pkt);
@@ -1456,6 +1473,14 @@ struct TeleportData;
 /* Pure: is this client slot ready for the host to leave? state = COOP_TRAVEL_*
    or -1 (no reply yet); dist = tiles from the host PC. */
 bool coop_lite_travel_slot_ready(int state, int64_t dist);
+/* PT52k: per-slot facts for the pure travel tally (slots 1..7 used). */
+typedef struct CoopTravelSlot {
+    bool present; /* a client PC is bound to the slot */
+    bool dead;
+    int64_t dist; /* tiles from the host PC */
+} CoopTravelSlot;
+int coop_lite_travel_tally(const CoopTravelSlot ts[8], int state[8], int* ready_ptr, int* far_mask_ptr);
+int coop_lite_travel_untold(int told_mask, int present_mask);
 /* Host teleport_do hook: true = deferred (ready check started), do not teleport now. */
 bool coop_lite_host_travel_gate(const struct TeleportData* td);
 /* Y key / panel click: client = "ready", host = "go now". True if consumed. */

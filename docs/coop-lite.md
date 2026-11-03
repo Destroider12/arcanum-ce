@@ -2266,3 +2266,12 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - Travel panel: the waiting-names list cuts each name on a UTF-8 boundary, because Cyrillic names were split mid-character. The name buffer is now 128 bytes.
 - tig `tig_find_first_file`: frees the empty SDL_GlobDirectory result. LSan flagged the leak.
 - 8 players, audit: per-slot arrays are [8], loops `slot < 8`, masks are int (bit 7 OK). Party dialog is one-at-a-time (`coop_party_slot`). WORLD_REQ is rate-limited per slot (3 s). Full snapshot is paged per slot: 7 x 16384 x 24 B = 2.7 MB host RAM and about 7 x 41 KB/s while streaming.
+
+## PT52k — нагрузка и лимиты / load and rate limits
+
+- Полные снимки мира: максимум один обход объектов за тик (`coop_world_full_need_walk`), при ошибке — ответ по радиусу.
+- `CoopOidSet`: хеш-сет (FNV-1a, линейное пробирование), ёмкость 16384, прежняя семантика переполнения.
+- Лимиты хоста на слот (token bucket `coop_lite_rate_take`): OBJ_REQ 256/128 в с, NPC_REQ 64/32, door/skill/craft 20/10; сброс при отключении, лог отладки при отбросе.
+- Подсчёт готовности к переходу вынесен в чистые `coop_lite_travel_tally`/`coop_lite_travel_untold`; обрезка имени UTF-8-безопасна.
+- Тесты: `coop_lite_fuzz8` (oid_hash_set 16384, rate_bucket, travel_soak 400k), новый `coop_lite_net8` (7 ENet-клиентов, шторм валидных/битых пакетов, переподключение слотов).
+- Нет лимитов пока для ATTACK_INTENT и PC_STATS.

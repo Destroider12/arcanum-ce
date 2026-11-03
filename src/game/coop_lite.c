@@ -3146,6 +3146,9 @@ static void coop_lite_char_rx_reset_all(void)
     }
 }
 
+static void coop_lite_host_rate_reset(int slot);
+static bool coop_lite_host_rate_ok(int kind, int slot, int cost);
+
 void coop_lite_host_on_client_disconnect(int slot)
 {
     if (slot <= 0 || slot >= 8) {
@@ -3153,6 +3156,7 @@ void coop_lite_host_on_client_disconnect(int slot)
     }
     coop_char_rx_free(&coop_char_rx[slot]);
     coop_lite_pt52_slot_gone(slot); /* PT52c */
+    coop_lite_host_rate_reset(slot); /* PT52k */
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_barter_end(slot, "disconnected");
 #endif
@@ -5730,6 +5734,9 @@ void coop_lite_handle_npc_req(PacketCoopObjReq* pkt)
     if (slot <= 0 || slot >= 8 || sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
         return;
     }
+    if (!coop_lite_host_rate_ok(1, slot, pkt->count > 0 ? pkt->count : 1)) {
+        return; /* PT52k */
+    }
     for (i = 0; i < pkt->count; i++) {
         int64_t npc = coop_lite_get_oid_obj(pkt->oid[i]);
         Packet70 out;
@@ -7831,34 +7838,128 @@ bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
     return coop_lite_interval_elapsed(last_req_ms, now_ms, 30000u);
 }
 
+bool coop_lite_rate_take(CoopRateBucket* b, unsigned int now_ms, int cost, int cap, int per_sec)
+{
+    unsigned int dt;
+    long long milli;
+
+    if (b == NULL || cost < 0 || cap <= 0 || per_sec <= 0) {
+        return false;
+    }
+    if (!b->init) {
+        b->init = true;
+        b->last_ms = now_ms;
+        b->milli = cap * 1000;
+    }
+    dt = now_ms - b->last_ms; /* wraps fine */
+    if (dt > 3600000u) {
+        dt = 3600000u;
+    }
+    b->last_ms = now_ms;
+    milli = (long long)b->milli + (long long)dt * per_sec;
+    if (milli > (long long)cap * 1000) {
+        milli = (long long)cap * 1000;
+    }
+    if (milli < (long long)cost * 1000) {
+        b->milli = (int)milli;
+        return false;
+    }
+    b->milli = (int)(milli - (long long)cost * 1000);
+    return true;
+}
+
+/* PT52k: kind 0 OBJ_REQ (cost = OIDs), 1 NPC_REQ, 2 door/skill/craft. */
+static CoopRateBucket coop_host_rate[3][8];
+static unsigned int coop_host_rate_drops[3][8];
+
+static bool coop_lite_host_rate_ok(int kind, int slot, int cost)
+{
+    static const int caps[3] = { COOP_RATE_OBJ_CAP, COOP_RATE_NPC_CAP, COOP_RATE_ACT_CAP };
+    static const int rates[3] = { COOP_RATE_OBJ_PER_SEC, COOP_RATE_NPC_PER_SEC, COOP_RATE_ACT_PER_SEC };
+
+    if (kind < 0 || kind >= 3 || slot <= 0 || slot >= 8) {
+        return false;
+    }
+    if (coop_lite_rate_take(&coop_host_rate[kind][slot], coop_obj_now_ms, cost, caps[kind], rates[kind])) {
+        return true;
+    }
+    if ((coop_host_rate_drops[kind][slot]++ & 63u) == 0) {
+        tig_debug_printf("CoopLite: PT52k slot %d request kind %d over rate, dropped (%u)\n",
+            slot, kind, coop_host_rate_drops[kind][slot]);
+    }
+    return false;
+}
+
+static void coop_lite_host_rate_reset(int slot)
+{
+    int k;
+
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    for (k = 0; k < 3; k++) {
+        memset(&coop_host_rate[k][slot], 0, sizeof(coop_host_rate[k][slot]));
+        coop_host_rate_drops[k][slot] = 0;
+    }
+}
+
+static unsigned int coop_oid_set_hash(const uint8_t oid[24])
+{
+    unsigned int h = 2166136261u;
+    int i;
+
+    for (i = 0; i < 24; i++) {
+        h = (h ^ oid[i]) * 16777619u;
+    }
+    return h;
+}
+
 void coop_oid_set_reset(CoopOidSet* set)
 {
     set->count = 0;
     set->overflow = false;
+    memset(set->slot, 0, sizeof(set->slot));
+}
+
+/* PT52k: hash lookup (was a linear scan: O(n^2) per snapshot). */
+static int coop_oid_set_find(const CoopOidSet* set, const uint8_t oid[24], bool* found)
+{
+    unsigned int i = coop_oid_set_hash(oid) & (COOP_OID_SET_HASH - 1);
+
+    while (set->slot[i] != 0) {
+        if (memcmp(set->oid[set->slot[i] - 1], oid, 24) == 0) {
+            *found = true;
+            return (int)i;
+        }
+        i = (i + 1) & (COOP_OID_SET_HASH - 1);
+    }
+    *found = false;
+    return (int)i;
 }
 
 void coop_oid_set_add(CoopOidSet* set, const uint8_t oid[24])
 {
-    if (coop_oid_set_has(set, oid)) {
+    bool found;
+    int i = coop_oid_set_find(set, oid, &found);
+
+    if (found) {
         return;
     }
     if (set->count >= COOP_OID_SET_MAX) {
         set->overflow = true;
         return;
     }
-    memcpy(set->oid[set->count++], oid, 24);
+    memcpy(set->oid[set->count], oid, 24);
+    set->count++;
+    set->slot[i] = (uint16_t)set->count;
 }
 
 bool coop_oid_set_has(const CoopOidSet* set, const uint8_t oid[24])
 {
-    int i;
+    bool found;
 
-    for (i = 0; i < set->count; i++) {
-        if (memcmp(set->oid[i], oid, 24) == 0) {
-            return true;
-        }
-    }
-    return false;
+    (void)coop_oid_set_find(set, oid, &found);
+    return found;
 }
 
 void coop_char_rx_free(CoopCharRx* rx)
@@ -10765,6 +10866,9 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
     if (slot <= 0 || slot >= 8 || sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
         return;
     }
+    if (!coop_lite_host_rate_ok(0, slot, pkt->count > 0 ? pkt->count : 1)) {
+        return; /* PT52k */
+    }
     out = (PacketCoopObjBlob*)MALLOC(sizeof(*out));
     if (out == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); return; }
     for (i = 0; i < pkt->count; i++) {
@@ -12939,6 +13043,7 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
 static int coop_world_full_key[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 static int64_t coop_world_full_pc[8];
 static bool coop_world_full_active[8];
+static bool coop_world_full_need_walk[8]; /* PT52k: object walk queued for the tick */
 static int coop_world_full_cursor[8];
 static unsigned int coop_world_full_ms[8];
 
@@ -13202,6 +13307,7 @@ static void coop_world_full_tick(unsigned int now_ms)
 {
     int slot;
     int key;
+    bool walked = false;
 
     if (!tig_net_is_active() || !tig_net_is_host()) {
         return;
@@ -13225,6 +13331,23 @@ static void coop_world_full_tick(unsigned int now_ms)
             coop_world_full_active[slot] = false;
             coop_world_full_free(slot);
             coop_world_full_key[slot] = -1;
+            continue;
+        }
+        if (coop_world_full_need_walk[slot]) {
+            if (walked) {
+                continue; /* PT52k: next tick */
+            }
+            walked = true;
+            coop_world_full_need_walk[slot] = false;
+            if (!coop_world_full_snapshot(slot)) {
+                coop_world_full_active[slot] = false;
+                coop_world_full_key[slot] = -1;
+                coop_world_full_first[slot] = false; /* PT52i */
+                tig_debug_printf("CoopLite: PT52d full snapshot alloc failed, radius reply\n");
+                (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
+            } else {
+                tig_debug_printf("CoopLite: PT51 full-map world snapshot → slot %d (map key %d)\n", slot, key);
+            }
             continue;
         }
         if (coop_world_full_ms[slot] != 0
@@ -13284,15 +13407,10 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
         coop_world_full_active[slot] = true;
         coop_world_full_cursor[slot] = 0;
         coop_world_full_ms[slot] = 0;
-        if (!coop_world_full_snapshot(slot)) {
-            coop_world_full_active[slot] = false;
-            coop_world_full_key[slot] = -1;
-            coop_world_full_first[slot] = false; /* PT52i */
-            tig_debug_printf("CoopLite: PT52d full snapshot alloc failed, radius reply\n");
-            (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
-            return;
-        }
-        tig_debug_printf("CoopLite: PT51 full-map world snapshot → slot %d (map key %d)\n", slot, key);
+        /* PT52k: the whole-map object walk runs from the tick, at most one
+           per tick, so 7 simultaneous joins do not stall one host frame. */
+        coop_world_full_need_walk[slot] = true;
+        tig_debug_printf("CoopLite: PT52k full-map snapshot queued → slot %d (map key %d)\n", slot, key);
         return;
     }
     (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
@@ -13720,6 +13838,7 @@ static void coop_lite_world_state_reset(void)
         for (i = 0; i < 8; i++) {
             coop_world_full_key[i] = -1; /* PT51: every session starts with a full snapshot */
             coop_world_full_active[i] = false;
+            coop_world_full_need_walk[i] = false; /* PT52k */
             coop_world_full_pc[i] = OBJ_HANDLE_NULL;
             coop_world_full_free(i);
         }
@@ -14193,6 +14312,9 @@ void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
     if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects()) {
         return;
     }
+    if (!coop_lite_host_rate_ok(2, slot, 1)) {
+        return; /* PT52k */
+    }
     pc = sub_4A2B60(slot);
     portal = coop_lite_get_oid_obj(pkt->oid);
     if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || portal == OBJ_HANDLE_NULL
@@ -14373,6 +14495,9 @@ void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt)
     if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects()) {
         return;
     }
+    if (!coop_lite_host_rate_ok(2, slot, 1)) {
+        return; /* PT52k */
+    }
     pc = sub_4A2B60(slot);
     target = coop_lite_get_oid_obj(pkt->target_oid);
     if (pkt->item_oid[0] != 0) {
@@ -14462,6 +14587,9 @@ void coop_lite_handle_craft(PacketCoopCraft* pkt)
     slot = sub_52A530();
     if (slot <= 0 || slot >= 8) {
         return;
+    }
+    if (!coop_lite_host_rate_ok(2, slot, 1)) {
+        return; /* PT52k */
     }
     pc = sub_4A2B60(slot);
     if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
@@ -16222,6 +16350,45 @@ bool coop_lite_travel_slot_ready(int state, int64_t dist)
     return state == COOP_TRAVEL_IDLE && dist >= 0 && dist <= COOP_TRAVEL_RANGE;
 }
 
+/* PT52k: pure tally of client slots 1..7 (soak-tested). A dead PC's READY
+   is dropped (state -> -1); absent / dead slots never hold the party. */
+int coop_lite_travel_tally(const CoopTravelSlot ts[8], int state[8], int* ready_ptr, int* far_mask_ptr)
+{
+    int slot;
+    int living = 0;
+    int ready = 0;
+    int far_mask = 0;
+
+    for (slot = 1; slot < 8; slot++) {
+        if (!ts[slot].present || ts[slot].dead) {
+            if (ts[slot].present) {
+                state[slot] = -1; /* PT52e: READY dies with the PC */
+            }
+            continue;
+        }
+        living++;
+        if (ts[slot].dist > COOP_TRAVEL_RANGE) {
+            far_mask |= 1 << slot;
+        }
+        if (coop_lite_travel_slot_ready(state[slot], ts[slot].dist)) {
+            ready++;
+        }
+    }
+    if (ready_ptr != NULL) {
+        *ready_ptr = ready;
+    }
+    if (far_mask_ptr != NULL) {
+        *far_mask_ptr = far_mask;
+    }
+    return living;
+}
+
+/* PT52k: connected client slots not yet told about the running check. */
+int coop_lite_travel_untold(int told_mask, int present_mask)
+{
+    return present_mask & ~told_mask & 0xFE;
+}
+
 bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_PARTY_CTRL && size >= (int)sizeof(PacketCoopPartyCtrl)
@@ -16294,29 +16461,34 @@ static int coop_travel_count(int* ready_ptr, int* far_mask_ptr, char* names, siz
         return 0;
     }
     host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+    {
+        CoopTravelSlot ts[8];
+
+        memset(ts, 0, sizeof(ts));
+        for (slot = 1; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+
+            ts[slot].present = pc != OBJ_HANDLE_NULL && pc != host_pc;
+            ts[slot].dead = ts[slot].present && critter_is_dead(pc);
+            ts[slot].dist = ts[slot].present ? location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), host_loc) : -1;
+        }
+        living = coop_lite_travel_tally(ts, coop_travel_state, &ready, &far_mask);
+    }
     for (slot = 1; slot < 8; slot++) {
         int64_t pc = sub_4A2B60(slot);
-        int64_t dist;
 
         if (pc == OBJ_HANDLE_NULL || pc == host_pc || critter_is_dead(pc)) {
-            if (pc != OBJ_HANDLE_NULL && pc != host_pc) {
-                coop_travel_state[slot] = -1; /* PT52e: READY dies with the PC */
-            }
-            continue; /* dead / disconnected never hold the party */
+            continue;
         }
-        living++;
-        dist = location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), host_loc);
-        if (dist > COOP_TRAVEL_RANGE) {
-            far_mask |= 1 << slot;
-        }
-        if (coop_lite_travel_slot_ready(coop_travel_state[slot], dist)) {
-            ready++;
+        if (coop_lite_travel_slot_ready(coop_travel_state[slot],
+                location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), host_loc))) {
+            continue;
         } else if (names != NULL && strlen(names) + 16 < size) {
             char name[128];
-
-            int cut = 15;
+            size_t cut;
 
             object_examine(pc, pc, name);
+            cut = strlen(name) > 15 ? 15 : strlen(name); /* PT52k: no read past the NUL */
             /* PT52j: cut on a UTF-8 boundary (Cyrillic names are 2 bytes/char) */
             while (cut > 0 && ((unsigned char)name[cut] & 0xC0) == 0x80) {
                 cut--;
@@ -16358,6 +16530,7 @@ void coop_lite_pt52_slot_gone(int slot)
         coop_travel_state[slot] = -1; /* PT52d: a rejoin is not READY */
         coop_travel_told_mask &= ~(1 << slot);
         coop_world_full_active[slot] = false;
+        coop_world_full_need_walk[slot] = false; /* PT52k */
         coop_world_full_key[slot] = -1;
         coop_world_full_pc[slot] = OBJ_HANDLE_NULL;
         coop_world_full_cursor[slot] = 0;
@@ -16512,8 +16685,17 @@ static void coop_travel_tick(unsigned int now_ms)
 
         /* PT52d: a client that joined during the check gets TRAVEL_START */
         coop_travel_count(NULL, &far_mask, NULL, 0);
+        int present = 0;
+        int untold;
+
         for (slot = 1; slot < 8; slot++) {
-            if ((coop_travel_told_mask & (1 << slot)) == 0 && sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
+            if (sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
+                present |= 1 << slot;
+            }
+        }
+        untold = coop_lite_travel_untold(coop_travel_told_mask, present);
+        for (slot = 1; slot < 8; slot++) {
+            if ((untold & (1 << slot)) != 0) {
                 coop_travel_told_mask |= 1 << slot;
                 coop_travel_state[slot] = -1;
                 coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, 0, slot);

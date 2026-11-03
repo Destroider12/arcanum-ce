@@ -323,12 +323,215 @@ static void eight_players(void)
     CHECK(set.count == 0 && !set.overflow && !coop_oid_set_has(&set, oid));
 }
 
+
+/* ---- PT52k ---- */
+static void oid_hash_set(void)
+{
+    static CoopOidSet set;
+    uint8_t oid[24];
+    int i;
+
+    coop_oid_set_reset(&set);
+    for (i = 0; i < COOP_OID_SET_MAX; i++) {
+        memset(oid, 0, sizeof(oid));
+        memcpy(oid, &i, sizeof(i));
+        oid[23] = (uint8_t)(i * 7);
+        coop_oid_set_add(&set, oid);
+        coop_oid_set_add(&set, oid); /* duplicate: no growth */
+    }
+    CHECK(set.count == COOP_OID_SET_MAX && !set.overflow);
+    for (i = 0; i < COOP_OID_SET_MAX; i += 97) {
+        memset(oid, 0, sizeof(oid));
+        memcpy(oid, &i, sizeof(i));
+        oid[23] = (uint8_t)(i * 7);
+        CHECK(coop_oid_set_has(&set, oid));
+        oid[23] ^= 0x80;
+        CHECK(!coop_oid_set_has(&set, oid));
+    }
+    memset(oid, 0xEE, sizeof(oid));
+    coop_oid_set_add(&set, oid);
+    CHECK(set.overflow && set.count == COOP_OID_SET_MAX && !coop_oid_set_has(&set, oid));
+    coop_oid_set_reset(&set);
+    memset(oid, 0, sizeof(oid));
+    CHECK(set.count == 0 && !coop_oid_set_has(&set, oid));
+    coop_oid_set_add(&set, oid); /* all-zero OID is a valid key */
+    CHECK(coop_oid_set_has(&set, oid) && set.count == 1);
+}
+
+static void rate_bucket(void)
+{
+    CoopRateBucket b;
+    int i;
+    int ok = 0;
+
+    memset(&b, 0, sizeof(b));
+    for (i = 0; i < 1000; i++) {
+        ok += coop_lite_rate_take(&b, 1000, 1, 20, 10) ? 1 : 0;
+    }
+    CHECK(ok == 20); /* burst = cap */
+    CHECK(!coop_lite_rate_take(&b, 1099, 1, 20, 10)); /* 0.99 token */
+    CHECK(coop_lite_rate_take(&b, 1100, 1, 20, 10)); /* 1 token after 100 ms */
+    CHECK(coop_lite_rate_take(&b, 1000u + 3600000u * 3u, 20, 20, 10)); /* refill capped, long gap */
+    CHECK(!coop_lite_rate_take(&b, 1000u + 3600000u * 3u, 1, 20, 10));
+    memset(&b, 0, sizeof(b));
+    CHECK(coop_lite_rate_take(&b, 0xFFFFFF00u, COOP_RATE_OBJ_CAP, COOP_RATE_OBJ_CAP, COOP_RATE_OBJ_PER_SEC));
+    CHECK(coop_lite_rate_take(&b, 0x00000100u, 64, COOP_RATE_OBJ_CAP, COOP_RATE_OBJ_PER_SEC)); /* clock wrap */
+    /* a normal client: 64 OIDs in flight, re-asked every second, never dropped */
+    memset(&b, 0, sizeof(b));
+    for (i = 0; i < 600; i++) {
+        CHECK(coop_lite_rate_take(&b, 5000u + (unsigned int)i * 1000u, COOP_OBJ_REQ_MAX * 4, COOP_RATE_OBJ_CAP, COOP_RATE_OBJ_PER_SEC));
+    }
+    CHECK(!coop_lite_rate_take(NULL, 0, 1, 1, 1));
+    CHECK(!coop_lite_rate_take(&b, 0, -1, 1, 1));
+}
+
+/* Model of the host travel check driven by random 8-slot events. */
+static void travel_soak(void)
+{
+    CoopTravelSlot ts[8];
+    int state[8];
+    bool busy[8];
+    int told = 0;
+    bool active = false;
+    long it;
+    int starts = 0;
+    int goes = 0;
+
+    memset(ts, 0, sizeof(ts));
+    memset(busy, 0, sizeof(busy));
+    for (it = 0; it < 8; it++) {
+        state[it] = -1;
+    }
+    for (it = 0; it < 400000; it++) {
+        int slot = 1 + (int)(rnd() % 7);
+        int present = 0;
+        int ready = 0;
+        int far = 0;
+        int living;
+        int s;
+
+        switch (rnd() % 10) {
+        case 0: /* connect / rejoin */
+            if (!ts[slot].present) {
+                ts[slot].present = true;
+                ts[slot].dead = false;
+                ts[slot].dist = (int64_t)(rnd() % 60);
+            }
+            break;
+        case 1: /* disconnect (coop_lite_pt52_slot_gone) */
+            ts[slot].present = false;
+            busy[slot] = false;
+            state[slot] = -1;
+            told &= ~(1 << slot);
+            break;
+        case 2: /* death / resurrection */
+            if (ts[slot].present) {
+                ts[slot].dead = !ts[slot].dead;
+            }
+            break;
+        case 3: /* walk */
+            if (ts[slot].present) {
+                ts[slot].dist = (int64_t)(rnd() % 60);
+            }
+            break;
+        case 4: /* client reports BUSY / IDLE / READY */
+            if (ts[slot].present) {
+                int st = (int)(rnd() % 3);
+
+                busy[slot] = st == COOP_TRAVEL_BUSY;
+                state[slot] = st;
+            }
+            break;
+        case 5: /* host tries to leave (gate) or forces when active */
+            if (active) {
+                if (rnd() % 4 == 0) {
+                    active = false; /* forced go */
+                    goes++;
+                }
+                break;
+            }
+            for (s = 0; s < 8; s++) {
+                state[s] = busy[s] ? COOP_TRAVEL_BUSY : COOP_TRAVEL_IDLE;
+            }
+            living = coop_lite_travel_tally(ts, state, &ready, &far);
+            if (living == 0 || ready >= living) {
+                goes++;
+                break;
+            }
+            active = true;
+            starts++;
+            told = 0;
+            for (s = 1; s < 8; s++) {
+                if (ts[s].present) {
+                    told |= 1 << s;
+                }
+            }
+            CHECK((far & 1) == 0 && (far & ~0xFE) == 0);
+            break;
+        case 6: /* cancel (host died / combat / walked off) */
+            active = false;
+            break;
+        default:
+            break;
+        }
+
+        /* tick */
+        if (!active) {
+            continue;
+        }
+        for (s = 1; s < 8; s++) {
+            if (ts[s].present) {
+                present |= 1 << s;
+            }
+        }
+        {
+            int untold = coop_lite_travel_untold(told, present);
+
+            CHECK((untold & ~present) == 0 && (untold & 1) == 0);
+            for (s = 1; s < 8; s++) {
+                if ((untold & (1 << s)) != 0) {
+                    told |= 1 << s;
+                    state[s] = -1;
+                }
+            }
+        }
+        CHECK((present & ~told) == 0); /* every connected client was told */
+        living = coop_lite_travel_tally(ts, state, &ready, &far);
+        {
+            int exp_living = 0;
+            int exp_ready = 0;
+
+            for (s = 1; s < 8; s++) {
+                if (ts[s].present && !ts[s].dead) {
+                    exp_living++;
+                    if (coop_lite_travel_slot_ready(state[s], ts[s].dist)) {
+                        exp_ready++;
+                    }
+                }
+                if (ts[s].present && ts[s].dead) {
+                    CHECK(state[s] == -1); /* READY dropped with the PC */
+                }
+            }
+            CHECK(living == exp_living && ready == exp_ready && ready <= living);
+        }
+        if (living == 0 || ready >= living) {
+            active = false; /* all ready / nobody left: never stuck */
+            goes++;
+        }
+        CHECK(!active || living > 0);
+    }
+    CHECK(starts > 1000 && goes > 1000);
+}
+
 int main(void)
 {
     fuzz_validators();
     fuzz_rx();
     notice_texts();
     eight_players();
+    oid_hash_set();
+    rate_bucket();
+    travel_soak();
     if (failures != 0) {
         fprintf(stderr, "coop_lite_fuzz8: %d failure(s)\n", failures);
         return 1;
