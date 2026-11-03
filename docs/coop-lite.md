@@ -2246,3 +2246,13 @@ No new packet. Protocol stays 32: WORLD_STATE gains flag bit `COOP_WORLD_F_FULL`
 - All player-visible Coop Lite strings are shown as "Русский / English": party notices (fall, resurrect, wipe/reload, pickpocket, skill, talk refusal, rest, world map), host-left notice, "X has fallen", travel panel texts (RU line, then EN line), coop dialog hint, training refusal, main menu buttons and co-op mode line, UPnP status.
 - Notice buffers grew 160 -> 512, travel texts 200/256 -> 512, menu labels 160 -> 512, UPnP status 128 -> 256. Travel panel is 460 px wide and up to 8 lines; the coop panel wrapper honours '\n' as a line break.
 - Debug logs and vanilla game strings are unchanged.
+
+## PT52i (DeepSeek review)
+
+- Travel vote: the `told_mask` is built from slots that are actually connected (it used to be 0xFE).
+- WIPE notice: the format string has two `%u`, so the seconds argument is now passed twice (caught by `-Wformat`).
+- `coop_world_host_emit`: returns false on allocation failure, so the full tick retries the page instead of treating the snapshot as done.
+- `handle_world_req`: the allocation-fail fallback resets `full_first[slot]`.
+- `inv_list_repair`: guards against SIZE_MAX overflow before growing the buffer.
+- Follow toggle: resolves `pc_obj` first and calls the travel close hook only when `pc_obj` is valid.
+- Rejected / OK by audit: radius rate-limit after a full snapshot (full_key/full_pc persist), UPnP stop idempotency, cdv_wrap '\n' handling, close_all recursion (send-only).

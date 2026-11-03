@@ -1016,11 +1016,12 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
         return;
     }
 
-    /* PT52f: forced travel - close dialog/barter/inventory/char view first */
-    if (coop_travel_close_hook != NULL) {
+    pc_obj = player_get_local_pc_obj();
+    /* PT52f: forced travel - close dialog/barter/inventory/char view first
+       (PT52i: only when there is a PC to move) */
+    if (pc_obj != OBJ_HANDLE_NULL && coop_travel_close_hook != NULL) {
         coop_travel_close_hook();
     }
-    pc_obj = player_get_local_pc_obj();
     slot = sub_529520();
     dest = coop_lite_follow_loc_for_slot(pkt->loc, slot);
     coop_lite_client_clear_stuck_flags(pc_obj, "follow");
@@ -5883,7 +5884,7 @@ static void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, boo
         break;
     case COOP_PARTY_WIPE:
         snprintf(buf, size, "Вся группа пала. Загрузка последнего сохранения через %u с... / The whole party has fallen. Reloading the last save in %u seconds...",
-            (countdown_ms + 999u) / 1000u);
+            (countdown_ms + 999u) / 1000u, (countdown_ms + 999u) / 1000u); /* PT52i */
         break;
     case COOP_PARTY_WIPE_CANCEL:
         snprintf(buf, size, "%s", "Кто-то поднялся — загрузка отменена. / Someone got back up - reload cancelled.");
@@ -11281,7 +11282,7 @@ static int coop_lite_inv_list_repair(int64_t owner)
     int i;
     int k;
 
-    if (n <= 0) {
+    if (n <= 0 || (size_t)n > SIZE_MAX / sizeof(*h)) { /* PT52i: size guard */
         return 0;
     }
     /* PT52e: no fixed cap */
@@ -13034,7 +13035,10 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
     t0 = SDL_GetTicksNS();
     center = obj_field_int64_get(pc, OBJ_F_LOCATION);
     out = (PacketCoopWorldState*)MALLOC(sizeof(*out));
-    if (out == NULL) { tig_debug_printf("CoopLite: PT52e alloc failed\n"); return true; }
+    if (out == NULL) {
+        tig_debug_printf("CoopLite: PT52e alloc failed\n");
+        return false; /* PT52i: not done; the full tick retries the page */
+    }
     memset(out, 0, offsetof(PacketCoopWorldState, entries));
     out->type = PACKET_COOP_WORLD_STATE;
     out->map = key;
@@ -13281,6 +13285,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
         if (!coop_world_full_snapshot(slot)) {
             coop_world_full_active[slot] = false;
             coop_world_full_key[slot] = -1;
+            coop_world_full_first[slot] = false; /* PT52i */
             tig_debug_printf("CoopLite: PT52d full snapshot alloc failed, radius reply\n");
             (void)coop_world_host_emit(slot, key, pc, false, NULL, 0);
             return;
@@ -16417,7 +16422,13 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
     coop_travel_active = true;
     coop_travel_draw_ms = 0;
     coop_travel_send(COOP_CTRL_TRAVEL_START, far_mask, 0, -1);
-    coop_travel_told_mask = 0xFE;
+    /* PT52i: only slots connected now got it; a late joiner is told by the tick */
+    coop_travel_told_mask = 0;
+    for (slot = 1; slot < 8; slot++) {
+        if (sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
+            coop_travel_told_mask |= 1 << slot;
+        }
+    }
     tig_debug_printf("CoopLite: PT50 host travel deferred, ready check (living=%d far=0x%x)\n", living, far_mask);
     return true;
 }
