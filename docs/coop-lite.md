@@ -2372,3 +2372,17 @@ From the gcc -fanalyzer / cppcheck / clang-tidy review of PT53b (protocol unchan
 - Character bundle build frees its buffer when the header write fails; obj-blob ground defer checks the pending entry.
 
 Tests: `coop_lite_policy` (PT53c helpers), new `tig_debug_long_line` (fails under ASan on PT53b).
+
+## PT53d: receive-path fuzz harness (no protocol change)
+
+- New `tests/coop_lite_rx_fuzz_test.c` (ctest `coop_lite_rx_fuzz`, 3 s;
+  `COOP_RX_FUZZ_SECONDS` for longer runs). Host phase: a raw ENet peer
+  completes the tig_net handshake and sends random typed coop packets
+  (truncated / exact / padded / oversized) through `tig_net_dispatch_app`
+  and the validator to the stub-available host handlers. Client phase:
+  handlers called on exact-size heap copies so ASan catches any over-read.
+- Game-only handlers (obj_blob, char_chunk, dialog_state, story_sync,
+  obj_req, npc_req, party_state, followers, npc_pos) are not linked in the
+  stub build; their batch validators stay covered by `coop_lite_fuzz8`.
+- A 180 s ASan/UBSan run (2.78M packets sent, 399k delivered, 3.6M client
+  iterations) was clean. No code changes to the game were required.
