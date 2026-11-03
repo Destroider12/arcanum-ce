@@ -1204,7 +1204,34 @@ void inven_ui_destroy(void)
     }
     intgame_mode_set(INTGAME_MODE_MAIN);
     /* PT52g: a drag from a window that closed under it is dropped */
+    if (inven_ui_drag_item_obj != OBJ_HANDLE_NULL) {
+        /* PT54: and its icon leaves the cursor (it kept floating). */
+        inven_ui_drag_item_obj = OBJ_HANDLE_NULL;
+        intgame_refresh_cursor();
+    }
+}
+
+/* PT54: a co-op sync can destroy or replace the item in hand (an ammo
+   stack re-totalled, a doomed copy); its icon then floated on the cursor
+   and every layout send waited for the drag to end. Drop such a drag. */
+bool inven_ui_drag_cancel_if_stale(void)
+{
+    int64_t obj = inven_ui_drag_item_obj;
+
+    if (obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (obj_handle_is_valid(obj)
+        && (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0
+        && obj_type_is_item(obj_field_int32_get(obj, OBJ_F_TYPE))) {
+        return false;
+    }
     inven_ui_drag_item_obj = OBJ_HANDLE_NULL;
+    intgame_refresh_cursor();
+    if (inven_ui_created) {
+        redraw_inven(false);
+    }
+    return true;
 }
 
 // 0x573590

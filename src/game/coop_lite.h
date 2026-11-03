@@ -359,8 +359,18 @@ typedef struct PacketCoopInvenLayout {
     /* 0000 */ int type;
     /* 0004 */ int count;
     /* 0008 */ uint8_t pc_oid[24];
-    /* 0020 */ PacketCoopInvenLayoutEntry entries[COOP_INVEN_LAYOUT_MAX];
+    /* 0020 */ unsigned int seq; /* PT54: echoed in INVEN_SYNC flags (COOP_INVEN_ECHO_SHIFT) */
+    /* 0024 */ int reserved;
+    /* 0028 */ PacketCoopInvenLayoutEntry entries[COOP_INVEN_LAYOUT_MAX];
 } PacketCoopInvenLayout;
+/* PT54: INVEN_SYNC flags bits 16..31 = the last INVEN_LAYOUT seq the host
+   applied for that client. The client keeps its own grid until the echo of
+   its newest layout is in (no revert by an older sync, no resend loop). */
+#define COOP_INVEN_ECHO_SHIFT 16
+unsigned int coop_lite_inven_echo_flags(unsigned int seq);
+unsigned int coop_lite_inven_echo_seq(int flags);
+/* True when echo_seq (16 bit) is at or past sent_seq; sent_seq 0 = none in flight. */
+bool coop_lite_inven_echo_reached(unsigned int sent_seq, unsigned int echo_seq);
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayoutEntry) == 0x20, "PacketCoopInvenLayoutEntry size");
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayout) <= 4096, "PacketCoopInvenLayout fits a net packet");
 bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size);
@@ -368,6 +378,8 @@ bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size);
 bool coop_lite_inven_layout_loc_ok(int loc);
 /* Order-independent per-item hash term; a layout's hash is the sum. */
 unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc);
+/* PT54: value bytes of an OID (padding zeroed). */
+void coop_lite_oid_canon(uint8_t out[24], const void* oid24);
 /* PT53a: client sends only a layout it made itself since the last host
    echo: local != host and local != acked (acked = local taken at each echo
    and at each send). A refused layout is never resent. */
@@ -378,9 +390,12 @@ bool coop_lite_inven_layout_send_due(unsigned int local_hash, unsigned int host_
    location). Returns the number of moves. Pure. */
 #define COOP_LAYOUT_NOOP (-2)
 #define COOP_LAYOUT_REFUSE (-1)
+int coop_lite_grid_cell_dist(int a, int b); /* PT54 */
 int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_loc, int nhave,
     const PacketCoopInvenLayoutEntry* want, int nwant, int* plan);
 void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt);
+void coop_lite_client_rejoin_tick(unsigned int now_ms); /* PT54 */
+void coop_lite_client_drag_tick(void); /* PT54 */
 
 /* PT53: co-op UI strings are written "RU / EN" (or "RU\nEN"). English is
    shown unless ARCANUM_COOP_LANG=ru. Returns a pointer into `s`. */

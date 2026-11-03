@@ -2436,3 +2436,40 @@ Log: `CoopLite: portrait: slot N id P (have Q)` once per slot per new id.
 
 Tests: `coop_dialog_test` `test_pt53e` (packet id/role/size, validator,
 pending-set dedupe/cap, portrait choice).
+
+## PT54: regression fixes after PT53e (protocol 35)
+
+Triggered by a play log where inventory, loot display, doors and the host's
+alive state broke after a host save load.
+
+- **Host alive/dead + HP.** The vitals tick only covered client slots 1-7,
+  so the host PC's HP/dead flag was never sent: after the host died and
+  loaded a save, clients kept seeing a corpse. The tick now covers slot 0
+  too and is forced for 3 rounds (full resend) after a host save load /
+  rejoin. Log: `CoopLite: host PC vitals sent (hp damage N, alive|dead)`.
+- **OID compares by value.** Every remaining raw `memcmp` of 24-byte OIDs
+  now uses `coop_lite_oid_raw_equal` (type + payload, padding ignored); the
+  layout hash hashes `coop_lite_oid_canon`. Host log showed all 9 layout
+  entries refused ("item not (uniquely) in host list").
+- **Backpack grid order is synced.** `PacketCoopInvenLayout` carries a
+  `seq`; grid->grid is a move. Host applies the wanted cell, or the
+  nearest valid free cell (`coop_lite_grid_cell_dist`), then echoes the
+  seq in the high 16 bits of `PacketCoopInvenSync.flags`. The client holds
+  its own layout until the echo (5 s timeout, logged once), then takes the
+  host copy without resending -> no loops. Client inventory batch now also
+  moves its own items to the host's grid cell.
+- **Rejoin never finishing.** If the parked-PC blob arrived before the
+  client world was ready it was dropped and `rejoin_pc_wanted` stayed true,
+  silently blocking door/pickup requests. The client now re-asks every 3 s
+  (4 tries), then keeps its PC and asks for a pack resync. Logs:
+  `rejoin: parked PC not here yet - asking again (N)`,
+  `rejoin: no parked PC blob after 4 tries - keeping ours, pack resync`.
+- **Floating item icon in the inventory window.** A drag whose item was
+  replaced by a sync (e.g. re-totalled arrows) left its art on the cursor.
+  The drag is dropped and the cursor refreshed (`inven_ui_drag_cancel_if_stale`,
+  also on window destroy). Log: `inven: held item was replaced by a sync - drag dropped`.
+- Owner missing for a batch: `inven sync: owner X not here - its N items skipped` (once).
+
+Tests: `coop_dialog_test` `test_pt54` (padding-insensitive OID equality and
+layout plan, grid distance, echo seq incl. wrap, validator accepting echo
+bits), updated `test_pt53a_plan`/`test_pt53b` for grid sync.

@@ -2,6 +2,7 @@
  * PT36 dialog viewer + voting: packet codec, strict validation, vote
  * aggregation / rate limit, packet policy. No network, no UI.
  */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -261,10 +262,10 @@ static int test_pt53a_plan(void)
     /* illegal location */
     memcpy(w[6].oid, have[0], 24);
     w[6].inventory_location = 1500;
-    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 7, plan) == 2, "2 legal moves (PT53b: grid->grid is a no-op)");
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 6, w, 7, plan) == 3, "3 legal moves (PT54: grid->grid is a move)");
     CHECK(plan[0] == COOP_LAYOUT_REFUSE, "stale OID refused");
     CHECK(plan[1] == 1 && plan[2] == 2, "hotbar/grid moves map to the real list");
-    CHECK(plan[3] == COOP_LAYOUT_NOOP, "PT53b: grid reorder not synced");
+    CHECK(plan[3] == 3, "PT54: grid reorder synced");
     CHECK(plan[4] == COOP_LAYOUT_REFUSE, "duplicate request refused");
     CHECK(plan[5] == COOP_LAYOUT_REFUSE, "ambiguous OID refused");
     CHECK(plan[6] == COOP_LAYOUT_REFUSE, "illegal location refused");
@@ -285,8 +286,8 @@ static int test_pt53a_plan(void)
     return 0;
 }
 
-/* PT53b: reload/rejoin + client sort + weapon swap + host gift (blob
-   later): grid order never produces moves or a resend; equip does. */
+/* PT53b/PT54: reload/rejoin + client sort + weapon swap: grid order is
+   synced (PT54), converges after one echo. */
 static int test_pt53b(void)
 {
     static uint8_t have[4][24];
@@ -306,10 +307,13 @@ static int test_pt53b(void)
         memcpy(w[i].oid, have[i], 24);
         w[i].inventory_location = sorted[i];
     }
-    CHECK(hh == lh, "sorted pack hashes like the host: nothing to send");
-    CHECK(!coop_lite_inven_layout_send_due(lh, hh, 0), "sort: no layout");
-    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 0, "sort: 0 moved");
-    /* weapon swap: worn sword to pack, axe (item 1) wielded */
+    /* PT54: grid order is synced: a sort is a layout with 3 grid moves. */
+    CHECK(hh != lh, "sorted pack differs from the host");
+    CHECK(coop_lite_inven_layout_send_due(lh, hh, 0), "sort: layout sent");
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 3
+            && plan[0] == COOP_LAYOUT_NOOP && plan[1] == 1 && plan[2] == 2 && plan[3] == 3,
+        "sort: 3 grid moves");
+    /* weapon swap on top: worn sword to pack, axe (item 1) wielded */
     w[0].inventory_location = 50;
     w[1].inventory_location = 1004;
     lh = 0;
@@ -317,19 +321,18 @@ static int test_pt53b(void)
         lh += coop_lite_inven_layout_term(have[i], w[i].inventory_location);
     }
     CHECK(coop_lite_inven_layout_send_due(lh, hh, 0), "swap: sent");
-    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 2
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 4
             && plan[0] == 0 && plan[1] == 1,
-        "swap: 2 equip moves");
-    /* host applied + echoed: host hash == local -> next layout empty */
-    host_loc[0] = 7;
-    host_loc[1] = 1004;
+        "swap: equip + grid moves");
+    /* host applied + echoed: host hash == local -> nothing more to send */
+    for (i = 0; i < 4; i++) {
+        host_loc[i] = w[i].inventory_location;
+    }
     hh = 0;
     for (i = 0; i < 4; i++) {
         hh += coop_lite_inven_layout_term(have[i], host_loc[i]);
     }
     CHECK(hh == lh && !coop_lite_inven_layout_send_due(lh, hh, lh), "after echo: converged");
-    /* host gift whose blob has not arrived: client does not list it, host
-       does -> the client's layout omits it, no refusal, still converged */
     CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, host_loc, 4, w, 4, plan) == 0, "echo: 0 moved");
     /* unknown OID (stale view) refused deterministically */
     w[0].oid[0] = 99;
@@ -443,9 +446,74 @@ static int test_pt53(void)
     return 0;
 }
 
+/* PT54: OID compare by value, grid sync helpers, echo seq. */
+static int test_pt54(void)
+{
+    uint8_t a[24];
+    uint8_t b[24];
+    uint8_t ca[24];
+    uint8_t cb[24];
+    int16_t t = 2;
+    static uint8_t have[2][24];
+    int have_loc[2] = { 5, 1004 };
+    PacketCoopInvenLayoutEntry w[2];
+    int plan[2];
+    PacketCoopInvenSync sync;
+    int i;
+
+    memset(a, 0, sizeof(a));
+    memcpy(a, &t, 2);
+    for (i = 8; i < 24; i++) {
+        a[i] = (uint8_t)(i * 7);
+    }
+    memcpy(b, a, 24);
+    b[2] = 0xAB; /* padding garbage */
+    b[5] = 0xCD;
+    CHECK(memcmp(a, b, 24) != 0 && coop_lite_oid_raw_equal(a, b), "GUID equal despite padding");
+    coop_lite_oid_canon(ca, a);
+    coop_lite_oid_canon(cb, b);
+    CHECK(memcmp(ca, cb, 24) == 0, "canon drops padding");
+    CHECK(coop_lite_inven_layout_term(a, 7) == coop_lite_inven_layout_term(b, 7), "term by value");
+    CHECK(coop_lite_inven_layout_term(a, 7) != coop_lite_inven_layout_term(a, 8), "term sees grid cell");
+    b[20] ^= 1;
+    CHECK(!coop_lite_oid_raw_equal(a, b), "payload differs");
+    /* the PT54 log: every layout entry refused because the host's copy of
+       the OID carried other padding bytes */
+    memcpy(have[0], a, 24);
+    memcpy(have[1], a, 24);
+    have[1][10] ^= 0x55;
+    memcpy(w[0].oid, a, 24);
+    w[0].oid[3] = 0x77;
+    w[0].inventory_location = 40;
+    memcpy(w[1].oid, have[1], 24);
+    w[1].oid[6] = 0x11;
+    w[1].inventory_location = 1004;
+    CHECK(coop_lite_inven_layout_plan((const uint8_t(*)[24])have, have_loc, 2, w, 2, plan) == 1
+            && plan[0] == 0 && plan[1] == COOP_LAYOUT_NOOP,
+        "padding-different OIDs matched; grid move planned");
+    CHECK(coop_lite_grid_cell_dist(0, 0) == 0 && coop_lite_grid_cell_dist(0, 11) == 2
+            && coop_lite_grid_cell_dist(9, 10) == 82,
+        "grid distance (10 columns)");
+    /* echo seq */
+    CHECK(coop_lite_inven_echo_seq((int)(coop_lite_inven_echo_flags(7) | COOP_INVEN_BATCH_LAST)) == 7, "echo seq");
+    CHECK(coop_lite_inven_echo_reached(0, 0) && coop_lite_inven_echo_reached(5, 5)
+            && coop_lite_inven_echo_reached(5, 6) && !coop_lite_inven_echo_reached(6, 5),
+        "echo reached");
+    CHECK(coop_lite_inven_echo_reached(0xFFFF, 1) && !coop_lite_inven_echo_reached(1, 0xFFFF), "echo wraps");
+    memset(&sync, 0, sizeof(sync));
+    sync.type = PACKET_COOP_INVEN_SYNC;
+    sync.flags = (int)(coop_lite_inven_echo_flags(0x1234) | COOP_INVEN_BATCH_FIRST | COOP_INVEN_BATCH_LAST);
+    CHECK(coop_lite_inven_sync_valid(&sync, (int)coop_lite_inven_sync_size(0)), "echo bits accepted");
+    sync.flags |= 0x100;
+    CHECK(!coop_lite_inven_sync_valid(&sync, (int)coop_lite_inven_sync_size(0)), "unknown low flag refused");
+    CHECK(offsetof(PacketCoopInvenLayout, entries) == 0x28, "layout header carries seq");
+    CHECK(TIG_NET_PROTOCOL >= 35, "protocol bumped");
+    return 0;
+}
+
 int main(void)
 {
-    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53() || test_pt53e()) {
+    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53() || test_pt53e() || test_pt54()) {
         return 1;
     }
     printf("PASS: coop dialog viewer (codec, validation, votes, policy, PT53)\n");

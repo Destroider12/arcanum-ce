@@ -1164,6 +1164,17 @@ static int64_t coop_lite_take_slot_pc(int slot);
 #endif
 
 static unsigned int coop_obj_now_ms; /* last coop_lite_ping time */
+/* PT53/PT54 pack layout state. Host: last INVEN_LAYOUT seq applied per slot
+   (echoed in INVEN_SYNC flags). Client: hashes, newest seq sent, echo seq
+   of the batch being applied. */
+static unsigned int coop_layout_seq_applied[8];
+static unsigned int coop_inv_echo_seq;
+static unsigned int coop_layout_sent_seq;
+static unsigned int coop_layout_next_seq;
+static unsigned int coop_layout_sent_ms;
+static unsigned int coop_layout_host_hash;
+static bool coop_layout_host_valid;
+static unsigned int coop_layout_acked_hash;
 /* PT37: debounced WORLD_DIRTY after any door change on the host. */
 static bool coop_portal_changed;
 static unsigned int coop_portal_changed_ms;
@@ -1213,6 +1224,7 @@ static void coop_lite_obj_pending_reset(void);
 static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_host_door_flush_tick(unsigned int now_ms); /* PT53e */
+static void coop_lite_host_vitals_force(void); /* PT54 */
 #endif
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
@@ -1264,6 +1276,7 @@ static unsigned int coop_lite_pc_build_hash(int64_t pc)
 /* Rejoin: our parked PC (host copy) is on its way; until it replaces the
    menu character, that one has no PC on the host to report for. */
 static bool coop_rejoin_pc_wanted;
+static unsigned int coop_rejoin_pc_ms; /* PT54: when the parked PC was asked for */
 
 /*
  * Review P0-3: client-side application of host state (inventory syncs,
@@ -1345,6 +1358,15 @@ void coop_lite_session_reset(void)
         coop_interp_reset(&coop_interp[i]);
     }
     coop_rejoin_pc_wanted = false;
+    coop_rejoin_pc_ms = 0;
+    /* PT54: pack layout state starts over with the session. */
+    memset(coop_layout_seq_applied, 0, sizeof(coop_layout_seq_applied));
+    coop_inv_echo_seq = 0;
+    coop_layout_sent_seq = 0;
+    coop_layout_next_seq = 0;
+    coop_layout_host_valid = false;
+    coop_layout_host_hash = 0;
+    coop_layout_acked_hash = 0;
     coop_in_world_ms = 0;
     coop_mismatch_key = 0;
     coop_mismatch_since_ms = 0;
@@ -4273,6 +4295,8 @@ static bool coop_lite_host_spawn_client(int slot)
     /* Per-slot: only this client may apply it. */
     tig_net_send_app(&sync, sizeof(sync), slot);
     coop_pending_offers[slot].valid = false;
+    coop_layout_seq_applied[slot] = 0; /* PT54: a (re)joined client numbers its layouts from 1 */
+    coop_lite_host_vitals_force(); /* PT54: host PC alive/dead + HP to the (re)joined client */
     tig_debug_printf("CoopLite: SESSION_SYNC sent slot=%d map=%d client_proto=%d host_proto=%d (companion spawned on host)\n",
         slot, map, sync.client_proto, sync.host_proto);
     coop_lite_host_announce_roster(slot);
@@ -5777,7 +5801,7 @@ static void coop_lite_client_want_npc(const uint8_t* oid)
     int i;
 
     for (i = 0; i < COOP_NPC_WANT_MAX; i++) {
-        if (coop_npc_want[i].ms != 0 && memcmp(coop_npc_want[i].oid, oid, 24) == 0) {
+        if (coop_npc_want[i].ms != 0 && coop_lite_oid_raw_equal(coop_npc_want[i].oid, oid)) {
             if (!coop_lite_interval_elapsed(coop_npc_want[i].ms, now, 5000u)) {
                 return;
             }
@@ -6090,7 +6114,18 @@ static int coop_vitals_sent_hp[8];
 static int coop_vitals_sent_fat[8];
 static unsigned int coop_vitals_ms;
 
-/* PT26: every 3 s, a slot PC whose vitals differ from the last ones we sent. */
+/* PT54: next vitals tick resends every PC (host PC included) - after a
+   save load, a resync or a revive the clients' copies may be stale. */
+static int coop_vitals_force_rounds;
+
+static void coop_lite_host_vitals_force(void)
+{
+    coop_vitals_force_rounds = 3; /* the next three 3 s ticks: a client mid-load still gets one */
+}
+
+/* PT26: every 3 s, a slot PC whose vitals differ from the last ones we sent.
+   PT54: slot 0 (the host PC) too: its death / revive / save-load HP never
+   reached the clients, which saw the host dead forever. */
 static void coop_lite_host_vitals_tick(unsigned int now_ms)
 {
     int slot;
@@ -6099,7 +6134,14 @@ static void coop_lite_host_vitals_tick(unsigned int now_ms)
         return;
     }
     coop_vitals_ms = now_ms != 0 ? now_ms : 1;
-    for (slot = 1; slot < 8; slot++) {
+    if (coop_vitals_force_rounds > 0) {
+        coop_vitals_force_rounds--;
+        for (slot = 0; slot < 8; slot++) {
+            coop_vitals_sent_hp[slot] = -1;
+            coop_vitals_sent_fat[slot] = -1;
+        }
+    }
+    for (slot = 0; slot < 8; slot++) {
         int64_t pc = sub_4A2B60(slot);
         int hp;
         int fat;
@@ -6113,6 +6155,10 @@ static void coop_lite_host_vitals_tick(unsigned int now_ms)
             coop_vitals_sent_hp[slot] = hp;
             coop_vitals_sent_fat[slot] = fat;
             coop_lite_host_send_vitals(pc);
+            if (slot == 0) {
+                tig_debug_printf("CoopLite: host PC vitals sent (hp damage %d, %s)\n", hp,
+                    critter_is_dead(pc) ? "dead" : "alive");
+            }
         }
     }
 }
@@ -6428,6 +6474,7 @@ static void coop_lite_host_resync_after_reload(void)
     pkt.kind = COOP_PARTY_RESYNC;
     pkt.slot = -1;
     tig_net_send_app_all(&pkt, sizeof(pkt));
+    coop_lite_host_vitals_force(); /* PT54 */
     tig_debug_printf("CoopLite: reload done — asking clients to resync\n");
 }
 
@@ -7185,6 +7232,8 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_layout_tick(now_ms); /* PT53 */
             coop_lite_client_door_tick();
             coop_lite_client_attack_tick(now_ms);
+            coop_lite_client_rejoin_tick(now_ms); /* PT54 */
+            coop_lite_client_drag_tick(); /* PT54 */
         }
         coop_lite_frame_stats(now_ms, 0);
 
@@ -8013,7 +8062,7 @@ static int coop_oid_set_find(const CoopOidSet* set, const uint8_t oid[24], bool*
     unsigned int i = coop_oid_set_hash(oid) & (COOP_OID_SET_HASH - 1);
 
     while (set->slot[i] != 0) {
-        if (memcmp(set->oid[set->slot[i] - 1], oid, 24) == 0) {
+        if (coop_lite_oid_raw_equal(set->oid[set->slot[i] - 1], oid)) {
             *found = true;
             return (int)i;
         }
@@ -8129,7 +8178,7 @@ bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size)
     if ((size_t)size < offsetof(PacketCoopObjBlob, data) + (size_t)pkt->size) {
         return false;
     }
-    return memcmp(pkt->data + 4 + 24, pkt->oid, 24) == 0;
+    return coop_lite_oid_raw_equal(pkt->data + 4 + 24, pkt->oid);
 }
 
 bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size)
@@ -8149,7 +8198,7 @@ bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size)
     if (pkt->gold < 0) {
         return false;
     }
-    return (pkt->flags & ~(COOP_INVEN_BATCH_FIRST | COOP_INVEN_BATCH_LAST)) == 0;
+    return (pkt->flags & ~(COOP_INVEN_BATCH_FIRST | COOP_INVEN_BATCH_LAST) & 0xFFFF) == 0; /* PT54: high bits = echo seq */
 }
 
 bool coop_lite_client_transfer_flags_allowed(unsigned int flags)
@@ -9722,6 +9771,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                 if (pkt->count == COOP_INVEN_CHUNK_ENTRIES) {
                     pkt->flags = first ? COOP_INVEN_BATCH_FIRST : 0;
                     first = false;
+                    pkt->flags |= coop_lite_inven_echo_flags(coop_layout_seq_applied[slot]); /* PT54 */
                     tig_net_send_app(pkt, (int)coop_lite_inven_sync_size(pkt->count), slot);
                     pkt->count = 0;
                 }
@@ -9750,7 +9800,8 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
             if (o == num_owners - 1) {
                 pkt->flags |= COOP_INVEN_BATCH_LAST;
             }
-            tig_net_send_app(pkt, (int)coop_lite_inven_sync_size(pkt->count), slot);
+            pkt->flags |= coop_lite_inven_echo_flags(coop_layout_seq_applied[slot]); /* PT54 */
+                    tig_net_send_app(pkt, (int)coop_lite_inven_sync_size(pkt->count), slot);
         }
         item_list_free(items);
     }
@@ -9759,6 +9810,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
         memset(pkt, 0, offsetof(PacketCoopInvenSync, entries));
         pkt->type = PACKET_COOP_INVEN_SYNC;
         pkt->flags = COOP_INVEN_BATCH_LAST;
+        pkt->flags |= coop_lite_inven_echo_flags(coop_layout_seq_applied[slot]); /* PT54 */
         tig_net_send_app(pkt, (int)coop_lite_inven_sync_size(0), slot);
     }
     FREE(pkt);
@@ -10615,6 +10667,15 @@ typedef struct CoopInvBufOwner {
 static CoopInvBufOwner coop_inv_owner[COOP_INV_BUF_OWNERS];
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_client_layout_note_host(int64_t local_pc);
+static int coop_lite_layout_nearest_cell(int64_t pc, int64_t item, int want); /* PT54 */
+static bool coop_lite_client_layout_hold(void)
+{
+    if (coop_layout_sent_seq != 0 && coop_lite_interval_elapsed(coop_layout_sent_ms, coop_obj_now_ms, 5000u)) {
+        tig_debug_printf("CoopLite: inven: layout %u not echoed in 5 s - host copy taken\n", coop_layout_sent_seq);
+        coop_layout_sent_seq = 0; /* no echo (refused before apply): the host wins */
+    }
+    return !coop_lite_inven_echo_reached(coop_layout_sent_seq, coop_inv_echo_seq);
+}
 #endif
 static int coop_inv_owner_cnt;
 static PacketCoopInvenEntry coop_inv_entry[COOP_INV_BUF_ENTRIES];
@@ -10703,7 +10764,7 @@ static CoopObjPending* coop_lite_obj_pending_find(const uint8_t* oid)
     int i;
 
     for (i = 0; i < COOP_OBJ_PENDING_MAX; i++) {
-        if (coop_obj_pending[i].used && memcmp(coop_obj_pending[i].oid, oid, 24) == 0) {
+        if (coop_obj_pending[i].used && coop_lite_oid_raw_equal(coop_obj_pending[i].oid, oid)) {
             return &coop_obj_pending[i];
         }
     }
@@ -11032,15 +11093,55 @@ void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
 /* Client rejoin: the host's copy of our PC replaces the local one. */
 static unsigned char coop_rejoin_pc_oid[24];
 
+static int coop_rejoin_pc_tries;
+
 static void coop_lite_client_request_own_pc(const unsigned char oid[24])
 {
     memcpy(coop_rejoin_pc_oid, oid, 24);
     coop_rejoin_pc_wanted = true;
+    coop_rejoin_pc_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
+    coop_rejoin_pc_tries = 0;
     if (coop_lite_obj_pending_find(oid) == NULL) {
         coop_lite_obj_blob_defer(oid);
     }
     coop_lite_obj_req_flush();
     tig_debug_printf("CoopLite: rejoin: asking the host for our parked PC\n");
+}
+
+/* PT54: a held item the last sync destroyed or replaced is dropped. */
+void coop_lite_client_drag_tick(void)
+{
+    if (inven_ui_drag_cancel_if_stale()) {
+        tig_debug_printf("CoopLite: inven: held item was replaced by a sync - drag dropped\n");
+    }
+}
+
+/* PT54: the parked-PC blob can be lost (it came while the world was not
+   ready, or the request was dropped). coop_rejoin_pc_wanted then stayed true
+   forever and silently blocked every door use and pickup the client sent.
+   Ask again every 3 s; after 4 tries keep the PC we have and resync its pack. */
+void coop_lite_client_rejoin_tick(unsigned int now_ms)
+{
+    int64_t pc;
+
+    if (!coop_rejoin_pc_wanted || !coop_lite_interval_elapsed(coop_rejoin_pc_ms, now_ms, 3000u)) {
+        return;
+    }
+    coop_rejoin_pc_ms = now_ms != 0 ? now_ms : 1u;
+    if (++coop_rejoin_pc_tries <= 4) {
+        if (coop_lite_obj_pending_find(coop_rejoin_pc_oid) == NULL) {
+            coop_lite_obj_blob_defer(coop_rejoin_pc_oid);
+        }
+        coop_lite_obj_req_flush();
+        tig_debug_printf("CoopLite: rejoin: parked PC not here yet - asking again (%d)\n", coop_rejoin_pc_tries);
+        return;
+    }
+    coop_rejoin_pc_wanted = false;
+    pc = player_get_local_pc_obj();
+    tig_debug_printf("CoopLite: rejoin: no parked PC blob after 4 tries - keeping ours, pack resync\n");
+    if (pc != OBJ_HANDLE_NULL) {
+        coop_lite_client_request_barter(pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
+    }
 }
 
 static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
@@ -11148,7 +11249,7 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         return;
     }
     if (coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL
-        && !(coop_rejoin_pc_wanted && memcmp(pkt->oid, coop_rejoin_pc_oid, 24) == 0
+        && !(coop_rejoin_pc_wanted && coop_lite_oid_raw_equal(pkt->oid, coop_rejoin_pc_oid)
             && coop_lite_get_oid_obj(pkt->oid) == local_pc)) {
         return;
     }
@@ -11174,7 +11275,7 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
             item != OBJ_HANDLE_NULL ? "loaded" : "rejected", pkt->size);
         return;
     }
-    if (coop_rejoin_pc_wanted && memcmp(pkt->oid, coop_rejoin_pc_oid, 24) == 0) {
+    if (coop_rejoin_pc_wanted && coop_lite_oid_raw_equal(pkt->oid, coop_rejoin_pc_oid)) {
         coop_rejoin_pc_wanted = false;
         coop_lite_client_adopt_own_pc_blob(pkt);
         return;
@@ -11619,6 +11720,7 @@ static bool coop_lite_inv_list_has(int64_t owner, int64_t item)
     return false;
 }
 
+#define COOP_GRID_FIX_MAX 256
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -11635,12 +11737,35 @@ static void coop_lite_client_apply_inven_batch(void)
     int o;
     int i;
     int t;
+    static int64_t grid_item[COOP_GRID_FIX_MAX];
+    static int grid_loc[COOP_GRID_FIX_MAX];
+    int num_grid = 0;
 
     multiplayer_lock();
     coop_lite_apply_begin();
 
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         owner_obj[o] = coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid);
+        if (owner_obj[o] == OBJ_HANDLE_NULL) {
+            /* PT54: diagnosable (a whole owner's sync was dropped silently). */
+            static unsigned int logged[16];
+            static int nlogged;
+            unsigned int key = coop_lite_inven_layout_term(coop_inv_owner[o].head.owner_oid, 0);
+            int k;
+
+            for (k = 0; k < nlogged && logged[k] != key; k++) {
+            }
+            if (k == nlogged) {
+                char oid_str[40];
+                ObjectID oid;
+
+                logged[nlogged < 16 ? nlogged++ : 15] = key;
+                memcpy(&oid, coop_inv_owner[o].head.owner_oid, sizeof(oid));
+                objid_id_to_str(oid_str, oid);
+                tig_debug_printf("CoopLite: inven sync: owner %s not here - its %d items skipped\n", oid_str,
+                    coop_inv_owner[o].count);
+            }
+        }
     }
 
     /* Unlisted (non-stack) items: gone, unless another owner lists them. */
@@ -11722,7 +11847,7 @@ static void coop_lite_client_apply_inven_batch(void)
             /* PT53a: an OID listed twice in one owner (corrupt host list)
                would be inserted twice: only the first entry counts. */
             for (k = coop_inv_owner[o].first; k < i; k++) {
-                if (memcmp(coop_inv_entry[k].oid, e->oid, sizeof(e->oid)) == 0) {
+                if (coop_lite_oid_raw_equal(coop_inv_entry[k].oid, e->oid)) {
                     break;
                 }
             }
@@ -11801,6 +11926,15 @@ static void coop_lite_client_apply_inven_batch(void)
                     /* PT33 item 3: keep what we wear; tell the host. PT34:
                        not when another item of the batch takes that slot,
                        and not after the host said no twice. */
+                } else if (owner == local_pc && cur != loc && cur >= 0 && cur < 120 && loc >= 0 && loc < 120
+                    && !coop_lite_client_layout_hold()) {
+                    /* PT54: the host's grid cell wins (the echo of our own
+                       layout, or its nearest legal cell): placed below,
+                       after every such item is out (swaps). */
+                    if (num_grid < COOP_GRID_FIX_MAX) {
+                        grid_item[num_grid] = item;
+                        grid_loc[num_grid++] = loc;
+                    }
                 } else if (owner == local_pc && cur != loc
                     && (IS_WEAR_INV_LOC(loc) || IS_WEAR_INV_LOC(cur))) {
                     item_remove(item);
@@ -11907,6 +12041,34 @@ static void coop_lite_client_apply_inven_batch(void)
         num_doomed = destroyed;
     }
 
+    /* PT54: our own backpack order follows the host. All moved items out
+       first (swaps), then each into the host's cell, or (taken here by
+       something the host does not list yet) the nearest free one. */
+    if (num_grid > 0 && local_pc != OBJ_HANDLE_NULL) {
+        int placed = 0;
+
+        for (i = 0; i < num_grid; i++) {
+            item_remove(grid_item[i]);
+        }
+        for (i = 0; i < num_grid; i++) {
+            int slots[960];
+            int loc = grid_loc[i];
+
+            item_inventory_slots_get(local_pc, slots);
+            if (!item_inventory_slots_has_room_for(grid_item[i], local_pc, loc, slots)) {
+                int near_loc = coop_lite_layout_nearest_cell(local_pc, grid_item[i], loc);
+
+                loc = near_loc >= 0 ? near_loc : item_find_free_inv_loc_for_insertion(grid_item[i], local_pc);
+                if (loc < 0) {
+                    loc = grid_loc[i];
+                }
+            }
+            item_insert(grid_item[i], local_pc, loc);
+            placed++;
+        }
+        moved += placed;
+    }
+
     /* Stacks by total. */
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         int64_t owner = owner_obj[o];
@@ -12007,7 +12169,7 @@ void coop_lite_handle_inven_sync(PacketCoopInvenSync* pkt)
     }
     {
         o = coop_inv_owner_cnt > 0 ? &coop_inv_owner[coop_inv_owner_cnt - 1] : NULL;
-        if (o == NULL || memcmp(o->head.owner_oid, pkt->owner_oid, sizeof(pkt->owner_oid)) != 0) {
+        if (o == NULL || !coop_lite_oid_raw_equal(o->head.owner_oid, pkt->owner_oid)) {
             if (coop_inv_owner_cnt == COOP_INV_BUF_OWNERS) {
                 coop_inv_overflow = true;
                 o = NULL;
@@ -12037,6 +12199,7 @@ last:
             tig_debug_printf("CoopLite: inven sync: batch too large, ignored\n");
             return;
         }
+        coop_inv_echo_seq = coop_lite_inven_echo_seq(pkt->flags); /* PT54 */
         coop_lite_client_apply_inven_batch();
     }
 #else
@@ -12694,7 +12857,7 @@ bool coop_lite_parked_has_oid(const unsigned char oid[24])
     int i;
 
     for (i = 0; i < COOP_PARKED_MAX; i++) {
-        if (coop_parked[i].used && memcmp(coop_parked[i].oid, oid, 24) == 0) {
+        if (coop_parked[i].used && coop_lite_oid_raw_equal(coop_parked[i].oid, oid)) {
             return true;
         }
     }
@@ -14282,7 +14445,7 @@ bool coop_pickup_queue_push(CoopPickupQueue* q, const uint8_t oid[24], int map_k
     int i;
 
     for (i = 0; i < q->count; i++) {
-        if (memcmp(q->oid[i], oid, 24) == 0) {
+        if (coop_lite_oid_raw_equal(q->oid[i], oid)) {
             q->map_key[i] = map_key;
             return true; /* same item clicked twice: one request */
         }
@@ -14400,7 +14563,7 @@ bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const u
         return false;
     }
     for (i = 0; i < *count && i < max; i++) {
-        if (memcmp(set[i], oid, 24) == 0) {
+        if (coop_lite_oid_raw_equal(set[i], oid)) {
             return true; /* already pending: sent with its newest state */
         }
     }
@@ -14625,7 +14788,7 @@ static void coop_lite_door_log(const uint8_t* oid, int64_t portal, int slot, con
     int i;
 
     for (i = 0; i < COOP_DOOR_PENDING_MAX; i++) {
-        if (memcmp(coop_door_log_oid[i], oid, 24) == 0) {
+        if (coop_lite_oid_raw_equal(coop_door_log_oid[i], oid)) {
             if (coop_door_log_state[i] == state) {
                 return;
             }
@@ -17279,6 +17442,24 @@ bool coop_lite_inven_layout_loc_ok(int loc)
     return (loc >= 0 && loc < 120) || (loc >= 1000 && loc <= 1008) || (loc >= 2000 && loc <= 2009);
 }
 
+unsigned int coop_lite_inven_echo_flags(unsigned int seq)
+{
+    return (seq & 0xFFFFu) << COOP_INVEN_ECHO_SHIFT;
+}
+
+unsigned int coop_lite_inven_echo_seq(int flags)
+{
+    return ((unsigned int)flags >> COOP_INVEN_ECHO_SHIFT) & 0xFFFFu;
+}
+
+bool coop_lite_inven_echo_reached(unsigned int sent_seq, unsigned int echo_seq)
+{
+    if (sent_seq == 0) {
+        return true;
+    }
+    return (int16_t)(uint16_t)((echo_seq - sent_seq) & 0xFFFFu) >= 0;
+}
+
 bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_INVEN_LAYOUT
@@ -17287,18 +17468,45 @@ bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size)
         && (size_t)size >= offsetof(PacketCoopInvenLayout, entries) + (size_t)pkt->count * sizeof(PacketCoopInvenLayoutEntry);
 }
 
+/* PT54: an OID's value bytes only (type + payload, padding zeroed), so
+   two copies of one ID always canonicalise to the same 24 bytes. */
+void coop_lite_oid_canon(uint8_t out[24], const void* oid24)
+{
+    const uint8_t* x = (const uint8_t*)oid24;
+    int16_t t;
+    size_t n;
+
+    memset(out, 0, 24);
+    memcpy(&t, x, sizeof(t));
+    memcpy(out, &t, sizeof(t));
+    switch (t) {
+    case 0:
+        return;
+    case 1:
+        n = 4;
+        break;
+    case 2:
+    case 3:
+        n = 16;
+        break;
+    default:
+        n = 8;
+        break;
+    }
+    memcpy(out + 8, x + 8, n);
+}
+
 unsigned int coop_lite_inven_layout_term(const uint8_t* oid24, int loc)
 {
     unsigned int h = 2166136261u;
+    uint8_t c[24];
     int k;
 
+    /* PT54: by OID value (padding differed between copies), and grid
+       cells count: backpack order is synced. */
+    coop_lite_oid_canon(c, oid24);
     for (k = 0; k < 24; k++) {
-        h = (h ^ oid24[k]) * 16777619u;
-    }
-    /* PT53b fallback: grid cells are not synced (each side keeps its own
-       backpack order); only wear/hotkey slots count. */
-    if (loc >= 0 && loc < 120) {
-        loc = -1;
+        h = (h ^ c[k]) * 16777619u;
     }
     h = (h ^ (unsigned int)loc) * 16777619u;
     return h;
@@ -17321,12 +17529,12 @@ int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_l
         bool bad = !coop_lite_inven_layout_loc_ok(want[i].inventory_location);
 
         for (k = 0; k < i && !bad; k++) {
-            if (memcmp(want[k].oid, want[i].oid, 24) == 0) {
+            if (coop_lite_oid_raw_equal(want[k].oid, want[i].oid)) {
                 bad = true; /* same item asked twice */
             }
         }
         for (k = 0; k < nhave && !bad; k++) {
-            if (memcmp(have_oid[k], want[i].oid, 24) == 0) {
+            if (coop_lite_oid_raw_equal(have_oid[k], want[i].oid)) {
                 if (found != -1) {
                     bad = true; /* two objects share the OID: ambiguous */
                 }
@@ -17335,10 +17543,8 @@ int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_l
         }
         if (bad || found == -1) {
             plan[i] = COOP_LAYOUT_REFUSE;
-        } else if (have_loc[found] == want[i].inventory_location
-            || (have_loc[found] >= 0 && have_loc[found] < 120
-                && want[i].inventory_location >= 0 && want[i].inventory_location < 120)) {
-            /* PT53b: grid -> grid is a no-op (backpack order is local). */
+        } else if (have_loc[found] == want[i].inventory_location) {
+            /* PT54: grid order is synced too (PT53b kept it local). */
             plan[i] = COOP_LAYOUT_NOOP;
         } else {
             plan[i] = found;
@@ -17348,11 +17554,17 @@ int coop_lite_inven_layout_plan(const uint8_t (*have_oid)[24], const int* have_l
     return moves;
 }
 
+/* PT54: squared distance between two backpack cells (10 columns). */
+int coop_lite_grid_cell_dist(int a, int b)
+{
+    int dx = a % 10 - b % 10;
+    int dy = a / 10 - b / 10;
+
+    return dx * dx + dy * dy;
+}
+
 #define COOP_LAYOUT_HAVE_MAX 512
 #ifndef COOP_LITE_TEST_STUBS
-static unsigned int coop_layout_host_hash;
-static bool coop_layout_host_valid;
-static unsigned int coop_layout_acked_hash;
 
 static unsigned int coop_lite_local_layout_hash(int64_t pc, PacketCoopInvenLayout* out)
 {
@@ -17392,6 +17604,12 @@ static void coop_lite_client_layout_note_host(int64_t local_pc)
     int i;
     unsigned int h = 0;
 
+    if (coop_lite_client_layout_hold()) {
+        return; /* PT54: an older sync; the echo of our newest layout follows */
+    }
+    if (coop_layout_sent_seq != 0) {
+        coop_layout_sent_seq = 0; /* echo in: the host's layout is the truth */
+    }
     for (o = 0; o < coop_inv_owner_cnt; o++) {
         if (local_pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid) != local_pc) {
             continue;
@@ -17432,6 +17650,13 @@ void coop_lite_client_layout_tick(unsigned int now_ms)
     }
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_INVEN_LAYOUT;
+    coop_layout_next_seq = (coop_layout_next_seq + 1) & 0xFFFFu;
+    if (coop_layout_next_seq == 0) {
+        coop_layout_next_seq = 1;
+    }
+    pkt.seq = coop_layout_next_seq;
+    coop_layout_sent_seq = pkt.seq;
+    coop_layout_sent_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
     oid = obj_get_id(pc);
     memcpy(pkt.pc_oid, &oid, sizeof(pkt.pc_oid));
     coop_lite_local_layout_hash(pc, &pkt);
@@ -17454,6 +17679,26 @@ static bool coop_lite_layout_place_ok(int64_t pc, int64_t item, int loc)
     }
     item_inventory_slots_get(pc, slots);
     return item_inventory_slots_has_room_for(item, pc, loc, slots);
+}
+
+/* PT54: the legal backpack cell (10 x 12 grid) closest to `want`. */
+static int coop_lite_layout_nearest_cell(int64_t pc, int64_t item, int want)
+{
+    int slots[960];
+    int best = -1;
+    int best_d = 1 << 30;
+    int c;
+
+    item_inventory_slots_get(pc, slots);
+    for (c = 0; c < 120; c++) {
+        int d = coop_lite_grid_cell_dist(want, c);
+
+        if (d < best_d && item_inventory_slots_has_room_for(item, pc, c, slots)) {
+            best = c;
+            best_d = d;
+        }
+    }
+    return best;
 }
 
 /* PT53b: each distinct (OID, loc, reason) refusal is logged once. */
@@ -17505,6 +17750,7 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         return;
     }
     pc = sub_4A2B60(slot);
+    coop_layout_seq_applied[slot] = pkt->seq & 0xFFFFu; /* PT54: the echo below answers this one */
     if (pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(pkt->pc_oid) != pc || critter_is_dead(pc)) {
         tig_debug_printf("CoopLite: inven: slot %d layout for a PC it does not own\n", slot);
         return;
@@ -17566,11 +17812,11 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
             int loc = want_loc[i];
 
             if (!coop_lite_layout_place_ok(pc, moved_item[i], loc) && loc >= 0 && loc < 120) {
-                /* PT53b: grid cells are local; any free cell will do. */
-                int free_loc = item_find_free_inv_loc_for_insertion(moved_item[i], pc);
+                /* PT54: the nearest free grid cell; the echo tells the client. */
+                int near_loc = coop_lite_layout_nearest_cell(pc, moved_item[i], loc);
 
-                if (free_loc >= 0 && free_loc < 120) {
-                    loc = free_loc;
+                if (near_loc >= 0) {
+                    loc = near_loc;
                 }
             }
             if (!coop_lite_layout_place_ok(pc, moved_item[i], loc)) {
