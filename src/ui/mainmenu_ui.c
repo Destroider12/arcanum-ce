@@ -148,6 +148,7 @@ static void mainmenu_ui_shop_refresh(TigRect* rect);
 static bool main_menu_button_create(MainMenuButtonInfo* info, int width, int height);
 static bool main_menu_button_create_ex(MainMenuButtonInfo* info, int width, int height, unsigned int flags);
 static void mainmenu_ui_refresh_text(tig_window_handle_t window_handle, const char* str, TigRect* rect, unsigned int flags);
+static void mainmenu_ui_coop_fit(char* str, size_t size, tig_font_handle_t font, int cx, int center, TigFont* out);
 static void sub_546DD0(void);
 static void mainmenu_ui_create_shared_radio_buttons(void);
 static bool mainmenu_ui_message_filter(TigMessage* msg);
@@ -2151,13 +2152,8 @@ static void mainmenu_ui_coop_buttons_create(void)
             } else {
                 font = (window->refresh_text_flags & 0x10) != 0 ? dword_64C218[0] : dword_64C210[0];
             }
-            font_desc.width = 0;
-            font_desc.height = 0;
-            font_desc.str = label[0];
-            font_desc.flags = 0;
-            tig_font_push(font);
-            tig_font_measure(&font_desc);
-            tig_font_pop();
+            mainmenu_ui_coop_fit(label[0], sizeof(label[0]), font, 410 - window->field_30,
+                (window->refresh_text_flags & 0x04) != 0, &font_desc);
             text_rect.x = 410 - window->field_30;
             if ((window->refresh_text_flags & 0x04) != 0) {
                 text_rect.x -= font_desc.width / 2;
@@ -2185,13 +2181,8 @@ static void mainmenu_ui_coop_buttons_create(void)
     for (idx = 0; idx < 2; idx++) {
         MainMenuButtonInfo* button = &mainmenu_ui_coop_buttons[idx];
 
-        font_desc.width = 0;
-        font_desc.height = 0;
-        font_desc.str = label[idx];
-        font_desc.flags = 0;
-        tig_font_push(font);
-        tig_font_measure(&font_desc);
-        tig_font_pop();
+        mainmenu_ui_coop_fit(label[idx], sizeof(label[idx]), font, 410 - window->field_30,
+            (window->refresh_text_flags & 0x04) != 0, &font_desc);
 
         button->x = 410;
         button->y = idx == 0 ? 343 : 393;
@@ -2215,6 +2206,50 @@ static void mainmenu_ui_coop_buttons_create(void)
         }
     }
     tig_window_display();
+}
+
+/* PT54a: a co-op menu line must fit the menu window, or
+   tig_window_text_write refuses the whole rect ("text_write2 failed") and
+   nothing is drawn. Picks the language part, then trims the tail (and adds
+   "...") until the shadowed 3-pass text fits; returns the measured size. */
+static void mainmenu_ui_coop_fit(char* str, size_t size, tig_font_handle_t font, int cx, int center, TigFont* out)
+{
+    TigWindowData wd;
+    int win_w = 800;
+    size_t len;
+    const char* picked;
+
+    picked = coop_lite_lang(str);
+    if (picked != str) {
+        memmove(str, picked, strlen(picked) + 1);
+    }
+    if (tig_window_data(mainmenu_ui_window_handle, &wd) == TIG_OK && wd.rect.width > 0) {
+        win_w = wd.rect.width;
+    }
+    for (;;) {
+        int x;
+
+        out->width = 0;
+        out->height = 0;
+        out->str = str;
+        out->flags = 0;
+        tig_font_push(font);
+        tig_font_measure(out);
+        tig_font_pop();
+        x = center ? cx - out->width / 2 : cx;
+        len = strlen(str);
+        if ((x >= 0 && x + out->width + 4 <= win_w) || len <= 4) {
+            break;
+        }
+        if (size < 4) {
+            break;
+        }
+        str[len - 4] = '\0';
+        if (len - 4 >= 3) {
+            memcpy(str + len - 7, "...", 3);
+        }
+    }
+    tig_debug_printf("MainMenu: co-op line \"%s\" (%d px, window %d)\n", str, out->width, win_w);
 }
 
 static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle)

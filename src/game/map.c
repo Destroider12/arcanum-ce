@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+#include "net/tig_net.h"
+
 #include "game/anim.h"
 #include "game/critter.h"
 #include "game/description.h"
@@ -812,7 +814,9 @@ bool map_open_in_game(int map, bool a2, bool a3)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed pre-load in map_open_in_game.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
         // FIXME: Execution continues after quit.
     }
 
@@ -843,7 +847,9 @@ bool map_open_in_game(int map, bool a2, bool a3)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed post-load in map_open_in_game.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
     }
 
     return true;

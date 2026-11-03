@@ -1300,7 +1300,7 @@ _Static_assert(sizeof(PacketCoopObjReq) == 392, "PacketCoopObjReq wire layout");
 _Static_assert(sizeof(PacketCoopPartyState) == 24, "PacketCoopPartyState wire layout");
 _Static_assert(sizeof(PacketCoopSwing) == 56, "PacketCoopSwing wire layout");
 _Static_assert(sizeof(PacketCoopPcPos) == 96, "PacketCoopPcPos wire layout");
-_Static_assert(sizeof(PacketCoopPcStats) == 444, "PacketCoopPcStats wire layout");
+_Static_assert(sizeof(PacketCoopPcStats) == 448, "PacketCoopPcStats wire layout");
 _Static_assert(sizeof(PacketCoopRoster) == 112, "PacketCoopRoster wire layout");
 _Static_assert(sizeof(PacketCoopSessionSync) == 224, "PacketCoopSessionSync wire layout");
 _Static_assert(sizeof(PacketCoopWorldReq) == 8, "PacketCoopWorldReq wire layout");

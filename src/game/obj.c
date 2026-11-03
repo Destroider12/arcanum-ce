@@ -736,6 +736,31 @@ bool obj_validate_system(unsigned int flags)
                                         tig_debug_printf("!VS  Inventory entry is an invalid handle.  handle: %" PRIx64 "  owner: %s type %d entry %d/%d\n",
                                             oid.d.h, owner_str, obj_type, idx, cnt);
                                     }
+                                    if (tig_net_is_coop_enabled()) {
+                                        /* PT54a: a co-op sync destroyed an item another
+                                           object still listed; the vanilla answer is
+                                           "validate failed" -> quit the game (the client
+                                           froze in the quit prompt, the host dropped it).
+                                           Drop the dead entry and keep going. */
+                                        int k;
+                                        ObjectID next_oid;
+
+                                        object = obj_lock(obj);
+                                        for (k = idx; k + 1 < cnt; k++) {
+                                            obj_arrayfield_fetch(object, inventory_list_fld, k + 1, &next_oid);
+                                            obj_arrayfield_store(object, inventory_list_fld, k, &next_oid);
+                                        }
+                                        obj_unlock(obj);
+                                        cnt--;
+                                        obj_arrayfield_length_set(obj, inventory_list_fld, cnt);
+                                        object = obj_lock(obj);
+                                        obj_field_store(object, inventory_num_fld, &cnt);
+                                        obj_unlock(obj);
+                                        tig_debug_printf("CoopLite: validate: dead inventory entry dropped (owner type %d, %d left)\n",
+                                            obj_type, cnt);
+                                        idx--;
+                                        continue;
+                                    }
                                     return false;
                                 }
 

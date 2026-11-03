@@ -2473,3 +2473,26 @@ alive state broke after a host save load.
 Tests: `coop_dialog_test` `test_pt54` (padding-insensitive OID equality and
 layout plan, grid distance, echo seq incl. wrap, validator accepting echo
 bits), updated `test_pt53a_plan`/`test_pt53b` for grid sync.
+
+## PT54a: no quit when far apart, main menu text, portrait/body art (protocol 36)
+
+- **"Too far apart" kick (session log, client).** Not a distance check: when the
+  host ran off, the client loaded new sectors and `obj_validate_system` found
+  an NPC inventory entry whose item handle a co-op sync had destroyed. The
+  vanilla answer is `tig_message_post_quit` -> quit prompt; the client froze in
+  it (`max gap 106430 ms`), the host timed it out (`disconnect slot 1`), and a
+  later load crashed. In co-op the dead entry is now dropped
+  (`CoopLite: validate: dead inventory entry dropped (owner type T, N left)`)
+  and validate failures never quit (`CoopLite: validate failed in X - co-op
+  keeps running (no quit)`, once). Same for map_open / multiplayer map open.
+- **Main menu text.** The co-op status line (`Кооп: подключение / Co-op: joining
+  host:port`, PT52h) was never routed through the PT53 language pick and was
+  wider than the menu window, so `tig_window_text_write` refused the rect
+  ("text_write2 failed"). Lines are now language-picked and trimmed to fit
+  (`MainMenu: co-op line "..." (W px, window N)`).
+- **Portraits / body art.** PC_STATS sent at join reached the client before its
+  world was ready and was only resent on a build change (log: client applied
+  slot 0's portrait 5 minutes in). Host now resends every slot 4x every 3 s
+  after join / rejoin / load; the client resends its own 4x too. PC_STATS now
+  carries `base_aid` (OBJ_F_AID) both ways. Logs: `portrait: slot N id P
+  applied`, `PC stats: slot N base art -> XXXXXXXX applied`.

@@ -507,7 +507,13 @@ static int test_pt54(void)
     sync.flags |= 0x100;
     CHECK(!coop_lite_inven_sync_valid(&sync, (int)coop_lite_inven_sync_size(0)), "unknown low flag refused");
     CHECK(offsetof(PacketCoopInvenLayout, entries) == 0x28, "layout header carries seq");
-    CHECK(TIG_NET_PROTOCOL >= 35, "protocol bumped");
+    CHECK(TIG_NET_PROTOCOL >= 36, "protocol bumped");
+    /* PT54a: body art rides in PC_STATS */
+    CHECK(sizeof(PacketCoopPcStats) == 448 && offsetof(PacketCoopPcStats, base_aid) == 0x1BC, "pc stats layout");
+    CHECK(coop_lite_base_aid_accept(0x2000123u, 0x2000456u, true), "new body art taken");
+    CHECK(!coop_lite_base_aid_accept(0x2000123u, 0x2000123u, true), "same art: no-op");
+    CHECK(!coop_lite_base_aid_accept(0u, 5u, true) && !coop_lite_base_aid_accept(0xFFFFFFFFu, 5u, true), "none/invalid ignored");
+    CHECK(!coop_lite_base_aid_accept(0x2000123u, 5u, false), "non-critter art refused");
     return 0;
 }
 

@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+#include "net/tig_net.h"
+
 #include "game/anim.h"
 #include "game/background.h"
 #include "game/combat.h"
@@ -950,7 +952,9 @@ bool multiplayer_map_open_by_name(const char* name)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed pre-load in multiplayer_map_open_by_name.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
     }
 
     snprintf(path, sizeof(path), "maps\\%s", name);
@@ -965,7 +969,9 @@ bool multiplayer_map_open_by_name(const char* name)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed post-load in multiplayer_map_open_by_name.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
     }
 
     return true;

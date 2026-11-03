@@ -2121,6 +2121,17 @@ void sector_validate_game(const char* section)
 {
     if (!obj_validate_system(1)) {
         tig_debug_printf("Object system validate failed in %s\n", section);
+        if (tig_net_is_coop_enabled()) {
+            /* PT54a: co-op never quits on this (the client froze in the quit
+               prompt and was dropped); the bad entries were repaired. */
+            static bool coop_logged;
+
+            if (!coop_logged) {
+                coop_logged = true;
+                tig_debug_printf("CoopLite: validate failed in %s - co-op keeps running (no quit)\n", section);
+            }
+            return;
+        }
         tig_message_post_quit(0);
     }
 }

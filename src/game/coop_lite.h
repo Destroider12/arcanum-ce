@@ -615,6 +615,7 @@ typedef struct PacketCoopPcStats {
     /* 0008 */ unsigned int flags;
     /* 000C */ unsigned char oid[24];
     /* 0024 */ CoopPcBuild build;
+    /* 01BC */ unsigned int base_aid; /* PT54a: OBJ_F_AID (body art: race/gender/look) */
 } PacketCoopPcStats;
 
 /* Owner → host: is `want` a legal character-point spend from `have` (the
@@ -1146,6 +1147,8 @@ bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const u
 /* PT53e: a coop PC portrait is drawn from its engine portrait number when
    it has one (Players\<oid>.bmp exists only on the machine that made it). */
 bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found);
+/* PT54a: may a received base art id replace OBJ_F_AID? (critter art, changed) */
+bool coop_lite_base_aid_accept(unsigned int aid, unsigned int have, bool aid_is_critter);
 /* PT40 */
 bool coop_lite_skill_use_valid(const PacketCoopSkillUse* pkt, int size);
 bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size);

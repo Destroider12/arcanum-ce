@@ -1225,6 +1225,7 @@ static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_host_door_flush_tick(unsigned int now_ms); /* PT53e */
 static void coop_lite_host_vitals_force(void); /* PT54 */
+static void coop_lite_host_pcs_force(void); /* PT54a */
 #endif
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
@@ -6121,6 +6122,7 @@ static int coop_vitals_force_rounds;
 static void coop_lite_host_vitals_force(void)
 {
     coop_vitals_force_rounds = 3; /* the next three 3 s ticks: a client mid-load still gets one */
+    coop_lite_host_pcs_force(); /* PT54a: portraits / body art too */
 }
 
 /* PT26: every 3 s, a slot PC whose vitals differ from the last ones we sent.
@@ -8875,6 +8877,7 @@ static void coop_lite_pc_stats_send(int slot, int64_t pc, unsigned int flags, in
     pkt.slot = slot;
     pkt.flags = coop_lite_pcs_portrait_pack(flags, obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT));
     memcpy(pkt.oid, &oid, sizeof(pkt.oid));
+    pkt.base_aid = (unsigned int)obj_field_int32_get(pc, OBJ_F_AID); /* PT54a */
     coop_lite_pc_build_fill(pc, &pkt.build);
     depth = tig_net_local_suspend_pause();
     if (to_slot >= 0) {
@@ -8888,6 +8891,14 @@ static void coop_lite_pc_stats_send(int slot, int64_t pc, unsigned int flags, in
 static unsigned int coop_pcs_sig[8];
 static int64_t coop_pcs_obj[8];
 static unsigned int coop_pcs_ms;
+static int coop_pcs_force_left; /* PT54a */
+static unsigned int coop_pcs_force_ms;
+
+static void coop_lite_host_pcs_force(void)
+{
+    coop_pcs_force_left = 4;
+    coop_pcs_force_ms = 0;
+}
 
 /* Host: every 500 ms, broadcast any slot PC whose build changed (and all of
    them when the roster changes, so a new client gets everyone). */
@@ -8904,6 +8915,14 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
         if (sub_4A2B60(slot) != coop_pcs_obj[slot]) {
             roster_changed = true;
         }
+    }
+    /* PT54a: after a join / rejoin / host load every slot's PC stats
+       (portrait + body art) go out again every 3 s, 4 times: the first
+       copy often reaches a client whose world is not loaded yet. */
+    if (coop_pcs_force_left > 0 && coop_lite_interval_elapsed(coop_pcs_force_ms, now_ms, 3000u)) {
+        coop_pcs_force_ms = now_ms;
+        coop_pcs_force_left--;
+        roster_changed = true;
     }
     for (slot = 0; slot < 8; slot++) {
         int64_t pc = sub_4A2B60(slot);
@@ -8930,7 +8949,8 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
         }
         coop_lite_pc_build_fill(pc, &b);
         sig = coop_lite_pc_build_sig(&b)
-            ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) * 0x9E3779B1u); /* PT47 */
+            ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) * 0x9E3779B1u) /* PT47 */
+            ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_AID) * 0x85EBCA77u); /* PT54a */
         if (sig == 0) {
             sig = 1; /* PT52g: 0 = none yet */
         }
@@ -8947,6 +8967,8 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
 
 static unsigned int coop_client_pcs_sig;
 static unsigned int coop_client_pcs_ms;
+static int coop_client_pcs_resend = 4; /* PT54a */
+static unsigned int coop_client_pcs_resend_ms;
 
 /* Client: our own build changed (character points spent) → tell the host. */
 static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
@@ -8960,9 +8982,20 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms)
     }
     coop_client_pcs_ms = now_ms;
     coop_lite_pc_build_fill(pc, &b);
-    sig = coop_lite_pc_build_sig(&b);
+    sig = coop_lite_pc_build_sig(&b)
+        ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) * 0x9E3779B1u) /* PT54a */
+        ^ ((unsigned int)obj_field_int32_get(pc, OBJ_F_AID) * 0x85EBCA77u);
     if (sig == 0) {
         sig = 1; /* PT52g: 0 = none yet */
+    }
+    if (coop_client_pcs_resend > 0 && coop_lite_interval_elapsed(coop_client_pcs_resend_ms, now_ms, 3000u)) {
+        /* PT54a: the join-time send can land before the host's world is
+           ready; repeat it a few times so portrait / body art arrive. */
+        coop_client_pcs_resend_ms = now_ms;
+        coop_client_pcs_resend--;
+        coop_client_pcs_sig = sig;
+        coop_lite_pc_stats_send(sub_529520(), pc, 0, -1);
+        return;
     }
     if (coop_client_pcs_sig == 0) {
         coop_client_pcs_sig = sig; /* the join bundle carried this one */
@@ -13372,10 +13405,18 @@ void coop_lite_handle_pc_stats(PacketCoopPcStats* pkt)
             && (!tig_net_is_host() || sub_4A2B60(sub_52A530()) == pc)
             && obj_field_int32_get(pc, OBJ_F_CRITTER_PORTRAIT) != portrait) {
             obj_field_int32_set(pc, OBJ_F_CRITTER_PORTRAIT, portrait);
-            tig_debug_printf("CoopLite: PC stats: slot %d portrait -> %d\n", pkt->slot, portrait);
+            tig_debug_printf("CoopLite: portrait: slot %d id %d applied\n", pkt->slot, portrait);
             if (coop_party_ui_refresh_hook != NULL) {
                 coop_party_ui_refresh_hook();
             }
+        }
+        /* PT54a: body art (race / gender / look) both ways, same rule. */
+        if (pc != player_get_local_pc_obj()
+            && (!tig_net_is_host() || sub_4A2B60(sub_52A530()) == pc)
+            && coop_lite_base_aid_accept(pkt->base_aid, (unsigned int)obj_field_int32_get(pc, OBJ_F_AID),
+                tig_art_type((tig_art_id_t)pkt->base_aid) == TIG_ART_TYPE_CRITTER)) {
+            obj_field_int32_set(pc, OBJ_F_AID, (int)pkt->base_aid);
+            tig_debug_printf("CoopLite: PC stats: slot %d base art -> %08x applied\n", pkt->slot, pkt->base_aid);
         }
     }
     if (tig_net_is_host()) {
@@ -14573,6 +14614,11 @@ bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const u
     memcpy(set[*count], oid, 24);
     (*count)++;
     return true;
+}
+
+bool coop_lite_base_aid_accept(unsigned int aid, unsigned int have, bool aid_is_critter)
+{
+    return aid != 0 && aid != 0xFFFFFFFFu && aid_is_critter && aid != have;
 }
 
 bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found)
@@ -16926,6 +16972,8 @@ static void coop_lite_session_reset_extra(void)
     memset(coop_pcs_sig, 0, sizeof(coop_pcs_sig));
     memset(coop_pcs_obj, 0, sizeof(coop_pcs_obj));
     coop_client_pcs_sig = 0;
+    coop_client_pcs_resend = 4; /* PT54a */
+    coop_client_pcs_resend_ms = 0;
     coop_lite_story_reset();
     coop_lite_dialog_reset();
     memset(coop_remote_fallen, 0, sizeof(coop_remote_fallen));
