@@ -101,7 +101,9 @@ void tig_net_xfer_send(const char* path, int client_id, void* unused);
 /* Opaque Troika helpers used by multiplayer.c / timeevent.c */
 int sub_529520(void); /* local client slot */
 int sub_52A530(void); /* last message sender slot (local slot outside dispatch) */
-int tig_net_last_message_size(void); /* size of the app message being dispatched */
+int tig_net_last_message_size(void);
+/* PT55: true for the first 20 calls, then every 1000th (log rate limit). */
+bool tig_net_log_budget(unsigned int* counter); /* size of the app message being dispatched */
 bool tig_net_welcome_slot_valid(int slot);
 
 /*

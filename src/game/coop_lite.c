@@ -6852,10 +6852,16 @@ void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt)
         return;
     }
     if (pkt->slot != slot) {
-        tig_debug_printf("CoopLite: CHAR_OFFER payload slot=%d != sender %d (using sender)\n", pkt->slot, slot);
+        static unsigned int log_n; /* PT55 */
+        if (tig_net_log_budget(&log_n)) {
+            tig_debug_printf("CoopLite: CHAR_OFFER payload slot=%d != sender %d (using sender)\n", pkt->slot, slot);
+        }
     }
     if (!coop_lite_pc_proto_plausible(pkt->basic_prototype)) {
-        tig_debug_printf("CoopLite: CHAR_OFFER rejected — bad proto %d\n", pkt->basic_prototype);
+        static unsigned int log_n; /* PT55 */
+        if (tig_net_log_budget(&log_n)) {
+            tig_debug_printf("CoopLite: CHAR_OFFER rejected - bad proto %d (%u so far)\n", pkt->basic_prototype, log_n);
+        }
         return;
     }
 #ifndef COOP_LITE_TEST_STUBS

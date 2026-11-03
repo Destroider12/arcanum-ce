@@ -223,8 +223,24 @@ static void tig_net_fire_event(int type, int client_id, void* data, int size)
     }
 }
 
+/* PT55: per-message log budget against a misbehaving peer filling the log:
+   the first 20, then every 1000th (with the running total). */
+bool tig_net_log_budget(unsigned int* counter)
+{
+    unsigned int n;
+
+    if (counter == NULL) {
+        return true;
+    }
+    n = ++*counter;
+    return n <= 20u || n % 1000u == 0u;
+}
+
 static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
 {
+    static unsigned int log_size_n;
+    static unsigned int log_valid_n;
+
     /* Review PT24 #10: handlers cast packet structs onto this buffer, so
        give it the strictest scalar alignment. */
     union {
@@ -236,7 +252,9 @@ static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
     char* copy = copy_buf.bytes;
 
     if (size < sizeof(int) || size > sizeof(copy_buf.bytes)) {
-        tig_debug_printf("tig_net: dropping oversized/undersized app packet (%zu)\n", size);
+        if (tig_net_log_budget(&log_size_n)) {
+            tig_debug_printf("tig_net: dropping oversized/undersized app packet (%zu; %u so far)\n", size, log_size_n);
+        }
         return;
     }
 
@@ -245,8 +263,10 @@ static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
     last_message_size = (int)size;
 
     if (validation_func != NULL && !validation_func(copy)) {
-        tig_debug_printf("tig_net: validation failed for packet type %d (size %zu, from %d)\n",
-            *(int*)copy, size, sender_slot);
+        if (tig_net_log_budget(&log_valid_n)) {
+            tig_debug_printf("tig_net: validation failed for packet type %d (size %zu, from %d; %u so far)\n",
+                *(int*)copy, size, sender_slot, log_valid_n);
+        }
     } else if (message_func != NULL) {
         message_func(copy);
     }
@@ -418,6 +438,11 @@ bool tig_net_is_coop_enabled(void)
 /* PT37: one line for the main menu when co-op was set up by command line flags. */
 bool tig_net_describe_coop_mode(char* buf, size_t size)
 {
+    /* PT55: the menu line was always "RU / EN" (never went through the
+       language pick); English unless ARCANUM_COOP_LANG=ru. */
+    const char* lang = getenv("ARCANUM_COOP_LANG");
+    bool ru = lang != NULL && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U');
+
     if (!coop_enabled || buf == NULL || size == 0) {
         return false;
     }
@@ -427,16 +452,16 @@ bool tig_net_describe_coop_mode(char* buf, size_t size)
 
         coop_upnp_state(); /* reaps a finished worker, logs once */
         coop_upnp_describe(upnp, sizeof(upnp));
-        snprintf(buf, size, "Кооп: хост / Co-op: host, port %d - %s", listen_port, upnp);
+        snprintf(buf, size, ru ? "Кооп: хост / Co-op: host, port %d - %s" : "Co-op: host, port %d - %s", listen_port, upnp);
 #else
-        snprintf(buf, size, "Кооп: хост / Co-op: host, port %d", listen_port);
+        snprintf(buf, size, ru ? "Кооп: хост / Co-op: host, port %d" : "Co-op: host, port %d", listen_port);
 #endif
     } else if (want_join && active) {
-        snprintf(buf, size, "Кооп: подключено / Co-op: connected, %s:%d", join_host, join_port);
+        snprintf(buf, size, ru ? "Кооп: подключено / Co-op: connected, %s:%d" : "Co-op: connected, %s:%d", join_host, join_port);
     } else if (want_join) {
-        snprintf(buf, size, "Кооп: подключение / Co-op: joining %s:%d", join_host, join_port);
+        snprintf(buf, size, ru ? "Кооп: подключение / Co-op: joining %s:%d" : "Co-op: joining %s:%d", join_host, join_port);
     } else {
-        snprintf(buf, size, "Кооп / Co-op Mode");
+        snprintf(buf, size, "%s", ru ? "Кооп / Co-op Mode" : "Co-op Mode");
     }
     return true;
 }

@@ -4,25 +4,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* PT55: English unless ARCANUM_COOP_LANG=ru (then "RU / EN"), same rule as
+   coop_lite_lang_ru(); the main menu status line embeds this text. */
+static bool coop_upnp_ru(void)
+{
+    const char* v = getenv("ARCANUM_COOP_LANG");
+
+    return v != NULL && (v[0] == 'r' || v[0] == 'R') && (v[1] == 'u' || v[1] == 'U');
+}
+
 void coop_upnp_format(CoopUpnpState state, int port, const char* ext_ip, const char* err, char* buf, size_t size)
 {
+    bool ru = coop_upnp_ru();
+
     if (buf == NULL || size == 0) {
         return;
     }
     switch (state) {
     case COOP_UPNP_BUSY:
-        snprintf(buf, size, "UPnP: проброс / mapping UDP %d...", port);
+        snprintf(buf, size, ru ? "UPnP: проброс / mapping UDP %d..." : "UPnP: mapping UDP %d...", port);
         break;
     case COOP_UPNP_MAPPED:
-        snprintf(buf, size, "UPnP: UDP %d открыт / open, IP %s", port,
+        snprintf(buf, size, ru ? "UPnP: UDP %d открыт / open, IP %s" : "UPnP: UDP %d open, IP %s", port,
             ext_ip != NULL && ext_ip[0] != '\0' ? ext_ip : "?");
         break;
     case COOP_UPNP_FAILED:
-        snprintf(buf, size, "UPnP: ошибка / failed (%s), UDP %d вручную / by hand",
+        snprintf(buf, size, ru ? "UPnP: ошибка / failed (%s), UDP %d вручную / by hand" : "UPnP: failed (%s), forward UDP %d by hand",
             err != NULL && err[0] != '\0' ? err : "?", port);
         break;
     default:
-        snprintf(buf, size, "UPnP: выкл / off");
+        snprintf(buf, size, "%s", ru ? "UPnP: выкл / off" : "UPnP: off");
         break;
     }
 }
