@@ -2405,6 +2405,12 @@ int main(int argc, char** argv)
             fprintf(stderr, "PT66 corpse keep\n");
             return 1;
         }
+        /* PT72: no-local-PC sync is retried, bounded */
+        if (coop_lite_sync_retry_allowed(0) || !coop_lite_sync_retry_allowed(1)
+            || !coop_lite_sync_retry_allowed(40) || coop_lite_sync_retry_allowed(41)) {
+            fprintf(stderr, "PT72 sync retry\n");
+            return 1;
+        }
         /* PT67: orphaned dialog window after the craft menu closed */
         if (!coop_lite_dialog_ui_orphaned(true, false, false) || !coop_lite_dialog_ui_orphaned(true, true, true)
             || coop_lite_dialog_ui_orphaned(true, true, false) || coop_lite_dialog_ui_orphaned(false, false, true)) {

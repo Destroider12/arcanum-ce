@@ -2943,3 +2943,18 @@ character made in single player (root `Players\`) is not visible to the role
   menu; follow/guard is **G** in game.
 - **Client menu:** in a co-op client launch Single Player and Credits are
   greyed out and inactive; Options, Join Host and Exit Game stay active.
+
+## PT72: client stays out of the world after a host reload
+
+Cause: when the host reloads, the client's SESSION_SYNC teleport could finish
+before its PC was bound. `coop_lite_client_finish_sync` logged "finish sync:
+no local PC" and dropped the pending sync, so the client never finished
+joining. After that, every host follow was only queued ("client not in world
+yet"), and the client seemed to vanish.
+
+Fix: a missing local PC is now adopted by the OID in the sync packet when that
+object exists. Otherwise the sync is kept and only the finish step is retried
+every 250 ms from `coop_lite_ping`, with no new teleport. It gives up after 40
+tries (about 10 s; `coop_lite_sync_retry_allowed`, tested). The earlier "Magnus
+vanished" report was a different problem: the teammate portrait had taken the
+follower slot (see PT74).

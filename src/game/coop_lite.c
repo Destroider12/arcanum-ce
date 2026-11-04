@@ -509,6 +509,8 @@ static CoopPendingOffer coop_pending_offers[8];
 /* Client: SESSION_SYNC waiting for our local-PC teleport to finish. */
 static bool coop_pending_sync_valid;
 static PacketCoopSessionSync coop_pending_sync;
+static int coop_sync_nopc_tries; /* PT72 */
+static bool coop_sync_nopc_wait; /* PT72 */
 static bool coop_pending_sync_teleport_queued;
 static unsigned int coop_pending_sync_retry_ms;
 
@@ -1436,6 +1438,8 @@ void coop_lite_session_reset(void)
     coop_pending_sync_valid = false;
     coop_pending_sync_teleport_queued = false;
     coop_pending_sync_retry_ms = 0;
+    coop_sync_nopc_wait = false;
+    coop_sync_nopc_tries = 0;
     coop_last_pc_pos_ms = 0;
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_world_reset();
@@ -4427,9 +4431,34 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
 
     local_pc = player_get_local_pc_obj();
     if (local_pc == OBJ_HANDLE_NULL) {
-        tig_debug_printf("CoopLite: finish sync: no local PC\n");
-        return;
+        /* PT72: after a host reload the sync teleport could finish before
+           our PC was bound (or with the PC object only present under its
+           OID). The sync used to be consumed here, leaving the client out of
+           the world ("vanished") with every later follow queued forever.
+           Adopt our PC by OID when it is here; otherwise keep the sync and
+           retry from coop_lite_ping. */
+        ObjectID want;
+
+        memcpy(&want, pkt->client_pc_oid, sizeof(want));
+        local_pc = obj_pool_perm_lookup(want);
+        if (local_pc != OBJ_HANDLE_NULL
+            && obj_field_int32_get(local_pc, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+            tig_debug_printf("CoopLite: PT72 finish sync: own PC adopted by OID\n");
+            sub_40DAF0(local_pc);
+        } else if (coop_lite_sync_retry_allowed(++coop_sync_nopc_tries)) {
+            tig_debug_printf("CoopLite: PT72 finish sync: no local PC yet - retry %d\n", coop_sync_nopc_tries);
+            coop_pending_sync = *pkt;
+            coop_pending_sync_valid = true;
+            coop_pending_sync_teleport_queued = true; /* no re-teleport */
+            coop_sync_nopc_wait = true;
+            return;
+        } else {
+            tig_debug_printf("CoopLite: finish sync: no local PC (gave up)\n");
+            coop_sync_nopc_tries = 0;
+            return;
+        }
     }
+    coop_sync_nopc_tries = 0;
     local_oid = obj_get_id(local_pc);
     if (!coop_lite_oid_raw_equal(&local_oid, pkt->client_pc_oid)) {
         if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
@@ -7417,6 +7446,14 @@ void coop_lite_ping(unsigned int now_ms)
                     now_ms - coop_client_swing_ms, tig_art_id_anim_get(a), tig_art_id_frame_get(a),
                     anim_is_current_goal_type(me, AG_ANIMATE, NULL), anim_is_current_goal_type(me, AG_ATTACK, NULL));
             }
+        }
+        /* PT72: map is loaded but our PC was not bound yet - retry the
+           finish step only (no new teleport). */
+        if (coop_pending_sync_valid && coop_sync_nopc_wait
+            && coop_lite_interval_elapsed(coop_pending_sync_retry_ms, now_ms, 250u)) {
+            coop_pending_sync_retry_ms = now_ms;
+            coop_sync_nopc_wait = false;
+            coop_lite_client_on_teleport_done();
         }
         /* Client: retry a SESSION_SYNC teleport that could not be queued. */
         if (coop_pending_sync_valid && !coop_pending_sync_teleport_queued
@@ -18696,6 +18733,13 @@ static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag)
 {
     return is_pc || leads_to_pc || no_decay_flag;
+}
+
+/* PT72 (pure; tests): a SESSION_SYNC that found no local PC is retried
+   (about 10 s at the 250 ms retry pace) before the client gives up. */
+bool coop_lite_sync_retry_allowed(int tries)
+{
+    return tries > 0 && tries <= 40;
 }
 
 /* PT67 (pure; tests): the dialog text window / input filter is still

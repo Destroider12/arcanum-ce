@@ -1770,6 +1770,7 @@ void coop_lite_set_travel_close_hook(void (*close_ui)(void)); /* PT52f */
 #define COOP_WORLD_FULL_SECTORS 256
 bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id);
 bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag); /* PT66 */
+bool coop_lite_sync_retry_allowed(int tries); /* PT72 */
 bool coop_lite_dialog_ui_orphaned(bool filter_installed, bool entry_active, bool mode_is_main); /* PT67 */
 bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 
