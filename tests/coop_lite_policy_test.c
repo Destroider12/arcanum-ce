@@ -982,7 +982,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 159 || TIG_NET_PROTOCOL < 37
+        || PACKET_COOP_TYPE_LIMIT != 160 || TIG_NET_PROTOCOL < 37
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -2419,7 +2419,10 @@ int main(int argc, char** argv)
                 || !coop_lite_wmap_pos_should_send(true, 1000, 1150, 1, 1, 2, 2)
                 || coop_lite_wmap_pos_should_send(true, 1000, 1900, 2, 2, 2, 2)
                 || !coop_lite_wmap_pos_should_send(true, 1000, 2000, 2, 2, 2, 2)
-                || TIG_NET_PROTOCOL < 43) {
+                || TIG_NET_PROTOCOL < 43
+                || coop_lite_coop_packet_min_size(PACKET_COOP_WMAP_POS) != (int)sizeof(PacketCoopWmapPos)
+                || coop_lite_packet_allowed(PACKET_COOP_WMAP_POS, false, 0) != coop_lite_packet_allowed(PACKET_COOP_TRAP_FX, false, 0)
+                || coop_lite_packet_allowed(PACKET_COOP_WMAP_POS, true, 1) != coop_lite_packet_allowed(PACKET_COOP_TRAP_FX, true, 1)) {
                 fprintf(stderr, "PT73 wmap pos\n");
                 return 1;
             }
