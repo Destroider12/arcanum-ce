@@ -43,6 +43,7 @@ static void critter_disband_internal(int64_t obj);
 static bool fatigue_timeevent_check(TimeEvent* timeevent);
 static bool resting_timeevent_check(TimeEvent* timeevent);
 static bool decay_timeevent_check(TimeEvent* timeevent);
+static bool critter_corpse_is_kept(int64_t obj);
 static void critter_set_concealed_internal(int64_t obj, bool concealed);
 
 /**
@@ -761,10 +762,14 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
     // Play dying animation.
     anim_goal_dying(victim_obj, anim);
 
-    // Schedule body decay. Co-op: a fallen player's body waits for a
-    // resurrect or the party reload; it never decays away.
-    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0
-        && !(tig_net_is_coop_enabled() && obj_field_int32_get(victim_obj, OBJ_F_TYPE) == OBJ_TYPE_PC)) {
+    // Schedule body decay. PT66: player and companion bodies never decay
+    // (they can be carried back and resurrected); they are marked
+    // OCF2_NO_DECAY, a saved vanilla flag, so it holds across map changes.
+    if (critter_corpse_is_kept(victim_obj)) {
+        obj_field_int32_set(victim_obj, OBJ_F_CRITTER_FLAGS2,
+            obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) | OCF2_NO_DECAY);
+        critter_decay_timeevent_cancel(victim_obj);
+    } else {
         critter_decay_timeevent_schedule(victim_obj);
     }
 
@@ -1576,12 +1581,47 @@ bool critter_decay_timeevent_process(TimeEvent* timeevent)
             return false;
         }
 
+        // PT66: a decay queued before this fix (old save) or before the
+        // body was marked: a player's / companion's body stays.
+        if (critter_corpse_is_kept(obj)) {
+            return true;
+        }
+
         sub_463860(obj, true);
     }
 
     object_destroy(obj);
 
     return true;
+}
+
+/* PT66: a PC, an NPC whose leader chain (OBJ_F_NPC_LEADER is kept after
+   death) reaches a PC, or a body already marked OCF2_NO_DECAY. */
+static bool critter_corpse_is_kept(int64_t obj)
+{
+    int type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    bool leads_to_pc = false;
+
+    if (!obj_type_is_critter(type)) {
+        return false;
+    }
+    if (type == OBJ_TYPE_NPC) {
+        int64_t leader = obj;
+        int guard = 0;
+
+        while (guard++ < 16) {
+            leader = critter_leader_get(leader);
+            if (leader == OBJ_HANDLE_NULL) {
+                break;
+            }
+            if (obj_field_int32_get(leader, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                leads_to_pc = true;
+                break;
+            }
+        }
+    }
+    return coop_lite_corpse_keep(type == OBJ_TYPE_PC, leads_to_pc,
+        (obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) != 0);
 }
 
 /**

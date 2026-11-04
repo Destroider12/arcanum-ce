@@ -2399,6 +2399,12 @@ int main(int argc, char** argv)
         int cnt = 0;
         char buf[256];
 
+        /* PT66: player / companion / marked bodies are kept; others decay */
+        if (!coop_lite_corpse_keep(true, false, false) || !coop_lite_corpse_keep(false, true, false)
+            || !coop_lite_corpse_keep(false, false, true) || coop_lite_corpse_keep(false, false, false)) {
+            fprintf(stderr, "PT66 corpse keep\n");
+            return 1;
+        }
         if (!coop_lite_sector_list_add(list, &cnt, 3, 10) || !coop_lite_sector_list_add(list, &cnt, 3, 10)
             || cnt != 1 || !coop_lite_sector_list_add(list, &cnt, 3, 11) || !coop_lite_sector_list_add(list, &cnt, 3, 12)
             || coop_lite_sector_list_add(list, &cnt, 3, 13) || !coop_lite_sector_list_has(list, cnt, 11)

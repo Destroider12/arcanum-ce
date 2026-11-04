@@ -1752,6 +1752,7 @@ void coop_lite_set_travel_close_hook(void (*close_ui)(void)); /* PT52f */
 /* PT51: full-map snapshot sector scope (client prune). */
 #define COOP_WORLD_FULL_SECTORS 256
 bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id);
+bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag); /* PT66 */
 bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 
 int coop_lite_inv_sanitize(int64_t owner); /* PT53b */

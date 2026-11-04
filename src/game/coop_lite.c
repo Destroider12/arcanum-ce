@@ -18617,6 +18617,14 @@ void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt) { (void)pkt; }
 static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 #endif
 
+/* PT66 (pure; tests): a dead critter's body is kept for good (never
+   decays) when it is a player (any PC, co-op client PCs on the host too),
+   a companion (its leader chain reaches a PC), or already marked. */
+bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag)
+{
+    return is_pc || leads_to_pc || no_decay_flag;
+}
+
 /* PT51: small sector-id set (pure; tests). add: false only when full. */
 bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id)
 {

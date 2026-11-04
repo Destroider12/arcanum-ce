@@ -2863,3 +2863,23 @@ asset. If the tag's sha is not this build's (`COOP_BUILD_SHA`) it shows
    launcher, scripts, game data, saves or the ini.
 Check / Update are disabled while the game runs, and Start waits for an update.
 No release publishing tooling is part of this (builds are handed out by hand).
+
+## PT66: companion and player corpses never disappear
+
+**Cause.** `critter_kill` (critter.c) schedules `TIMEEVENT_TYPE_DECAY_DEAD_BODIE`
+for every dead critter not flagged `OCF2_NO_DECAY` (co-op only exempted PCs).
+One game day later `critter_decay_timeevent_process` drops the inventory and
+`object_destroy`s the body. A dead follower is disbanded first, so it is just
+another NPC body and decayed too, whether or not you left the map; on return,
+or after resting / travel time, the body was gone. Nothing else removes bodies
+(sector unload / map leave keep objects in the map diff).
+
+**Fix.** `critter_corpse_is_kept`: a PC (any, incl. co-op client PCs on the
+host), an NPC whose leader chain reaches a PC (`OBJ_F_NPC_LEADER` is restored
+right after the death disband), or a body already marked `OCF2_NO_DECAY`.
+Such a body gets `OCF2_NO_DECAY` set at death (a vanilla, saved flag, so the
+decision survives map changes and saves) and no decay event. The decay handler
+also skips kept bodies, so decay events already queued in older saves do not
+destroy them. The body stays where it died with its inventory; it syncs to
+clients as any other object, and resurrection works as for any existing body.
+Decision is the pure `coop_lite_corpse_keep` (policy test). Protocol unchanged (41).
