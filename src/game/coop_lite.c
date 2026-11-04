@@ -499,6 +499,7 @@ typedef struct CoopPendingOffer {
 } CoopPendingOffer;
 
 /* Host: token hash of each bound slot's player (for parking on leave). */
+static char coop_map_wipe_path[260]; /* PT63 */
 static uint64_t coop_slot_token_hash[8];
 
 static CoopPendingOffer coop_pending_offers[8];
@@ -1258,6 +1259,9 @@ static void coop_lite_obj_pending_reset(void);
 static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_host_door_flush_tick(unsigned int now_ms); /* PT53e */
+static void coop_lite_client_hotbar_tick(unsigned int now_ms); /* PT63 */
+static void coop_lite_host_hotbar_tick(void); /* PT63 */
+static void coop_lite_hotbar_after_load(void); /* PT63 */
 static void coop_lite_host_vitals_force(void); /* PT54 */
 static void coop_lite_host_pcs_force(void); /* PT54a */
 #endif
@@ -2139,6 +2143,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_PARTY_CTRL: /* PT50: travel check / spell end (op-checked) */
     case PACKET_COOP_TRAVEL_REQ: /* PT57: client ask -> host, refusal -> client (kind-checked) */
     case PACKET_COOP_SAVE_REQ: /* PT61: client save/load ask -> host, result -> client (kind-checked) */
+    case PACKET_COOP_HOTBAR: /* PT63: client layout -> host, kept layout -> client */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3195,6 +3200,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopSaveReq);
     case PACKET_COOP_TRAP_FX:
         return sizeof(PacketCoopTrapFx);
+    case PACKET_COOP_HOTBAR:
+        return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -7023,7 +7030,15 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
 
         if (map_get_name(pkt->map, &map_name) && map_name != NULL) {
             snprintf(path, sizeof(path), "Save\\Current\\maps\\%s", map_name);
-            if (tig_file_is_directory(path)) {
+            if (map_is_valid() && map_current_map() == pkt->map) {
+                /* PT63: never empty the folder of the OPEN map. map_flush in
+                   map_open_in_game rewrote it, while the sector cache read
+                   from it - the 07239681 client crash (dead inventory
+                   handles, then obj_find_remove on NULL in map_open). Wipe it
+                   between map_close and the reload instead. */
+                snprintf(coop_map_wipe_path, sizeof(coop_map_wipe_path), "%s", path);
+                tig_debug_printf("CoopLite: PT63 stale state of the open map %s - wiped after it closes\n", path);
+            } else if (tig_file_is_directory(path)) {
                 tig_debug_printf("CoopLite: clearing stale client map state %s\n", path);
                 tig_file_empty_directory(path);
             }
@@ -7033,6 +7048,24 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
 
     coop_lite_client_request_sync_teleport();
     /* Binding happens in coop_lite_client_on_teleport_done (teleport.c). */
+}
+
+
+void coop_lite_map_open_after_close(const char* save_path)
+{
+#ifdef COOP_LITE_TEST_STUBS
+    (void)save_path;
+    coop_map_wipe_path[0] = '\0';
+#else
+    if (save_path == NULL || coop_map_wipe_path[0] == '\0') {
+        return;
+    }
+    if (SDL_strcasecmp(save_path, coop_map_wipe_path) == 0) {
+        tig_debug_printf("CoopLite: PT63 clearing stale client map state %s (map closed)\n", save_path);
+        tig_file_empty_directory(save_path);
+    }
+    coop_map_wipe_path[0] = '\0';
+#endif
 }
 
 void coop_lite_client_on_teleport_done(void)
@@ -7256,9 +7289,23 @@ static void coop_travel_tick(unsigned int now_ms);
 static void coop_world_full_tick(unsigned int now_ms);
 #endif
 
+/* PT63: O(1) gate for the per-object hooks in object.c (flags / HP /
+   destroy). Clients and solo games skip the type reads and the net checks
+   that every object_flags_set call paid since PT60b. */
+bool coop_lite_world_hooks_on;
+
+void coop_lite_world_hooks_refresh(void)
+{
+    int depth = tig_net_local_suspend_pause();
+
+    coop_lite_world_hooks_on = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
+    tig_net_local_suspend_resume(depth);
+}
+
 void coop_lite_ping(unsigned int now_ms)
 {
     coop_obj_now_ms = now_ms;
+    coop_lite_world_hooks_refresh();
     coop_travel_tick(now_ms);
 #ifndef COOP_LITE_TEST_STUBS
     int slot;
@@ -7371,6 +7418,7 @@ void coop_lite_ping(unsigned int now_ms)
             }
         }
 
+        coop_lite_client_hotbar_tick(now_ms); /* PT63 */
         if (coop_lite_client_in_session
             && coop_lite_interval_elapsed(coop_last_census_ms, now_ms, 30000u)) {
             coop_last_census_ms = now_ms;
@@ -7415,6 +7463,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_intent_tick(now_ms);
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_host_door_flush_tick(now_ms); /* PT53e */
+    coop_lite_host_hotbar_tick(); /* PT63 */
 #endif
     coop_lite_host_dev_auto_resurrect_tick(now_ms);
     coop_lite_host_dev_gold_pile_tick(now_ms);
@@ -13347,6 +13396,16 @@ bool coop_lite_save_appendix(TigFile* stream)
         return false;
     }
     tig_debug_printf("CoopLite: save: %d player PC(s) kept for rejoin\n", (size - 8) / COOP_PARKED_SAVE_ENTRY);
+    {
+        /* PT63: players' hotbars, after the parked block (older builds stop before it) */
+        static uint8_t hb[8 + COOP_HOTBAR_KEPT_MAX * COOP_HOTBAR_SAVE_ENTRY];
+
+        size = coop_lite_hotbar_serialize(hb, (int)sizeof(hb));
+        if (size < 0 || tig_file_fwrite(hb, (size_t)size, 1, stream) != 1) {
+            return false;
+        }
+        tig_debug_printf("CoopLite: save: %d player hotbar(s) kept\n", coop_lite_hotbar_kept_count());
+    }
     return true;
 }
 
@@ -13358,6 +13417,8 @@ bool coop_lite_load_appendix(TigFile* stream)
     int i;
 
     coop_lite_parked_reset();
+    coop_lite_hotbar_kept_reset(); /* PT63 */
+    coop_lite_hotbar_after_load();
     pos = tig_file_ftell(stream);
     if (tig_file_fread(buf, 8, 1, stream) != 1) {
         tig_file_fseek(stream, pos, SEEK_SET);
@@ -13390,6 +13451,25 @@ bool coop_lite_load_appendix(TigFile* stream)
         }
     }
     tig_debug_printf("CoopLite: load: %d player PC(s) parked for rejoin\n", (int)count);
+    {
+        static uint8_t hb[8 + COOP_HOTBAR_KEPT_MAX * COOP_HOTBAR_SAVE_ENTRY];
+        uint32_t hn;
+
+        coop_lite_hotbar_kept_reset();
+        coop_lite_hotbar_after_load();
+        pos = tig_file_ftell(stream);
+        if (tig_file_fread(hb, 8, 1, stream) != 1 || *(uint32_t*)hb != COOP_HOTBAR_SAVE_MAGIC) {
+            tig_file_fseek(stream, pos, SEEK_SET); /* saved before PT63 */
+            return true;
+        }
+        memcpy(&hn, hb + 4, 4);
+        if (hn > COOP_HOTBAR_KEPT_MAX
+            || (hn > 0 && tig_file_fread(hb + 8, (size_t)hn * COOP_HOTBAR_SAVE_ENTRY, 1, stream) != 1)
+            || !coop_lite_hotbar_deserialize(hb, 8 + (int)hn * COOP_HOTBAR_SAVE_ENTRY)) {
+            return false;
+        }
+        tig_debug_printf("CoopLite: load: %d player hotbar(s) restored\n", (int)hn);
+    }
     return true;
 }
 #endif
@@ -15044,6 +15124,31 @@ bool coop_lite_object_state_kind_ok(int kind)
         || kind == COOP_WORLD_WALL; /* PT61 */
 }
 
+/* PT63: client fallback when a host world-object id does not resolve:
+   first live object of the type with the same art, else the first live one. */
+int coop_lite_world_pick_candidate(const int* types, const bool* dead, const unsigned int* aids, int n,
+    int want_type, unsigned int aid)
+{
+    int i;
+    int any = -1;
+
+    if (types == NULL || dead == NULL || aids == NULL) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (types[i] != want_type || dead[i]) {
+            continue;
+        }
+        if (aid != 0 && aids[i] == aid) {
+            return i;
+        }
+        if (any < 0) {
+            any = i;
+        }
+    }
+    return any;
+}
+
 bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid)
 {
     int i;
@@ -15482,6 +15587,54 @@ void coop_lite_host_object_touch(int64_t portal)
     }
 }
 
+/* PT63: object_destroy on the host. PT60 only queued the oid and let the
+   100 ms flush send GONE; the Bates tunnel log shows no send at all for a
+   bashed "Heavy Wood Door" (the flush's host check ran under a local
+   suspend and dropped the whole queue). Send at once, with the location,
+   so a client can match the door even if its id differs. */
+void coop_lite_host_object_destroyed(int64_t obj)
+{
+    PacketCoopDoorState pkt;
+    ObjectID oid;
+    int type;
+    int kind;
+    int depth;
+    char oid_str[80];
+
+    if (obj == OBJ_HANDLE_NULL || !coop_lite_world_hooks_on) {
+        return;
+    }
+    type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    kind = type == OBJ_TYPE_PORTAL ? COOP_WORLD_PORTAL
+        : type == OBJ_TYPE_SCENERY ? COOP_WORLD_SCENERY
+        : type == OBJ_TYPE_CONTAINER ? COOP_WORLD_CONTAINER
+                                     : 0;
+    if (kind == 0 || (obj_field_int32_get(obj, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED)) != 0
+        || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    oid = obj_get_id(obj);
+    if (oid.type == OID_TYPE_NULL) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_DOOR_STATE;
+    pkt.map = map_current_map();
+    pkt.slot = coop_door_actor_slot;
+    memcpy(pkt.e.oid, &oid, 24);
+    pkt.e.kind = kind;
+    pkt.e.aid = (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID);
+    pkt.e.loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+    pkt.e.reserved[1] = COOP_WORLD_OBJ_GONE;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    objid_id_to_str(oid_str, oid);
+    tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host at %d,%d - sent to clients now (slot %d)\n",
+        oid_str, kind == COOP_WORLD_PORTAL ? "door" : kind == COOP_WORLD_SCENERY ? "scenery" : "container",
+        (int)location_get_x(pkt.e.loc), (int)location_get_y(pkt.e.loc), pkt.slot);
+}
+
 static void coop_lite_door_log(const uint8_t* oid, int64_t portal, int slot, const char* side)
 {
     unsigned int flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_PORTAL_FLAGS);
@@ -15524,11 +15677,13 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
         return;
     }
     coop_door_flush_ms = now_ms;
+    depth = tig_net_local_suspend_pause(); /* PT63: was after the host check, so a suspended tick dropped the queue */
     if (!tig_net_is_active() || !tig_net_is_host() || !map_is_valid() || map_is_clearing_objects()) {
+        tig_net_local_suspend_resume(depth);
+        tig_debug_printf("CoopLite: PT63 %d pending world change(s) dropped (no map / not host)\n", coop_door_pend_cnt);
         coop_door_pend_cnt = 0;
         return;
     }
-    depth = tig_net_local_suspend_pause();
     for (i = 0; i < coop_door_pend_cnt; i++) {
         int64_t portal;
         unsigned int flags;
@@ -15612,9 +15767,46 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
 }
 
 /* Client: the host's door state, applied at once (any distance). */
+static int coop_lite_world_kind_obj_type(int kind)
+{
+    return kind == COOP_WORLD_SCENERY ? OBJ_TYPE_SCENERY
+        : kind == COOP_WORLD_CONTAINER ? OBJ_TYPE_CONTAINER
+        : kind == COOP_WORLD_WALL      ? OBJ_TYPE_WALL
+                                       : OBJ_TYPE_PORTAL;
+}
+
+static int64_t coop_lite_find_world_obj_at(int64_t loc, int type, unsigned int aid)
+{
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t objs[16];
+    int types[16];
+    bool dead[16];
+    unsigned int aids[16];
+    int n = 0;
+    int pick;
+    unsigned int mask = type == OBJ_TYPE_SCENERY ? OBJ_TM_SCENERY
+        : type == OBJ_TYPE_CONTAINER ? OBJ_TM_CONTAINER
+        : type == OBJ_TYPE_WALL ? OBJ_TM_WALL
+                                : OBJ_TM_PORTAL;
+
+    object_list_location(loc, mask, &objects);
+    for (node = objects.head; node != NULL && n < 16; node = node->next) {
+        objs[n] = node->obj;
+        types[n] = obj_field_int32_get(node->obj, OBJ_F_TYPE);
+        dead[n] = (obj_field_int32_get(node->obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0;
+        aids[n] = (unsigned int)obj_field_int32_get(node->obj, OBJ_F_CURRENT_AID);
+        n++;
+    }
+    object_list_destroy(&objects);
+    pick = coop_lite_world_pick_candidate(types, dead, aids, n, type, aid);
+    return pick >= 0 ? objs[pick] : OBJ_HANDLE_NULL;
+}
+
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
 {
     int64_t portal;
+    int want_type;
 
     if (!tig_net_is_active() || tig_net_is_host()
         || !coop_lite_door_state_valid(pkt, tig_net_last_message_size())) {
@@ -15623,13 +15815,25 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
     if (!coop_lite_client_world_ready() || pkt->map != map_current_map() || map_is_clearing_objects()) {
         return; /* the map's full snapshot carries it */
     }
+    want_type = coop_lite_world_kind_obj_type(pkt->e.kind);
     portal = coop_lite_get_oid_obj(pkt->e.oid);
-    if (portal == OBJ_HANDLE_NULL
-        || obj_field_int32_get(portal, OBJ_F_TYPE)
-            != (pkt->e.kind == COOP_WORLD_SCENERY       ? OBJ_TYPE_SCENERY
-                    : pkt->e.kind == COOP_WORLD_CONTAINER ? OBJ_TYPE_CONTAINER
-                    : pkt->e.kind == COOP_WORLD_WALL      ? OBJ_TYPE_WALL
-                                                          : OBJ_TYPE_PORTAL)) {
+    if (portal != OBJ_HANDLE_NULL && obj_field_int32_get(portal, OBJ_F_TYPE) != want_type) {
+        portal = OBJ_HANDLE_NULL;
+    }
+    if (portal == OBJ_HANDLE_NULL && pkt->e.loc != 0) {
+        /* PT63: the id did not resolve here (positional P_ ids can differ
+           from the host's); match by tile + type (+ art when known). */
+        portal = coop_lite_find_world_obj_at(pkt->e.loc, want_type, pkt->e.aid);
+        if (portal != OBJ_HANDLE_NULL) {
+            tig_debug_printf("CoopLite: PT63 world object matched by location %d,%d (id did not resolve)\n",
+                (int)location_get_x(pkt->e.loc), (int)location_get_y(pkt->e.loc));
+        }
+    }
+    if (portal == OBJ_HANDLE_NULL) {
+        if ((pkt->e.reserved[1] & COOP_WORLD_OBJ_GONE) != 0) {
+            tig_debug_printf("CoopLite: PT63 host destroyed an object at %d,%d - not found here (already gone?)\n",
+                (int)location_get_x(pkt->e.loc), (int)location_get_y(pkt->e.loc));
+        }
         return;
     }
     if ((pkt->e.reserved[1] & COOP_WORLD_OBJ_GONE) != 0) {
@@ -16046,6 +16250,7 @@ void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
 void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
+void coop_lite_host_object_destroyed(int64_t obj) { (void)obj; }
 void coop_lite_host_wall_touch(int64_t obj, bool destroyed) { (void)obj; (void)destroyed; }
 void coop_lite_walls_reset(void) { }
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt) { (void)pkt; }
@@ -18988,6 +19193,153 @@ bool coop_lite_trap_fx_valid(const PacketCoopTrapFx* pkt, int size)
         && pkt->count >= 0 && pkt->count <= COOP_TRAP_FX_VICTIMS && pkt->base >= 0 && pkt->base < 1000;
 }
 
+/* ---- PT63: hotbar (quick-access slots) per player ---- */
+static struct {
+    bool used;
+    uint64_t hash;
+    CoopHotbarEntry e[COOP_HOTBAR_SLOTS];
+} coop_hotbar_kept[COOP_HOTBAR_KEPT_MAX];
+static bool (*coop_hotbar_get_hook)(int index, CoopHotbarEntry* e);
+static bool (*coop_hotbar_set_hook)(int index, const CoopHotbarEntry* e);
+
+void coop_lite_set_hotbar_hooks(bool (*get)(int index, CoopHotbarEntry* e), bool (*set)(int index, const CoopHotbarEntry* e))
+{
+    coop_hotbar_get_hook = get;
+    coop_hotbar_set_hook = set;
+}
+
+static bool coop_lite_hotbar_entries_ok(const CoopHotbarEntry* e)
+{
+    int i;
+
+    for (i = 0; i < COOP_HOTBAR_SLOTS; i++) {
+        if (e[i].type < 0 || e[i].type > 4 || e[i].data < -1 || e[i].data >= 1000) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool coop_lite_hotbar_valid(const PacketCoopHotbar* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_HOTBAR && size >= (int)sizeof(PacketCoopHotbar)
+        && (pkt->flags & ~COOP_HOTBAR_HAVE) == 0 && coop_lite_hotbar_entries_ok(pkt->e);
+}
+
+void coop_lite_hotbar_kept_reset(void)
+{
+    memset(coop_hotbar_kept, 0, sizeof(coop_hotbar_kept));
+}
+
+bool coop_lite_hotbar_kept_put(uint64_t hash, const CoopHotbarEntry* e)
+{
+    int i;
+    int free_i = -1;
+
+    if (hash == 0 || e == NULL || !coop_lite_hotbar_entries_ok(e)) {
+        return false;
+    }
+    for (i = 0; i < COOP_HOTBAR_KEPT_MAX; i++) {
+        if (coop_hotbar_kept[i].used && coop_hotbar_kept[i].hash == hash) {
+            break;
+        }
+        if (!coop_hotbar_kept[i].used && free_i < 0) {
+            free_i = i;
+        }
+    }
+    if (i == COOP_HOTBAR_KEPT_MAX) {
+        if (free_i < 0) {
+            return false;
+        }
+        i = free_i;
+    }
+    coop_hotbar_kept[i].used = true;
+    coop_hotbar_kept[i].hash = hash;
+    memcpy(coop_hotbar_kept[i].e, e, sizeof(coop_hotbar_kept[i].e));
+    return true;
+}
+
+bool coop_lite_hotbar_kept_get(uint64_t hash, CoopHotbarEntry* out)
+{
+    int i;
+
+    for (i = 0; hash != 0 && i < COOP_HOTBAR_KEPT_MAX; i++) {
+        if (coop_hotbar_kept[i].used && coop_hotbar_kept[i].hash == hash) {
+            if (out != NULL) {
+                memcpy(out, coop_hotbar_kept[i].e, sizeof(coop_hotbar_kept[i].e));
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+int coop_lite_hotbar_kept_count(void)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; i < COOP_HOTBAR_KEPT_MAX; i++) {
+        n += coop_hotbar_kept[i].used ? 1 : 0;
+    }
+    return n;
+}
+
+/* "CHB1", count, then count x (token hash, 10 entries). */
+int coop_lite_hotbar_serialize(uint8_t* out, int cap)
+{
+    uint32_t magic = COOP_HOTBAR_SAVE_MAGIC;
+    uint32_t count = 0;
+    int off = 8;
+    int i;
+
+    if (out == NULL || cap < 8 + COOP_HOTBAR_KEPT_MAX * COOP_HOTBAR_SAVE_ENTRY) {
+        return -1;
+    }
+    for (i = 0; i < COOP_HOTBAR_KEPT_MAX; i++) {
+        if (!coop_hotbar_kept[i].used) {
+            continue;
+        }
+        memcpy(out + off, &coop_hotbar_kept[i].hash, 8);
+        memcpy(out + off + 8, coop_hotbar_kept[i].e, sizeof(coop_hotbar_kept[i].e));
+        off += COOP_HOTBAR_SAVE_ENTRY;
+        count++;
+    }
+    memcpy(out, &magic, 4);
+    memcpy(out + 4, &count, 4);
+    return off;
+}
+
+bool coop_lite_hotbar_deserialize(const uint8_t* in, int len)
+{
+    uint32_t magic;
+    uint32_t count;
+    uint32_t i;
+
+    coop_lite_hotbar_kept_reset();
+    if (in == NULL || len < 8) {
+        return false;
+    }
+    memcpy(&magic, in, 4);
+    memcpy(&count, in + 4, 4);
+    if (magic != COOP_HOTBAR_SAVE_MAGIC || count > COOP_HOTBAR_KEPT_MAX
+        || len != 8 + (int)count * COOP_HOTBAR_SAVE_ENTRY) {
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        uint64_t hash;
+        CoopHotbarEntry e[COOP_HOTBAR_SLOTS];
+
+        memcpy(&hash, in + 8 + i * COOP_HOTBAR_SAVE_ENTRY, 8);
+        memcpy(e, in + 8 + i * COOP_HOTBAR_SAVE_ENTRY + 8, sizeof(e));
+        if (!coop_lite_hotbar_kept_put(hash, e)) {
+            coop_lite_hotbar_kept_reset();
+            return false;
+        }
+    }
+    return true;
+}
+
 void coop_lite_coop_save_desc(const char* player_name, char* out, size_t size)
 {
     size_t n;
@@ -19388,7 +19740,160 @@ void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt)
     multiplayer_unlock();
     tig_debug_printf("CoopLite: PT61 trap visuals played (fx base %d, %d victims)\n", pkt->base, pkt->count);
 }
+/* ---- PT63: hotbar runtime ---- */
+static PacketCoopHotbar coop_hotbar_last;
+static bool coop_hotbar_last_valid;
+static unsigned int coop_hotbar_poll_ms;
+static unsigned int coop_hotbar_ready_ms;
+static bool coop_hotbar_got_host;
+static PacketCoopHotbar coop_hotbar_restore;
+static bool coop_hotbar_restore_pending;
+static unsigned int coop_hotbar_restore_ms;
+static uint64_t coop_hotbar_sent_hash[8];
+
+static int coop_lite_hotbar_used(const CoopHotbarEntry* e)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; i < COOP_HOTBAR_SLOTS; i++) {
+        n += e[i].type != 0 ? 1 : 0;
+    }
+    return n;
+}
+
+static void coop_lite_hotbar_read(PacketCoopHotbar* pkt)
+{
+    int i;
+
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = PACKET_COOP_HOTBAR;
+    for (i = 0; i < COOP_HOTBAR_SLOTS; i++) {
+        if (!coop_hotbar_get_hook(i, &pkt->e[i]) || pkt->e[i].type < 0 || pkt->e[i].type > 4) {
+            memset(&pkt->e[i], 0, sizeof(pkt->e[i]));
+        }
+        if (pkt->e[i].data < -1 || pkt->e[i].data >= 1000) {
+            pkt->e[i].data = -1;
+        }
+    }
+}
+
+/* Client: restore what the host kept, then send every change. */
+static void coop_lite_client_hotbar_tick(unsigned int now_ms)
+{
+    PacketCoopHotbar cur;
+    int i;
+
+    if (coop_hotbar_get_hook == NULL || coop_hotbar_set_hook == NULL) {
+        return;
+    }
+    if (!coop_lite_client_world_ready()) {
+        coop_hotbar_ready_ms = 0;
+        return;
+    }
+    if (coop_hotbar_ready_ms == 0) {
+        coop_hotbar_ready_ms = now_ms != 0 ? now_ms : 1u;
+    }
+    if (coop_hotbar_restore_pending) {
+        int missing = 0;
+
+        for (i = 0; i < COOP_HOTBAR_SLOTS; i++) {
+            if (!coop_hotbar_set_hook(i, &coop_hotbar_restore.e[i])) {
+                missing++;
+            }
+        }
+        if (missing == 0 || coop_lite_interval_elapsed(coop_hotbar_restore_ms, now_ms, 30000u)) {
+            coop_hotbar_restore_pending = false;
+            tig_debug_printf("CoopLite: PT63 hotbar restored from the host (%d slot(s) used, %d item(s) not found)\n",
+                coop_lite_hotbar_used(coop_hotbar_restore.e), missing);
+            coop_lite_hotbar_read(&coop_hotbar_last);
+            coop_hotbar_last_valid = true;
+        }
+        return; /* items may still arrive with the inventory sync */
+    }
+    if (!coop_lite_interval_elapsed(coop_hotbar_poll_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_hotbar_poll_ms = now_ms;
+    if (!coop_hotbar_got_host && !coop_lite_interval_elapsed(coop_hotbar_ready_ms, now_ms, 10000u)) {
+        return; /* wait for the host's copy before overwriting it */
+    }
+    coop_lite_hotbar_read(&cur);
+    if (coop_hotbar_last_valid && memcmp(&cur, &coop_hotbar_last, sizeof(cur)) == 0) {
+        return;
+    }
+    coop_hotbar_last = cur;
+    coop_hotbar_last_valid = true;
+    tig_net_send_app(&cur, sizeof(cur), 0);
+    tig_debug_printf("CoopLite: PT63 hotbar changed - sent to the host (%d slot(s) used)\n", coop_lite_hotbar_used(cur.e));
+}
+
+/* Host: each (re)joined player gets their kept hotbar once per join. */
+static void coop_lite_host_hotbar_tick(void)
+{
+    PacketCoopHotbar pkt;
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        uint64_t hash = coop_slot_token_hash[slot];
+
+        if (hash == 0) {
+            coop_hotbar_sent_hash[slot] = 0;
+            continue;
+        }
+        if (coop_hotbar_sent_hash[slot] == hash || sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = PACKET_COOP_HOTBAR;
+        if (coop_lite_hotbar_kept_get(hash, pkt.e)) {
+            pkt.flags = COOP_HOTBAR_HAVE;
+        }
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+        coop_hotbar_sent_hash[slot] = hash;
+        tig_debug_printf("CoopLite: PT63 hotbar -> slot %d: %s (%d slot(s) used)\n", slot,
+            pkt.flags != 0 ? "kept layout" : "none kept yet", coop_lite_hotbar_used(pkt.e));
+    }
+}
+
+void coop_lite_handle_hotbar(PacketCoopHotbar* pkt)
+{
+    if (!tig_net_is_active() || !coop_lite_hotbar_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (tig_net_is_host()) {
+        int slot = sub_52A530();
+
+        if (slot <= 0 || slot >= 8 || !coop_lite_host_rate_ok(2, slot, 1)) {
+            return;
+        }
+        if (coop_slot_token_hash[slot] == 0 || !coop_lite_hotbar_kept_put(coop_slot_token_hash[slot], pkt->e)) {
+            tig_debug_printf("CoopLite: PT63 slot %d hotbar not kept (no player token / table full)\n", slot);
+            return;
+        }
+        coop_hotbar_sent_hash[slot] = coop_slot_token_hash[slot]; /* theirs is newer than any kept copy */
+        tig_debug_printf("CoopLite: PT63 slot %d hotbar kept (%d slot(s) used)\n", slot, coop_lite_hotbar_used(pkt->e));
+        return;
+    }
+    coop_hotbar_got_host = true;
+    if ((pkt->flags & COOP_HOTBAR_HAVE) == 0) {
+        tig_debug_printf("CoopLite: PT63 host has no hotbar kept for us - ours will be sent\n");
+        coop_hotbar_last_valid = false;
+        return;
+    }
+    coop_hotbar_restore = *pkt;
+    coop_hotbar_restore_pending = true;
+    coop_hotbar_restore_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
+}
+
+/* Host load: every player gets the loaded layout again. */
+static void coop_lite_hotbar_after_load(void)
+{
+    memset(coop_hotbar_sent_hash, 0, sizeof(coop_hotbar_sent_hash));
+}
+
 #else
+void coop_lite_handle_hotbar(PacketCoopHotbar* pkt) { (void)pkt; }
 bool coop_lite_client_load_blocked(void) { return false; }
 bool coop_lite_client_request_save(void) { return false; }
 bool coop_lite_client_request_load(void) { return false; }

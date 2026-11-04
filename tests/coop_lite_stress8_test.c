@@ -233,6 +233,48 @@ static int test_pure(void)
     for (i = 0; i < 3; i++) { oid[0] = (uint8_t)(10 + i); (void)coop_lite_door_pending_add(set, &cnt, 4, oid); }
     oid[0] = 99;
     CHECK(!coop_lite_door_pending_add(set, &cnt, 4, oid) && cnt == 4, "door set full refuses cleanly");
+    {
+        /* PT63: gone-message resolution by tile when the id does not resolve */
+        int types[4] = { 3, 1, 1, 1 };
+        bool dead[4] = { false, true, false, false };
+        unsigned int aids[4] = { 7, 9, 5, 9 };
+        CHECK(coop_lite_world_pick_candidate(types, dead, aids, 4, 1, 9) == 3, "same art, live, right type wins");
+        CHECK(coop_lite_world_pick_candidate(types, dead, aids, 4, 1, 42) == 2, "no art match: first live of the type");
+        CHECK(coop_lite_world_pick_candidate(types, dead, aids, 4, 2, 9) == -1, "no object of the type: not found");
+        CHECK(coop_lite_world_pick_candidate(types, dead, aids, 0, 1, 9) == -1, "empty tile");
+    }
+    {
+        /* PT63: hotbar kept per player token, packet check, save round trip */
+        PacketCoopHotbar hb;
+        CoopHotbarEntry e[COOP_HOTBAR_SLOTS];
+        CoopHotbarEntry got[COOP_HOTBAR_SLOTS];
+        static uint8_t buf[8 + COOP_HOTBAR_KEPT_MAX * COOP_HOTBAR_SAVE_ENTRY];
+        int len;
+
+        memset(&hb, 0, sizeof(hb));
+        hb.type = PACKET_COOP_HOTBAR;
+        hb.e[0].type = 3; hb.e[0].data = 42; /* spell */
+        hb.e[1].type = 1; hb.e[1].data = -1; hb.e[1].oid[0] = 7; /* item */
+        CHECK(coop_lite_hotbar_valid(&hb, (int)sizeof(hb)), "hotbar packet ok");
+        CHECK(!coop_lite_hotbar_valid(&hb, (int)sizeof(hb) - 1), "short hotbar refused");
+        hb.e[2].type = 9;
+        CHECK(!coop_lite_hotbar_valid(&hb, (int)sizeof(hb)), "bad slot type refused");
+        hb.e[2].type = 0;
+        memcpy(e, hb.e, sizeof(e));
+        coop_lite_hotbar_kept_reset();
+        CHECK(!coop_lite_hotbar_kept_put(0, e), "no token: not kept");
+        CHECK(coop_lite_hotbar_kept_put(0x1234, e) && coop_lite_hotbar_kept_count() == 1, "kept");
+        e[0].data = 43;
+        CHECK(coop_lite_hotbar_kept_put(0x1234, e) && coop_lite_hotbar_kept_count() == 1, "same player replaces");
+        len = coop_lite_hotbar_serialize(buf, (int)sizeof(buf));
+        coop_lite_hotbar_kept_reset();
+        CHECK(len == 8 + COOP_HOTBAR_SAVE_ENTRY && coop_lite_hotbar_deserialize(buf, len), "save round trip");
+        CHECK(coop_lite_hotbar_kept_get(0x1234, got) && got[0].data == 43 && got[1].type == 1 && got[1].oid[0] == 7,
+            "item oid and spell back after load");
+        CHECK(!coop_lite_hotbar_kept_get(0x9999, got), "other player: nothing");
+        CHECK(!coop_lite_hotbar_deserialize(buf, len - 1), "truncated save refused");
+        coop_lite_hotbar_kept_reset();
+    }
     /* S3: ready check, 7 clients: busy, idle near, idle far, dead, READY far,
        no reply, one disconnecting mid-check */
     {
@@ -322,8 +364,8 @@ int main(void)
     log_reset();
     g_proto[0] = TIG_NET_PROTOCOL - 1;
     connect_client(0);
-    for (i = 0; i < 3000 && !log_has("protocol 39 != ours"); i++) pump(1);
-    CHECK(log_has("protocol 39 != ours 40"), "S5: protocol mismatch logged");
+    for (i = 0; i < 3000 && !log_has("protocol 40 != ours"); i++) pump(1);
+    CHECK(log_has("protocol 40 != ours 41"), "S5: protocol mismatch logged");
     for (i = 0; i < 6000 && active_count() > 6; i++) pump(1);
     CHECK(active_count() == 6, "S5: mismatched client dropped");
     g_proto[0] = 0;

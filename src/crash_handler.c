@@ -126,35 +126,78 @@ static void crash_stack(CONTEXT* ctx)
     }
 }
 
-static void crash_minidump(const char* path, EXCEPTION_POINTERS* ep)
-{
-    HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+/* PT63: the 07239681 dump was 0 bytes ("FAILED"). Writing a dump of the
+   faulting thread from that thread is unreliable (dbghelp suspends it);
+   the documented way is a helper thread. Also: dbghelp from System32 (a
+   stale copy next to the exe can lack the export), read+write access,
+   and GetLastError in the log. */
+typedef struct CrashDumpJob {
     MiniDumpWriteDump_t write_dump;
     HANDLE file;
-    MINIDUMP_EXCEPTION_INFORMATION_PT mei;
+    DWORD thread_id;
+    EXCEPTION_POINTERS* ep;
     BOOL ok;
+    DWORD err;
+} CrashDumpJob;
+
+static DWORD WINAPI crash_minidump_thread(LPVOID param)
+{
+    CrashDumpJob* job = (CrashDumpJob*)param;
+    MINIDUMP_EXCEPTION_INFORMATION_PT mei;
+
+    mei.ThreadId = job->thread_id;
+    mei.ExceptionPointers = job->ep;
+    mei.ClientPointers = FALSE;
+    job->ok = job->write_dump(GetCurrentProcess(), GetCurrentProcessId(), job->file,
+        0x00001000 /* MiniDumpWithThreadInfo */ | 0x00000004 /* MiniDumpWithHandleData */,
+        job->ep != NULL ? &mei : NULL, NULL, NULL);
+    job->err = job->ok ? 0 : GetLastError();
+    return 0;
+}
+
+static void crash_minidump(const char* path, EXCEPTION_POINTERS* ep)
+{
+    HMODULE dbghelp = LoadLibraryExA("dbghelp.dll", NULL, 0x00000800 /* LOAD_LIBRARY_SEARCH_SYSTEM32 */);
+    CrashDumpJob job;
+    HANDLE thread;
 
     if (dbghelp == NULL) {
-        crash_out("minidump: dbghelp.dll not available\n");
+        dbghelp = LoadLibraryA("dbghelp.dll");
+    }
+    if (dbghelp == NULL) {
+        crash_out("minidump: dbghelp.dll not available (error %lu)\n", (unsigned long)GetLastError());
         return;
     }
-    write_dump = (MiniDumpWriteDump_t)(void*)GetProcAddress(dbghelp, "MiniDumpWriteDump");
-    if (write_dump == NULL) {
+    memset(&job, 0, sizeof(job));
+    job.write_dump = (MiniDumpWriteDump_t)(void*)GetProcAddress(dbghelp, "MiniDumpWriteDump");
+    if (job.write_dump == NULL) {
         crash_out("minidump: MiniDumpWriteDump not found\n");
         return;
     }
-    file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) {
-        crash_out("minidump: cannot create %s\n", path);
+    job.file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (job.file == INVALID_HANDLE_VALUE) {
+        crash_out("minidump: cannot create %s (error %lu)\n", path, (unsigned long)GetLastError());
         return;
     }
-    mei.ThreadId = GetCurrentThreadId();
-    mei.ExceptionPointers = ep;
-    mei.ClientPointers = FALSE;
-    ok = write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, 0 /* MiniDumpNormal */,
-        ep != NULL ? &mei : NULL, NULL, NULL);
-    CloseHandle(file);
-    crash_out("minidump: %s %s\n", path, ok ? "written" : "FAILED");
+    job.thread_id = GetCurrentThreadId();
+    job.ep = ep;
+    thread = CreateThread(NULL, 0, crash_minidump_thread, &job, 0, NULL);
+    if (thread != NULL) {
+        if (WaitForSingleObject(thread, 60000) != WAIT_OBJECT_0) {
+            job.ok = FALSE;
+            job.err = WAIT_TIMEOUT;
+        }
+        CloseHandle(thread);
+    } else {
+        crash_minidump_thread(&job); /* no thread: try in place */
+    }
+    CloseHandle(job.file);
+    if (job.ok) {
+        crash_out("minidump: %s written\n", path);
+    } else {
+        crash_out("minidump: %s FAILED (error 0x%08lx)\n", path, (unsigned long)job.err);
+    }
 }
 
 static void crash_report(const char* what, EXCEPTION_POINTERS* ep)

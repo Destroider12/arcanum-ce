@@ -44,7 +44,8 @@ extern "C" {
 #define PACKET_COOP_TRAVEL_REQ 155 /* PT57: client -> host travel request; host -> client refusal */
 #define PACKET_COOP_SAVE_REQ 156 /* PT61: client save/load ask -> host; host result -> client */
 #define PACKET_COOP_TRAP_FX 157 /* PT61: host trap trigger visuals -> clients */
-#define PACKET_COOP_TYPE_LIMIT 158
+#define PACKET_COOP_HOTBAR 158 /* PT63: client -> host hotbar layout; host -> client restore */
+#define PACKET_COOP_TYPE_LIMIT 159
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -535,6 +536,40 @@ typedef struct PacketCoopTrapFx {
 } PacketCoopTrapFx;
 COOP_STATIC_ASSERT(sizeof(PacketCoopTrapFx) == 0x100, "PacketCoopTrapFx size");
 bool coop_lite_trap_fx_valid(const PacketCoopTrapFx* pkt, int size);
+
+/* PT63: the 10 quick-access (hotbar) slots, per player, kept by the host
+   under the player's token (rejoin / late join / host save). Items and
+   item-spells are named by host object id. */
+#define COOP_HOTBAR_SLOTS 10
+#define COOP_HOTBAR_KEPT_MAX 16
+#define COOP_HOTBAR_SAVE_MAGIC 0x31424843u /* "CHB1" */
+#define COOP_HOTBAR_SAVE_ENTRY (8 + 0x20 * COOP_HOTBAR_SLOTS)
+typedef struct CoopHotbarEntry {
+    /* 0000 */ int type; /* HotkeyType: 0 none, 1 item, 2 skill, 3 spell, 4 item spell */
+    /* 0004 */ int data; /* skill / spell number */
+    /* 0008 */ uint8_t oid[24]; /* item (types 1, 4) */
+} CoopHotbarEntry;
+COOP_STATIC_ASSERT(sizeof(CoopHotbarEntry) == 0x20, "CoopHotbarEntry size");
+#define COOP_HOTBAR_HAVE 0x1 /* host -> client: a stored layout (else: nothing kept, keep yours) */
+typedef struct PacketCoopHotbar {
+    /* 0000 */ int type;
+    /* 0004 */ int flags;
+    /* 0008 */ int reserved[2];
+    /* 0010 */ CoopHotbarEntry e[COOP_HOTBAR_SLOTS];
+} PacketCoopHotbar;
+COOP_STATIC_ASSERT(sizeof(PacketCoopHotbar) == 0x150, "PacketCoopHotbar size");
+bool coop_lite_hotbar_valid(const PacketCoopHotbar* pkt, int size);
+void coop_lite_handle_hotbar(PacketCoopHotbar* pkt);
+/* Kept table (pure; unit-tested): put replaces the same token's layout. */
+void coop_lite_hotbar_kept_reset(void);
+bool coop_lite_hotbar_kept_put(uint64_t hash, const CoopHotbarEntry* e);
+bool coop_lite_hotbar_kept_get(uint64_t hash, CoopHotbarEntry* out);
+int coop_lite_hotbar_kept_count(void);
+int coop_lite_hotbar_serialize(uint8_t* out, int cap);
+bool coop_lite_hotbar_deserialize(const uint8_t* in, int len);
+/* UI hooks (hotkey_ui.c): read / write one slot; set returns false when an
+   item could not be resolved (yet). */
+void coop_lite_set_hotbar_hooks(bool (*get)(int index, CoopHotbarEntry* e), bool (*set)(int index, const CoopHotbarEntry* e));
 void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt);
 /* trap.c (host): send what trap_script_execute just drew. */
 void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count);
@@ -1252,6 +1287,11 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt);
 bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size);
 /* PT53e: pending-door set (by OID bytes); false when full or a duplicate. */
 bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid);
+int coop_lite_world_pick_candidate(const int* types, const bool* dead, const unsigned int* aids, int n,
+    int want_type, unsigned int aid); /* PT63 */
+void coop_lite_host_object_destroyed(int64_t obj); /* PT63 */
+void coop_lite_map_open_after_close(const char* save_path); /* PT63 */
+extern bool coop_lite_world_hooks_on; /* PT63 */
 /* PT53e: a coop PC portrait is drawn from its engine portrait number when
    it has one (Players\<oid>.bmp exists only on the machine that made it). */
 bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found);

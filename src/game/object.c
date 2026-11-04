@@ -1290,7 +1290,7 @@ void object_destroy(int64_t obj)
         return;
     }
 
-    {
+    if (coop_lite_world_hooks_on) {
         int t = obj_field_int32_get(obj, OBJ_F_TYPE);
 
         if (t == OBJ_TYPE_PORTAL || t == OBJ_TYPE_SCENERY || t == OBJ_TYPE_CONTAINER) {
@@ -1306,6 +1306,10 @@ void object_destroy(int64_t obj)
 
     if (!object_script_execute(obj, obj, OBJ_HANDLE_NULL, SAP_DESTROY, 0)) {
         return;
+    }
+
+    if (coop_lite_world_hooks_on) {
+        coop_lite_host_object_destroyed(obj); /* PT63: GONE sent at once, with the location (script did not veto) */
     }
 
     object_get_rect(obj, 0x7, &rect);
@@ -1437,10 +1441,10 @@ void object_flags_set(int64_t obj, unsigned int flags)
     unsigned int cur_flags;
     unsigned int extra_flags = 0;
 
-    if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
         coop_lite_host_object_touch(obj); /* PT60b */
     }
-    if ((flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
         && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != (flags & COOP_WORLD_WALL_OF_MASK)) {
         coop_lite_host_wall_touch(obj, false); /* PT61: script hid / changed a wall */
     }
@@ -1521,10 +1525,10 @@ void object_flags_unset(int64_t obj, unsigned int flags)
     unsigned int extra_flags = 0;
     bool visibility_changed = false;
 
-    if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
         coop_lite_host_object_touch(obj); /* PT60b */
     }
-    if ((flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
         && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != 0) {
         coop_lite_host_wall_touch(obj, false); /* PT61: script showed / changed a wall */
     }
@@ -1644,8 +1648,9 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, value);
-    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
-        || obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+    if (coop_lite_world_hooks_on
+        && (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
+            || obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY)) {
         coop_lite_host_object_touch(obj); /* PT60/PT60b: door / scenery HP */
     }
 

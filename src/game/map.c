@@ -609,6 +609,7 @@ bool map_open(const char* base_path, const char* save_path, bool a3)
     }
 
     tig_file_mkdir(save_path);
+    coop_lite_map_open_after_close(save_path); /* PT63: a co-op resync wipe of this map's state, now that it is closed */
     if (!a3) {
         tig_file_empty_directory(save_path);
     }

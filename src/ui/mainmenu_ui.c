@@ -1922,6 +1922,7 @@ static void mainmenu_ui_dev_autostart_tick(void)
 static void mainmenu_ui_pt62_tick(void)
 {
     static bool autoload_done;
+    static bool autojoin_done;
     static int frames;
     static unsigned int next_try_ms;
     unsigned int now;
@@ -1944,6 +1945,23 @@ static void mainmenu_ui_pt62_tick(void)
                 return;
             }
             tig_debug_printf("MainMenu-UI: autoload: no save, staying in the menu\n");
+        }
+    }
+    if (!autojoin_done) {
+        const char* aj = coop_lite_env("ARCANUM_COOP_AUTOJOIN");
+
+        autojoin_done = true;
+        if (aj != NULL && aj[0] == '1' && tig_net_is_coop_enabled() && tig_net_join_configured()
+            && !tig_net_is_active()) {
+            /* PT63: launcher Reconnect - straight back into the session: the
+               rejoin token brings the parked PC back; no New Game clicks.
+               If the host is not up yet, keep trying like the auto-wait. */
+            tig_debug_printf("MainMenu-UI: autojoin - rejoining the host\n");
+            if (coop_lite_client_reconnect()) {
+                mainmenu_ui_start_pregen(1);
+                return;
+            }
+            coop_lite_wait_host_set(true);
         }
     }
     if (!coop_lite_wait_host_active() || !tig_net_is_coop_enabled() || !tig_net_join_configured()

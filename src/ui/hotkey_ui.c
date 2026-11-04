@@ -19,6 +19,9 @@
 #include "ui/skill_ui.h"
 #include "ui/textedit_ui.h"
 
+static bool hotkey_ui_coop_get(int index, CoopHotbarEntry* e);
+static bool hotkey_ui_coop_set(int index, const CoopHotbarEntry* e);
+
 static bool intgame_save_hotkey(Hotkey* hotkey, TigFile* stream);
 static bool intgame_load_hotkey(Hotkey* hotkey, TigFile* stream);
 static int sub_57E460(void);
@@ -116,6 +119,7 @@ bool hotkey_ui_init(GameInitInfo* init_info)
 
     coop_lite_set_hotkey_spell_hook(hotkey_ui_assign_spell);
     coop_lite_set_dev_click_hotkey_hook(hotkey_ui_dev_click_slot);
+    coop_lite_set_hotbar_hooks(hotkey_ui_coop_get, hotkey_ui_coop_set); /* PT63 */
 
     for (index = 0; index < 10; index++) {
         hotkey = &(stru_6835E0[index]);
@@ -1358,6 +1362,92 @@ bool hotkey_ui_dev_click_slot(int index)
     tig_message_enqueue(&msg);
     msg.data.mouse.event = TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP;
     tig_message_enqueue(&msg);
+    return true;
+}
+
+/* PT63: coop hotbar sync - read one slot (items by object id). */
+static bool hotkey_ui_coop_get(int index, CoopHotbarEntry* e)
+{
+    Hotkey* hotkey;
+    ObjectID oid;
+
+    if (index < 0 || index >= 10 || e == NULL) {
+        return false;
+    }
+    hotkey = &(stru_6835E0[index]);
+    memset(e, 0, sizeof(*e));
+    e->type = hotkey->type;
+    e->data = (hotkey->type == HOTKEY_SPELL || hotkey->type == HOTKEY_SKILL || hotkey->type == HOTKEY_ITEM_SPELL)
+        ? hotkey->data
+        : -1;
+    if (hotkey->type == HOTKEY_ITEM || hotkey->type == HOTKEY_ITEM_SPELL) {
+        if (hotkey->item_obj.obj == OBJ_HANDLE_NULL) {
+            e->type = HOTKEY_NONE;
+            return true;
+        }
+        oid = obj_get_id(hotkey->item_obj.obj);
+        memcpy(e->oid, &oid, sizeof(e->oid));
+    }
+    return true;
+}
+
+/* PT63: put the host's kept layout on one slot. False = the item is not in
+   our pack (yet); the caller retries while the inventory sync arrives. */
+static bool hotkey_ui_coop_set(int index, const CoopHotbarEntry* e)
+{
+    Hotkey* hotkey;
+    CoopHotbarEntry have;
+    ObjectID oid;
+    int64_t item = OBJ_HANDLE_NULL;
+    int64_t parent = OBJ_HANDLE_NULL;
+
+    if (index < 0 || index >= 10 || e == NULL) {
+        return true;
+    }
+    hotkey = &(stru_6835E0[index]);
+    if ((hotkey->flags & HOTKEY_DRAGGED) != 0) {
+        return false;
+    }
+    if (hotkey_ui_coop_get(index, &have) && memcmp(&have, e, sizeof(have)) == 0) {
+        return true;
+    }
+    if (e->type == HOTKEY_ITEM || e->type == HOTKEY_ITEM_SPELL) {
+        memcpy(&oid, e->oid, sizeof(oid));
+        item = oid.type != OID_TYPE_NULL ? obj_pool_perm_lookup(oid) : OBJ_HANDLE_NULL;
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != player_get_local_pc_obj()) {
+            return false;
+        }
+    }
+    sub_57E5A0(hotkey);
+    sub_4440E0(OBJ_HANDLE_NULL, &(hotkey->item_obj));
+    hotkey->type = e->type;
+    hotkey->data = e->data;
+    hotkey->count = -1;
+    switch (e->type) {
+    case HOTKEY_ITEM:
+        sub_4440E0(item, &(hotkey->item_obj));
+        hotkey->art_id = sub_554BE0(item);
+        hotkey->count = item_count_items_matching_prototype(player_get_local_pc_obj(), item);
+        break;
+    case HOTKEY_ITEM_SPELL:
+        sub_4440E0(item, &(hotkey->item_obj));
+        hotkey->info.art_num = spell_icon(e->data);
+        tig_art_interface_id_create(hotkey->info.art_num, 0, 0, 0, &(hotkey->art_id));
+        break;
+    case HOTKEY_SPELL:
+        hotkey->info.art_num = spell_icon(e->data);
+        tig_art_interface_id_create(hotkey->info.art_num, 0, 0, 0, &(hotkey->art_id));
+        break;
+    case HOTKEY_SKILL:
+        hotkey->info.art_num = sub_579F70(e->data);
+        tig_art_interface_id_create(hotkey->info.art_num, 0, 0, 0, &(hotkey->art_id));
+        break;
+    default:
+        hotkey->type = HOTKEY_NONE;
+        hotkey->data = -1;
+        break;
+    }
+    intgame_hotkey_refresh(index);
     return true;
 }
 

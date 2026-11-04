@@ -376,6 +376,8 @@ static void start_game(void)
     SetEnvironmentVariableA("ARCANUM_COOP_TRANSPORT", steam ? "steam" : "direct");
     SetEnvironmentVariableA("ARCANUM_COOP_STEAM_HOST", !host && steam ? steam_id : NULL);
     SetEnvironmentVariableA("ARCANUM_COOP_AUTOLOAD", host && g_autoload_next ? "latest" : NULL);
+    /* PT63: a client's Reconnect skips the main menu and rejoins (parked PC). */
+    SetEnvironmentVariableA("ARCANUM_COOP_AUTOJOIN", !host && g_autoload_next ? "1" : NULL);
     g_autoload_next = false;
     if (steam) {
         char dll[MAX_PATH];
@@ -1146,7 +1148,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDC_RECONNECT:
             if (g_game == NULL) {
-                g_autoload_next = g_game_host; /* a host resumes its last save */
+                g_autoload_next = true; /* host: resumes its last save; client (PT63): joins straight away */
                 start_game();
             }
             break;
