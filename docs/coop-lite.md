@@ -2738,3 +2738,34 @@ Logs:
 - windows: `CoopLite: door: ... busted=1 ...` (host sent / client applied)
 
 Wire: new `COOP_WORLD_PORTAL_GONE` flag and portal `hp_damage`; protocol 37 → 38.
+
+## PT60b: broken / destroyed scenery and other objects (protocol 39)
+
+Reported case: an engine/machine broken by damage (the Silent Hills temple engine, Bates' engine in Tarant) stayed intact on the client.
+
+**Cause.** Only doors (PT53e/PT60), containers (PT56 prune), NPCs, traps and ground items were replicated. `OBJ_TYPE_SCENERY` was in neither the live door flush nor the world snapshot. Its `object_bust` result was never sent: busted art, `OSCF_BUSTED`, `OF_INVULNERABLE`, HP, or `object_destroy` (second bust, or a script destroy). The same was true for a respawnable scenery's `OF_OFF`.
+
+**Fix.** The PT53e door queue is now an object-state queue (`coop_lite_host_object_touch`), host side.
+- **Hooks:** `object_destroy` (any cause: damage, spell, script) for portals, scenery and containers; `object_hp_damage_set` for portals and scenery; `object_flags_set/unset` for scenery when OFF / INVULNERABLE / passability bits change.
+- **Queue:** objects with a null OID (temporary objects) or in an inventory are ignored.
+- **Live:** `DOOR_STATE` now carries `COOP_WORLD_SCENERY` entries (art, flags, `OBJ_F_SCENERY_FLAGS`, HP). A destroyed portal, scenery or container is sent with `COOP_WORLD_OBJ_GONE` and its kind; the client destroys it.
+- **Snapshot (entry / rejoin / late join, radius and full map):** lists breakable scenery. That is scenery that is not invulnerable, plus anything the host busted, damaged or turned off. The client applies it. The prune removes in-scope scenery that is still breakable locally and that the host no longer lists.
+- **Excluded:**
+  - items: unchanged ground/inventory paths, no double removal;
+  - critters/PCs;
+  - walls: there are too many to list;
+  - projectiles, effects and animation objects: no portal, scenery or container type.
+- **Client attacks:** they already go to the host through the generic `ATTACK_INTENT` (no target type filter), so a client breaking scenery is resolved by the host and reaches all players.
+
+**Not covered:**
+- A script that only changes scenery art via `object_set_current_aid` without bust, flags, HP or destroy. Hooking art changes would fire on every animation frame.
+- Scenery that is invulnerable on the client but destroyed on the host is only removed live, not by the entry prune.
+
+Logs:
+- host: `CoopLite: object: <oid> (door|scenery|container) destroyed on the host - sent to clients (slot N)`
+- host: `CoopLite: object: scenery <oid> busted=1 off=0 hp dmg N - sent to clients`
+- client: `CoopLite: object: <oid> (scenery) destroyed on the host - removed here (slot N)`
+- client: `CoopLite: object: scenery busted on the host - applied here`
+- client: `CoopLite: world: scenery gone on the host (broken/destroyed) - removed here`
+
+Wire: new world kind 6 (`COOP_WORLD_SCENERY`); `DOOR_STATE` accepts scenery, and containers when gone. Protocol 38 → 39.

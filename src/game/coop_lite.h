@@ -583,7 +583,14 @@ typedef enum CoopWorldKind {
     COOP_WORLD_NPC = 3,
     COOP_WORLD_GROUND_ITEM = 4,
     COOP_WORLD_TRAP = 5, /* PT42: floor trap object; kind_flags = COOP_WORLD_TRAP_ARMED */
+    COOP_WORLD_SCENERY = 6, /* PT60b: breakable scenery (engines, machines); kind_flags = OBJ_F_SCENERY_FLAGS */
 } CoopWorldKind;
+#define COOP_WORLD_KIND_MAX COOP_WORLD_SCENERY
+/* PT60b: scenery flags the host shares: off (respawning), invulnerable
+   (busted), and the passability bits. */
+#define COOP_WORLD_SCENERY_OF_MASK (OF_OFF_BIT | OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT | 0x00400000u)
+/* PT60b: whether a DOOR_STATE (object state) entry kind is allowed. */
+bool coop_lite_object_state_kind_ok(int kind);
 /* PT42: floor-trap flags the host shares (spotted / hidden / PC-placed). */
 #define COOP_WORLD_TRAP_OF_MASK 0x03000100u
 #define COOP_WORLD_OF_TRAP_SPOTTED 0x02000000u
@@ -689,6 +696,7 @@ typedef struct CoopWorldEntry {
 /* PT60: reserved[1] of a DOOR_STATE portal entry: the door is gone on the
    host (bashed / blown apart: portal_bust -> object_destroy). */
 #define COOP_WORLD_PORTAL_GONE 1u
+#define COOP_WORLD_OBJ_GONE COOP_WORLD_PORTAL_GONE /* PT60b: any kind */
 #define COOP_TRAP_WALK_MAX 16 /* PT42: tiles checked per client pose step */
 
 /* PT53e: host → every client, right after a door changed on the host (any
@@ -1168,6 +1176,10 @@ bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size);
 /* PT53e: host marks one door changed (flushed as DOOR_STATE within 100 ms);
    client applies it. */
 void coop_lite_host_portal_touch(int64_t portal);
+/* PT60b: host: a portal, scenery or container changed or is being destroyed
+   (queued; sent with the door flush). Items, critters, walls and
+   projectiles/effects are ignored. */
+void coop_lite_host_object_touch(int64_t obj);
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt);
 bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size);
 /* PT53e: pending-door set (by OID bytes); false when full or a duplicate. */

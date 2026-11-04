@@ -1290,8 +1290,12 @@ void object_destroy(int64_t obj)
         return;
     }
 
-    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
-        coop_lite_host_portal_touch(obj); /* PT60: a destroyed door reaches the clients */
+    {
+        int t = obj_field_int32_get(obj, OBJ_F_TYPE);
+
+        if (t == OBJ_TYPE_PORTAL || t == OBJ_TYPE_SCENERY || t == OBJ_TYPE_CONTAINER) {
+            coop_lite_host_object_touch(obj); /* PT60/PT60b: destroyed (damage or script) reaches the clients */
+        }
     }
 
     if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
@@ -1431,6 +1435,10 @@ void object_flags_set(int64_t obj, unsigned int flags)
     unsigned int cur_flags;
     unsigned int extra_flags = 0;
 
+    if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        coop_lite_host_object_touch(obj); /* PT60b */
+    }
+
     if ((flags & OF_FLAT) != 0) {
         object_toggle_flat(obj, true);
         flags &= ~OF_FLAT;
@@ -1506,6 +1514,10 @@ void object_flags_unset(int64_t obj, unsigned int flags)
     unsigned int cur_flags;
     unsigned int extra_flags = 0;
     bool visibility_changed = false;
+
+    if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        coop_lite_host_object_touch(obj); /* PT60b */
+    }
 
     if ((flags & OF_FLAT) != 0) {
         object_toggle_flat(obj, false);
@@ -1622,8 +1634,9 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, value);
-    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
-        coop_lite_host_portal_touch(obj); /* PT60: door HP */
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
+        || obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        coop_lite_host_object_touch(obj); /* PT60/PT60b: door / scenery HP */
     }
 
     if (value > 0) {

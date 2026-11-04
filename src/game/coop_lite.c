@@ -8014,7 +8014,7 @@ bool coop_lite_world_state_valid(const PacketCoopWorldState* pkt, int size)
         return false;
     }
     for (i = 0; i < pkt->count; i++) {
-        if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_TRAP) {
+        if (pkt->entries[i].kind < COOP_WORLD_PORTAL || pkt->entries[i].kind > COOP_WORLD_KIND_MAX) {
             return false;
         }
     }
@@ -13825,6 +13825,22 @@ static void coop_world_full_free(int slot)
     coop_world_full_oid_cnt[slot] = 0;
 }
 
+/* PT60b: breakable scenery the snapshot lists: anything not invulnerable,
+   plus what the host busted (busted = invulnerable), damaged or turned off.
+   The client prunes only scenery that is still breakable on its side. */
+static bool coop_world_scenery_listed(int64_t obj, int type)
+{
+    unsigned int flags;
+
+    if (type != OBJ_TYPE_SCENERY) {
+        return false;
+    }
+    flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS);
+    return (flags & OF_INVULNERABLE) == 0 || (flags & OF_OFF) != 0
+        || (obj_field_int32_get(obj, OBJ_F_SCENERY_FLAGS) & OSCF_BUSTED) != 0
+        || obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) > 0;
+}
+
 static bool coop_world_full_snapshot(int slot)
 {
     int64_t obj;
@@ -13846,7 +13862,7 @@ static bool coop_world_full_snapshot(int slot)
             }
             type = obj_field_int32_get(obj, OBJ_F_TYPE);
             if (type != OBJ_TYPE_PORTAL && type != OBJ_TYPE_CONTAINER && type != OBJ_TYPE_NPC
-                && type != OBJ_TYPE_TRAP && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
+                && type != OBJ_TYPE_TRAP && !coop_world_scenery_listed(obj, type) && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
                 continue;
             }
             if (n >= COOP_WORLD_FULL_MAX_OIDS) {
@@ -13932,7 +13948,7 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
             }
             type = obj_field_int32_get(obj, OBJ_F_TYPE);
             if (type != OBJ_TYPE_PORTAL && type != OBJ_TYPE_CONTAINER && type != OBJ_TYPE_NPC
-                && type != OBJ_TYPE_TRAP
+                && type != OBJ_TYPE_TRAP && !coop_world_scenery_listed(obj, type)
                 && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
                 continue;
             }
@@ -13981,6 +13997,12 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
                 e->of_flags = flags & COOP_WORLD_TRAP_OF_MASK;
                 e->kind_flags = trap_type(obj) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
                 n_trap++;
+                break;
+            case OBJ_TYPE_SCENERY: /* PT60b */
+                e->kind = COOP_WORLD_SCENERY;
+                e->of_flags = flags & COOP_WORLD_SCENERY_OF_MASK;
+                e->kind_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_SCENERY_FLAGS);
+                e->hp_damage = obj_field_int32_get(obj, OBJ_F_HP_DAMAGE);
                 break;
             case OBJ_TYPE_NPC:
                 e->kind = COOP_WORLD_NPC;
@@ -14233,7 +14255,7 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
         obj = coop_lite_client_reclaim_destroyed(obj);
     }
 
-    if (e->kind == COOP_WORLD_CONTAINER || e->kind == COOP_WORLD_PORTAL) {
+    if (e->kind == COOP_WORLD_CONTAINER || e->kind == COOP_WORLD_PORTAL || e->kind == COOP_WORLD_SCENERY) {
         coop_oid_set_add(coop_world_seen, e->oid); /* PT26: junk piles prune too; PT60: doors */
     }
     if (e->kind == COOP_WORLD_GROUND_ITEM) {
@@ -14307,6 +14329,28 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
             coop_world_stats[e->kind]++;
         }
         coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_NPC_OF_MASK, e->kind);
+        break;
+    case COOP_WORLD_SCENERY: /* PT60b */
+        if (type != OBJ_TYPE_SCENERY) {
+            return;
+        }
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != e->aid) {
+            object_set_current_aid(obj, (tig_art_id_t)e->aid);
+            coop_world_stats[e->kind]++;
+        }
+        coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_SCENERY_OF_MASK, e->kind);
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_SCENERY_FLAGS) != e->kind_flags) {
+            if ((e->kind_flags & OSCF_BUSTED) != 0
+                && (obj_field_int32_get(obj, OBJ_F_SCENERY_FLAGS) & OSCF_BUSTED) == 0) {
+                tig_debug_printf("CoopLite: object: scenery busted on the host - applied here\n");
+            }
+            obj_field_int32_set(obj, OBJ_F_SCENERY_FLAGS, (int)e->kind_flags);
+            coop_world_stats[e->kind]++;
+        }
+        if (e->hp_damage >= 0 && obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != e->hp_damage) {
+            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage);
+            coop_world_stats[e->kind]++;
+        }
         break;
     case COOP_WORLD_TRAP:
         if (type != OBJ_TYPE_TRAP) {
@@ -14434,7 +14478,9 @@ static int coop_lite_world_prune(void)
             if (!item_is_item(obj)
                 && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_TRAP /* PT42 */
                 && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER
-                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PORTAL /* PT60 */) {
+                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PORTAL /* PT60 */
+                && !(obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY /* PT60b */
+                    && (flags & OF_INVULNERABLE) == 0)) {
                 continue;
             }
             if (!coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
@@ -14460,6 +14506,8 @@ static int coop_lite_world_prune(void)
                 object_hp_damage_get(doomed[i]));
         } else if (obj_field_int32_get(doomed[i], OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
             tig_debug_printf("CoopLite: world: door gone on the host (bashed/destroyed) - removed here\n");
+        } else if (obj_field_int32_get(doomed[i], OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+            tig_debug_printf("CoopLite: world: scenery gone on the host (broken/destroyed) - removed here\n");
         }
         object_destroy(doomed[i]);
     }
@@ -14916,7 +14964,16 @@ bool coop_lite_door_use_valid(const PacketCoopDoorUse* pkt, int size)
 bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_DOOR_STATE && size >= (int)sizeof(PacketCoopDoorState)
-        && pkt->e.kind == COOP_WORLD_PORTAL && pkt->slot >= -1 && pkt->slot < 8;
+        && coop_lite_object_state_kind_ok(pkt->e.kind) && pkt->slot >= -1 && pkt->slot < 8
+        && (pkt->e.kind == COOP_WORLD_PORTAL || pkt->e.kind == COOP_WORLD_SCENERY
+            || (pkt->e.reserved[1] & COOP_WORLD_OBJ_GONE) != 0);
+}
+
+/* PT60b: DOOR_STATE carries doors, breakable scenery and (gone only)
+   containers. Never NPCs, ground items or traps (own paths). */
+bool coop_lite_object_state_kind_ok(int kind)
+{
+    return kind == COOP_WORLD_PORTAL || kind == COOP_WORLD_SCENERY || kind == COOP_WORLD_CONTAINER;
 }
 
 bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid)
@@ -15161,8 +15218,17 @@ static uint8_t coop_door_log_oid[COOP_DOOR_PENDING_MAX][24];
 static unsigned int coop_door_log_state[COOP_DOOR_PENDING_MAX];
 static int coop_door_log_next;
 
+static int coop_door_pend_kind[COOP_DOOR_PENDING_MAX]; /* PT60b */
+
 void coop_lite_host_portal_touch(int64_t portal)
 {
+    coop_lite_host_object_touch(portal);
+}
+
+void coop_lite_host_object_touch(int64_t portal)
+{
+    int type;
+    int kind;
     int depth;
     bool host;
     ObjectID oid;
@@ -15174,15 +15240,27 @@ void coop_lite_host_portal_touch(int64_t portal)
     depth = tig_net_local_suspend_pause();
     host = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
     tig_net_local_suspend_resume(depth);
-    if (!host || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+    if (!host) {
+        return;
+    }
+    type = obj_field_int32_get(portal, OBJ_F_TYPE);
+    kind = type == OBJ_TYPE_PORTAL ? COOP_WORLD_PORTAL
+        : type == OBJ_TYPE_SCENERY ? COOP_WORLD_SCENERY
+        : type == OBJ_TYPE_CONTAINER ? COOP_WORLD_CONTAINER
+                                     : 0;
+    if (kind == 0 || (obj_field_int32_get(portal, OBJ_F_FLAGS) & OF_INVENTORY) != 0) {
         return;
     }
     oid = obj_get_id(portal);
+    if (oid.type == OID_TYPE_NULL) {
+        return; /* PT60b: no stable id (temporary object): nothing to sync */
+    }
     before = coop_door_pend_cnt;
     if (coop_lite_door_pending_add(coop_door_pend, &coop_door_pend_cnt, COOP_DOOR_PENDING_MAX,
             (const uint8_t*)&oid)
         && coop_door_pend_cnt > before) {
         coop_door_pend_slot[coop_door_pend_cnt - 1] = coop_door_actor_slot;
+        coop_door_pend_kind[coop_door_pend_cnt - 1] = kind;
     }
 }
 
@@ -15249,20 +15327,46 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
             pkt.map = map_current_map();
             pkt.slot = coop_door_pend_slot[i];
             memcpy(pkt.e.oid, coop_door_pend[i], 24);
-            pkt.e.kind = COOP_WORLD_PORTAL;
-            pkt.e.reserved[1] = COOP_WORLD_PORTAL_GONE;
+            pkt.e.kind = coop_door_pend_kind[i] != 0 ? coop_door_pend_kind[i] : COOP_WORLD_PORTAL;
+            pkt.e.reserved[1] = COOP_WORLD_OBJ_GONE;
             if (portal != OBJ_HANDLE_NULL) {
                 pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
             }
             tig_net_send_app_all(&pkt, sizeof(pkt));
             memcpy(&id, coop_door_pend[i], sizeof(id));
             objid_id_to_str(oid_str, id);
-            tig_debug_printf("CoopLite: door: %s destroyed on the host - sent to clients (slot %d)\n", oid_str,
+            tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host - sent to clients (slot %d)\n", oid_str,
+                pkt.e.kind == COOP_WORLD_PORTAL ? "door" : pkt.e.kind == COOP_WORLD_SCENERY ? "scenery" : "container",
                 pkt.slot);
             continue;
         }
-        if (obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+        if (obj_field_int32_get(portal, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+            /* PT60b: busted / respawning / damaged scenery */
+            char oid_str[80];
+            ObjectID id;
+
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = PACKET_COOP_DOOR_STATE;
+            pkt.map = map_current_map();
+            pkt.slot = coop_door_pend_slot[i];
+            memcpy(pkt.e.oid, coop_door_pend[i], 24);
+            pkt.e.kind = COOP_WORLD_SCENERY;
+            pkt.e.aid = (unsigned int)obj_field_int32_get(portal, OBJ_F_CURRENT_AID);
+            pkt.e.of_flags = flags & COOP_WORLD_SCENERY_OF_MASK;
+            pkt.e.kind_flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_SCENERY_FLAGS);
+            pkt.e.hp_damage = obj_field_int32_get(portal, OBJ_F_HP_DAMAGE);
+            pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+            if ((pkt.e.kind_flags & OSCF_BUSTED) != 0 || (flags & OF_OFF) != 0) {
+                memcpy(&id, coop_door_pend[i], sizeof(id));
+                objid_id_to_str(oid_str, id);
+                tig_debug_printf("CoopLite: object: scenery %s busted=%d off=%d hp dmg %d - sent to clients\n", oid_str,
+                    (pkt.e.kind_flags & OSCF_BUSTED) != 0, (flags & OF_OFF) != 0, pkt.e.hp_damage);
+            }
             continue;
+        }
+        if (obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+            continue; /* a live container: the world snapshot carries it */
         }
         memset(&pkt, 0, sizeof(pkt));
         pkt.type = PACKET_COOP_DOOR_STATE;
@@ -15296,10 +15400,14 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
         return; /* the map's full snapshot carries it */
     }
     portal = coop_lite_get_oid_obj(pkt->e.oid);
-    if (portal == OBJ_HANDLE_NULL || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+    if (portal == OBJ_HANDLE_NULL
+        || obj_field_int32_get(portal, OBJ_F_TYPE)
+            != (pkt->e.kind == COOP_WORLD_SCENERY       ? OBJ_TYPE_SCENERY
+                    : pkt->e.kind == COOP_WORLD_CONTAINER ? OBJ_TYPE_CONTAINER
+                                                          : OBJ_TYPE_PORTAL)) {
         return;
     }
-    if ((pkt->e.reserved[1] & COOP_WORLD_PORTAL_GONE) != 0) {
+    if ((pkt->e.reserved[1] & COOP_WORLD_OBJ_GONE) != 0) {
         char oid_str[80];
         ObjectID id;
 
@@ -15314,7 +15422,17 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
         object_destroy(portal);
         coop_lite_apply_end();
         multiplayer_unlock();
-        tig_debug_printf("CoopLite: door: %s destroyed on the host - removed here (slot %d)\n", oid_str, pkt->slot);
+        tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host - removed here (slot %d)\n", oid_str,
+            pkt->e.kind == COOP_WORLD_PORTAL ? "door" : pkt->e.kind == COOP_WORLD_SCENERY ? "scenery" : "container",
+            pkt->slot);
+        return;
+    }
+    if (pkt->e.kind == COOP_WORLD_SCENERY) {
+        multiplayer_lock();
+        coop_lite_apply_begin();
+        coop_lite_world_apply(&pkt->e);
+        coop_lite_apply_end();
+        multiplayer_unlock();
         return;
     }
     multiplayer_lock();
@@ -15700,6 +15818,7 @@ void coop_lite_host_pc_changed(int64_t pc, bool stats)
 void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
+void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt) { (void)pkt; }
 void coop_lite_client_preshop_begin(void) { }
 void coop_lite_client_preshop_end(void) { }

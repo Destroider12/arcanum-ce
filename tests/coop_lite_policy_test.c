@@ -1885,9 +1885,14 @@ static int test_world_state(void)
         fprintf(stderr, "world: trap entry refused\n");
         return 1;
     }
-    pkt.entries[1].kind = COOP_WORLD_TRAP + 1;
+    pkt.entries[1].kind = COOP_WORLD_SCENERY; /* PT60b */
+    if (!coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
+        fprintf(stderr, "world: scenery entry refused\n");
+        return 1;
+    }
+    pkt.entries[1].kind = COOP_WORLD_KIND_MAX + 1;
     if (coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(2))) {
-        fprintf(stderr, "world: kind past trap accepted\n");
+        fprintf(stderr, "world: kind past max accepted\n");
         return 1;
     }
     if (coop_lite_world_trap_flags_merge(COOP_WORLD_OF_DONTDRAW, COOP_WORLD_OF_TRAP_SPOTTED)

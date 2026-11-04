@@ -368,6 +368,16 @@ static int test_pt53e(void)
     ds.e.reserved[1] = COOP_WORLD_PORTAL_GONE; /* PT60: destroyed door */
     CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door gone valid");
     ds.e.reserved[1] = 0;
+    ds.e.kind = COOP_WORLD_SCENERY; /* PT60b */
+    CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "scenery state valid");
+    ds.e.kind = COOP_WORLD_CONTAINER;
+    CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "container state needs gone");
+    ds.e.reserved[1] = COOP_WORLD_OBJ_GONE;
+    CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "container gone valid");
+    ds.e.kind = COOP_WORLD_NPC;
+    CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "npc never via object state");
+    ds.e.kind = COOP_WORLD_PORTAL;
+    ds.e.reserved[1] = 0;
     ds.slot = 8;
     CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state bad slot");
     ds.slot = -1;
