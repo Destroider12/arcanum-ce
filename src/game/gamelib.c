@@ -1,5 +1,6 @@
 #include "game/gamelib.h"
 #include "game/coop_lite.h"
+#include "coop_paths.h"
 
 #include <stdio.h>
 
@@ -319,7 +320,7 @@ bool gamelib_init(GameInitInfo* init_info)
     if (init_info->editor) {
         settings_init(&settings, "worlded.cfg");
     } else {
-        settings_init(&settings, "arcanum.cfg");
+        settings_init(&settings, coop_paths_cfg("arcanum.cfg")); /* PT68: per coop role */
     }
 
     settings_load(&settings);
@@ -1032,10 +1033,16 @@ bool gamelib_save(const char* name, const char* description)
         tig_debug_printf("done. Time (ms): %d\n", duration);
     }
 
-    if (!gamelib_saveinfo_init(name, description, &save_info)) {
-        tig_debug_printf("gamelib_save(): error creating saveinfo\n");
-        in_save = false;
-        return false;
+    {
+        /* PT68: "[Host] " / "[Client] " in front of coop saves. */
+        char tagged[256];
+
+        coop_paths_save_description(description, tagged, sizeof(tagged));
+        if (!gamelib_saveinfo_init(name, tagged, &save_info)) {
+            tig_debug_printf("gamelib_save(): error creating saveinfo\n");
+            in_save = false;
+            return false;
+        }
     }
 
     if (!gamelib_saveinfo_save(&save_info)) {

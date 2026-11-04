@@ -340,6 +340,8 @@ set(SRCS
     "src/net/tig_net.h"
     "src/main.c"
     "src/crash_handler.c"
+    "src/coop_paths.c"
+    "src/coop_paths.h"
 )
 
 if(ANDROID)
@@ -406,6 +408,10 @@ if(NOT WIN32 AND NOT ANDROID)
     add_executable(tig_file_empty_dir_test "tests/tig_file_empty_dir_test.c")
     target_link_libraries(tig_file_empty_dir_test PRIVATE ${TIG_LIBRARY})
     add_test(NAME tig_file_empty_dir COMMAND tig_file_empty_dir_test)
+    # PT68: coop role overlay (one game folder, separate host/client saves).
+    add_executable(tig_file_overlay_test "tests/tig_file_overlay_test.c")
+    target_link_libraries(tig_file_overlay_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_file_overlay COMMAND tig_file_overlay_test)
     # PT53c: overflowing partial debug line (no OOB read, no stalled log).
     add_executable(tig_debug_long_line_test "tests/tig_debug_long_line_test.c")
     target_link_libraries(tig_debug_long_line_test PRIVATE ${TIG_LIBRARY})

@@ -18,6 +18,13 @@
  * once with ARCANUM_COOP_AUTOLOAD=latest (the game loads its newest save and
  * skips the menu); clients wait for it in their main menu and rejoin.
  *
+ * PT68: one game folder. The game keeps a coop role's saves, settings, log
+ * and crash files in coop\host\ / coop\client\ of that folder, so host and
+ * client can even run at once from it. The old Coop-Setup instances are used
+ * only when the root arcanum-ce.exe is missing; if they exist, their saves,
+ * Players and arcanum.cfg are copied once (never moved or deleted) into the
+ * new role folders.
+ *
  * PT65: on separate PCs one folder is enough (Coop-Setup is only for host +
  * client on one PC). Optional update check ([update] enabled=1 in the ini,
  * default off): replaces only the root arcanum-ce.exe from a verified
@@ -85,6 +92,7 @@ static char g_public_ip[64];
 static HANDLE g_game;
 static bool g_game_host;
 static char g_game_dir_now[MAX_PATH];
+static char g_game_data_dir[MAX_PATH]; /* PT68: where logs / crash files of the running role go */
 static char g_game_log[64];
 static FILETIME g_game_started;
 static DWORD g_game_exit;
@@ -276,33 +284,101 @@ static bool file_exists(const char* path)
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-static LONGLONG file_size(const char* path)
+/* PT68: copy every plain file of src_dir into dst_dir, never overwriting. */
+static int copy_files_once(const char* src_dir, const char* dst_dir)
 {
-    WIN32_FILE_ATTRIBUTE_DATA d;
+    char pat[MAX_PATH];
+    char src[MAX_PATH];
+    char dst[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int copied = 0;
 
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &d)) {
-        return -1;
+    snprintf(pat, sizeof(pat), "%s*", src_dir);
+    h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
     }
-    return ((LONGLONG)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+    CreateDirectoryA(dst_dir, NULL);
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue; /* Save\Current is scratch; slots are plain files */
+        }
+        snprintf(src, sizeof(src), "%s%s", src_dir, fd.cFileName);
+        snprintf(dst, sizeof(dst), "%s%s", dst_dir, fd.cFileName);
+        if (CopyFileA(src, dst, TRUE)) {
+            copied++;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return copied;
 }
 
-/* Game folder: coop-host\ / coop-client\ (Coop-Setup) or the launcher's. */
+/* PT68: one-time copy of a Coop-Setup instance (coop-host\ / coop-client\)
+   into coop\host\ / coop\client\. A marker file makes it run once; the
+   old folders are left untouched. */
+static void migrate_legacy(bool host)
+{
+    char legacy[MAX_PATH];
+    char role[MAX_PATH];
+    char src[MAX_PATH];
+    char dst[MAX_PATH];
+    char marker[MAX_PATH];
+    char msg[200];
+    int n = 0;
+    FILE* f;
+
+    snprintf(legacy, sizeof(legacy), "%s%s\\", g_dir, host ? "coop-host" : "coop-client");
+    if (GetFileAttributesA(legacy) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+    snprintf(dst, sizeof(dst), "%scoop\\", g_dir);
+    CreateDirectoryA(dst, NULL);
+    snprintf(role, sizeof(role), "%scoop\\%s\\", g_dir, host ? "host" : "client");
+    CreateDirectoryA(role, NULL);
+    snprintf(marker, sizeof(marker), "%smigrated-from-%s.txt", role, host ? "coop-host" : "coop-client");
+    if (file_exists(marker)) {
+        return;
+    }
+    snprintf(src, sizeof(src), "%smodules\\Arcanum\\Save\\", legacy);
+    snprintf(dst, sizeof(dst), "%sSave\\", role);
+    n += copy_files_once(src, dst);
+    snprintf(src, sizeof(src), "%smodules\\Arcanum\\Players\\", legacy);
+    snprintf(dst, sizeof(dst), "%sPlayers\\", role);
+    n += copy_files_once(src, dst);
+    snprintf(src, sizeof(src), "%sdata\\Players\\", legacy);
+    n += copy_files_once(src, dst);
+    snprintf(src, sizeof(src), "%sarcanum.cfg", legacy);
+    snprintf(dst, sizeof(dst), "%sarcanum.cfg", role);
+    if (file_exists(src) && CopyFileA(src, dst, TRUE)) {
+        n++;
+    }
+    f = fopen(marker, "w");
+    if (f != NULL) {
+        fprintf(f, "Copied %d file(s) from %s (saves, Players, arcanum.cfg). The old folder was not changed.\n", n,
+            legacy);
+        fclose(f);
+    }
+    snprintf(msg, sizeof(msg), "Copied %d file(s) from %s into coop\\%s\\ (old folder kept).", n,
+        host ? "coop-host" : "coop-client", host ? "host" : "client");
+    set_status(msg);
+}
+
+/* Game folder (PT68): the launcher's own folder when arcanum-ce.exe is there;
+   the old coop-host\ / coop-client\ instance only when it is not. */
 static void game_dir(bool host, char* out, size_t size)
 {
     char exe[MAX_PATH];
-    char root_exe[MAX_PATH];
 
+    snprintf(exe, sizeof(exe), "%sarcanum-ce.exe", g_dir);
+    if (file_exists(exe)) {
+        snprintf(out, size, "%s", g_dir);
+        return;
+    }
     snprintf(out, size, "%s%s\\", g_dir, host ? "coop-host" : "coop-client");
     snprintf(exe, sizeof(exe), "%sarcanum-ce.exe", out);
     if (!file_exists(exe)) {
         snprintf(out, size, "%s", g_dir);
-        return;
-    }
-    /* Like Start-*.bat: refresh the instance exe from a newer root build. */
-    snprintf(root_exe, sizeof(root_exe), "%sarcanum-ce.exe", g_dir);
-    if (file_exists(root_exe) && file_size(root_exe) != file_size(exe)) {
-        DeleteFileA(exe);
-        CopyFileA(root_exe, exe, FALSE);
     }
 }
 
@@ -369,18 +445,31 @@ static void start_game(void)
         set_status("arcanum-ce.exe not found next to the launcher (or in coop-host\\ / coop-client\\).");
         return;
     }
-    if (host) {
-        snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -host %d -log coop_host.log", exe, windowed ? " -window" : "",
-            port_of(addr));
-    } else if (steam) {
-        snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -join %s -log coop_client.log", exe, windowed ? " -window" : "",
-            steam_id);
-    } else {
-        if (strchr(addr, ':') == NULL) {
-            strncat(addr, ":7777", sizeof(addr) - strlen(addr) - 1);
+    {
+        /* PT68: the root folder: the game writes its log to coop\<role>\ by
+           itself; an old instance folder keeps its log in its own root. */
+        bool legacy = strcmp(dir, g_dir) != 0;
+        const char* log_arg = legacy ? (host ? " -log coop_host.log" : " -log coop_client.log") : "";
+
+        if (!legacy) {
+            migrate_legacy(host);
+            snprintf(g_game_data_dir, sizeof(g_game_data_dir), "%scoop\\%s\\", g_dir, host ? "host" : "client");
+        } else {
+            snprintf(g_game_data_dir, sizeof(g_game_data_dir), "%s", dir);
         }
-        snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -join %s -log coop_client.log", exe, windowed ? " -window" : "",
-            addr);
+        if (host) {
+            snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -host %d%s", exe, windowed ? " -window" : "", port_of(addr),
+                log_arg);
+        } else if (steam) {
+            snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -join %s%s", exe, windowed ? " -window" : "", steam_id,
+                log_arg);
+        } else {
+            if (strchr(addr, ':') == NULL) {
+                strncat(addr, ":7777", sizeof(addr) - strlen(addr) - 1);
+            }
+            snprintf(cmd, sizeof(cmd), "\"%s\"%s -coop -join %s%s", exe, windowed ? " -window" : "", addr, log_arg);
+        }
+        SetEnvironmentVariableA("ARCANUM_LOG_FILE", NULL); /* the role log path above wins */
     }
     SetEnvironmentVariableA("ARCANUM_COOP_NAME", name);
     SetEnvironmentVariableA("ARCANUM_COOP_TRANSPORT", steam ? "steam" : "direct");
@@ -441,7 +530,7 @@ static bool new_crash_file(void)
     HANDLE h;
     bool found = false;
 
-    snprintf(pat, sizeof(pat), "%scrash-*.txt", g_game_dir_now);
+    snprintf(pat, sizeof(pat), "%scrash-*.txt", g_game_data_dir[0] != '\0' ? g_game_data_dir : g_game_dir_now);
     h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
         return false;
@@ -666,12 +755,25 @@ static void create_bug_report(void)
         COOP_BUILD_SHA, COOP_PROTOCOL, g_game_host ? "host" : "client", g_game_exit, g_game_exit, t.wYear, t.wMonth,
         t.wDay, t.wHour, t.wMinute, t.wSecond, dir);
     zip_add_mem(&z, "info.txt", (const unsigned char*)info, strlen(info));
-    snprintf(path, sizeof(path), "%scoop_host.log", dir);
-    zip_add_file(&z, path, "coop_host.log");
-    snprintf(path, sizeof(path), "%scoop_client.log", dir);
-    zip_add_file(&z, path, "coop_client.log");
-    zip_add_newest(&z, dir, "crash-*.txt", 2);
-    zip_add_newest(&z, dir, "crash-*.dmp", 2);
+    if (strcmp(dir, g_dir) == 0) {
+        /* PT68: one folder: each role's log and crash files in coop\<role>\ */
+        char role_dir[MAX_PATH];
+
+        snprintf(path, sizeof(path), "%scoop\\host\\coop_host.log", g_dir);
+        zip_add_file(&z, path, "coop_host.log");
+        snprintf(path, sizeof(path), "%scoop\\client\\coop_client.log", g_dir);
+        zip_add_file(&z, path, "coop_client.log");
+        snprintf(role_dir, sizeof(role_dir), "%scoop\\%s\\", g_dir, g_game_host ? "host" : "client");
+        zip_add_newest(&z, role_dir, "crash-*.txt", 2);
+        zip_add_newest(&z, role_dir, "crash-*.dmp", 2);
+    } else {
+        snprintf(path, sizeof(path), "%scoop_host.log", dir);
+        zip_add_file(&z, path, "coop_host.log");
+        snprintf(path, sizeof(path), "%scoop_client.log", dir);
+        zip_add_file(&z, path, "coop_client.log");
+        zip_add_newest(&z, dir, "crash-*.txt", 2);
+        zip_add_newest(&z, dir, "crash-*.dmp", 2);
+    }
     zip_add_file(&z, g_ini, "arcanum-coop-launcher.ini");
     zip_finish(&z);
     snprintf(params, sizeof(params), "/select,\"%s\"", zpath);

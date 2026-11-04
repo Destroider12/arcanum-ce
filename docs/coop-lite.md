@@ -2668,7 +2668,7 @@ spot until the check finishes or the stop is repeated (repeat forces travel). Pr
 **Launcher (`arcanum-coop-launcher.exe`, tools/launcher/launcher.c, Win32, Windows builds only).**
 - Fields: player name, Host / Join, transport (Direct+UPnP or Steam), the port (host) or host IP:port (join, default 7777), the host's SteamID64 (Steam join), and Windowed.
 - Shows the local IP and the public IP. The public IP comes from the router via UPnP (miniupnpc) and stays blank without it. **Copy** puts `ip:port` on the clipboard.
-- **Start** runs `arcanum-ce.exe [-window] -coop -host <port> | -join <ip:port|SteamID64> -log coop_host.log|coop_client.log` from `coop-host\` / `coop-client\` (Coop-Setup layout). It refreshes the instance exe from a different root build, as Start-*.bat does. If those folders don't exist it uses the exe next to the launcher.
+- **Start** runs `arcanum-ce.exe [-window] -coop -host <port> | -join <ip:port|SteamID64> -log coop_host.log|coop_client.log` from `coop-host\` / `coop-client\` (Coop-Setup layout). It refreshes the instance exe from a different root build, as Start-*.bat does. If those folders don't exist it uses the exe next to the launcher. (PT68: the root exe is now preferred; see below.)
 - Environment it sets: `ARCANUM_COOP_NAME` (replaces the default "Player"), `ARCANUM_COOP_TRANSPORT=direct|steam`, `ARCANUM_COOP_STEAM_HOST=<SteamID64>` (Steam join).
 - Settings are saved in `arcanum-coop-launcher.ini` next to it.
 - Joining a host that is already playing uses the normal late-join flow.
@@ -2894,3 +2894,39 @@ all input, even across loads (reset only closed it when a flag that had been
 stale-cleared was still set). Now ending a dialog, any save load/reset, and the
 Esc-menu stale check always remove an orphaned dialog window/filter
 (`coop_lite_dialog_ui_orphaned`, tested in coop_lite_policy_test).
+
+## PT68: one game folder, separate host/client saves and logs
+
+**Problem.** Two game instances in one folder shared `Modules\Arcanum\Save`
+(incl. `Save\Current`, the live map state), `Players\`, `arcanum.cfg` and the
+log, so Coop-Setup had to build `coop-host\` / `coop-client\` copies.
+
+**Fix.** The coop role (`-coop` with `-host` / `-join`, `src/coop_paths.c`)
+gets a writable folder `coop\host\` or `coop\client\` in the game folder.
+After `tig_init` it is mounted as a tig *overlay* (`tig_file_set_overlay`,
+first_party/tig/src/file.c): a directory repository that is kept on top of the
+search list (re-pinned after every `tig_file_repository_add`), so every
+relative write (saves, `Save\Current`, `Players\`, tile cache, ...) lands in it,
+while reads of game data fall through to the module / data folders. The
+prefixes `Save` and `Players` are private to the overlay: other directory
+repositories are skipped for them in open / exists / list / remove / rename /
+extract, so a role never sees, loads, empties or deletes single-player or the
+other role's saves. Also per role: `arcanum.cfg` (`coop\<role>\arcanum.cfg`,
+seeded once from the root file), the default log `coop\<role>\coop_host.log` /
+`coop_client.log` (when no `-log` / `ARCANUM_LOG_FILE`), and crash
+`crash-*.txt/.dmp` (`crash_handler_set_subdir`). Without a role nothing
+changes. New saves made in coop get `[Host] ` / `[Client] ` in front of the
+description (`ARCANUM_COOP_LANG=ru`: `[Хост / Host] ` / `[Клиент / Client] `);
+a description already starting with `[` is left as is (re-saving a slot).
+
+**Launcher.** Uses the root `arcanum-ce.exe` when present (no `-log`: the game
+picks the role log); `coop-host\` / `coop-client\` only when the root exe is
+missing. On Start in root mode, if the old instance folder exists, its
+`modules\Arcanum\Save\*` slot files, `Players\` (module and `data\`) and
+`arcanum.cfg` are copied once into `coop\<role>\` (`CopyFile` without
+overwrite; `migrated-from-coop-*.txt` marks it done; the old folder is never
+changed). Crash detection and the bug report read `coop\<role>\`.
+
+Not covered: saves are not split per module inside a role folder; a client
+character made in single player (root `Players\`) is not visible to the role
+(the host sends the PC anyway). Protocol unchanged. Test: `tig_file_overlay_test`.

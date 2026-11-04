@@ -29,6 +29,7 @@ static volatile LONG crash_entered;
 static LPTOP_LEVEL_EXCEPTION_FILTER crash_prev_filter;
 
 static FILE* crash_txt;
+static char crash_subdir[64]; /* PT68: "coop\\host" etc., "" = next to the exe */
 
 static void crash_out(const char* fmt, ...)
 {
@@ -220,6 +221,11 @@ static void crash_report(const char* what, EXCEPTION_POINTERS* ep)
         snprintf(stamp, sizeof(stamp), "%lld", (long long)now);
     }
     crash_exe_dir(dir, sizeof(dir));
+    if (crash_subdir[0] != '\0' && strlen(dir) + strlen(crash_subdir) + 2 < sizeof(dir)) {
+        strcat(dir, crash_subdir);
+        CreateDirectoryA(dir, NULL); /* usually exists already */
+        strcat(dir, "\\");
+    }
     snprintf(path, sizeof(path), "%scrash-%s.txt", dir, stamp);
     crash_txt = fopen(path, "w");
 
@@ -285,11 +291,21 @@ void crash_handler_install(const char* build_id)
     tig_debug_printf("Crash handler installed (crash-<time>.txt/.dmp next to the exe)\n");
 }
 
+void crash_handler_set_subdir(const char* subdir)
+{
+    snprintf(crash_subdir, sizeof(crash_subdir), "%s", subdir != NULL ? subdir : "");
+}
+
 #else
 
 void crash_handler_install(const char* build_id)
 {
     (void)build_id;
+}
+
+void crash_handler_set_subdir(const char* subdir)
+{
+    (void)subdir;
 }
 
 #endif

@@ -122,7 +122,7 @@ Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_
 5. **Join:** pick Join, enter the host's address or SteamID64, and press **Start**. You can join while the host is already playing.
 6. For Steam: put a 64-bit `steam_api64.dll` (Steamworks SDK 1.51+ or taken from a recent 64-bit Steam game) next to `arcanum-ce.exe` on every PC.
 
-Testing host and client on one PC: the optional `Coop-Setup` layout (`coop-host\`, `coop-client\`) is used when those folders exist.
+One game folder is enough, even for a host and a client on the same PC: in coop the game keeps each role's saves, `Players\`, `arcanum.cfg`, log and crash files in `coop\host\` or `coop\client\` of that folder (game data stays shared; single player is unchanged). Coop saves are tagged `[Host]` / `[Client]`. The old `Coop-Setup` folders (`coop-host\`, `coop-client\`) are only used when the root `arcanum-ce.exe` is missing; otherwise the launcher copies their saves once into the new folders (nothing is moved or deleted).
 
 ### Building
 

@@ -6,6 +6,7 @@
 
 #include <SDL3/SDL_main.h>
 
+#include "coop_paths.h"
 #include "crash_handler.h"
 
 #ifdef SDL_PLATFORM_WINDOWS
@@ -127,12 +128,30 @@ int main(int argc, char** argv)
     char lpCmdLine[260];
     build_cmd_line(lpCmdLine, sizeof(lpCmdLine), argc, argv);
 
+    /* PT68: a coop host / client writes its saves, settings, log and crash
+       files under coop\host\ or coop\client\ of this one game folder. */
+    coop_paths_set_role(coop_paths_role_from_args(argc, argv));
+
     /* PT23: -log <path> mirrors every debug line into a file (from argv:
        lpCmdLine is lowercased and length-capped). */
-    for (int i = 1; i + 1 < argc; i++) {
-        if (SDL_strcasecmp(argv[i], "-log") == 0) {
-            tig_debug_set_log_file(argv[i + 1]);
-            break;
+    {
+        bool log_set = false;
+
+        for (int i = 1; i + 1 < argc; i++) {
+            if (SDL_strcasecmp(argv[i], "-log") == 0) {
+                tig_debug_set_log_file(argv[i + 1]);
+                log_set = true;
+                break;
+            }
+        }
+        if (!log_set && getenv("ARCANUM_LOG_FILE") == NULL && coop_paths_role() != COOP_PATHS_ROLE_NONE) {
+            static char coop_log[128];
+
+            coop_paths_cfg("arcanum.cfg"); /* creates the role folder (and seeds the cfg) */
+            if (coop_paths_join(coop_log, sizeof(coop_log),
+                    coop_paths_role() == COOP_PATHS_ROLE_HOST ? "coop_host.log" : "coop_client.log")) {
+                tig_debug_set_log_file(coop_log);
+            }
         }
     }
 
@@ -142,6 +161,10 @@ int main(int argc, char** argv)
     /* PT28: which build is this (first log line, window title). */
     tig_debug_printf("Arcanum CE Coop Lite build %s\n", COOP_BUILD_SHA);
     crash_handler_install(COOP_BUILD_SHA); /* PT56a */
+    if (coop_paths_role() != COOP_PATHS_ROLE_NONE) {
+        crash_handler_set_subdir(coop_paths_dir()); /* PT68 */
+        tig_debug_printf("Coop: role folder %s\\ (saves, settings, log, crash files)\n", coop_paths_dir());
+    }
     /* PT56a: ARCANUM_CRASH_TEST=1 crashes on purpose (checks the report). */
     if (getenv("ARCANUM_CRASH_TEST") != NULL && getenv("ARCANUM_CRASH_TEST")[0] == '1') {
         tig_debug_printf("ARCANUM_CRASH_TEST: crashing on purpose\n");
@@ -322,6 +345,10 @@ int main(int argc, char** argv)
 
     if (tig_init(&init_info) != TIG_OK) {
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
+    }
+
+    if (!coop_paths_mount()) { /* PT68 */
+        tig_debug_printf("Coop: could not mount %s - saves go to the shared folder\n", coop_paths_dir());
     }
 
     screenshotter.key = SDL_SCANCODE_F12;
