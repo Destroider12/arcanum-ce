@@ -365,6 +365,9 @@ static int test_pt53e(void)
     ds.slot = 1;
     CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state valid");
     CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds) - 1), "door state short");
+    ds.e.reserved[1] = COOP_WORLD_PORTAL_GONE; /* PT60: destroyed door */
+    CHECK(coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door gone valid");
+    ds.e.reserved[1] = 0;
     ds.slot = 8;
     CHECK(!coop_lite_door_state_valid(&ds, (int)sizeof(ds)), "door state bad slot");
     ds.slot = -1;

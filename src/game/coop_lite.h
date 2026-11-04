@@ -686,6 +686,9 @@ typedef struct CoopWorldEntry {
     /* 0038 */ uint8_t reserved[8]; /* PT41: [0] = COOP_WORLD_TRAP_ARMED (portal/container) */
 } CoopWorldEntry;
 #define COOP_WORLD_TRAP_ARMED 1u
+/* PT60: reserved[1] of a DOOR_STATE portal entry: the door is gone on the
+   host (bashed / blown apart: portal_bust -> object_destroy). */
+#define COOP_WORLD_PORTAL_GONE 1u
 #define COOP_TRAP_WALK_MAX 16 /* PT42: tiles checked per client pose step */
 
 /* PT53e: host → every client, right after a door changed on the host (any

@@ -1290,6 +1290,10 @@ void object_destroy(int64_t obj)
         return;
     }
 
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
+        coop_lite_host_portal_touch(obj); /* PT60: a destroyed door reaches the clients */
+    }
+
     if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
         return;
     }
@@ -1618,6 +1622,9 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, value);
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
+        coop_lite_host_portal_touch(obj); /* PT60: door HP */
+    }
 
     if (value > 0) {
         obj_type = obj_field_int32_get(obj, OBJ_F_TYPE);

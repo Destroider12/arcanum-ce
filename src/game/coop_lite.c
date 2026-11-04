@@ -13962,6 +13962,7 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
                 e->kind = COOP_WORLD_PORTAL;
                 e->of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
                 e->kind_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS);
+                e->hp_damage = obj_field_int32_get(obj, OBJ_F_HP_DAMAGE); /* PT60 */
                 e->reserved[0] = trap_type(obj) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
                 n_portal++;
                 break;
@@ -14232,8 +14233,8 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
         obj = coop_lite_client_reclaim_destroyed(obj);
     }
 
-    if (e->kind == COOP_WORLD_CONTAINER) {
-        coop_oid_set_add(coop_world_seen, e->oid); /* PT26: junk piles prune too */
+    if (e->kind == COOP_WORLD_CONTAINER || e->kind == COOP_WORLD_PORTAL) {
+        coop_oid_set_add(coop_world_seen, e->oid); /* PT26: junk piles prune too; PT60: doors */
     }
     if (e->kind == COOP_WORLD_GROUND_ITEM) {
         coop_oid_set_add(coop_world_seen, e->oid);
@@ -14271,6 +14272,11 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
         if (type == OBJ_TYPE_PORTAL
             && (unsigned int)obj_field_int32_get(obj, OBJ_F_PORTAL_FLAGS) != e->kind_flags) {
             obj_field_int32_set(obj, OBJ_F_PORTAL_FLAGS, (int)e->kind_flags);
+            coop_world_stats[e->kind]++;
+        }
+        if (type == OBJ_TYPE_PORTAL && e->hp_damage >= 0
+            && obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != e->hp_damage) {
+            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage); /* PT60: door HP */
             coop_world_stats[e->kind]++;
         } else if (type == OBJ_TYPE_CONTAINER
             && (unsigned int)obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS) != e->kind_flags) {
@@ -14427,7 +14433,8 @@ static int coop_lite_world_prune(void)
                object_destroy) stayed here at negative HP. */
             if (!item_is_item(obj)
                 && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_TRAP /* PT42 */
-                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
+                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER
+                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PORTAL /* PT60 */) {
                 continue;
             }
             if (!coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
@@ -14451,6 +14458,8 @@ static int coop_lite_world_prune(void)
         if (obj_field_int32_get(doomed[i], OBJ_F_TYPE) == OBJ_TYPE_CONTAINER) {
             tig_debug_printf("CoopLite: world: container gone on the host (broken/destroyed) - removed here (hp dmg %d)\n",
                 object_hp_damage_get(doomed[i]));
+        } else if (obj_field_int32_get(doomed[i], OBJ_F_TYPE) == OBJ_TYPE_PORTAL) {
+            tig_debug_printf("CoopLite: world: door gone on the host (bashed/destroyed) - removed here\n");
         }
         object_destroy(doomed[i]);
     }
@@ -15228,11 +15237,31 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
         int64_t portal = coop_lite_get_oid_obj(coop_door_pend[i]);
         unsigned int flags;
 
-        if (portal == OBJ_HANDLE_NULL || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+        flags = portal != OBJ_HANDLE_NULL ? (unsigned int)obj_field_int32_get(portal, OBJ_F_FLAGS) : OF_DESTROYED;
+        if (portal == OBJ_HANDLE_NULL || (flags & OF_DESTROYED) != 0) {
+            /* PT60: bashed / blown apart (portal_bust -> object_destroy).
+               PT53e skipped it, so the door stayed whole on every client. */
+            char oid_str[80];
+            ObjectID id;
+
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = PACKET_COOP_DOOR_STATE;
+            pkt.map = map_current_map();
+            pkt.slot = coop_door_pend_slot[i];
+            memcpy(pkt.e.oid, coop_door_pend[i], 24);
+            pkt.e.kind = COOP_WORLD_PORTAL;
+            pkt.e.reserved[1] = COOP_WORLD_PORTAL_GONE;
+            if (portal != OBJ_HANDLE_NULL) {
+                pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
+            }
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+            memcpy(&id, coop_door_pend[i], sizeof(id));
+            objid_id_to_str(oid_str, id);
+            tig_debug_printf("CoopLite: door: %s destroyed on the host - sent to clients (slot %d)\n", oid_str,
+                pkt.slot);
             continue;
         }
-        flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_FLAGS);
-        if ((flags & OF_DESTROYED) != 0) {
+        if (obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
             continue;
         }
         memset(&pkt, 0, sizeof(pkt));
@@ -15244,6 +15273,7 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
         pkt.e.aid = (unsigned int)obj_field_int32_get(portal, OBJ_F_CURRENT_AID);
         pkt.e.of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
         pkt.e.kind_flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_PORTAL_FLAGS);
+        pkt.e.hp_damage = obj_field_int32_get(portal, OBJ_F_HP_DAMAGE); /* PT60 */
         pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
         pkt.e.reserved[0] = trap_type(portal) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
         tig_net_send_app_all(&pkt, sizeof(pkt));
@@ -15267,6 +15297,24 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
     }
     portal = coop_lite_get_oid_obj(pkt->e.oid);
     if (portal == OBJ_HANDLE_NULL || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL) {
+        return;
+    }
+    if ((pkt->e.reserved[1] & COOP_WORLD_PORTAL_GONE) != 0) {
+        char oid_str[80];
+        ObjectID id;
+
+        if ((obj_field_int32_get(portal, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+            return;
+        }
+        memcpy(&id, pkt->e.oid, sizeof(id));
+        objid_id_to_str(oid_str, id);
+        multiplayer_lock();
+        coop_lite_apply_begin();
+        gsound_play_sfx_on_obj(sfx_misc_sound(portal, MISC_SOUND_DESTROYING), 1, portal);
+        object_destroy(portal);
+        coop_lite_apply_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: door: %s destroyed on the host - removed here (slot %d)\n", oid_str, pkt->slot);
         return;
     }
     multiplayer_lock();

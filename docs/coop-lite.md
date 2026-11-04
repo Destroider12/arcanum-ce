@@ -2715,3 +2715,26 @@ Verdicts:
 - `UNKNOWN`: neither UPnP nor STUN answered.
 
 Limits: a true inbound UDP test needs an outside peer; only a friend joining proves it. A manual forward cannot be seen (hence "likely"). Third-party firewalls and other Windows rules are not detected.
+
+## PT60: broken doors reach the clients (protocol 38)
+
+**Cause.** A bashed door goes through `object_bust` → `portal_bust`.
+- A window gets `OPF_BUSTED` and the busted art, which PT53e already synced.
+- A real door is `object_destroy`ed. That path never called `coop_lite_host_portal_touch`. Even when the door was queued, the PT53e flush skipped `OF_DESTROYED` portals.
+- The world-state snapshot does not list destroyed objects, and the client prune (PT26/PT31/PT42/PT56) only removed items, traps, containers and NPCs. So the door stayed whole on every client, live and on entry, rejoin and late join.
+- Door HP was not sent either.
+
+**Fix.**
+- `object_destroy` and `object_hp_damage_set` touch portals, host side.
+- The door flush sends a destroyed (or already freed) door as `DOOR_STATE` with `e.reserved[1] = COOP_WORLD_PORTAL_GONE`. The client `object_destroy`s it and plays the destroy sound.
+- Portal entries (live and snapshot) carry `hp_damage`, and the client applies it.
+- The world prune now also removes portals in scope that the host no longer lists. This covers location entry, rejoin and late join.
+- A client's attack or spell on a door was already resolved by the host (same path as the PT56 containers), so the host's result now reaches everybody.
+
+Logs:
+- host: `CoopLite: door: <oid> destroyed on the host - sent to clients (slot N)`
+- client, live: `CoopLite: door: <oid> destroyed on the host - removed here (slot N)`
+- client, snapshot: `CoopLite: world: door gone on the host (bashed/destroyed) - removed here`
+- windows: `CoopLite: door: ... busted=1 ...` (host sent / client applied)
+
+Wire: new `COOP_WORLD_PORTAL_GONE` flag and portal `hp_damage`; protocol 37 → 38.
