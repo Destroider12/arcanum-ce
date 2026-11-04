@@ -333,6 +333,8 @@ set(SRCS
     "src/ui/written_ui.h"
     "src/net_compat.h"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/net/coop_upnp.c"
     "src/net/coop_upnp.h"
     "src/net/tig_net.h"
@@ -379,6 +381,8 @@ endif()
 add_executable(tig_net_loopback_test
     "tests/tig_net_loopback_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
 )
 target_include_directories(tig_net_loopback_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -412,6 +416,8 @@ add_executable(coop_lite_policy_test
     "tests/coop_lite_policy_test.c"
     "src/net/coop_upnp.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_policy_test PRIVATE
@@ -431,6 +437,8 @@ add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
 add_executable(coop_story_test
     "tests/coop_story_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_story_test PRIVATE
@@ -450,6 +458,8 @@ add_test(NAME coop_story COMMAND coop_story_test)
 add_executable(coop_dialog_test
     "tests/coop_dialog_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_dialog_test PRIVATE
@@ -478,6 +488,8 @@ add_test(NAME coop_menu COMMAND coop_menu_test)
 add_executable(coop_lite_dialog_filter_test
     "tests/coop_lite_dialog_filter_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_dialog_filter_test PRIVATE
@@ -498,6 +510,8 @@ add_test(NAME coop_lite_dialog_filter COMMAND coop_lite_dialog_filter_test
 add_executable(coop_lite_session_sync_test
     "tests/coop_lite_session_sync_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_session_sync_test PRIVATE
@@ -517,6 +531,8 @@ add_test(NAME coop_lite_session_sync COMMAND coop_lite_session_sync_test)
 add_executable(coop_lite_net_hardening_test
     "tests/coop_lite_net_hardening_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_net_hardening_test PRIVATE
@@ -540,6 +556,8 @@ endif()
 add_executable(coop_lite_rx_fuzz_test
     "tests/coop_lite_rx_fuzz_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_rx_fuzz_test PRIVATE
@@ -561,6 +579,8 @@ add_executable(coop_lite_fuzz8_test
     "tests/coop_lite_fuzz8_test.c"
     "src/net/coop_upnp.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_fuzz8_test PRIVATE
@@ -581,6 +601,8 @@ add_test(NAME coop_lite_fuzz8 COMMAND coop_lite_fuzz8_test)
 add_executable(coop_lite_net8_test
     "tests/coop_lite_net8_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_net8_test PRIVATE
@@ -600,6 +622,8 @@ endif()
 add_executable(coop_lite_stress8_test
     "tests/coop_lite_stress8_test.c"
     "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
 )
 target_include_directories(coop_lite_stress8_test PRIVATE
@@ -681,4 +705,35 @@ if(APPLE)
     endif()
 
     include(CPack)
+endif()
+
+# PT58: transport abstraction (loopback fake + Steam backend on a fake flat API).
+add_executable(tig_net_transport_test
+    "tests/tig_net_transport_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+)
+target_include_directories(tig_net_transport_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(tig_net_transport_test PRIVATE enet)
+target_compile_definitions(tig_net_transport_test PRIVATE TIG_NET_TEST_STUB_DEBUG=1)
+if(WIN32)
+    target_link_libraries(tig_net_transport_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME tig_net_transport COMMAND tig_net_transport_test)
+
+# PT58: co-op launcher (Win32 GUI, Windows builds only).
+if(WIN32)
+    add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c")
+    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32)
+    if(ARCANUM_UPNP)
+        target_link_libraries(arcanum-coop-launcher PRIVATE miniupnpc)
+        target_compile_definitions(arcanum-coop-launcher PRIVATE LAUNCHER_UPNP=1)
+    endif()
+    if(MINGW)
+        target_link_options(arcanum-coop-launcher PRIVATE -static -static-libgcc)
+    endif()
 endif()

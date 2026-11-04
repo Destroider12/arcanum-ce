@@ -2662,3 +2662,33 @@ spot until the check finishes or the stop is repeated (repeat forces travel). Pr
 - **Host loss.** The client peer timeout is now 4–10 s (it was ENet's ~30 s). `coop_lite_client_host_left` also fires outside an active session. After 2.5 s the client goes back to the main menu with "Lost connection to the host… press R there to reconnect."
 - **Reconnect.** In the main menu with coop and join configured, "R - Reconnect" is shown. Pressing R starts the pregen/rejoin flow to the last ARCANUM_COOP_JOIN address, port and token, and the rejoin token restores the parked PC.
 - **Travel requests.** On the client, `teleport_do` for the local PC to a different valid map is intercepted. It sends PACKET_COOP_TRAVEL_REQ (155) ASK instead, rate-limited to one every 3 s. The host sees "<name> wants to travel to <map>. Y = go, N = refuse." Y sends ACCEPTED and runs the host's own teleport through the PT50 ready check, so the whole party moves. N sends REFUSED, nobody moves, and the client sees a message. Teleports that coop itself applies are allowed through by an auth counter. World-map travel by clients stays blocked as before. Same-map teleports are not intercepted.
+
+## PT58: launcher + transport abstraction + Steam transport
+
+**Launcher (`arcanum-coop-launcher.exe`, tools/launcher/launcher.c, Win32, Windows builds only).**
+- Fields: player name, Host / Join, transport (Direct+UPnP or Steam), the port (host) or host IP:port (join, default 7777), the host's SteamID64 (Steam join), and Windowed.
+- Shows the local IP and the public IP. The public IP comes from the router via UPnP (miniupnpc) and stays blank without it. **Copy** puts `ip:port` on the clipboard.
+- **Start** runs `arcanum-ce.exe [-window] -coop -host <port> | -join <ip:port|SteamID64> -log coop_host.log|coop_client.log` from `coop-host\` / `coop-client\` (Coop-Setup layout). It refreshes the instance exe from a different root build, as Start-*.bat does. If those folders don't exist it uses the exe next to the launcher.
+- Environment it sets: `ARCANUM_COOP_NAME` (replaces the default "Player"), `ARCANUM_COOP_TRANSPORT=direct|steam`, `ARCANUM_COOP_STEAM_HOST=<SteamID64>` (Steam join).
+- Settings are saved in `arcanum-coop-launcher.ini` next to it.
+- Joining a host that is already playing uses the normal late-join flow.
+
+**Transport abstraction (src/net/tig_net_transport.h).**
+- tig_net keeps all co-op logic: slots, HELLO/WELCOME, the protocol check, dispatch, stats.
+- A backend only does listen/connect/service (connect, receive, disconnect events)/send (channel, reliable flag)/flush/disconnect/timeout.
+- Backends:
+  - `tig_net_enet.c`: the previous ENet calls, moved unchanged. It is the default.
+  - `tig_net_steam.c`.
+  - A loopback fake in `tests/tig_net_transport_test.c`.
+- Selection: `ARCANUM_COOP_TRANSPORT` (unset / `direct` / `enet` → ENet, `steam` → Steam).
+- UPnP runs only with ENet.
+
+**Steam backend.**
+- Uses ISteamNetworkingMessages: P2P through Valve's SDR relays, with NAT traversal handled by Steam.
+- `steam_api64.dll` is loaded with LoadLibrary at runtime. The game never links it, so GOG and non-Steam builds behave exactly as before.
+- Only flat C exports are used, and their declarations live in `src/net/tig_net_steam.h`. No Steamworks SDK files are in the repo, and static asserts pin the struct layouts.
+- Connection model: a small control protocol on channel 7. The client sends CONNECT (resent every 500 ms, up to 20 s); the host answers ACCEPT or FULL. BYE ends a session, PING keeps it alive once a second, and a peer silent for 10 s is dropped. App channels 0..2 map one-to-one, and reliable messages keep their order per channel.
+- The host's main-menu status line shows `Co-op: Steam host, ID <SteamID64>`. The client joins with that ID.
+- AppID: `SteamAppId` defaults to **500810** (Arcanum on Steam). Override it with `ARCANUM_COOP_STEAM_APPID`, e.g. 480 (Spacewar, Valve's test app) if Steam refuses the init. The launcher also writes `steam_appid.txt`.
+- Without the DLL, without a running Steam, or with a too-old DLL, the log says `tig_net: Steam transport unavailable: <reason>` and starting co-op fails cleanly.
+- **What the user provides:** a 64-bit `steam_api64.dll` from Steamworks SDK 1.51 or newer, or from any recent 64-bit Steam game's folder, placed next to `arcanum-ce.exe` in every instance folder. Steam must be running and logged in on both PCs, and the account needs the AppID (owning Arcanum on Steam, or use 480).

@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <enet/enet.h>
+#include "net/tig_net_transport.h"
 #ifdef ARCANUM_UPNP
 #include "net/coop_upnp.h" /* PT51 */
 #endif
@@ -59,7 +59,7 @@ _Static_assert(sizeof(TigNetCtrlWelcome) == 16, "WELCOME wire layout");
 _Static_assert(sizeof(TigNetCtrlName) == 12 + TIG_NET_MAX_NAME, "NAME/HELLO wire layout");
 
 typedef struct TigNetClient {
-    ENetPeer* peer;
+    TigNetTPeer* peer;
     bool active;
     bool waiting;
     bool loading;
@@ -79,7 +79,35 @@ static int join_port = TIG_NET_DEFAULT_PORT;
 static bool want_host;
 static bool want_join;
 
-static ENetHost* enet_host;
+/* PT58: the transport backend (ENet unless ARCANUM_COOP_TRANSPORT says otherwise). */
+static const TigNetTransport* tp;
+
+static const TigNetTransport* tig_net_tp(void)
+{
+    if (tp == NULL) {
+        tp = tig_net_transport_pick(getenv("ARCANUM_COOP_TRANSPORT"));
+        tig_debug_printf("tig_net: transport %s\n", tp->name);
+    }
+    return tp;
+}
+
+void tig_net_set_transport(const TigNetTransport* transport)
+{
+    tp = transport;
+    library_ready = false;
+}
+
+const TigNetTransport* tig_net_get_transport(void)
+{
+    return tig_net_tp();
+}
+
+bool tig_net_local_join_id(char* buf, size_t size)
+{
+    return tig_net_tp()->local_id(buf, size);
+}
+
+#define enet_host_open() (tp != NULL && tp->is_open())
 
 /* Per-type app packet counters (diagnose spam / lag). Logged every ~10 s. */
 static unsigned int tig_net_stat_sent[256];
@@ -109,7 +137,7 @@ static void tig_net_stat_maybe_log(void)
     char line[512];
     size_t len;
 
-    now = (unsigned int)enet_time_get();
+    now = tig_net_tp()->now_ms();
     if (tig_net_stat_window_start == 0) {
         tig_net_stat_window_start = now;
         return;
@@ -145,7 +173,7 @@ static int max_players = TIG_NET_MAX_PLAYERS;
 static unsigned int server_options;
 static char server_name[64] = "Arcanum";
 static char server_description[128] = "Description";
-static char local_name[TIG_NET_MAX_NAME] = "Player";
+static char local_name[TIG_NET_MAX_NAME] = "Player"; /* PT58: ARCANUM_COOP_NAME via set_name */
 
 static int last_message_size;
 static int local_suspend_depth;
@@ -193,19 +221,19 @@ static int tig_net_alloc_slot(void)
  * ENet peer->data holds (slot + 1) so that NULL (a rejected / not yet
  * assigned peer) decodes to -1 rather than to the host slot 0.
  */
-static void tig_net_peer_set_slot(ENetPeer* peer, int slot)
+static void tig_net_peer_set_slot(TigNetTPeer* peer, int slot)
 {
-    peer->data = (void*)(intptr_t)(slot + 1);
+    *tp->peer_data(peer) = (void*)(intptr_t)(slot + 1);
 }
 
-static int tig_net_peer_get_slot(const ENetPeer* peer)
+static int tig_net_peer_get_slot(TigNetTPeer* peer)
 {
     int slot;
 
     if (peer == NULL) {
         return -1;
     }
-    slot = (int)(intptr_t)peer->data - 1;
+    slot = (int)(intptr_t)*tp->peer_data(peer) - 1;
     if (slot < 0 || slot >= TIG_NET_MAX_PLAYERS) {
         return -1;
     }
@@ -276,21 +304,12 @@ static void tig_net_dispatch_app(const void* data, size_t size, int sender_slot)
     last_message_size = 0;
 }
 
-static void tig_net_send_ctrl_to_peer(ENetPeer* peer, const void* data, size_t size)
+static void tig_net_send_ctrl_to_peer(TigNetTPeer* peer, const void* data, size_t size)
 {
-    ENetPacket* packet;
-
-    if (peer == NULL || enet_host == NULL) {
+    if (peer == NULL || !enet_host_open()) {
         return;
     }
-
-    packet = enet_packet_create(data, size, ENET_PACKET_FLAG_RELIABLE);
-    if (packet == NULL) {
-        return;
-    }
-    if (enet_peer_send(peer, TIG_NET_CHANNEL_CTRL, packet) != 0) {
-        enet_packet_destroy(packet); /* not queued: still ours */
-    }
+    tp->send(&peer, 1, TIG_NET_CHANNEL_CTRL, data, size, true);
 }
 
 static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
@@ -327,7 +346,7 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
             if (local_slot == 0) {
                 host_refused = true; /* never welcomed: no app traffic either */
                 if (clients[0].peer != NULL) {
-                    enet_peer_disconnect(clients[0].peer, 0);
+                    tp->disconnect(clients[0].peer, false);
                 }
             }
             return;
@@ -376,7 +395,7 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
                drop everything from it until the disconnect lands. */
             clients[from_slot].refused = true;
             if (clients[from_slot].peer != NULL) {
-                enet_peer_disconnect(clients[from_slot].peer, 0);
+                tp->disconnect(clients[from_slot].peer, false);
             }
             return;
         }
@@ -394,25 +413,19 @@ static void tig_net_handle_ctrl(const void* data, size_t size, int from_slot)
 }
 
 /* Client: first packet on the APP channel, sent the moment ENet connects. */
-static void tig_net_send_hello(ENetPeer* peer)
+static void tig_net_send_hello(TigNetTPeer* peer)
 {
     TigNetCtrlName hello;
-    ENetPacket* packet;
 
     memset(&hello, 0, sizeof(hello));
     hello.magic = TIG_NET_APP_HELLO;
     hello.slot = 0; /* the host uses the authenticated peer, not this */
     strncpy(hello.name, local_name, TIG_NET_MAX_NAME - 1);
     hello.protocol = TIG_NET_PROTOCOL;
-    packet = enet_packet_create(&hello, sizeof(hello), ENET_PACKET_FLAG_RELIABLE);
-    if (packet == NULL) {
+    if (tp->send(&peer, 1, TIG_NET_CHANNEL_APP, &hello, sizeof(hello), true) != 1) {
         return;
     }
-    if (enet_peer_send(peer, TIG_NET_CHANNEL_APP, packet) != 0) {
-        enet_packet_destroy(packet);
-        return;
-    }
-    enet_host_flush(enet_host);
+    tp->flush();
 }
 
 bool tig_net_welcome_slot_valid(int slot)
@@ -446,7 +459,15 @@ bool tig_net_describe_coop_mode(char* buf, size_t size)
     if (!coop_enabled || buf == NULL || size == 0) {
         return false;
     }
-    if (want_host) {
+    if (want_host && tp != NULL && tp != tig_net_transport_enet()) {
+        char id[32];
+
+        /* PT58: friends join with this (shown on the main menu). */
+        if (!tp->local_id(id, sizeof(id))) {
+            snprintf(id, sizeof(id), "%s", "?");
+        }
+        snprintf(buf, size, ru ? "Кооп: хост Steam / Co-op: Steam host, ID %s" : "Co-op: Steam host, ID %s", id);
+    } else if (want_host) {
 #ifdef ARCANUM_UPNP
         char upnp[256];
 
@@ -496,12 +517,10 @@ int tig_net_start_client(void)
     }
 
     if (!library_ready) {
-        if (enet_initialize() != 0) {
-            tig_debug_printf("tig_net: enet_initialize failed\n");
+        if (!tig_net_tp()->init()) {
             return TIG_ERR_GENERIC;
         }
         library_ready = true;
-        atexit(enet_deinitialize);
     }
 
     tig_net_clear_clients();
@@ -530,8 +549,6 @@ int tig_net_start_client(void)
 
 void tig_net_start_server(void)
 {
-    ENetAddress address;
-
     if (!coop_enabled) {
         return;
     }
@@ -540,16 +557,12 @@ void tig_net_start_server(void)
         return;
     }
 
-    if (enet_host != NULL) {
+    if (enet_host_open()) {
         return;
     }
 
-    address.host = ENET_HOST_ANY;
-    address.port = (enet_uint16)listen_port;
-
-    enet_host = enet_host_create(&address, (size_t)max_players, TIG_NET_NUM_CHANNELS, 0, 0);
-    if (enet_host == NULL) {
-        tig_debug_printf("tig_net: failed to listen on port %d\n", listen_port);
+    if (!tp->listen(listen_port, max_players, TIG_NET_NUM_CHANNELS)) {
+        tig_debug_printf("tig_net: failed to listen on port %d (%s)\n", listen_port, tp->name);
         return;
     }
 
@@ -558,30 +571,32 @@ void tig_net_start_server(void)
     local_slot = 0;
     clients[0].active = true;
     strncpy(clients[0].name, local_name, TIG_NET_MAX_NAME - 1);
-    tig_debug_printf("tig_net: hosting on port %d (max %d)\n", listen_port, max_players);
+    tig_debug_printf("tig_net: hosting on port %d (max %d, %s)\n", listen_port, max_players, tp->name);
 #ifdef ARCANUM_UPNP
-    coop_upnp_start(listen_port); /* PT51: async, never blocks */
+    if (tp == tig_net_transport_enet()) {
+        coop_upnp_start(listen_port); /* PT51: async, never blocks */
+    }
 #endif
     tig_net_fire_event(TIG_NET_EVENT_CONNECT, 0, NULL, 0);
 }
 
 int tig_net_connect_configured(void)
 {
-    ENetAddress address;
-    ENetPeer* peer;
-    ENetEvent event;
+    TigNetTPeer* peer;
+    TigNetTEvent event;
+    const char* target;
     int waits;
 
     if (!coop_enabled) {
         return TIG_OK;
     }
 
-    if (!library_ready && enet_initialize() != 0) {
+    if (!library_ready && !tig_net_tp()->init()) {
         return TIG_ERR_GENERIC;
     }
     library_ready = true;
 
-    if (enet_host != NULL) {
+    if (enet_host_open()) {
         if (active) {
             return TIG_OK;
         }
@@ -590,65 +605,56 @@ int tig_net_connect_configured(void)
         tig_net_reset_connection();
     }
 
-    if (join_host[0] == '\0') {
+    /* PT58: Steam joins a SteamID64 (ARCANUM_COOP_STEAM_HOST wins over -join). */
+    target = join_host;
+    if (tp != tig_net_transport_enet() && getenv("ARCANUM_COOP_STEAM_HOST") != NULL
+        && getenv("ARCANUM_COOP_STEAM_HOST")[0] != '\0') {
+        target = getenv("ARCANUM_COOP_STEAM_HOST");
+    }
+    if (target[0] == '\0') {
         tig_debug_printf("tig_net: join host not configured\n");
         return TIG_ERR_GENERIC;
     }
 
-    enet_host = enet_host_create(NULL, 1, TIG_NET_NUM_CHANNELS, 0, 0);
-    if (enet_host == NULL) {
-        tig_debug_printf("tig_net: client host create failed\n");
-        return TIG_ERR_GENERIC;
-    }
-
-    if (enet_address_set_host(&address, join_host) != 0) {
-        /* Review PT24 #2: unresolvable name - address.host is garbage. */
-        tig_debug_printf("tig_net: cannot resolve join host '%s'\n", join_host);
-        enet_host_destroy(enet_host);
-        enet_host = NULL;
-        return TIG_ERR_GENERIC;
-    }
-    address.port = (enet_uint16)join_port;
-
-    peer = enet_host_connect(enet_host, &address, TIG_NET_NUM_CHANNELS, 0);
+    peer = tp->connect(target, join_port, TIG_NET_NUM_CHANNELS);
     if (peer == NULL) {
-        tig_debug_printf("tig_net: connect to %s:%d failed\n", join_host, join_port);
-        enet_host_destroy(enet_host);
-        enet_host = NULL;
         return TIG_ERR_GENERIC;
     }
 
     is_host = false;
     active = false;
 
-    for (waits = 0; waits < 50; waits++) {
-        if (enet_host_service(enet_host, &event, 100) <= 0) {
+    /* PT58: Steam relays may need several seconds to route the first packet. */
+    for (waits = 0; waits < (tp == tig_net_transport_enet() ? 50 : 200); waits++) {
+        if (tp->service(&event, 100) <= 0) {
             continue;
         }
-        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+        if (event.type == TIG_NET_TEV_RECEIVE) {
             /* Not expected before CONNECT; never leak the packet. */
-            enet_packet_destroy(event.packet);
+            tp->event_done(&event);
             continue;
         }
-        if (event.type == ENET_EVENT_TYPE_CONNECT) {
+        if (event.type == TIG_NET_TEV_DISCONNECT) {
+            break; /* refused / unreachable */
+        }
+        if (event.type == TIG_NET_TEV_CONNECT) {
             clients[0].peer = peer;
             clients[0].active = true;
             tig_net_peer_set_slot(peer, 0);
             active = true;
             /* PT57: a crashed / frozen host is noticed in ~10 s (ENet's
                default is up to 30 s of a frozen client screen). */
-            enet_peer_timeout(peer, 32, 4000, 10000);
-            tig_debug_printf("tig_net: connected to %s:%d\n", join_host, join_port);
+            tp->set_timeout(peer, 4000, 10000);
+            tig_debug_printf("tig_net: connected to %s:%d (%s)\n", target, join_port, tp->name);
             tig_net_send_hello(peer);
             /* Slot assignment arrives via WELCOME ctrl packet. */
             return TIG_OK;
         }
     }
 
-    tig_debug_printf("tig_net: timed out connecting to %s:%d\n", join_host, join_port);
-    enet_peer_reset(peer);
-    enet_host_destroy(enet_host);
-    enet_host = NULL;
+    tig_debug_printf("tig_net: timed out connecting to %s:%d (%s)\n", target, join_port, tp->name);
+    tp->reset_peer(peer);
+    tp->close();
     return TIG_ERR_GENERIC;
 }
 
@@ -657,24 +663,23 @@ void tig_net_reset_connection(void)
     int i;
 
 #ifdef ARCANUM_UPNP
-    if (is_host) {
+    if (is_host && tp == tig_net_transport_enet()) {
         coop_upnp_stop(); /* PT51: drop the router mapping */
     }
 #endif
 
-    if (enet_host != NULL) {
+    if (enet_host_open()) {
         if (tig_net_send_pending_flush) {
-            enet_host_flush(enet_host);
+            tp->flush();
             tig_net_send_pending_flush = false;
         }
         for (i = 0; i < TIG_NET_MAX_PLAYERS; i++) {
             if (clients[i].peer != NULL) {
-                enet_peer_disconnect_now(clients[i].peer, 0);
+                tp->disconnect(clients[i].peer, true);
                 clients[i].peer = NULL;
             }
         }
-        enet_host_destroy(enet_host);
-        enet_host = NULL;
+        tp->close();
     }
 
     tig_net_clear_clients();
@@ -699,24 +704,22 @@ static void tig_net_peer_diag_log(void)
     /* PT23: queue depth / RTT per peer — a growing outgoing queue means
        latency that grows over a session ("everything gets laggy"). */
     for (i = 0; i < max_players; i++) {
-        ENetPeer* p = clients[i].peer;
+        TigNetTPeer* p = clients[i].peer;
+        char desc[256];
 
         if (p == NULL || (is_host && i == 0) || (!is_host && i != 0)) {
             continue;
         }
-        tig_debug_printf("tig_net: peer %d rtt=%u ms lost=%u throttle=%u inflight=%u q_out=%u q_rel=%u q_sent=%u\n",
-            i, p->roundTripTime, p->packetsLost, p->packetThrottle, p->reliableDataInTransit,
-            (unsigned int)enet_list_size(&p->outgoingCommands),
-            (unsigned int)enet_list_size(&p->outgoingSendReliableCommands),
-            (unsigned int)enet_list_size(&p->sentReliableCommands));
+        tp->describe_peer(p, desc, sizeof(desc));
+        tig_debug_printf("tig_net: peer %d %s\n", i, desc);
     }
 }
 
 void tig_net_pump(void)
 {
-    ENetEvent event;
+    TigNetTEvent event;
 
-    if (!coop_enabled || enet_host == NULL) {
+    if (!coop_enabled || !enet_host_open()) {
         return;
     }
 
@@ -724,17 +727,17 @@ void tig_net_pump(void)
        ENet and is handled next frame. */
     int budget = TIG_NET_MAX_EVENTS_PER_PUMP;
 
-    while (budget-- > 0 && enet_host != NULL && enet_host_service(enet_host, &event, 0) > 0) {
+    while (budget-- > 0 && enet_host_open() && tp->service(&event, 0) > 0) {
         switch (event.type) {
-        case ENET_EVENT_TYPE_CONNECT:
+        case TIG_NET_TEV_CONNECT:
             if (is_host) {
                 int slot = tig_net_alloc_slot();
                 TigNetCtrlWelcome welcome;
 
                 if (slot < 0) {
                     tig_debug_printf("tig_net: rejecting client, no free slots\n");
-                    event.peer->data = NULL; /* decodes to -1 */
-                    enet_peer_disconnect(event.peer, 0);
+                    *tp->peer_data(event.peer) = NULL; /* decodes to -1 */
+                    tp->disconnect(event.peer, false);
                     break;
                 }
 
@@ -745,7 +748,7 @@ void tig_net_pump(void)
                 clients[slot].loading = false;
                 clients[slot].refused = false;
                 clients[slot].handshaken = false;
-                clients[slot].connect_ms = (unsigned int)enet_time_get();
+                clients[slot].connect_ms = tp->now_ms();
                 snprintf(clients[slot].name, sizeof(clients[slot].name), "Player%d", slot);
 
                 memset(&welcome, 0, sizeof(welcome));
@@ -754,7 +757,7 @@ void tig_net_pump(void)
                 welcome.max_players = max_players;
                 welcome.protocol = TIG_NET_PROTOCOL;
                 tig_net_send_ctrl_to_peer(event.peer, &welcome, sizeof(welcome));
-                enet_host_flush(enet_host);
+                tp->flush();
 
                 tig_debug_printf("tig_net: client connected -> slot %d (awaiting handshake)\n", slot);
             } else {
@@ -764,17 +767,17 @@ void tig_net_pump(void)
             }
             break;
 
-        case ENET_EVENT_TYPE_RECEIVE:
+        case TIG_NET_TEV_RECEIVE:
             {
                 int from = tig_net_peer_get_slot(event.peer);
                 if (from < 0) {
                     /* Rejected / unassigned peer: drop everything it sends. */
-                } else if (event.channelID == TIG_NET_CHANNEL_CTRL) {
-                    tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
+                } else if (event.channel == TIG_NET_CHANNEL_CTRL) {
+                    tig_net_handle_ctrl(event.data, event.size, from);
                 } else if (is_host && from > 0
-                    && event.packet->dataLength >= sizeof(int)
-                    && *(const int*)event.packet->data == TIG_NET_APP_HELLO) {
-                    tig_net_handle_ctrl(event.packet->data, event.packet->dataLength, from);
+                    && event.size >= sizeof(int)
+                    && *(const int*)event.data == TIG_NET_APP_HELLO) {
+                    tig_net_handle_ctrl(event.data, event.size, from);
                 } else if (is_host ? clients[from].refused : host_refused) {
                     /* Protocol mismatch: disconnect pending, drop it. */
                 } else if (is_host && from > 0 && !clients[from].handshaken) {
@@ -785,14 +788,14 @@ void tig_net_pump(void)
                 } else if (is_host && from == 0) {
                     /* Host never receives from itself over the wire. */
                 } else {
-                    tig_net_stat_count(tig_net_stat_recv, event.packet->data, event.packet->dataLength);
-                    tig_net_dispatch_app(event.packet->data, event.packet->dataLength, from);
+                    tig_net_stat_count(tig_net_stat_recv, event.data, event.size);
+                    tig_net_dispatch_app(event.data, event.size, from);
                 }
             }
-            enet_packet_destroy(event.packet);
+            tp->event_done(&event);
             break;
 
-        case ENET_EVENT_TYPE_DISCONNECT: {
+        case TIG_NET_TEV_DISCONNECT: {
             int slot = tig_net_peer_get_slot(event.peer);
             tig_debug_printf("tig_net: disconnect slot %d\n", slot);
             /* Unassigned/rejected peers (slot -1) must not clear anything. */
@@ -806,7 +809,7 @@ void tig_net_pump(void)
                 clients[slot].name[0] = '\0';
                 tig_net_fire_event(TIG_NET_EVENT_DISCONNECT, slot, NULL, 0);
             }
-            event.peer->data = NULL;
+            *tp->peer_data(event.peer) = NULL;
             if (!is_host) {
                 active = false;
                 lost_host = true;
@@ -819,8 +822,8 @@ void tig_net_pump(void)
         }
     }
 
-    if (is_host && enet_host != NULL) {
-        unsigned int now = (unsigned int)enet_time_get();
+    if (is_host && enet_host_open()) {
+        unsigned int now = tp->now_ms();
         int i;
 
         for (i = 1; i < max_players; i++) {
@@ -829,12 +832,12 @@ void tig_net_pump(void)
                 tig_debug_printf("tig_net: slot %d sent no valid handshake in %u ms - disconnecting\n",
                     i, TIG_NET_HANDSHAKE_TIMEOUT_MS);
                 clients[i].refused = true;
-                enet_peer_disconnect(clients[i].peer, 0);
+                tp->disconnect(clients[i].peer, false);
             }
         }
     }
-    if (tig_net_send_pending_flush && enet_host != NULL) {
-        enet_host_flush(enet_host);
+    if (tig_net_send_pending_flush && enet_host_open()) {
+        tp->flush();
         tig_net_send_pending_flush = false;
     }
     if (lost_host) {
@@ -916,24 +919,16 @@ void tig_net_on_network_event(TigNetNetworkEventFunc func)
 
 static void tig_net_send_raw_ex(void* data, int size, int client_id, bool all, bool except, bool pose)
 {
-    ENetPacket* packet;
+    TigNetTPeer* peers[TIG_NET_MAX_PLAYERS];
+    int n = 0;
     int i;
-    int sent = 0;
-    enet_uint8 channel = pose ? TIG_NET_CHANNEL_POSE : TIG_NET_CHANNEL_APP;
-    enet_uint32 flags = pose ? 0 : ENET_PACKET_FLAG_RELIABLE;
+    int sent;
 
-    if (!tig_net_is_active() || data == NULL || size <= 0 || size > TIG_NET_MAX_PACKET) {
+    if (!tig_net_is_active() || data == NULL || size <= 0 || size > TIG_NET_MAX_PACKET || !enet_host_open()) {
         return;
     }
     if (!is_host && host_refused) {
         return; /* refused host (protocol): nothing of ours reaches it */
-    }
-
-    /* Review L3: one packet for every recipient; ENet takes a reference per
-       successful send, and a failed send leaves it ours to free. */
-    packet = enet_packet_create(data, (size_t)size, flags);
-    if (packet == NULL) {
-        return;
     }
 
     if (is_host) {
@@ -952,20 +947,17 @@ static void tig_net_send_raw_ex(void* data, int size, int client_id, bool all, b
                     continue;
                 }
             }
-            if (enet_peer_send(clients[i].peer, channel, packet) == 0) {
-                sent++;
-            }
+            peers[n++] = clients[i].peer;
         }
     } else if (clients[0].peer != NULL) {
         /* Clients only talk to host. */
-        if (enet_peer_send(clients[0].peer, channel, packet) == 0) {
-            sent++;
-        }
+        peers[n++] = clients[0].peer;
     }
-
-    if (packet->referenceCount == 0) {
-        enet_packet_destroy(packet);
+    if (n == 0) {
+        return;
     }
+    /* Review M7: poses unreliable+sequenced on their own channel. */
+    sent = tp->send(peers, n, pose ? TIG_NET_CHANNEL_POSE : TIG_NET_CHANNEL_APP, data, (size_t)size, !pose);
     if (sent > 0) {
         /* Batched: flushed once per frame in tig_net_pump (was per packet). */
         tig_net_send_pending_flush = true;
@@ -1016,8 +1008,14 @@ void tig_net_send_app_except(void* data, int size, int client_id)
 
 int tig_net_local_client_set_name(const char* name)
 {
+    const char* env_name = getenv("ARCANUM_COOP_NAME");
+
     if (name == NULL || name[0] == '\0') {
         return 0;
+    }
+    /* PT58: the launcher's player name replaces the default "Player". */
+    if (strcmp(name, "Player") == 0 && env_name != NULL && env_name[0] != '\0') {
+        name = env_name;
     }
     strncpy(local_name, name, TIG_NET_MAX_NAME - 1);
     local_name[TIG_NET_MAX_NAME - 1] = '\0';
