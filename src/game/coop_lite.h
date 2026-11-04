@@ -45,7 +45,8 @@ extern "C" {
 #define PACKET_COOP_SAVE_REQ 156 /* PT61: client save/load ask -> host; host result -> client */
 #define PACKET_COOP_TRAP_FX 157 /* PT61: host trap trigger visuals -> clients */
 #define PACKET_COOP_HOTBAR 158 /* PT63: client -> host hotbar layout; host -> client restore */
-#define PACKET_COOP_TYPE_LIMIT 159
+#define PACKET_COOP_WMAP_POS 159 /* PT73: host -> clients: party marker on the world map */
+#define PACKET_COOP_TYPE_LIMIT 160
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -566,6 +567,22 @@ typedef struct PacketCoopHotbar {
 } PacketCoopHotbar;
 COOP_STATIC_ASSERT(sizeof(PacketCoopHotbar) == 0x150, "PacketCoopHotbar size");
 bool coop_lite_hotbar_valid(const PacketCoopHotbar* pkt, int size);
+
+/* PT73: host's world-map party marker (world-map pixel coords), 5-10 Hz. */
+typedef struct PacketCoopWmapPos {
+    /* 0000 */ int type;
+    /* 0004 */ unsigned int seq;
+    /* 0008 */ int x;
+    /* 000C */ int y;
+    /* 0010 */ int moving;
+    /* 0014 */ int reserved;
+} PacketCoopWmapPos;
+COOP_STATIC_ASSERT(sizeof(PacketCoopWmapPos) == 0x18, "PacketCoopWmapPos size");
+bool coop_lite_wmap_pos_valid(const PacketCoopWmapPos* pkt, int size);
+/* Pure: send now? moved and >=150 ms since the last one, or 1 s keepalive. */
+bool coop_lite_wmap_pos_should_send(bool have_last, unsigned int last_ms, unsigned int now_ms,
+    int last_x, int last_y, int x, int y);
+void coop_lite_handle_wmap_pos(PacketCoopWmapPos* pkt);
 void coop_lite_handle_hotbar(PacketCoopHotbar* pkt);
 /* Kept table (pure; unit-tested): put replaces the same token's layout. */
 void coop_lite_hotbar_kept_reset(void);

@@ -210,6 +210,13 @@ static bool wmap_ui_state_set(WmapUiState state);
 static void sub_561800(WmapCoords* coords, int64_t* loc_ptr);
 static bool wmap_ui_teleport(int64_t loc);
 static bool wmap_ui_message_filter(TigMessage* msg);
+static bool wmap_ui_spectating; /* PT73 */
+
+/* PT73: the spectator view may show the world map on a coop client. */
+static bool wmap_ui_world_allowed(void)
+{
+    return wmap_ui_spectating || coop_lite_can_use_worldmap();
+}
 static bool sub_5627B0(WmapCoords* coords);
 static bool sub_5627F0(int64_t loc);
 static void sub_562800(int id);
@@ -1116,6 +1123,9 @@ void wmap_ui_encounter_end(void)
 // 0x560760
 void wmap_ui_open(void)
 {
+    if (wmap_ui_spectating) {
+        return; /* PT73: read-only */
+    }
     wmap_ui_spell = -1;
     wmap_ui_selecting = false;
     wmap_ui_obj = OBJ_HANDLE_NULL;
@@ -1125,6 +1135,9 @@ void wmap_ui_open(void)
 // 0x560790
 void wmap_ui_select(int64_t obj, int spell)
 {
+    if (wmap_ui_spectating) {
+        return;
+    }
     wmap_ui_obj = obj;
     dword_65E968 = 0;
     wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD].length = 0;
@@ -1150,7 +1163,7 @@ void wmap_ui_open_internal(void)
 
     /* PT44: a coop client may still open its own town map (same button);
        world/continent modes stay host-only (see wmap_ui_mode_set). */
-    if (!coop_lite_worldmap_open_allowed(coop_lite_can_use_worldmap(), wmap_ui_selecting,
+    if (!coop_lite_worldmap_open_allowed(wmap_ui_world_allowed(), wmap_ui_selecting,
             player_get_local_pc_obj() != OBJ_HANDLE_NULL
                 ? townmap_get(sector_id_from_loc(obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION)))
                 : TOWNMAP_NONE)) {
@@ -1269,11 +1282,11 @@ void wmap_ui_open_internal(void)
 
     if (wmap_ui_townmap != TOWNMAP_NONE) {
         wmap_ui_mode_set(WMAP_UI_MODE_TOWN);
-        if (!coop_lite_can_use_worldmap() && wmap_ui_mode != WMAP_UI_MODE_TOWN) {
+        if (!wmap_ui_world_allowed() && wmap_ui_mode != WMAP_UI_MODE_TOWN) {
             wmap_ui_close();
             return;
         }
-    } else if (!coop_lite_can_use_worldmap()) {
+    } else if (!wmap_ui_world_allowed()) {
         wmap_ui_close();
         return;
     } else if (tig_net_is_active() && !tig_net_is_coop_enabled()) {
@@ -1444,6 +1457,7 @@ void wmap_ui_close(void)
     int64_t pc_obj;
     int index;
 
+    wmap_ui_spectating = false;
     if (!wmap_ui_created) {
         return;
     }
@@ -1833,6 +1847,10 @@ bool wmap_ui_message_filter(TigMessage* msg)
     bool inside = false;
     TigMessage tmp_msg = *msg;
     msg = &tmp_msg;
+
+    if (wmap_ui_spectating) {
+        return true; /* PT73: watching the host travel - no input, no Esc */
+    }
 
     // Convert mouse position from screen coordinate system to centered 800x600
     // area.
@@ -2575,7 +2593,7 @@ void wmap_ui_mode_set(WmapUiMode mode)
         return;
     }
 
-    if (mode != WMAP_UI_MODE_TOWN && !coop_lite_can_use_worldmap()) {
+    if (mode != WMAP_UI_MODE_TOWN && !wmap_ui_world_allowed()) {
         return; /* PT44: coop client — town map only, no world travel */
     }
 
@@ -5081,4 +5099,74 @@ void sub_566D10(int type, WmapCoords* coords, TigRect* a3, TigRect* a4, WmapInfo
         art_blit_info.dst_rect = &dst_rect;
         tig_window_blit_art(wmap_ui_window, &art_blit_info);
     }
+}
+
+/* PT73: coop client spectator view of the host's world-map travel. Opens
+   the normal world map (its own checks: alive PC, no encounter), switches to
+   the world mode and swallows every input in wmap_ui_message_filter. */
+bool wmap_ui_spectate_open(void)
+{
+    if (wmap_ui_created) {
+        return wmap_ui_spectating;
+    }
+    wmap_ui_spectating = true;
+    wmap_ui_spell = -1;
+    wmap_ui_selecting = false;
+    wmap_ui_obj = OBJ_HANDLE_NULL;
+    wmap_ui_open_internal();
+    if (!wmap_ui_created) {
+        wmap_ui_spectating = false;
+        return false;
+    }
+    wmap_ui_spectating = true;
+    if (wmap_ui_mode != WMAP_UI_MODE_WORLD) {
+        wmap_ui_mode_set(WMAP_UI_MODE_WORLD);
+    }
+    if (wmap_ui_mode != WMAP_UI_MODE_WORLD) {
+        wmap_ui_close();
+        return false;
+    }
+    return true;
+}
+
+void wmap_ui_spectate_set(int x, int y)
+{
+    WmapInfo* wmap_info;
+
+    if (!wmap_ui_spectating || !wmap_ui_created || wmap_ui_mode != WMAP_UI_MODE_WORLD) {
+        return;
+    }
+    wmap_info = &(wmap_ui_mode_info[WMAP_UI_MODE_WORLD]);
+    wmap_info->field_3C.x = x;
+    wmap_info->field_3C.y = y;
+    sub_563590(&(wmap_info->field_3C), false);
+    wmap_info->refresh();
+}
+
+void wmap_ui_spectate_close(void)
+{
+    if (wmap_ui_spectating && wmap_ui_created) {
+        wmap_ui_close();
+    }
+    wmap_ui_spectating = false;
+}
+
+bool wmap_ui_is_spectating(void)
+{
+    return wmap_ui_spectating && wmap_ui_created;
+}
+
+bool wmap_ui_world_coords_get(int* x, int* y)
+{
+    if (!wmap_ui_created || wmap_ui_spectating || wmap_ui_mode != WMAP_UI_MODE_WORLD) {
+        return false;
+    }
+    *x = wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.x;
+    *y = wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.y;
+    return true;
+}
+
+bool wmap_ui_is_moving(void)
+{
+    return wmap_ui_created && wmap_ui_state == WMAP_UI_STATE_MOVING;
 }

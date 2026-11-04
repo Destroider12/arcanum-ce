@@ -2958,3 +2958,23 @@ every 250 ms from `coop_lite_ping`, with no new teleport. It gives up after 40
 tries (about 10 s; `coop_lite_sync_retry_allowed`, tested). The earlier "Magnus
 vanished" report was a different problem: the teammate portrait had taken the
 follower slot (see PT74).
+
+## PT73: client sees host world-map travel (protocol 43)
+
+While the host has the world map open, `coop_lite_host_wmap_tick` sends a
+new packet, `PACKET_COOP_WMAP_POS` (159), with the party marker's world-map
+coordinates (x, y, moving flag, seq). It sends when the marker moves, at most
+every 150 ms (about 6–7 Hz), plus a 1 s keepalive
+(`coop_lite_wmap_pos_should_send`, tested).
+
+On the client, `coop_lite_handle_wmap_pos` opens the normal world map in
+spectator mode (`wmap_ui_spectate_open`) and moves the marker there, centring
+the view. The old screen dim is lifted while the map is shown. Spectator mode
+is read-only:
+- `wmap_ui_message_filter` swallows all input, including Esc.
+- `wmap_ui_open`/`select` are ignored.
+
+The view closes on WMAP_CLOSE, on the 8 s overlay timeout, or when the host's
+follow (arrival) packet comes in. If the client already has its own town map
+open, it is left alone (dim only). Route lines are not sent; only the marker
+moves.

@@ -2405,6 +2405,30 @@ int main(int argc, char** argv)
             fprintf(stderr, "PT66 corpse keep\n");
             return 1;
         }
+        /* PT73: world-map marker packet */
+        {
+            PacketCoopWmapPos wp;
+
+            memset(&wp, 0, sizeof(wp));
+            wp.type = PACKET_COOP_WMAP_POS;
+            wp.x = 1200;
+            wp.y = 900;
+            if (!coop_lite_wmap_pos_valid(&wp, (int)sizeof(wp)) || coop_lite_wmap_pos_valid(&wp, 8)
+                || !coop_lite_wmap_pos_should_send(false, 0, 0, 0, 0, 1, 1)
+                || coop_lite_wmap_pos_should_send(true, 1000, 1100, 1, 1, 2, 2)
+                || !coop_lite_wmap_pos_should_send(true, 1000, 1150, 1, 1, 2, 2)
+                || coop_lite_wmap_pos_should_send(true, 1000, 1900, 2, 2, 2, 2)
+                || !coop_lite_wmap_pos_should_send(true, 1000, 2000, 2, 2, 2, 2)
+                || TIG_NET_PROTOCOL < 43) {
+                fprintf(stderr, "PT73 wmap pos\n");
+                return 1;
+            }
+            wp.x = -1;
+            if (coop_lite_wmap_pos_valid(&wp, (int)sizeof(wp))) {
+                fprintf(stderr, "PT73 wmap pos bounds\n");
+                return 1;
+            }
+        }
         /* PT72: no-local-PC sync is retried, bounded */
         if (coop_lite_sync_retry_allowed(0) || !coop_lite_sync_retry_allowed(1)
             || !coop_lite_sync_retry_allowed(40) || coop_lite_sync_retry_allowed(41)) {

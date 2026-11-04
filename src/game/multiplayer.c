@@ -1197,6 +1197,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_HOTBAR:
         coop_lite_handle_hotbar((PacketCoopHotbar*)msg);
         break;
+    case PACKET_COOP_WMAP_POS:
+        coop_lite_handle_wmap_pos((PacketCoopWmapPos*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

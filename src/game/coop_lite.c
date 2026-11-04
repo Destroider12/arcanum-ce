@@ -1112,6 +1112,11 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
         return;
     }
 
+#ifndef COOP_LITE_TEST_STUBS
+    if (wmap_ui_is_spectating()) {
+        wmap_ui_spectate_close(); /* PT73: host arrived */
+    }
+#endif
     pc_obj = player_get_local_pc_obj();
     /* PT52f: forced travel - close dialog/barter/inventory/char view first
        (PT52i: only when there is a PC to move) */
@@ -2131,6 +2136,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_STORY_SYNC: /* PT35 quests / rumors / reputation → client */
     case PACKET_COOP_DOOR_STATE: /* PT53e host door state → clients */
     case PACKET_COOP_TRAP_FX: /* PT61 host trap visuals → clients */
+    case PACKET_COOP_WMAP_POS: /* PT73 host world-map marker → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3247,6 +3253,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopSaveReq);
     case PACKET_COOP_TRAP_FX:
         return sizeof(PacketCoopTrapFx);
+    case PACKET_COOP_WMAP_POS:
+        return sizeof(PacketCoopWmapPos);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -6348,8 +6356,11 @@ static void coop_lite_client_wmap_dim(bool on)
         return;
     }
     coop_client_wmap_dimmed = on;
+    if (!on && wmap_ui_is_spectating()) {
+        wmap_ui_spectate_close(); /* PT73 */
+    }
     if (!coop_client_rest_faded) {
-        tig_video_dim(tig_color_make(0, 0, 16), on ? 150 : 0);
+        tig_video_dim(tig_color_make(0, 0, 16), on && !wmap_ui_is_spectating() ? 150 : 0);
     }
     tig_debug_printf("CoopLite: world map overlay %s\n", on ? "on (host travels)" : "off");
 }
@@ -6364,6 +6375,44 @@ static void coop_lite_client_wmap_tick(unsigned int now_ms)
 
 static bool coop_host_wmap_open;
 static unsigned int coop_host_wmap_ms;
+static bool coop_host_wmap_pos_have;
+static unsigned int coop_host_wmap_pos_ms;
+static unsigned int coop_host_wmap_pos_seq;
+static int coop_host_wmap_pos_x;
+static int coop_host_wmap_pos_y;
+static unsigned int coop_client_wmap_pos_seq;
+
+/* PT73 client: show the host's world map read-only, marker at x,y. */
+void coop_lite_handle_wmap_pos(PacketCoopWmapPos* pkt)
+{
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_wmap_pos_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (!coop_lite_client_world_ready() || coop_client_rest_faded) {
+        return;
+    }
+    if (coop_client_wmap_pos_seq != 0 && (int)(pkt->seq - coop_client_wmap_pos_seq) <= 0) {
+        return; /* stale */
+    }
+    coop_client_wmap_pos_seq = pkt->seq;
+    if (!coop_client_wmap_dimmed) {
+        coop_lite_client_wmap_dim(true);
+    } else {
+        coop_client_wmap_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    }
+    if (!wmap_ui_is_spectating()) {
+        if (wmap_ui_is_created()) {
+            return; /* own town map open: leave it */
+        }
+        if (!wmap_ui_spectate_open()) {
+            return;
+        }
+        tig_video_dim(tig_color_make(0, 0, 16), 0);
+        tig_debug_printf("CoopLite: PT73 spectating the host's world map\n");
+    }
+    wmap_ui_spectate_set(pkt->x, pkt->y);
+}
 
 /* PT26 host: tell clients the world map is open (edge + every 3 s). */
 static void coop_lite_host_wmap_tick(unsigned int now_ms)
@@ -6383,7 +6432,32 @@ static void coop_lite_host_wmap_tick(unsigned int now_ms)
             tig_debug_printf("CoopLite: host opened the world map - clients dim\n");
         }
         coop_host_wmap_ms = now_ms != 0 ? now_ms : 1;
-    } else if (!open && coop_host_wmap_open) {
+    }
+    if (open) {
+        int x;
+        int y;
+
+        if (wmap_ui_world_coords_get(&x, &y)
+            && coop_lite_wmap_pos_should_send(coop_host_wmap_pos_have, coop_host_wmap_pos_ms, now_ms,
+                coop_host_wmap_pos_x, coop_host_wmap_pos_y, x, y)) {
+            PacketCoopWmapPos wp;
+
+            memset(&wp, 0, sizeof(wp));
+            wp.type = PACKET_COOP_WMAP_POS;
+            wp.seq = ++coop_host_wmap_pos_seq;
+            wp.x = x;
+            wp.y = y;
+            wp.moving = wmap_ui_is_moving() ? 1 : 0;
+            tig_net_send_app_all(&wp, sizeof(wp));
+            coop_host_wmap_pos_have = true;
+            coop_host_wmap_pos_ms = now_ms;
+            coop_host_wmap_pos_x = x;
+            coop_host_wmap_pos_y = y;
+        }
+    } else if (coop_host_wmap_open) {
+        coop_host_wmap_pos_have = false;
+    }
+    if (!open && coop_host_wmap_open) {
         PacketCoopPartyState pkt;
 
         memset(&pkt, 0, sizeof(pkt));
@@ -6414,6 +6488,7 @@ static void coop_lite_client_rest_fade(bool out)
     }
 }
 #else
+void coop_lite_handle_wmap_pos(PacketCoopWmapPos* pkt) { (void)pkt; }
 bool coop_lite_client_rest_refused(void) { return false; }
 void coop_lite_host_rest_begin(void) { }
 void coop_lite_host_world_dirty(void) { }
@@ -18733,6 +18808,28 @@ static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag)
 {
     return is_pc || leads_to_pc || no_decay_flag;
+}
+
+/* PT73 (pure; tests) */
+bool coop_lite_wmap_pos_valid(const PacketCoopWmapPos* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_WMAP_POS && size >= (int)sizeof(PacketCoopWmapPos)
+        && pkt->x >= 0 && pkt->y >= 0 && pkt->x < 100000 && pkt->y < 100000;
+}
+
+bool coop_lite_wmap_pos_should_send(bool have_last, unsigned int last_ms, unsigned int now_ms,
+    int last_x, int last_y, int x, int y)
+{
+    unsigned int dt;
+
+    if (!have_last) {
+        return true;
+    }
+    dt = now_ms - last_ms;
+    if (x != last_x || y != last_y) {
+        return dt >= 150u;
+    }
+    return dt >= 1000u;
 }
 
 /* PT72 (pure; tests): a SESSION_SYNC that found no local PC is retried
