@@ -2318,6 +2318,15 @@ int main(int argc, char** argv)
     if (test_world_state() != 0) {
         return 1;
     }
+    /* PT76b */
+    if (!coop_lite_cosmetic_swing_speed_scaled(true, false, true, true)
+        || coop_lite_cosmetic_swing_speed_scaled(true, true, true, true)
+        || coop_lite_cosmetic_swing_speed_scaled(false, false, true, true)
+        || coop_lite_cosmetic_swing_speed_scaled(true, false, false, true)
+        || coop_lite_cosmetic_swing_speed_scaled(true, false, true, false)) {
+        fprintf(stderr, "PT76b swing speed policy wrong\n");
+        return 1;
+    }
     if (coop_lite_host_left_menu_due(false, 1, 99999)
         || coop_lite_host_left_menu_due(true, 1000, 3499)
         || !coop_lite_host_left_menu_due(true, 1000, 3500)

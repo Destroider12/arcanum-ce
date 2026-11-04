@@ -3404,6 +3404,11 @@ bool coop_lite_client_drives_obj(int64_t obj)
    PC_POS interpolation ring, NPCs through NPC_POS - so applying it cut our
    swing to a stand frame after each host strike and yanked the host's PC
    out of its interpolated path. true: the caller must drop the packet. */
+bool coop_lite_cosmetic_swing_speed_scaled(bool net_active, bool is_host, bool is_critter, bool is_attack_anim)
+{
+    return net_active && !is_host && is_critter && is_attack_anim;
+}
+
 bool coop_lite_client_drop_anim_pose(int64_t obj)
 {
 #ifdef COOP_LITE_TEST_STUBS

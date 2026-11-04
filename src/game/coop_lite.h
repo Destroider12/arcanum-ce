@@ -1298,6 +1298,10 @@ void coop_lite_terminate_name(char* name, size_t size);
  */
 bool coop_lite_client_drives_obj(int64_t obj);
 bool coop_lite_client_drop_anim_pose(int64_t obj);
+/* PT76b: a coop client's cosmetic attack AG_ANIMATE (relayed swing) runs at
+   the attacker's speed-scaled rate like the host's real attack, not the
+   art's base fps. Pure. */
+bool coop_lite_cosmetic_swing_speed_scaled(bool net_active, bool is_host, bool is_critter, bool is_attack_anim);
 /* Client applying host state: object scripts must not run (review P0-3). */
 bool coop_lite_scripts_muted(void);
 /* Client: our gold / ammo stack's OID → the host's (they differ). */

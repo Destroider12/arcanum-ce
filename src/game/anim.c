@@ -9395,6 +9395,15 @@ bool sub_42CB10(AnimRunInfo* run_info)
         run_info->pause_time.milliseconds = 100;
     }
 
+    /* PT76b: on a coop client an attack AG_ANIMATE is the cosmetic copy of
+       a host-resolved swing; the host plays it at the speed-scaled rate
+       (sub_42EE90), so a fast PC looked several times slower here. */
+    if (coop_lite_cosmetic_swing_speed_scaled(tig_net_is_active(), tig_net_is_host(),
+            obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE)),
+            tig_art_id_anim_get(art_id) == TIG_ART_ANIM_ATTACK)) {
+        sub_42EE90(obj, &(run_info->pause_time));
+    }
+
     run_info->flags &= ~0x0C;
     run_info->flags |= 0x10;
 
