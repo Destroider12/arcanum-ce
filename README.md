@@ -130,9 +130,9 @@ See the upstream build notes below. Use the CMake presets, or a mingw-w64 cross-
 
 ## Known limitations
 
-- **Pre-release.** The full campaign has **not** been finished in co-op yet. Playtesting is ongoing and bugs and desyncs should be expected.
+- **Pre-release, limited testing.** The full campaign has **not** been played through in co-op yet. So far it has been tested **only on a single local machine** (host and client on the same PC, 127.0.0.1). It has **not** been tested over a real network or between separate PCs, and the Steam transport is **untested**. Expect bugs and desyncs.
 - Windows x64 only for co-op. Other platforms are untested.
-- The **Steam transport** has seen much less testing than Direct/ENet. The relay connection is still being polished.
+- The **Steam transport** has not been tested at all yet.
 - The world map is driven by the host. Clients can't travel on their own.
 - When the ready check delays a world-map stop, the host can stand at the old spot until the check finishes.
 - While the host is down, each reconnect attempt can block the client's menu for up to about 5 s.
@@ -144,7 +144,7 @@ See the upstream build notes below. Use the CMake presets, or a mingw-w64 cross-
 
 - Compatibility with [Arcanum: ReForged](https://github.com/kurkijar/Arcanum-ReForged) (modern world map, HighRes).
 - Polish for the Steam relay transport (connection UX, testing).
-- A complete campaign playthrough in co-op, and fixing whatever it turns up.
+- Testing between separate PCs over a real network, then a complete campaign playthrough in co-op.
 - More sync coverage and fewer desyncs found by playtests, fuzzing and 8-player stress tests.
 - A release and update workflow for the launcher.
 
