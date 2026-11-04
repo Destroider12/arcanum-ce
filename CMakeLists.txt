@@ -728,7 +728,7 @@ add_test(NAME tig_net_transport COMMAND tig_net_transport_test)
 # PT58: co-op launcher (Win32 GUI, Windows builds only).
 if(WIN32)
     add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c")
-    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32)
+    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32 shell32)
     if(ARCANUM_UPNP)
         target_link_libraries(arcanum-coop-launcher PRIVATE miniupnpc)
         target_compile_definitions(arcanum-coop-launcher PRIVATE LAUNCHER_UPNP=1)

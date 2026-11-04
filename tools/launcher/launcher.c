@@ -17,6 +17,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,9 @@
 #define IDC_ADDR_LABEL 113
 #define IDC_STEAM_LABEL 114
 #define WM_APP_PUBIP (WM_APP + 1)
+#define IDC_CHECK 115
+#define IDC_FIREWALL 116
+#define IDC_CHECK_OUT 117
 
 static HWND g_wnd;
 static HFONT g_font;
@@ -359,6 +363,345 @@ static void start_game(void)
     set_status(host ? "Game started as host. Friends can join any time (late join)." : "Game started - joining the host.");
 }
 
+/* ---- PT59: port check (launcher only) ----
+ * No server of ours: local bind test, UPnP query / test mapping, router WAN
+ * IP vs the public IP seen by a public STUN server (CGNAT), STUN mapped port
+ * from the game port, and our firewall rule. A true inbound UDP test needs
+ * an outside peer, so OPEN is only ever "likely". */
+#define WM_APP_CHECK (WM_APP + 2)
+#define FW_RULE_FMT "Arcanum Coop UDP %d"
+
+typedef struct PortCheckJob {
+    int port;
+    bool probe_port; /* bind the game port for STUN + try a test mapping */
+} PortCheckJob;
+
+static volatile LONG g_check_running;
+
+static bool ip_private(const char* ip)
+{
+    unsigned a, b, c, d;
+
+    if (ip == NULL || sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        return false;
+    }
+    return a == 10 || a == 127 || (a == 172 && b >= 16 && b < 32) || (a == 192 && b == 168)
+        || (a == 100 && b >= 64 && b < 128) || (a == 169 && b == 254) || a == 0;
+}
+
+/* STUN binding request (RFC 5389) on sock; fills ip / port. */
+static bool stun_query(SOCKET sock, char* ip, size_t ip_size, int* mapped_port)
+{
+    static const char* const servers[] = { "stun.l.google.com", "stun1.l.google.com", "stun.cloudflare.com" };
+    static const char* const ports[] = { "19302", "19302", "3478" };
+    size_t s;
+    int attempt;
+
+    for (s = 0; s < sizeof(servers) / sizeof(servers[0]); s++) {
+        struct addrinfo hints;
+        struct addrinfo* res = NULL;
+
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(servers[s], ports[s], &hints, &res) != 0 || res == NULL) {
+            continue;
+        }
+        for (attempt = 0; attempt < 2; attempt++) {
+            unsigned char req[20];
+            unsigned char resp[512];
+            fd_set rd;
+            struct timeval tv = { 0, 800000 };
+            int n;
+            int i;
+            int off;
+
+            memset(req, 0, sizeof(req));
+            req[1] = 0x01; /* Binding Request */
+            req[4] = 0x21;
+            req[5] = 0x12;
+            req[6] = 0xA4;
+            req[7] = 0x42;
+            for (i = 8; i < 20; i++) {
+                req[i] = (unsigned char)(rand() & 0xFF);
+            }
+            sendto(sock, (const char*)req, sizeof(req), 0, res->ai_addr, (int)res->ai_addrlen);
+            FD_ZERO(&rd);
+            FD_SET(sock, &rd);
+            if (select(0, &rd, NULL, NULL, &tv) <= 0) {
+                continue;
+            }
+            n = recv(sock, (char*)resp, sizeof(resp), 0);
+            if (n < 20 || resp[0] != 0x01 || resp[1] != 0x01 || memcmp(resp + 8, req + 8, 12) != 0) {
+                continue;
+            }
+            for (off = 20; off + 4 <= n;) {
+                int type = (resp[off] << 8) | resp[off + 1];
+                int len = (resp[off + 2] << 8) | resp[off + 3];
+
+                if ((type == 0x0020 || type == 0x0001) && len >= 8 && off + 4 + 8 <= n && resp[off + 5] == 0x01) {
+                    unsigned char* v = resp + off + 4;
+                    int p = (v[2] << 8) | v[3];
+                    unsigned char a[4] = { v[4], v[5], v[6], v[7] };
+
+                    if (type == 0x0020) {
+                        p ^= 0x2112;
+                        a[0] ^= 0x21;
+                        a[1] ^= 0x12;
+                        a[2] ^= 0xA4;
+                        a[3] ^= 0x42;
+                    }
+                    snprintf(ip, ip_size, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+                    *mapped_port = p;
+                    freeaddrinfo(res);
+                    return true;
+                }
+                off += 4 + ((len + 3) & ~3);
+            }
+        }
+        freeaddrinfo(res);
+    }
+    return false;
+}
+
+/* Our netsh rule exists? (by name: language-independent exit code) */
+static int firewall_rule_state(int port)
+{
+    char cmd[256];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 2;
+
+    snprintf(cmd, sizeof(cmd), "netsh.exe advfirewall firewall show rule name=\"" FW_RULE_FMT "\"", port);
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return -1;
+    }
+    if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0) {
+        GetExitCodeProcess(pi.hProcess, &code);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0 ? 1 : code == 1 ? 0 : -1;
+}
+
+static DWORD WINAPI check_thread(LPVOID arg)
+{
+    PortCheckJob job = *(PortCheckJob*)arg;
+    char* out = (char*)malloc(4096);
+    char lines[2048] = "";
+    char verdict[1024] = "";
+    char wan_ip[64] = "";
+    char stun_ip[64] = "";
+    char port_str[16];
+    int stun_port = 0;
+    bool stun_ok = false;
+    bool bound = false;
+    bool in_use = false;
+    bool upnp_router = false;
+    bool upnp_mapped = false;
+    bool upnp_refused = false;
+    int fw;
+    bool cgnat = false;
+    SOCKET sock;
+    struct sockaddr_in sin;
+
+    free(arg);
+    snprintf(port_str, sizeof(port_str), "%d", job.port);
+
+    /* 1. local bind */
+    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons((u_short)job.port);
+    if (sock != INVALID_SOCKET && job.probe_port && bind(sock, (struct sockaddr*)&sin, sizeof(sin)) == 0) {
+        bound = true;
+        strcat(lines, "Local: UDP port free.\r\n");
+    } else if (sock != INVALID_SOCKET && job.probe_port) {
+        in_use = WSAGetLastError() == WSAEADDRINUSE;
+        strcat(lines, in_use ? "Local: UDP port in use (the game is already hosting?).\r\n"
+                             : "Local: cannot bind the UDP port.\r\n");
+    }
+    if (sock != INVALID_SOCKET && !bound) {
+        closesocket(sock);
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP); /* any port: public IP only */
+        sin.sin_port = 0;
+        if (sock != INVALID_SOCKET) {
+            bind(sock, (struct sockaddr*)&sin, sizeof(sin));
+        }
+    }
+
+    /* 4. STUN */
+    if (sock != INVALID_SOCKET) {
+        stun_ok = stun_query(sock, stun_ip, sizeof(stun_ip), &stun_port);
+        closesocket(sock);
+    }
+    {
+        char l[256];
+
+        if (!stun_ok) {
+            snprintf(l, sizeof(l), "STUN: no answer (offline, or UDP blocked outbound).\r\n");
+        } else if (bound) {
+            snprintf(l, sizeof(l), "STUN: public %s, port %d -> %d (%s).\r\n", stun_ip, job.port, stun_port,
+                stun_port == job.port ? "preserved" : "rewritten by NAT");
+        } else {
+            snprintf(l, sizeof(l), "STUN: public IP %s.\r\n", stun_ip);
+        }
+        strcat(lines, l);
+    }
+
+    /* 2. UPnP */
+#ifdef LAUNCHER_UPNP
+    {
+        int error = 0;
+        struct UPNPDev* devs = upnpDiscover(2000, NULL, NULL, 0, 0, 2, &error);
+
+        if (devs != NULL) {
+            struct UPNPUrls urls;
+            struct IGDdatas data;
+            char lan[64];
+            char wan[64];
+            int igd;
+
+            memset(&urls, 0, sizeof(urls));
+            memset(&data, 0, sizeof(data));
+            igd = UPNP_GetValidIGD(devs, &urls, &data, lan, sizeof(lan), wan, sizeof(wan));
+            if (igd == 1 || igd == 2) {
+                char ic[40] = "", ip_[8] = "", desc[80] = "", en[8] = "", lease[16] = "";
+
+                upnp_router = true;
+                if (UPNP_GetExternalIPAddress(urls.controlURL, data.first.servicetype, wan_ip) != UPNPCOMMAND_SUCCESS) {
+                    wan_ip[0] = '\0';
+                }
+                if (UPNP_GetSpecificPortMappingEntry(urls.controlURL, data.first.servicetype, port_str, "UDP", NULL,
+                        ic, ip_, desc, en, lease)
+                    == UPNPCOMMAND_SUCCESS) {
+                    char l[200];
+
+                    upnp_mapped = true;
+                    snprintf(l, sizeof(l), "UPnP: UDP %d is mapped to %s (%s).\r\n", job.port, ic, desc);
+                    strcat(lines, l);
+                    if (strcmp(ic, lan) != 0) {
+                        snprintf(l, sizeof(l), "UPnP: but that is not this PC (%s)!\r\n", lan);
+                        strcat(lines, l);
+                        upnp_mapped = false;
+                    }
+                } else if (job.probe_port && !in_use) {
+                    /* test mapping, removed again: the game maps for itself */
+                    int rc = UPNP_AddPortMapping(urls.controlURL, data.first.servicetype, port_str, port_str, lan,
+                        "Arcanum Coop (launcher test)", "UDP", NULL, "0");
+
+                    if (rc == UPNPCOMMAND_SUCCESS) {
+                        upnp_mapped = true;
+                        UPNP_DeletePortMapping(urls.controlURL, data.first.servicetype, port_str, "UDP", NULL);
+                        strcat(lines, "UPnP: router accepts the mapping (the game maps it when hosting).\r\n");
+                    } else {
+                        char l[160];
+
+                        upnp_refused = true;
+                        snprintf(l, sizeof(l), "UPnP: router refused the mapping (%d).\r\n", rc);
+                        strcat(lines, l);
+                    }
+                } else {
+                    strcat(lines, "UPnP: router found, port not mapped yet.\r\n");
+                }
+                if (wan_ip[0] != '\0') {
+                    char l[120];
+
+                    snprintf(l, sizeof(l), "Router WAN IP: %s.\r\n", wan_ip);
+                    strcat(lines, l);
+                }
+            } else {
+                strcat(lines, "UPnP: no usable router (UPnP off, or a second router in front).\r\n");
+            }
+            if (urls.controlURL != NULL) {
+                FreeUPNPUrls(&urls);
+            }
+            freeUPNPDevlist(devs);
+        } else {
+            strcat(lines, "UPnP: no router answered (UPnP disabled?).\r\n");
+        }
+    }
+#else
+    strcat(lines, "UPnP: not built in.\r\n");
+#endif
+
+    /* 3. CGNAT */
+    if (wan_ip[0] != '\0' && (ip_private(wan_ip) || (stun_ok && strcmp(wan_ip, stun_ip) != 0))) {
+        cgnat = true;
+    }
+    if (stun_ok && ip_private(stun_ip)) {
+        cgnat = true;
+    }
+
+    /* 5. firewall */
+    fw = firewall_rule_state(job.port);
+    strcat(lines, fw == 1 ? "Firewall: our inbound rule exists.\r\n"
+                 : fw == 0 ? "Firewall: no 'Arcanum Coop' rule (Windows may ask on first host, or block silently).\r\n"
+                           : "Firewall: state unknown.\r\n");
+
+    if (cgnat) {
+        snprintf(verdict, sizeof(verdict),
+            "CLOSED - your provider uses CGNAT (router WAN %s, public %s). Port forwarding cannot work here: use the Steam transport, or ask the provider for a public IP.",
+            wan_ip[0] ? wan_ip : "?", stun_ok ? stun_ip : "?");
+    } else if (upnp_mapped) {
+        snprintf(verdict, sizeof(verdict),
+            "OPEN (likely) - UPnP maps UDP %d to this PC, no CGNAT. Give friends %s:%d. (Only a friend joining proves inbound UDP.)%s",
+            job.port, stun_ok ? stun_ip : (wan_ip[0] ? wan_ip : "your public IP"), job.port,
+            fw == 0 ? " If they cannot connect, press 'Add firewall rule'." : "");
+    } else if (upnp_router || upnp_refused || stun_ok) {
+        snprintf(verdict, sizeof(verdict),
+            "CLOSED (likely) - UDP %d is not mapped. Enable UPnP on the router, or forward UDP %d to %s by hand%s. %s",
+            job.port, job.port, g_local_ip[0] ? g_local_ip : "this PC",
+            fw == 1 ? "" : ", and allow it in the firewall ('Add firewall rule')",
+            "If you already forwarded it manually, ignore this.");
+    } else {
+        snprintf(verdict, sizeof(verdict),
+            "UNKNOWN - no UPnP router answered and no STUN server replied (offline or UDP blocked); cannot tell from here.");
+    }
+    snprintf(out, 4096, "%s\r\n\r\n%s", verdict, lines);
+    PostMessageA(g_wnd, WM_APP_CHECK, 0, (LPARAM)out);
+    return 0;
+}
+
+static void start_check(bool probe_port)
+{
+    char addr[128];
+    PortCheckJob* job;
+
+    if (InterlockedCompareExchange(&g_check_running, 1, 0) != 0) {
+        return;
+    }
+    job = (PortCheckJob*)malloc(sizeof(*job));
+    GetWindowTextA(item(IDC_ADDR), addr, sizeof(addr));
+    job->port = port_of(addr);
+    job->probe_port = probe_port;
+    SetWindowTextA(item(IDC_CHECK_OUT), "Checking the port... (a few seconds)");
+    CloseHandle(CreateThread(NULL, 0, check_thread, job, 0, NULL));
+}
+
+static void add_firewall_rule(void)
+{
+    char addr[128];
+    char params[300];
+    char exe[MAX_PATH];
+    HINSTANCE rc;
+    int port;
+
+    GetWindowTextA(item(IDC_ADDR), addr, sizeof(addr));
+    port = port_of(addr);
+    snprintf(params, sizeof(params),
+        "advfirewall firewall add rule name=\"" FW_RULE_FMT "\" dir=in action=allow protocol=UDP localport=%d", port,
+        port);
+    (void)exe;
+    rc = ShellExecuteA(g_wnd, "runas", "netsh.exe", params, NULL, SW_HIDE);
+    set_status((INT_PTR)rc > 32 ? "Firewall rule requested (confirm the Windows prompt), then press 'Check port'."
+                                : "Firewall rule not added (cancelled or no admin rights).");
+}
+
 static HWND make(const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
 {
     HWND h_ = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_wnd,
@@ -389,8 +732,12 @@ static void create_controls(void)
     make("STATIC", "Public IP: (looking up via UPnP...)", 0, 12, 204, 300, 20, IDC_PUBIP);
     make("BUTTON", "Copy", WS_TABSTOP, 330, 190, 100, 26, IDC_COPY);
     make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 200, 20, IDC_WINDOWED);
-    make("STATIC", "", SS_LEFT, 12, 262, 418, 36, IDC_STATUS);
-    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 304, 100, 30, IDC_START);
+    make("BUTTON", "Check port", WS_TABSTOP, 220, 230, 100, 26, IDC_CHECK);
+    make("BUTTON", "Add firewall rule", WS_TABSTOP, 326, 230, 104, 26, IDC_FIREWALL);
+    make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        12, 262, 418, 150, IDC_CHECK_OUT);
+    make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
+    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -404,6 +751,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         set_status("Host: start, then send your address (or SteamID64) to friends. Join: works while the host plays.");
         CloseHandle(CreateThread(NULL, 0, upnp_thread, NULL, 0, NULL));
         return 0;
+    case WM_APP_CHECK:
+        SetWindowTextA(item(IDC_CHECK_OUT), (const char*)lp);
+        free((void*)lp);
+        InterlockedExchange(&g_check_running, 0);
+        return 0;
     case WM_APP_PUBIP:
         snprintf(g_public_ip, sizeof(g_public_ip), "%s", (const char*)lp);
         refresh();
@@ -411,8 +763,19 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDC_HOST:
+            refresh();
+            if (!is_steam()) {
+                start_check(true); /* PT59: automatic check on Host */
+            }
+            break;
         case IDC_JOIN:
             refresh();
+            break;
+        case IDC_CHECK:
+            start_check(true);
+            break;
+        case IDC_FIREWALL:
+            add_firewall_rule();
             break;
         case IDC_TRANSPORT:
             if (HIWORD(wp) == CBN_SELCHANGE) {
@@ -424,6 +787,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDC_START:
             start_game();
+            if (is_host() && !is_steam()) {
+                /* PT59: never blocks the start; the game owns the port now */
+                start_check(false);
+            }
             break;
         }
         return 0;
@@ -443,7 +810,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     WNDCLASSA wc;
     WSADATA wsa;
     MSG m;
-    RECT r = { 0, 0, 444, 346 };
+    RECT r = { 0, 0, 444, 502 };
     char* slash;
     NONCLIENTMETRICSA ncm;
 

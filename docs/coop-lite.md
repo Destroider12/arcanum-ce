@@ -2692,3 +2692,26 @@ spot until the check finishes or the stop is repeated (repeat forces travel). Pr
 - AppID: `SteamAppId` defaults to **500810** (Arcanum on Steam). Override it with `ARCANUM_COOP_STEAM_APPID`, e.g. 480 (Spacewar, Valve's test app) if Steam refuses the init. The launcher also writes `steam_appid.txt`.
 - Without the DLL, without a running Steam, or with a too-old DLL, the log says `tig_net: Steam transport unavailable: <reason>` and starting co-op fails cleanly.
 - **What the user provides:** a 64-bit `steam_api64.dll` from Steamworks SDK 1.51 or newer, or from any recent 64-bit Steam game's folder, placed next to `arcanum-ce.exe` in every instance folder. Steam must be running and logged in on both PCs, and the account needs the AppID (owning Arcanum on Steam, or use 480).
+
+## PT59: launcher port check
+
+The launcher only (no in-game UI) answers "can friends reach my UDP port?" without any server of ours.
+It runs on a worker thread, triggered by **Check port**, by selecting **Host**, and after **Start** as host.
+It never blocks the start.
+
+Checks:
+1. **Local bind** of UDP <port>: free / in use (game already hosting).
+2. **STUN** (stun.l.google.com:19302, stun1, stun.cloudflare.com:3478) from the bound port: public IP and mapped port; reports whether the NAT preserved the port.
+3. **UPnP**: existing mapping of UDP <port> (and whether it points at this PC). If there is none and the port is free, a test mapping is added and deleted again; refusal is reported.
+4. **CGNAT**: the router WAN IP is private or 100.64/10, or differs from the STUN IP.
+5. **Firewall**: `netsh advfirewall firewall show rule name="Arcanum Coop UDP <port>"` (exit code, so it is language-independent). **Add firewall rule** runs netsh elevated (`runas`) only on click.
+
+After Start the check does not bind the port or add mappings (the game owns them).
+
+Verdicts:
+- `OPEN (likely)`: UPnP maps the port to this PC and there is no CGNAT.
+- `CLOSED`: CGNAT detected; use the Steam transport or ask the provider for a public IP.
+- `CLOSED (likely)`: the port is not mapped; enable UPnP, or forward UDP <port> to <local IP> and allow it in the firewall.
+- `UNKNOWN`: neither UPnP nor STUN answered.
+
+Limits: a true inbound UDP test needs an outside peer; only a friend joining proves it. A manual forward cannot be seen (hence "likely"). Third-party firewalls and other Windows rules are not detected.
