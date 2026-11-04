@@ -361,6 +361,19 @@ static int64_t coop_lite_host_pc_obj(void)
 }
 #endif
 
+/* PT57: co-op's own teleports (follow, session sync, rejoin, host travel)
+   pass the client travel intercept in teleport_do. */
+static int coop_client_tp_auth;
+static bool coop_lite_auth_teleport(TeleportData* td)
+{
+    bool ok;
+
+    coop_client_tp_auth++;
+    ok = teleport_do(td);
+    coop_client_tp_auth--;
+    return ok;
+}
+
 void coop_lite_host_on_entered_world(void);
 
 static bool coop_lite_applying_follow;
@@ -1123,7 +1136,7 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     coop_follow_host_loc = pkt->loc;
     coop_lite_applying_follow = true;
     coop_map_gen = (uint16_t)pkt->map_gen;
-    if (!teleport_do(&teleport_data)) {
+    if (!coop_lite_auth_teleport(&teleport_data)) {
         /* PT23: refused (another local teleport pending) — never leave the
            carry wait armed: it stops our PC_POS until the next travel. */
         coop_follow_carry_pending = false;
@@ -1188,6 +1201,11 @@ static unsigned int coop_layout_sent_seq;
 static unsigned int coop_layout_next_seq;
 static unsigned int coop_layout_sent_ms;
 static unsigned int coop_layout_host_hash;
+/* PT57: other players' packs (by slot) as the host last listed them. */
+static unsigned int coop_other_host_hash[8];
+static unsigned int coop_other_acked_hash[8];
+static bool coop_other_valid[8];
+
 static bool coop_layout_host_valid;
 static unsigned int coop_layout_acked_hash;
 /* PT37: debounced WORLD_DIRTY after any door change on the host. */
@@ -1382,6 +1400,7 @@ void coop_lite_session_reset(void)
     coop_layout_next_seq = 0;
     coop_layout_host_valid = false;
     coop_layout_host_hash = 0;
+    memset(coop_other_valid, 0, sizeof(coop_other_valid)); /* PT57 */
     coop_layout_acked_hash = 0;
     coop_in_world_ms = 0;
     coop_mismatch_key = 0;
@@ -2116,6 +2135,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_PC_STATS: /* PT19 PC build: owner→host, host→all */
     case PACKET_COOP_DIALOG_STATE: /* PT36: host view → clients, client vote → host (kind-checked) */
     case PACKET_COOP_PARTY_CTRL: /* PT50: travel check / spell end (op-checked) */
+    case PACKET_COOP_TRAVEL_REQ: /* PT57: client ask -> host, refusal -> client (kind-checked) */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3166,6 +3186,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return offsetof(PacketCoopInvenLayout, entries);
     case PACKET_COOP_PARTY_CTRL:
         return sizeof(PacketCoopPartyCtrl);
+    case PACKET_COOP_TRAVEL_REQ:
+        return sizeof(PacketCoopTravelReq);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -4774,7 +4796,7 @@ static void coop_lite_dev_go_to_merchant(void)
     teleport_data.map = map_current_map();
     tig_debug_printf("CoopLite: dev start: merchant '%s' at %d,%d (%d tiles) — moving the party there\n",
         name, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), (int)best_dist);
-    teleport_do(&teleport_data);
+    coop_lite_auth_teleport(&teleport_data);
 }
 
 /*
@@ -5009,7 +5031,7 @@ static void coop_lite_dev_tick(unsigned int now_ms)
                     coop_dialog_end_hook(player_get_local_pc_obj(), 0);
                 }
                 tig_debug_printf("CoopLite: dev start: teleport host to %d,%d\n", x, y);
-                teleport_do(&teleport_data);
+                coop_lite_auth_teleport(&teleport_data);
                 if (strcmp(env, "merchant") == 0) {
                     coop_dev_merchant_pending = true;
                     coop_dev_merchant_ms = now_ms;
@@ -5420,7 +5442,7 @@ static void coop_lite_host_dev_far_tick(unsigned int now_ms)
         coop_dev_far_stage == 0 ? "away" : "back",
         (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
         (int)LOCATION_GET_X(teleport_data.loc), (int)LOCATION_GET_Y(teleport_data.loc));
-    teleport_do(&teleport_data);
+    coop_lite_auth_teleport(&teleport_data);
     coop_dev_far_stage = coop_dev_far_stage == 0 ? 1 : 3;
     coop_dev_far_ms = now_ms != 0 ? now_ms : 1;
     /* Census soon after on the host too. */
@@ -6909,7 +6931,7 @@ static bool coop_lite_client_request_sync_teleport(void)
     teleport_data.map = coop_pending_sync.map;
     coop_lite_client_clear_stuck_flags(teleport_data.obj, "sync");
     coop_lite_applying_follow = true;
-    ok = teleport_do(&teleport_data);
+    ok = coop_lite_auth_teleport(&teleport_data);
     coop_lite_applying_follow = false;
     coop_pending_sync_teleport_queued = ok;
     if (!ok) {
@@ -9866,9 +9888,9 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                    quantity); a critter's by total (gold/ammo fields). A
                    container's piles have no such field, and only the first
                    pile of one prototype was ever counted. */
-                if (coop_lite_is_stackable(items[idx]) && critter) {
-                    continue;
-                }
+                /* PT57: a critter's stacks are listed too (E_STACK), for
+                   their grid cell only: the client maps them to its own
+                   local stack of that type; quantity still by total. */
                 if (pkt->count == COOP_INVEN_CHUNK_ENTRIES) {
                     pkt->flags = first ? COOP_INVEN_BATCH_FIRST : 0;
                     first = false;
@@ -11949,6 +11971,41 @@ static bool coop_lite_inv_list_has(int64_t owner, int64_t item)
 }
 
 #define COOP_GRID_FIX_MAX 256
+/* PT57: this critter's own (local) gold / ammo stack of the kind the
+   host prototype `proto` is, or null. */
+static int64_t coop_lite_local_stack_for(int64_t owner, int proto)
+{
+    int64_t proto_obj = proto > 0 ? sub_4685A0(proto) : OBJ_HANDLE_NULL;
+    int64_t stack;
+    int64_t parent = OBJ_HANDLE_NULL;
+    int fld;
+
+    if (proto_obj == OBJ_HANDLE_NULL) {
+        return OBJ_HANDLE_NULL;
+    }
+    if (obj_field_int32_get(proto_obj, OBJ_F_TYPE) == OBJ_TYPE_AMMO) {
+        int t = obj_field_int32_get(proto_obj, OBJ_F_AMMO_TYPE);
+
+        if (t < 0 || t >= COOP_INVEN_AMMO_TYPES) {
+            return OBJ_HANDLE_NULL;
+        }
+        fld = coop_ammo_fld[t];
+    } else if (obj_field_int32_get(proto_obj, OBJ_F_TYPE) == OBJ_TYPE_GOLD) {
+        fld = OBJ_F_CRITTER_GOLD;
+    } else {
+        return OBJ_HANDLE_NULL;
+    }
+    stack = obj_field_handle_get(owner, fld);
+    if (stack == OBJ_HANDLE_NULL || !obj_handle_is_valid(stack)
+        || (obj_field_int32_get(stack, OBJ_F_FLAGS) & OF_DESTROYED) != 0
+        || !item_parent(stack, &parent) || parent != owner) {
+        return OBJ_HANDLE_NULL;
+    }
+    return stack;
+}
+
+static int coop_lite_layout_nearest_cell(int64_t pc, int64_t item, int want);
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -12066,11 +12123,17 @@ static void coop_lite_client_apply_inven_batch(void)
         owner_loc = obj_field_int64_get(owner, OBJ_F_LOCATION);
         for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
             PacketCoopInvenEntry* e = &coop_inv_entry[i];
-            int64_t item = coop_lite_client_reclaim_destroyed(coop_lite_get_oid_obj(e->oid));
+            int64_t item;
             int64_t parent = OBJ_HANDLE_NULL;
             int loc = e->inventory_location;
             int free_loc;
             int k;
+
+            if ((e->state_flags & COOP_INVEN_E_STACK) != 0
+                && obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE))) {
+                continue; /* PT57: a critter's gold / ammo cell: placed after the totals */
+            }
+            item = coop_lite_client_reclaim_destroyed(coop_lite_get_oid_obj(e->oid));
 
             /* PT53a: an OID listed twice in one owner (corrupt host list)
                would be inserted twice: only the first entry counts. */
@@ -12332,6 +12395,47 @@ static void coop_lite_client_apply_inven_batch(void)
                 item_ammo_transfer(owner, OBJ_HANDLE_NULL, -d, t, OBJ_HANDLE_NULL);
             }
             coop_lite_inv_destroy_stray(coop_inv_owner[o].head.ammo_oid[t]);
+        }
+    }
+
+    /* PT57: gold / ammo / arrows follow the host's grid cell. The host's
+       stack OIDs are not ours (stacks merge), so each host stack is mapped
+       to this owner's local stack of the same kind (gold, or the ammo type
+       of the host prototype). Our own PC keeps its cell while a layout of
+       ours is in flight (same rule as the other items). */
+    for (o = 0; o < coop_inv_owner_cnt; o++) {
+        int64_t owner = owner_obj[o];
+
+        if (owner == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(owner, OBJ_F_TYPE))
+            || (owner == local_pc && coop_lite_client_layout_hold())) {
+            continue;
+        }
+        for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
+            PacketCoopInvenEntry* e = &coop_inv_entry[i];
+            int64_t stack = coop_lite_local_stack_for(owner, e->proto);
+            int want = e->inventory_location;
+            int cur;
+
+            if ((e->state_flags & COOP_INVEN_E_STACK) == 0 || stack == OBJ_HANDLE_NULL) {
+                continue;
+            }
+            cur = item_inventory_location_get(stack);
+            if (cur == want || cur < 0 || cur >= 120 || want < 0 || want >= 120) {
+                continue;
+            }
+            item_remove(stack);
+            {
+                int slots[960];
+
+                item_inventory_slots_get(owner, slots);
+                if (!item_inventory_slots_has_room_for(stack, owner, want, slots)) {
+                    int near_loc = coop_lite_layout_nearest_cell(owner, stack, want);
+
+                    want = near_loc >= 0 ? near_loc : cur;
+                }
+            }
+            item_insert(stack, owner, want);
+            moved++;
         }
     }
 
@@ -12994,16 +13098,15 @@ void coop_lite_client_dev_barter_tick(unsigned int now_ms)
 void coop_lite_client_host_left(void)
 {
 #ifndef COOP_LITE_TEST_STUBS
-    if (!coop_lite_client_in_session) {
-        return;
-    }
-    tig_debug_printf("CoopLite: the host left the session\n");
-    /* Keep the player's progress: the session's state of this PC goes to
-       its character bundle before anything is reset. */
-    if (player_get_local_pc_obj() != OBJ_HANDLE_NULL && coop_lite_client_world_ready()) {
+    tig_debug_printf("CoopLite: the host left the session (in session %d)\n", coop_lite_client_in_session);
+    /* PT57: also while still joining / loading (it used to return here and
+       the client sat on a dead session). Keep the player's progress: the
+       session's state of this PC goes to its character bundle first. */
+    if (coop_lite_client_in_session && player_get_local_pc_obj() != OBJ_HANDLE_NULL
+        && coop_lite_client_world_ready()) {
         coop_lite_export_local_character_impl();
     }
-    coop_lite_show_notice("Хост вышел из игры. Ваш персонаж сохранён; возврат в главное меню. / The host left the game. Your character was saved; returning to the main menu.", TF_TYPE_RED);
+    coop_lite_show_notice("Связь с хостом потеряна (вышел, вылет или таймаут). Возврат в главное меню; R — переподключиться. / Lost connection to the host (left, crashed or timed out). Returning to the main menu; press R there to reconnect.", TF_TYPE_RED);
     coop_host_left_menu_armed = true;
     coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
 #endif
@@ -13012,7 +13115,7 @@ void coop_lite_client_host_left(void)
 bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms)
 {
     /* A few seconds so the notice can be read. */
-    return armed && coop_lite_interval_elapsed(armed_ms, now_ms, 4000u);
+    return armed && coop_lite_interval_elapsed(armed_ms, now_ms, 2500u);
 }
 
 /* ---- Parked PCs (pure table; unit-tested) ---- */
@@ -16295,7 +16398,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
             tig_debug_printf("CoopLite: dev far: slot %d PC %d,%d -> %d,%d\n", slot,
                 (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc),
                 (int)LOCATION_GET_X(td.loc), (int)LOCATION_GET_Y(td.loc));
-            teleport_do(&td);
+            coop_lite_auth_teleport(&td);
         }
         return true;
     }
@@ -16323,7 +16426,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
             td.obj = hpc;
             td.map = map_current_map();
             td.loc = coop_lite_follow_loc_for_slot(LOCATION_MAKE(LOCATION_GET_X(loc) + tiles, LOCATION_GET_Y(loc)), 0);
-            ok = teleport_do(&td);
+            ok = coop_lite_auth_teleport(&td);
         } else if (strcmp(cmd, "grab") == 0) {
             if (strcmp(arg, "mp") == 0 || strcmp(arg, "ammo") == 0) {
                 /* announced with Packet70 while the client is far away (loot,
@@ -16596,7 +16699,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
             td.loc = loc;
             td.map = map_by_type(MAP_TYPE_START_MAP);
             tig_debug_printf("CoopLite: dev wmap-travel: host arrives %d tiles east: %s\n", tiles,
-                teleport_do(&td) ? "ok" : "failed");
+                coop_lite_auth_teleport(&td) ? "ok" : "failed");
         }
         if (wmap_ui_is_created()) {
             wmap_ui_close();
@@ -16639,7 +16742,7 @@ static bool coop_lite_dev_trigger_core(const char* cmd, const char* arg)
         td.loc = LOCATION_MAKE(x, y);
         td.map = m;
         tig_debug_printf("CoopLite: dev map: host teleports to map %d at %d,%d\n", m, (int)x, (int)y);
-        teleport_do(&td);
+        coop_lite_auth_teleport(&td);
         return true;
     }
     return false;
@@ -17304,6 +17407,13 @@ bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
         && pkt->op >= COOP_CTRL_TRAVEL_START && pkt->op <= COOP_CTRL_SPELL_END;
 }
 
+/* PT57 */
+bool coop_lite_travel_req_valid(const PacketCoopTravelReq* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_TRAVEL_REQ && size >= (int)sizeof(PacketCoopTravelReq)
+        && pkt->kind >= COOP_TREQ_ASK && pkt->kind <= COOP_TREQ_ACCEPTED && pkt->map > 0 && pkt->map < 100000;
+}
+
 static bool (*coop_travel_busy_hook)(void);
 static void (*coop_travel_show_hook)(const char* text);
 static void (*coop_travel_hide_hook)(void);
@@ -17433,9 +17543,17 @@ void coop_lite_travel_reset(void)
 }
 
 /* PT52c host: a disconnected slot's busy flag and snapshot list go */
+static bool coop_treq_active; /* PT57 */
+static int coop_treq_slot;
+static bool coop_treq_accept(void);
+
 void coop_lite_pt52_slot_gone(int slot)
 {
     if (slot > 0 && slot < 8) {
+        if (coop_treq_active && coop_treq_slot == slot) {
+            coop_treq_active = false; /* PT57: the asker left */
+            coop_travel_hide();
+        }
         coop_client_busy[slot] = false;
         coop_travel_state[slot] = -1; /* PT52d: a rejoin is not READY */
         coop_travel_told_mask &= ~(1 << slot);
@@ -17453,6 +17571,8 @@ void coop_lite_travel_session_reset(void)
 {
     int slot;
 
+    coop_treq_active = false; /* PT57 */
+
     coop_lite_travel_reset();
     memset(coop_client_busy, 0, sizeof(coop_client_busy));
     for (slot = 0; slot < 8; slot++) {
@@ -17469,7 +17589,7 @@ static void coop_travel_go(const char* why)
     coop_travel_hide();
     tig_debug_printf("CoopLite: PT50 travel check done (%s), host leaves\n", why);
     coop_travel_bypass = true;
-    if (!teleport_do(&td)) {
+    if (!coop_lite_auth_teleport(&td)) {
         tig_debug_printf("CoopLite: PT52e travel: teleport_do failed\n");
     }
     coop_travel_bypass = false;
@@ -17526,6 +17646,9 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
 
 bool coop_lite_travel_key(void)
 {
+    if (tig_net_is_active() && tig_net_is_host() && coop_treq_active && !coop_travel_active) {
+        return coop_treq_accept(); /* PT57: Y = go */
+    }
     if (!tig_net_is_active() || !coop_travel_active) {
         return false;
     }
@@ -17694,6 +17817,139 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
     }
 }
 
+/* ---- PT57: client travel requests (coop_treq_active: host, a request waits for Y / N) ---- */
+static PacketCoopTravelReq coop_treq;
+static unsigned int coop_treq_sent_ms; /* client: last ask (jump points re-fire) */
+
+static void coop_treq_send(int kind, int map, int64_t loc, int slot)
+{
+    PacketCoopTravelReq pkt;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_TRAVEL_REQ;
+    pkt.kind = kind;
+    pkt.map = map;
+    pkt.loc = loc;
+    if (slot < 0) {
+        int depth = tig_net_local_suspend_pause();
+
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+        tig_net_local_suspend_resume(depth);
+    } else {
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+    }
+}
+
+static const char* coop_treq_map_name(int map)
+{
+    char* name = NULL;
+
+    if (map > 0 && map_get_name(map, &name) && name != NULL && name[0] != '\0') {
+        return name;
+    }
+    return "another area";
+}
+
+bool coop_lite_client_travel_intercept(const TeleportData* td)
+{
+    unsigned int now;
+
+    if (td == NULL || coop_client_tp_auth > 0 || !tig_net_is_coop_enabled() || !tig_net_is_active()
+        || tig_net_is_host() || !coop_lite_client_in_session || !player_is_local_pc_obj(td->obj)
+        || td->map <= 0 || !map_is_valid() || td->map == map_current_map()) {
+        return false;
+    }
+    now = coop_obj_now_ms;
+    if (coop_treq_sent_ms == 0 || coop_lite_interval_elapsed(coop_treq_sent_ms, now, 3000u)) {
+        coop_treq_sent_ms = now != 0 ? now : 1u;
+        coop_treq_send(COOP_TREQ_ASK, td->map, td->loc, -1);
+        coop_lite_show_notice("Запрос на переход отправлен хосту. / Travel request sent to the host.", TF_TYPE_WHITE);
+        tig_debug_printf("CoopLite: PT57 travel request to map %d sent to the host\n", td->map);
+    }
+    return true; /* never alone */
+}
+
+bool coop_lite_travel_refuse_key(void)
+{
+    if (!tig_net_is_active() || !tig_net_is_host() || !coop_treq_active) {
+        return false;
+    }
+    coop_treq_active = false;
+    coop_travel_hide();
+    coop_treq_send(COOP_TREQ_REFUSED, coop_treq.map, coop_treq.loc, coop_treq_slot);
+    tig_debug_printf("CoopLite: PT57 host refused slot %d travel to map %d\n", coop_treq_slot, coop_treq.map);
+    return true;
+}
+
+static bool coop_treq_accept(void)
+{
+    TeleportData td;
+    int64_t pc = player_get_local_pc_obj();
+
+    if (!coop_treq_active) {
+        return false;
+    }
+    coop_treq_active = false;
+    coop_travel_hide();
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+        coop_treq_send(COOP_TREQ_REFUSED, coop_treq.map, coop_treq.loc, coop_treq_slot);
+        return true;
+    }
+    coop_treq_send(COOP_TREQ_ACCEPTED, coop_treq.map, coop_treq.loc, coop_treq_slot);
+    memset(&td, 0, sizeof(td));
+    td.obj = pc;
+    td.map = coop_treq.map;
+    td.loc = coop_treq.loc;
+    tig_debug_printf("CoopLite: PT57 host accepted slot %d travel to map %d - party travels\n",
+        coop_treq_slot, coop_treq.map);
+    /* The host way: ready check (gate) and party carry, as if the host left. */
+    teleport_do(&td);
+    return true;
+}
+
+void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
+{
+    if (!tig_net_is_active() || !coop_lite_travel_req_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (tig_net_is_host()) {
+        int slot = sub_52A530();
+        int64_t pc;
+        char* map_nm = NULL;
+        char name[128];
+        char text[512];
+
+        if (pkt->kind != COOP_TREQ_ASK || slot <= 0 || slot >= 8) {
+            return;
+        }
+        pc = sub_4A2B60(slot);
+        if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !map_get_name(pkt->map, &map_nm)) {
+            coop_treq_send(COOP_TREQ_REFUSED, pkt->map, pkt->loc, slot);
+            return;
+        }
+        coop_treq_active = true;
+        coop_treq_slot = slot;
+        coop_treq = *pkt;
+        object_examine(pc, pc, name);
+        snprintf(text, sizeof(text), "%s хочет перейти в %s. Y — идти, N — отказать.\n%s wants to travel to %s. Y = go, N = refuse.",
+            name, coop_treq_map_name(pkt->map), name, coop_treq_map_name(pkt->map));
+        if (coop_travel_show_hook != NULL) {
+            coop_travel_show_text(text);
+        } else {
+            coop_lite_show_notice(text, TF_TYPE_WHITE);
+        }
+        tig_debug_printf("CoopLite: PT57 slot %d asks to travel to map %d\n", slot, pkt->map);
+        return;
+    }
+    if (pkt->kind == COOP_TREQ_REFUSED) {
+        coop_treq_sent_ms = 0;
+        coop_lite_show_notice("Хост отказал в переходе. / The host refused the trip.", TF_TYPE_RED);
+    } else if (pkt->kind == COOP_TREQ_ACCEPTED) {
+        coop_treq_sent_ms = 0;
+        coop_lite_show_notice("Хост согласился: группа отправляется. / The host agreed: the party is setting off.", TF_TYPE_WHITE);
+    }
+}
+
 bool coop_lite_client_spell_end(int mt_id)
 {
     if (!tig_net_is_coop_enabled() || !tig_net_is_active() || tig_net_is_host()) {
@@ -17710,6 +17966,9 @@ void coop_lite_pt52_slot_gone(int slot) { (void)slot; }
 bool coop_lite_travel_key(void) { return false; }
 void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
 bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }
+bool coop_lite_client_travel_intercept(const TeleportData* td) { (void)td; return false; }
+bool coop_lite_travel_refuse_key(void) { return false; }
+void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt) { (void)pkt; }
 static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }
 #endif
 
@@ -17921,13 +18180,34 @@ static void coop_lite_client_layout_note_host(int64_t local_pc)
         coop_layout_sent_seq = 0; /* echo in: the host's layout is the truth */
     }
     for (o = 0; o < coop_inv_owner_cnt; o++) {
-        if (local_pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid) != local_pc) {
+        int64_t owner = coop_lite_get_oid_obj(coop_inv_owner[o].head.owner_oid);
+
+        if (owner != OBJ_HANDLE_NULL && owner != local_pc) {
+            /* PT57: another player's pack we may have open: its host
+               layout, so our own rearranging of it is sent as a request. */
+            int k;
+
+            for (k = 0; k < 8; k++) {
+                if (sub_4A2B60(k) == owner) {
+                    h = 0;
+                    for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
+                        h += coop_lite_inven_layout_term(coop_inv_entry[i].oid, coop_inv_entry[i].inventory_location);
+                    }
+                    coop_other_host_hash[k] = h;
+                    coop_other_acked_hash[k] = coop_lite_local_layout_hash(owner, NULL);
+                    coop_other_valid[k] = true;
+                    h = 0;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (local_pc == OBJ_HANDLE_NULL || owner != local_pc) {
             continue;
         }
         for (i = coop_inv_owner[o].first; i < coop_inv_owner[o].first + coop_inv_owner[o].count; i++) {
-            if ((coop_inv_entry[i].state_flags & COOP_INVEN_E_STACK) != 0) {
-                continue;
-            }
+            /* PT57: stacks are listed with the host's OIDs, the same names
+               our layout uses for them (coop_lite_client_map_stack_oid). */
             h += coop_lite_inven_layout_term(coop_inv_entry[i].oid, coop_inv_entry[i].inventory_location);
         }
         coop_layout_host_hash = h;
@@ -17956,6 +18236,34 @@ void coop_lite_client_layout_tick(unsigned int now_ms)
     h = coop_lite_local_layout_hash(pc, NULL);
     (void)now_ms;
     if (!coop_lite_inven_layout_send_due(h, coop_layout_host_hash, coop_layout_acked_hash)) {
+        /* PT57: our edits to another player's pack go to the host as a
+           request (seq 0: not an echo of our own layout). */
+        int k;
+        int me = sub_529520();
+
+        for (k = 0; k < 8; k++) {
+            int64_t other = sub_4A2B60(k);
+            unsigned int oh;
+
+            if (k == me || !coop_other_valid[k] || other == OBJ_HANDLE_NULL || other == pc || critter_is_dead(other)) {
+                continue;
+            }
+            oh = coop_lite_local_layout_hash(other, NULL);
+            if (!coop_lite_inven_layout_send_due(oh, coop_other_host_hash[k], coop_other_acked_hash[k])) {
+                continue;
+            }
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type = PACKET_COOP_INVEN_LAYOUT;
+            oid = obj_get_id(other);
+            memcpy(pkt.pc_oid, &oid, sizeof(pkt.pc_oid));
+            coop_lite_local_layout_hash(other, &pkt);
+            depth = tig_net_local_suspend_pause();
+            tig_net_send_app_all(&pkt, (int)(offsetof(PacketCoopInvenLayout, entries) + (size_t)pkt.count * sizeof(pkt.entries[0])));
+            tig_net_local_suspend_resume(depth);
+            coop_other_acked_hash[k] = oh;
+            tig_debug_printf("CoopLite: inven: PT57 layout request for slot %d's pack sent (%d items)\n", k, pkt.count);
+            break;
+        }
         return;
     }
     memset(&pkt, 0, sizeof(pkt));
@@ -18048,6 +18356,7 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
     int n = 0;
     int refused = 0;
     int slot;
+    int target_slot = -1; /* PT57: >= 0 = another player's pack */
     int64_t pc;
     int cnt;
     int i;
@@ -18060,10 +18369,33 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
         return;
     }
     pc = sub_4A2B60(slot);
-    coop_layout_seq_applied[slot] = pkt->seq & 0xFFFFu; /* PT54: the echo below answers this one */
-    if (pc == OBJ_HANDLE_NULL || coop_lite_get_oid_obj(pkt->pc_oid) != pc || critter_is_dead(pc)) {
-        tig_debug_printf("CoopLite: inven: slot %d layout for a PC it does not own\n", slot);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
         return;
+    }
+    if (coop_lite_get_oid_obj(pkt->pc_oid) != pc) {
+        /* PT57: a client rearranged ANOTHER player's pack it has open (trade
+           / give / view). A request: the target must be a living party PC
+           the sender has open or stands next to; applied here, then echoed
+           to the owner and to everyone who has that pack open. */
+        int64_t t = coop_lite_get_oid_obj(pkt->pc_oid);
+        int k;
+
+        for (k = 0; k < 8; k++) {
+            if (k != slot && t != OBJ_HANDLE_NULL && sub_4A2B60(k) == t) {
+                target_slot = k;
+                break;
+            }
+        }
+        if (target_slot < 0 || critter_is_dead(t)
+            || (coop_lite_target_obj(slot) != t
+                && location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(t, OBJ_F_LOCATION)) > 12)) {
+            tig_debug_printf("CoopLite: inven: slot %d layout for a PC it does not own / reach\n", slot);
+            coop_lite_host_sync_slot_inven(slot);
+            return;
+        }
+        pc = t;
+    } else {
+        coop_layout_seq_applied[slot] = pkt->seq & 0xFFFFu; /* PT54: the echo below answers this one */
     }
     /* PT53a: the PC's real list is the only source of handles (an OID
        lookup can name a stale object whose parent field says this PC but
@@ -18151,6 +18483,29 @@ void coop_lite_host_handle_inven_layout(PacketCoopInvenLayout* pkt)
     if (n > 0 || refused > 0) {
         tig_debug_printf("CoopLite: inven: slot %d layout applied (%d moved, %d refused)\n", slot, n, refused);
         coop_lite_inv_selfcheck(pc, "layout_apply"); /* PT54d */
+    }
+    if (target_slot >= 0) {
+        int k;
+
+        tig_debug_printf("CoopLite: inven: PT57 slot %d rearranged slot %d's pack (%d moved, %d refused)\n",
+            slot, target_slot, n, refused);
+        /* Echo to the requester (with the target pack), the owner, and
+           anyone else who has that pack open. */
+        coop_lite_host_sync_slot_and(slot, pc);
+        for (k = 1; k < 8; k++) {
+            if (k != slot && sub_4A2B60(k) != OBJ_HANDLE_NULL
+                && (k == target_slot || coop_lite_target_obj(k) == pc)) {
+                coop_lite_host_sync_slot_inven(k);
+            }
+        }
+        if (target_slot > 0) {
+            coop_slot_inven_sig[target_slot] = coop_lite_pc_inven_sig(pc);
+            coop_slot_inven_sig_valid[target_slot] = true;
+        }
+        if (target_slot == 0) {
+            ui_update_inven(OBJ_HANDLE_NULL); /* the host's own window, if open */
+        }
+        return;
     }
     /* Always echo: the client takes the echo as truth and stops sending. */
     coop_lite_host_sync_slot_inven(slot);

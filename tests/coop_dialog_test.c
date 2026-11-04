@@ -353,7 +353,7 @@ static int test_pt53e(void)
     int cnt = 0;
     int i;
 
-    CHECK(PACKET_COOP_DOOR_STATE == 154 && PACKET_COOP_TYPE_LIMIT == 155, "door state id");
+    CHECK(PACKET_COOP_DOOR_STATE == 154 && PACKET_COOP_TYPE_LIMIT >= 155, "door state id");
     CHECK(TIG_NET_PROTOCOL >= 34, "protocol bumped for door state");
     CHECK(coop_lite_packet_allowed(PACKET_COOP_DOOR_STATE, false, 0), "host sends door state");
     CHECK(!coop_lite_packet_allowed(PACKET_COOP_DOOR_STATE, true, 1), "client never sends door state");

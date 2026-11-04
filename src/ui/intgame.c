@@ -2517,6 +2517,11 @@ bool sub_54B5D0(TigMessage* msg)
                     return true; /* PT50: travel ready / host go now */
                 }
                 break;
+            case SDL_SCANCODE_N:
+                if (!mainmenu_ui_is_active() && coop_lite_travel_refuse_key()) {
+                    return true; /* PT57: host refuses a client's travel request */
+                }
+                break;
             case SDL_SCANCODE_F:
                 if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_follow_toggle()) {
                     return true; /* PT47: follow/guard nearest player */

@@ -635,6 +635,9 @@ int tig_net_connect_configured(void)
             clients[0].active = true;
             tig_net_peer_set_slot(peer, 0);
             active = true;
+            /* PT57: a crashed / frozen host is noticed in ~10 s (ENet's
+               default is up to 30 s of a frozen client screen). */
+            enet_peer_timeout(peer, 32, 4000, 10000);
             tig_debug_printf("tig_net: connected to %s:%d\n", join_host, join_port);
             tig_net_send_hello(peer);
             /* Slot assignment arrives via WELCOME ctrl packet. */

@@ -70,6 +70,7 @@ static void sub_5418A0(char* str, TigRect* rect, tig_font_handle_t font, unsigne
 static void mainmenu_ui_create_mainmenu(void);
 static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle);
 static void mainmenu_ui_coop_buttons_create(void);
+static void mainmenu_ui_start_pregen(int idx);
 static void mainmenu_ui_draw_version(void);
 static bool mainmenu_ui_press_mainmenu_in_play(tig_button_handle_t button_handle);
 static bool mainmenu_ui_press_mainmenu_in_play_locked(tig_button_handle_t button_handle);
@@ -1822,6 +1823,15 @@ bool mainmenu_ui_handle(void)
                 break;
             case TIG_MESSAGE_KEYBOARD:
                 if (!msg.data.keyboard.pressed
+                    && msg.data.keyboard.scancode == SDL_SCANCODE_R
+                    && mainmenu_ui_window_type == MM_WINDOW_MAINMENU
+                    && tig_net_is_coop_enabled() && tig_net_join_configured() && !tig_net_is_active()) {
+                    /* PT57: R - Reconnect to the last host (same address, port, token). */
+                    tig_debug_printf("MainMenu-UI: R - reconnect to the host\n");
+                    mainmenu_ui_start_pregen(1);
+                    break;
+                }
+                if (!msg.data.keyboard.pressed
                     && msg.data.keyboard.scancode == SDL_SCANCODE_ESCAPE
                     && mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
                     mainmenu_ui_close(true);
@@ -1843,6 +1853,8 @@ bool mainmenu_ui_handle(void)
  * ARCANUM_DEV_AUTOSTART_PREGEN=<1..8> starts a New Game with that premade
  * character once the main menu has been idle for ~2 s. Unset = no effect.
  */
+static void mainmenu_ui_start_pregen(int idx);
+
 static void mainmenu_ui_dev_autostart_tick(void)
 {
     static int frames;
@@ -1885,6 +1897,14 @@ static void mainmenu_ui_dev_autostart_tick(void)
     }
 
     tig_debug_printf("MainMenu-UI: dev autostart: New Game with pregen %d\n", idx);
+    mainmenu_ui_start_pregen(idx);
+}
+
+/* PT57: the dev autostart steps, shared with R - Reconnect. Passing the
+   New-or-Pregen window runs coop_lite_client_reconnect (join + rejoin
+   token); the pregen only stands in until the parked PC comes back. */
+static void mainmenu_ui_start_pregen(int idx)
+{
     mainmenu_ui_close(false);
     mainmenu_ui_window_type = MM_WINDOW_SINGLE_PLAYER;
     mainmenu_ui_open();
@@ -2163,6 +2183,21 @@ static void mainmenu_ui_coop_buttons_create(void)
             text_rect.height = font_desc.height;
             mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[0], &text_rect,
                 window->refresh_text_flags | 0x20);
+            if (tig_net_join_configured() && !tig_net_is_active()) {
+                /* PT57: visible hint for the reconnect key. */
+                snprintf(label[1], sizeof(label[1]), "%s", coop_lite_lang("R — переподключиться / R - Reconnect"));
+                mainmenu_ui_coop_fit(label[1], sizeof(label[1]), font, 410 - window->field_30,
+                    (window->refresh_text_flags & 0x04) != 0, &font_desc);
+                text_rect.x = 410 - window->field_30;
+                if ((window->refresh_text_flags & 0x04) != 0) {
+                    text_rect.x -= font_desc.width / 2;
+                }
+                text_rect.y = 393 - window->field_34;
+                text_rect.width = font_desc.width;
+                text_rect.height = font_desc.height;
+                mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[1], &text_rect,
+                    window->refresh_text_flags | 0x20);
+            }
             tig_window_display();
         }
         return;

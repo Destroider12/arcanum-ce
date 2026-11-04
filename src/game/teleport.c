@@ -121,6 +121,11 @@ void teleport_ping(tig_timestamp_t timestamp)
 // 0x4D3380
 bool teleport_do(TeleportData* teleport_data)
 {
+    /* PT57: a client never changes maps alone: it asks the host instead. */
+    if (coop_lite_client_travel_intercept(teleport_data)) {
+        return false;
+    }
+
     /* PT50: host leaving with clients far / busy -> ready check first. */
     if (coop_lite_host_travel_gate(teleport_data)) {
         return false;

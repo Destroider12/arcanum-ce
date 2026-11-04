@@ -950,10 +950,39 @@ static int test_packet_hardening(void)
         fprintf(stderr, "FOLLOWERS/NPC_POS direction wrong\n");
         return 1;
     }
+    /* PT57: client travel request: both ways, kind / map checked. */
+    {
+        PacketCoopTravelReq r;
+
+        memset(&r, 0, sizeof(r));
+        r.type = PACKET_COOP_TRAVEL_REQ;
+        r.kind = COOP_TREQ_ASK;
+        r.map = 5;
+        if (PACKET_COOP_TRAVEL_REQ != 155 || sizeof(PacketCoopTravelReq) != 0x18
+            || !coop_lite_packet_allowed(PACKET_COOP_TRAVEL_REQ, true, 1)
+            || !coop_lite_packet_allowed(PACKET_COOP_TRAVEL_REQ, false, 0)
+            || coop_lite_coop_packet_min_size(PACKET_COOP_TRAVEL_REQ) != (int)sizeof(PacketCoopTravelReq)
+            || !coop_lite_travel_req_valid(&r, (int)sizeof(r))
+            || coop_lite_travel_req_valid(&r, (int)sizeof(r) - 1)) {
+            fprintf(stderr, "PT57 travel request layout / role wrong\n");
+            return 1;
+        }
+        r.kind = 9;
+        if (coop_lite_travel_req_valid(&r, (int)sizeof(r))) {
+            fprintf(stderr, "PT57 bad kind accepted\n");
+            return 1;
+        }
+        r.kind = COOP_TREQ_REFUSED;
+        r.map = 0;
+        if (coop_lite_travel_req_valid(&r, (int)sizeof(r))) {
+            fprintf(stderr, "PT57 map 0 accepted\n");
+            return 1;
+        }
+    }
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 155 || TIG_NET_PROTOCOL < 36
+        || PACKET_COOP_TYPE_LIMIT != 156 || TIG_NET_PROTOCOL < 37
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -2239,8 +2268,8 @@ int main(int argc, char** argv)
         return 1;
     }
     if (coop_lite_host_left_menu_due(false, 1, 99999)
-        || coop_lite_host_left_menu_due(true, 1000, 4999)
-        || !coop_lite_host_left_menu_due(true, 1000, 5000)
+        || coop_lite_host_left_menu_due(true, 1000, 3499)
+        || !coop_lite_host_left_menu_due(true, 1000, 3500)
         || !coop_lite_host_left_menu_due(true, 0xFFFFF000u, 3000u)) {
         fprintf(stderr, "host-left menu timing wrong\n");
         return 1;

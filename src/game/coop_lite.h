@@ -41,7 +41,8 @@ extern "C" {
 #define PACKET_COOP_PARTY_CTRL 152 /* PT50: travel ready check (both ways) + client spell-end intent */
 #define PACKET_COOP_INVEN_LAYOUT 153 /* PT53: client → host: my own pack layout (equip/grid/hotkeys) */
 #define PACKET_COOP_DOOR_STATE 154 /* PT53e: host → clients: one door's state (open/lock/jam/bust) */
-#define PACKET_COOP_TYPE_LIMIT 155
+#define PACKET_COOP_TRAVEL_REQ 155 /* PT57: client -> host travel request; host -> client refusal */
+#define PACKET_COOP_TYPE_LIMIT 156
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -466,6 +467,29 @@ typedef struct PacketCoopPartyCtrl {
     /* 000C */ int b;
 } PacketCoopPartyCtrl;
 COOP_STATIC_ASSERT(sizeof(PacketCoopPartyCtrl) == 0x10, "PacketCoopPartyCtrl size");
+
+/* PT57: a client never changes maps alone. Its map transition (jump point,
+   script / spell teleport to another map) becomes a request; the host is
+   asked (Y = go, N = refuse) and on Y the whole party travels the host way
+   (ready check + party carry). */
+#define COOP_TREQ_ASK 1 /* client -> host */
+#define COOP_TREQ_REFUSED 2 /* host -> client */
+#define COOP_TREQ_ACCEPTED 3 /* host -> client */
+typedef struct PacketCoopTravelReq {
+    /* 0000 */ int type;
+    /* 0004 */ int kind;
+    /* 0008 */ int map;
+    /* 000C */ int reserved;
+    /* 0010 */ int64_t loc;
+} PacketCoopTravelReq;
+COOP_STATIC_ASSERT(sizeof(PacketCoopTravelReq) == 0x18, "PacketCoopTravelReq size");
+bool coop_lite_travel_req_valid(const PacketCoopTravelReq* pkt, int size);
+void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt);
+struct TeleportData;
+/* teleport_do hook (client): true = turned into a request, do not teleport. */
+bool coop_lite_client_travel_intercept(const struct TeleportData* td);
+/* N key: host refuses a pending client travel request. True if consumed. */
+bool coop_lite_travel_refuse_key(void);
 
 typedef struct PacketCoopObjReq {
     /* 0000 */ int type;
