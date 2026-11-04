@@ -2341,6 +2341,11 @@ bool coop_lite_offer_flag_rejoin_only(int has_oid_field)
     return (has_oid_field & COOP_OFFER_F_REJOIN_ONLY) != 0;
 }
 
+bool coop_lite_client_is_in_session(void)
+{
+    return coop_lite_client_in_session || coop_lite_waiting_sync;
+}
+
 bool coop_lite_client_take_rejoin_no_pc(void)
 {
     bool v = coop_lite_rejoin_no_pc;
@@ -13252,7 +13257,7 @@ void coop_lite_client_host_left(void)
         && coop_lite_client_world_ready()) {
         coop_lite_export_local_character_impl();
     }
-    coop_lite_show_notice("Связь с хостом потеряна (вышел, вылет или таймаут). Возврат в главное меню; R — переподключиться. / Lost connection to the host (left, crashed or timed out). Returning to the main menu; press R there to reconnect.", TF_TYPE_RED);
+    coop_lite_show_notice("Связь с хостом потеряна (вышел, вылет или таймаут). Возврат в главное меню; «Войти к хосту» (J/Enter). / Lost connection to the host (left, crashed or timed out). Returning to the main menu; use Join Host there (J or Enter).", TF_TYPE_RED);
     coop_host_left_menu_armed = true;
     coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
     /* PT62: wait in the main menu and rejoin when the host is back (its

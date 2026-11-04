@@ -85,6 +85,12 @@ static int test_skip_and_roles(void)
         fprintf(stderr, "SESSION_SYNC role\n");
         return 1;
     }
+    /* PT71: a fresh (reset) client is not in a session: the menu offers Join Host. */
+    coop_lite_session_reset();
+    if (coop_lite_client_is_in_session()) {
+        fprintf(stderr, "PT71 in-session after reset\n");
+        return 1;
+    }
     /* PT69: offer flag bits (old has_oid value 1 keeps its meaning). */
     if (!coop_lite_offer_flag_has_oid(1) || coop_lite_offer_flag_rejoin_only(1)
         || !coop_lite_offer_flag_rejoin_only(COOP_OFFER_F_REJOIN_ONLY)
@@ -133,6 +139,10 @@ static int run_client(void)
     }
     if (!coop_lite_client_waiting_for_sync()) {
         fprintf(stderr, "client: expected waiting\n");
+        return 1;
+    }
+    if (!coop_lite_client_is_in_session()) {
+        fprintf(stderr, "client: PT71 offered but not counted as joining\n");
         return 1;
     }
     pump_ms(200);

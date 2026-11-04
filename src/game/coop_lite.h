@@ -1448,6 +1448,8 @@ bool coop_lite_offer_flag_has_oid(int has_oid_field);
 bool coop_lite_offer_flag_rejoin_only(int has_oid_field);
 /* PT69: true once after the host answered COOP_SYNC_F_NO_PC. */
 bool coop_lite_client_take_rejoin_no_pc(void);
+/* PT71: in the host's session (or already asked to join it). */
+bool coop_lite_client_is_in_session(void);
 bool coop_lite_test_pending_offer_rejoin_only(int slot);
 
 /* True while a coop client is waiting for SESSION_SYNC (no independent New Game). */

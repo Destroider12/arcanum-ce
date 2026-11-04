@@ -2930,3 +2930,16 @@ changed). Crash detection and the bug report read `coop\<role>\`.
 Not covered: saves are not split per module inside a role folder; a client
 character made in single player (root `Players\`) is not visible to the role
 (the host sends the PC anyway). Protocol unchanged. Test: `tig_file_overlay_test`.
+
+## PT71: client main menu Join Host, coop hotkeys rebound
+
+- **Why R did nothing:** PT69 gated the hint, the click, R and AUTOJOIN on
+  `!tig_net_is_active()`. A `-join` launch is already connected at start-up
+  ("Co-op: connected ..."), so the gate was false and only the status line
+  showed. The gate is now "co-op client launch, not in (or joining) the
+  host's session" (`coop_lite_client_is_in_session`).
+- **Keys:** R is the game's combat key and F its Fate key. Join Host is now
+  **J** or **Enter** (or a click on the "[ Join Host ]" line) in the main
+  menu; follow/guard is **G** in game.
+- **Client menu:** in a co-op client launch Single Player and Credits are
+  greyed out and inactive; Options, Join Host and Exit Game stay active.

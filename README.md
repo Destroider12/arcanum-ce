@@ -56,7 +56,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 
 - **Ready check:** when the host travels (world map or area change), the party goes through a ready check. Players press **Y** to confirm, and the host can force the trip with **Y**. Party PCs are carried along.
 - **Client travel requests:** when a client steps onto an exit, jump point, stairs or scripted transition, the host is asked "<name> wants to travel to <map>. Y = the party goes, N = refuse." Clients can't travel the world map by themselves.
-- **F – follow:** follow or guard the nearest player.
+- **G – follow:** follow or guard the nearest player.
 
 ### Saving and loading
 
@@ -67,7 +67,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 ### Late join and reconnect
 
 - Each player has a **rejoin token** (`Players/coop_token.txt`). When a player leaves, the host parks their PC. A player who joins again with the same token gets the same character back, also into a game that is already running.
-- If the host is lost, the client returns to the main menu. Press **R – Reconnect** there, or the client keeps trying every 3 s ("Waiting for host…").
+- If the host is lost, the client returns to the main menu. Use **Join Host** there (J, Enter or click; Single Player and Credits are inactive in a client launch), or the client keeps trying every 3 s ("Waiting for host…").
 
 ### Crash handling (Windows)
 
@@ -87,12 +87,12 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 
 | Key | Where | Action |
 | --- | --- | --- |
-| **F** | in game | follow / guard the nearest player |
+| **G** | in game | follow / guard the nearest player |
 | **Y** | in game | ready for travel; host: go now (force) / accept a request |
 | **N** | in game | host: refuse a travel, save or load request |
 | **F7** | client | save on the host |
 | **F8** | client | ask the host to load |
-| **R** | main menu | reconnect to the last host |
+| **J** / **Enter** | client main menu | Join Host (rejoin the last host, no New Game) |
 
 ### Command line and environment variables
 

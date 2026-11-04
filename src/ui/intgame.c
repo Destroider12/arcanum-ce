@@ -2522,7 +2522,8 @@ bool sub_54B5D0(TigMessage* msg)
                     return true; /* PT57: host refuses a client's travel request */
                 }
                 break;
-            case SDL_SCANCODE_F:
+            case SDL_SCANCODE_G:
+                /* PT71: G (F is the game's Fate key). */
                 if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_follow_toggle()) {
                     return true; /* PT47: follow/guard nearest player */
                 }
