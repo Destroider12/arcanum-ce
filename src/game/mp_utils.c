@@ -1298,7 +1298,7 @@ _Static_assert(sizeof(PacketCoopNpcPosEntry) == 56, "PacketCoopNpcPosEntry wire 
 _Static_assert(sizeof(PacketCoopObjBlob) == 8256, "PacketCoopObjBlob wire layout");
 _Static_assert(sizeof(PacketCoopObjReq) == 392, "PacketCoopObjReq wire layout");
 _Static_assert(sizeof(PacketCoopPartyState) == 24, "PacketCoopPartyState wire layout");
-_Static_assert(sizeof(PacketCoopSwing) == 56, "PacketCoopSwing wire layout");
+_Static_assert(sizeof(PacketCoopSwing) == 64, "PacketCoopSwing wire layout");
 _Static_assert(sizeof(PacketCoopPcPos) == 96, "PacketCoopPcPos wire layout");
 _Static_assert(sizeof(PacketCoopPcStats) == 448, "PacketCoopPcStats wire layout");
 _Static_assert(sizeof(PacketCoopRoster) == 112, "PacketCoopRoster wire layout");

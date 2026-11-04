@@ -530,9 +530,27 @@ static int test_pt54(void)
     return 0;
 }
 
+/* PT75: every strike / combat text rides PACKET_COOP_SWING to nearby clients. */
+static int test_pt75(void)
+{
+    CHECK(sizeof(PacketCoopSwing) == 64, "swing packet carries text fields");
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_SWING) == sizeof(PacketCoopSwing), "swing min size");
+    CHECK(COOP_SWING_OWN == 0 && COOP_SWING_APPROACH == 2, "old swing codes kept");
+    CHECK(COOP_SWING_OTHER != COOP_SWING_TEXT, "new codes distinct");
+    CHECK(coop_lite_combat_text_allowed(11), "Dodge! allowed");
+    CHECK(coop_lite_combat_text_allowed(2) && coop_lite_combat_text_allowed(12), "critical texts allowed");
+    CHECK(!coop_lite_combat_text_allowed(0) && !coop_lite_combat_text_allowed(-1)
+        && !coop_lite_combat_text_allowed(1000), "other lines refused");
+    CHECK(coop_lite_pose_keeps_swing(true, true, true), "stand pose keeps a running swing");
+    CHECK(!coop_lite_pose_keeps_swing(true, true, false), "walk/death pose cuts it");
+    CHECK(!coop_lite_pose_keeps_swing(true, false, true), "no animate goal: pose applies");
+    CHECK(!coop_lite_pose_keeps_swing(false, true, true), "not attacking: pose applies");
+    return 0;
+}
+
 int main(void)
 {
-    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53() || test_pt53e() || test_pt54()) {
+    if (test_codec() || test_validation() || test_votes() || test_policy() || test_pt53() || test_pt53e() || test_pt54() || test_pt75()) {
         return 1;
     }
     printf("PASS: coop dialog viewer (codec, validation, votes, policy, PT53)\n");

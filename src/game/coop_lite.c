@@ -1883,6 +1883,53 @@ static void coop_lite_client_play_swing(int64_t attacker_obj, int64_t target_obj
 #endif
 }
 
+bool coop_lite_combat_text_allowed(int text_num)
+{
+    /* 2 "Critical miss", 11 "Dodge!", 12 "Critical hit" */
+    return text_num == 2 || text_num == 11 || text_num == 12;
+}
+
+bool coop_lite_pose_keeps_swing(bool cur_is_attack, bool animating, bool new_is_stand_or_attack)
+{
+    return cur_is_attack && animating && new_is_stand_or_attack;
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+/* PT75: send pkt to every client slot whose PC is within 25 tiles of loc
+   (same radius as the PT28 combat sounds), except skip_slot. */
+static void coop_lite_send_near(PacketCoopSwing* pkt, int64_t loc, int skip_slot)
+{
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc;
+
+        if (slot == skip_slot) {
+            continue;
+        }
+        pc = sub_4A2B60(slot);
+        if (pc != OBJ_HANDLE_NULL && location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), loc) <= 25) {
+            tig_net_send_app(pkt, sizeof(*pkt), slot);
+            coop_diag.swing_tx++;
+        }
+    }
+}
+#endif
+
+static void coop_lite_client_play_other_swing(int64_t attacker_obj, int64_t target_obj)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    /* PT75: coop_client_swing_ms belongs to our own PC's swings. */
+    unsigned int saved = coop_client_swing_ms;
+
+    coop_lite_client_play_swing(attacker_obj, target_obj);
+    coop_client_swing_ms = saved;
+#else
+    (void)attacker_obj;
+    (void)target_obj;
+#endif
+}
+
 void coop_lite_host_strike(int64_t attacker, int64_t target)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -1893,10 +1940,10 @@ void coop_lite_host_strike(int64_t attacker, int64_t target)
     if (!tig_net_is_active() || !tig_net_is_host() || !tig_net_is_coop_enabled()) {
         return;
     }
-    slot = coop_lite_slot_of_obj(attacker);
-    if (slot < 1) {
+    if (!obj_type_is_critter(obj_field_int32_get(attacker, OBJ_F_TYPE))) {
         return;
     }
+    slot = coop_lite_slot_of_obj(attacker);
     /* PT25 item 2: the host's AG_ATTACK keeps swinging for a client PC
        until the target dies (further intents are "refused" meanwhile),
        but only the first swing was ever drawn on the owner's screen. */
@@ -1906,13 +1953,48 @@ void coop_lite_host_strike(int64_t attacker, int64_t target)
     memcpy(pkt.attacker_oid, &oid, sizeof(oid));
     oid = obj_get_id(target);
     memcpy(pkt.target_oid, &oid, sizeof(oid));
-    tig_net_send_app(&pkt, sizeof(pkt), slot);
-    coop_diag.swing_tx++;
+    if (slot >= 1) {
+        pkt.hit = COOP_SWING_OWN;
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+        coop_diag.swing_tx++;
+    }
+    /* PT75 root cause of "1/5 of the swings": every other client only saw
+       an NPC's / other PC's strike through the 100 ms pose samples, which
+       caught a frame of the short ATTACK anim now and then. */
+    pkt.hit = COOP_SWING_OTHER;
+    coop_lite_send_near(&pkt, obj_field_int64_get(attacker, OBJ_F_LOCATION), slot);
 #else
     (void)attacker;
     (void)target;
 #endif
 }
+
+void coop_lite_host_combat_text(int64_t obj, int tf_type, int text_num)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    PacketCoopSwing pkt;
+    ObjectID oid;
+
+    if (obj == OBJ_HANDLE_NULL || !coop_lite_combat_text_allowed(text_num)
+        || !tig_net_is_active() || !tig_net_is_host() || !tig_net_is_coop_enabled()) {
+        return;
+    }
+    /* PT75: tf_add only runs where combat resolves (the host). */
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_SWING;
+    pkt.hit = COOP_SWING_TEXT;
+    oid = obj_get_id(obj);
+    memcpy(pkt.target_oid, &oid, sizeof(oid));
+    pkt.text_num = text_num;
+    pkt.tf_type = tf_type;
+    coop_lite_send_near(&pkt, obj_field_int64_get(obj, OBJ_F_LOCATION), -1);
+#else
+    (void)obj;
+    (void)tf_type;
+    (void)text_num;
+#endif
+}
+
 
 void coop_lite_host_npc_sound(int sound_id, int64_t npc)
 {
@@ -2002,11 +2084,33 @@ void coop_lite_handle_swing(PacketCoopSwing* pkt)
     attacker = obj_pool_perm_lookup(oid);
     memcpy(&oid, pkt->target_oid, sizeof(oid));
     target = obj_pool_perm_lookup(oid);
+    if (pkt->hit == COOP_SWING_TEXT) {
+        const char* str;
+
+        if (target == OBJ_HANDLE_NULL || !coop_lite_combat_text_allowed(pkt->text_num)
+            || pkt->tf_type < 0 || pkt->tf_type >= TF_TYPE_COUNT) {
+            return;
+        }
+        str = combat_mes_text(pkt->text_num);
+        if (str != NULL) {
+            tf_add(target, pkt->tf_type, str);
+        }
+        return;
+    }
+    if (pkt->hit == COOP_SWING_OTHER) {
+        if (attacker == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL
+            || attacker == player_get_local_pc_obj() || critter_is_dead(attacker)) {
+            return;
+        }
+        coop_diag.swing_rx++;
+        coop_lite_client_play_other_swing(attacker, target);
+        return;
+    }
     if (attacker == OBJ_HANDLE_NULL || attacker != player_get_local_pc_obj()
         || target == OBJ_HANDLE_NULL || critter_is_dead(attacker)) {
         return;
     }
-    if (pkt->hit == 2) {
+    if (pkt->hit == COOP_SWING_APPROACH) {
         /* Our target stepped away: walk after it and attack again (only
            while we are still fighting). */
         if (!critter_is_dead(target) && combat_critter_is_combat_mode_active(attacker)
@@ -3824,6 +3928,19 @@ bool coop_lite_loc_in_map(int64_t loc)
 #endif
 }
 
+#ifndef COOP_LITE_TEST_STUBS
+/* PT75: true = keep the relayed swing playing, drop this pose's art. */
+static bool coop_lite_pose_cuts_swing_obj(int64_t obj, tig_art_id_t new_art)
+{
+    int new_anim = tig_art_id_anim_get(new_art);
+
+    return coop_lite_pose_keeps_swing(
+        tig_art_id_anim_get(obj_field_int32_get(obj, OBJ_F_CURRENT_AID)) == TIG_ART_ANIM_ATTACK,
+        anim_is_current_goal_type(obj, AG_ANIMATE, NULL),
+        new_anim == TIG_ART_ANIM_STAND || new_anim == TIG_ART_ANIM_ATTACK);
+}
+#endif
+
 static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
 {
     if (!coop_lite_loc_in_map(pkt->loc)) {
@@ -3843,7 +3960,8 @@ static void coop_lite_apply_pc_pos(int64_t obj, const PacketCoopPcPos* pkt)
             || anim_is_current_goal_type(obj, AG_ATTEMPT_ATTACK, NULL))) {
         return;
     }
-    if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != pkt->art_id) {
+    if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != pkt->art_id
+        && (tig_net_is_host() || !coop_lite_pose_cuts_swing_obj(obj, (tig_art_id_t)pkt->art_id))) {
         object_set_current_aid(obj, (tig_art_id_t)pkt->art_id);
     }
 }
@@ -6078,7 +6196,8 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
             || obj_field_int32_get(obj, OBJ_F_OFFSET_Y) != e->offset_y) {
             sub_43E770(obj, e->loc, e->offset_x, e->offset_y);
         }
-        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != e->art_id) {
+        if ((unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != e->art_id
+            && !coop_lite_pose_cuts_swing_obj(obj, (tig_art_id_t)e->art_id)) {
             object_set_current_aid(obj, (tig_art_id_t)e->art_id);
         }
         flags = obj_field_int32_get(obj, OBJ_F_FLAGS);

@@ -954,6 +954,7 @@ int sub_4B3170(CombatContext* combat)
                     mes_file_entry.num = 11; // "Dodge!"
                     mes_get_msg(combat_mes_file, &mes_file_entry);
                     tf_add(combat->target_obj, 0, mes_file_entry.str);
+                    coop_lite_host_combat_text(combat->target_obj, 0, 11); /* PT75 */
 
                     combat->flags &= ~(CF_HIT | CF_CRITICAL);
 
@@ -1573,10 +1574,12 @@ void combat_dmg(CombatContext* combat)
             mes_file_entry.num = 2; // "Critical miss"
             mes_get_msg(combat_mes_file, &mes_file_entry);
             tf_add(combat->attacker_obj, tf_type, mes_file_entry.str);
+            coop_lite_host_combat_text(combat->attacker_obj, tf_type, 2); /* PT75 */
         } else if ((combat->flags & CF_CRITICAL) != 0) {
             mes_file_entry.num = 12; // "Critical hit"
             mes_get_msg(combat_mes_file, &mes_file_entry);
             tf_add(combat->target_obj, tf_type, mes_file_entry.str);
+            coop_lite_host_combat_text(combat->target_obj, tf_type, 12); /* PT75 */
         }
 
         if ((dam_flags & CDF_BONUS_DAM_200) != 0) {
@@ -3948,4 +3951,16 @@ void pc_switch_weapon(int64_t pc_obj, int64_t target_obj)
         && combat_auto_switch_weapons_get(pc_obj)) {
         item_wield_best(pc_obj, ITEM_INV_LOC_WEAPON, target_obj);
     }
+}
+
+/* PT75: one combat.mes line (co-op client floats host combat text). */
+const char* combat_mes_text(int num)
+{
+    MesFileEntry mes_file_entry;
+
+    mes_file_entry.num = num;
+    if (!mes_search(combat_mes_file, &mes_file_entry)) {
+        return NULL;
+    }
+    return mes_file_entry.str;
 }

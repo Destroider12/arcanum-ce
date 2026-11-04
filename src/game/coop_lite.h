@@ -69,10 +69,25 @@ typedef struct PacketCoopAttackIntent {
    (continuous AG_ATTACK); the owner plays the swing animation. */
 typedef struct PacketCoopSwing {
     /* 0000 */ int type;
-    /* 0004 */ int hit; /* 0 = strike (play the swing), 2 = out of reach: re-approach */
+    /* 0004 */ int hit; /* COOP_SWING_* */
     /* 0008 */ unsigned char attacker_oid[24]; /* ObjectID */
     /* 0020 */ unsigned char target_oid[24]; /* ObjectID */
+    /* 0038 */ int text_num; /* PT75 COOP_SWING_TEXT: combat.mes line */
+    /* 003C */ int tf_type; /* PT75 COOP_SWING_TEXT: TF_TYPE_* */
 } PacketCoopSwing;
+
+#define COOP_SWING_OWN 0 /* your PC struck: play its swing */
+#define COOP_SWING_APPROACH 2 /* out of reach: re-approach */
+#define COOP_SWING_OTHER 3 /* PT75: an NPC / other PC near you struck */
+#define COOP_SWING_TEXT 4 /* PT75: floating combat text on target_oid */
+
+/* PT75: combat.mes lines a client may float from a host relay. */
+bool coop_lite_combat_text_allowed(int text_num);
+/* PT75: a pose sample (stand / attack art) must not cut a relayed swing
+   still playing on that critter. */
+bool coop_lite_pose_keeps_swing(bool cur_is_attack, bool animating, bool new_is_stand_or_attack);
+/* PT75: host: float a combat.mes line over obj for nearby clients. */
+void coop_lite_host_combat_text(int64_t obj, int tf_type, int text_num);
 
 typedef struct PacketCoopFollowHost {
     /* 0000 */ int type;
