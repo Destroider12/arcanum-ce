@@ -2978,3 +2978,19 @@ The view closes on WMAP_CLOSE, on the 8 s overlay timeout, or when the host's
 follow (arrival) packet comes in. If the client already has its own town map
 open, it is left alone (dim only). Route lines are not sent; only the marker
 moves.
+
+## PT74: co-op player portraits on the right with a blue frame
+
+Teammate PCs (PT43) used to be appended to the follower list, so they took
+NPC follower slots on the left. That is why Magnus looked "lost". They now
+have their own column of up to 7 slots, anchored top-right
+(`follower_ui_team_*`), with a light-blue tinted frame. The left bar shows
+only NPC followers again.
+
+Clicks work as before:
+- Hover shows the name.
+- A plain click centres the camera.
+- A click in spell/skill/item targeting targets the PC.
+- There is still no right-click order menu for teammates.
+
+The team column is shown even when the follower bar is collapsed.

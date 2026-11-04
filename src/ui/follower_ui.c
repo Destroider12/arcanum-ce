@@ -156,6 +156,8 @@ typedef enum FollowerUiButton {
 #define FOLLOWER_UI_DROP_DOWN_MENU_ART 826
 
 static void follower_ui_create(int index);
+static void follower_ui_team_create(void);
+static void follower_ui_team_draw(void);
 static bool follower_ui_message_filter(TigMessage* msg);
 static void follower_ui_drop_down_menu_create(int index);
 static void follower_ui_drop_down_menu_destroy(void);
@@ -238,6 +240,14 @@ static tig_font_handle_t follower_ui_drop_down_menu_item_highlighted_color;
  * 0x67BB60
  */
 static tig_window_handle_t follower_ui_windows[FOLLOWER_UI_BUTTON_COUNT];
+
+/* PT74: co-op teammates get their own column on the right (light blue
+   frame) so they never take an NPC follower's slot on the left. */
+#define FOLLOWER_UI_TEAM_SLOTS 7
+static tig_window_handle_t follower_ui_team_windows[FOLLOWER_UI_TEAM_SLOTS];
+static tig_button_handle_t follower_ui_team_buttons[FOLLOWER_UI_TEAM_SLOTS];
+static FollowerInfo follower_ui_team[FOLLOWER_UI_TEAM_SLOTS];
+static int follower_ui_team_count;
 
 /**
  * Precomputed screen rects for each follower's drop-down context menu.
@@ -394,6 +404,7 @@ bool follower_ui_init(GameInitInfo* init_info)
     for (index = 0; index < FOLLOWER_UI_BUTTON_COUNT; index++) {
         follower_ui_create(index);
     }
+    follower_ui_team_create();
 
     // Determine the drop-down menu dimensions from the background art.
     tig_art_interface_id_create(FOLLOWER_UI_DROP_DOWN_MENU_ART, 0, 0, 0, &art_id);
@@ -530,6 +541,9 @@ void follower_ui_exit(void)
     for (index = 0; index < FOLLOWER_UI_BUTTON_COUNT; index++) {
         tig_window_destroy(follower_ui_windows[index]);
     }
+    for (index = 0; index < FOLLOWER_UI_TEAM_SLOTS; index++) {
+        tig_window_destroy(follower_ui_team_windows[index]);
+    }
 
     FREE(follower_ui_followers);
 
@@ -557,9 +571,13 @@ void follower_ui_reset(void)
     follower_ui_visible = true;
     follower_ui_followers_count = 0;
     follower_ui_top_index = 0;
+    follower_ui_team_count = 0;
 
     for (index = 0; index < FOLLOWER_UI_BUTTON_COUNT; index++) {
         tig_window_hide(follower_ui_windows[index]);
+    }
+    for (index = 0; index < FOLLOWER_UI_TEAM_SLOTS; index++) {
+        tig_window_hide(follower_ui_team_windows[index]);
     }
 
     if (follower_ui_drop_down_menu_window != TIG_WINDOW_HANDLE_INVALID) {
@@ -749,6 +767,17 @@ bool follower_ui_message_filter(TigMessage* msg)
         case TIG_BUTTON_STATE_MOUSE_INSIDE:
             // Show the hovered follower's name/description in the message
             // window.
+            for (index = 0; index < follower_ui_team_count; index++) {
+                if (msg->data.button.button_handle == follower_ui_team_buttons[index]) {
+                    sub_444130(&follower_ui_team[index]);
+                    if (follower_ui_team[index].obj != OBJ_HANDLE_NULL) {
+                        sub_57CD60(player_get_local_pc_obj(), follower_ui_team[index].obj, str);
+                        intgame_examine_object(player_get_local_pc_obj(), follower_ui_team[index].obj, str);
+                        object_hover_obj_set(follower_ui_team[index].obj);
+                    }
+                    return true;
+                }
+            }
             for (index = 0; index < FOLLOWER_UI_SLOTS; index++) {
                 if (msg->data.button.button_handle == follower_ui_buttons[index]) {
                     follower_ui_commander_obj = player_get_local_pc_obj();
@@ -765,6 +794,13 @@ bool follower_ui_message_filter(TigMessage* msg)
             return false;
         case TIG_BUTTON_STATE_MOUSE_OUTSIDE:
             // Clear the message window when the cursor leaves any button.
+            for (index = 0; index < follower_ui_team_count; index++) {
+                if (msg->data.button.button_handle == follower_ui_team_buttons[index]) {
+                    intgame_message_window_clear();
+                    object_hover_obj_set(OBJ_HANDLE_NULL);
+                    return true;
+                }
+            }
             for (index = 0; index < FOLLOWER_UI_BUTTON_COUNT; index++) {
                 if (msg->data.button.button_handle == follower_ui_buttons[index]) {
                     intgame_message_window_clear();
@@ -795,6 +831,25 @@ bool follower_ui_message_filter(TigMessage* msg)
                     follower_ui_update();
                 }
                 return true;
+            }
+
+            // PT74: teammate column - same click behavior as before (PT43).
+            for (index = 0; index < follower_ui_team_count; index++) {
+                if (msg->data.button.button_handle == follower_ui_team_buttons[index]) {
+                    sub_444130(&follower_ui_team[index]);
+                    target_descriptor_set_obj(&td, follower_ui_team[index].obj);
+                    if (td.obj == OBJ_HANDLE_NULL) {
+                        return true;
+                    }
+                    if (intgame_mode_get() != INTGAME_MODE_SPELL
+                        && intgame_mode_get() != INTGAME_MODE_SKILL
+                        && intgame_mode_get() != INTGAME_MODE_ITEM) {
+                        location_origin_set(obj_field_int64_get(td.obj, OBJ_F_LOCATION));
+                        return true;
+                    }
+                    sub_54EA80(&td);
+                    return true;
+                }
             }
 
             // Left-click on a portrait slot.
@@ -1008,6 +1063,7 @@ void follower_ui_update(void)
     int fatigue_percent;
 
     if (!follower_ui_visible) {
+        follower_ui_team_draw(); /* PT74: the team column is always shown */
         return;
     }
 
@@ -1069,6 +1125,8 @@ void follower_ui_update(void)
         fatigue_percent = critter_fatigue_max(follower_obj) > 0 ? 100 * critter_fatigue_current(follower_obj) / critter_fatigue_max(follower_obj) : 0;
         follower_ui_draw(follower_ui_windows[index], FOLLOWER_UI_FATIGUE_BAR_ART, 3, 44, fatigue_percent, 100);
     }
+
+    follower_ui_team_draw();
 
     in_update = false;
 }
@@ -1211,7 +1269,9 @@ void follower_ui_refresh(void)
 
     // PT43: co-op teammates' PCs follow the NPC followers.
     teammates_count = coop_lite_party_teammates(teammates, 8);
-    follower_ui_followers_count += teammates_count;
+    if (teammates_count > FOLLOWER_UI_TEAM_SLOTS) {
+        teammates_count = FOLLOWER_UI_TEAM_SLOTS;
+    }
 
     // Grow the followers array if needed.
     if (follower_ui_followers_count > follower_ui_followers_capacity) {
@@ -1226,10 +1286,17 @@ void follower_ui_refresh(void)
         sub_4440E0(node->obj, &(follower_ui_followers[index++]));
         node = node->next;
     }
-    for (int t = 0; t < teammates_count; t++) {
-        sub_4440E0(teammates[t], &(follower_ui_followers[index++]));
-    }
     follower_ui_followers_count = index;
+    // PT74: teammates go to the right-hand column.
+    for (int t = 0; t < FOLLOWER_UI_TEAM_SLOTS; t++) {
+        if (t < teammates_count) {
+            sub_4440E0(teammates[t], &(follower_ui_team[t]));
+            tig_window_show(follower_ui_team_windows[t]);
+        } else {
+            tig_window_hide(follower_ui_team_windows[t]);
+        }
+    }
+    follower_ui_team_count = teammates_count;
 
     object_list_destroy(&followers);
 
@@ -1373,5 +1440,85 @@ void follower_ui_show(void)
 {
     if (follower_ui_initialized) {
         follower_ui_refresh();
+    }
+}
+
+/* PT74: right-hand teammate column, anchored top-right like the left one. */
+static void follower_ui_team_create(void)
+{
+    TigWindowData window_data;
+    TigButtonData button_data;
+    int index;
+
+    for (index = 0; index < FOLLOWER_UI_TEAM_SLOTS; index++) {
+        memset(&window_data, 0, sizeof(window_data));
+        window_data.flags = TIG_WINDOW_HIDDEN;
+        window_data.message_filter = NULL;
+        window_data.rect.x = 800 - 11 - 40;
+        window_data.rect.y = 50 + 62 * index;
+        window_data.rect.width = 40;
+        window_data.rect.height = 49;
+        hrp_apply(&(window_data.rect), GRAVITY_RIGHT | GRAVITY_TOP);
+        tig_window_create(&window_data, &(follower_ui_team_windows[index]));
+
+        memset(&button_data, 0, sizeof(button_data));
+        button_data.flags = TIG_BUTTON_MOMENTARY;
+        button_data.mouse_down_snd_id = -1;
+        button_data.mouse_up_snd_id = -1;
+        button_data.mouse_enter_snd_id = -1;
+        button_data.mouse_exit_snd_id = -1;
+        button_data.art_id = TIG_ART_ID_INVALID;
+        button_data.width = 40;
+        button_data.height = 49;
+        button_data.window_handle = follower_ui_team_windows[index];
+        tig_button_create(&button_data, &(follower_ui_team_buttons[index]));
+    }
+}
+
+static void follower_ui_team_draw(void)
+{
+    int64_t pc_obj = player_get_local_pc_obj();
+    int64_t obj;
+    TigRect frame;
+    TigRect face;
+    int index;
+    int portrait;
+    int hp_percent;
+    int fatigue_percent;
+
+    face.x = 4;
+    face.y = 4;
+    face.width = 32;
+    face.height = 32;
+    frame.x = 0;
+    frame.y = 0;
+    frame.width = 40;
+    frame.height = 49;
+
+    for (index = 0; index < follower_ui_team_count; index++) {
+        sub_444130(&(follower_ui_team[index]));
+        obj = follower_ui_team[index].obj;
+        if (obj == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        follower_ui_draw(follower_ui_team_windows[index], FOLLOWER_UI_FRAME_ART, 0, 0, 100, 100);
+        /* light blue frame marks a co-op player */
+        tig_window_tint(follower_ui_team_windows[index], &frame, tig_color_make(120, 190, 255), 0);
+        if (intgame_examine_portrait(pc_obj, obj, &portrait)) {
+            portrait_draw_32x32(obj, portrait, follower_ui_team_windows[index], 4, 4);
+        } else {
+            follower_ui_draw(follower_ui_team_windows[index], portrait, 4, 4, 100, 50);
+        }
+        hp_percent = object_hp_max(obj) > 0 ? 100 * object_hp_current(obj) / object_hp_max(obj) : 0;
+        follower_ui_draw(follower_ui_team_windows[index],
+            stat_level_get(obj, STAT_POISON_LEVEL) > FOLLOWER_UI_POISON_LEVEL_THRESHOLD
+                ? FOLLOWER_UI_POISON_BAR_ART
+                : FOLLOWER_UI_HEALTH_BAR_ART,
+            3, 39, hp_percent, 100);
+        if (hp_percent < FOLLOWER_UI_LOW_HP_THRESHOLD) {
+            tig_window_tint(follower_ui_team_windows[index], &face, tig_color_make(255, 0, 0), 0);
+        }
+        fatigue_percent = critter_fatigue_max(obj) > 0 ? 100 * critter_fatigue_current(obj) / critter_fatigue_max(obj) : 0;
+        follower_ui_draw(follower_ui_team_windows[index], FOLLOWER_UI_FATIGUE_BAR_ART, 3, 44, fatigue_percent, 100);
     }
 }
