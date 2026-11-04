@@ -70,6 +70,8 @@ static void sub_5418A0(char* str, TigRect* rect, tig_font_handle_t font, unsigne
 static void mainmenu_ui_create_mainmenu(void);
 static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle);
 static void mainmenu_ui_coop_buttons_create(void);
+static bool mainmenu_ui_coop_rejoin(void);
+static bool mainmenu_ui_coop_rejoin_pending; /* PT69 */
 static void mainmenu_ui_start_pregen(int idx);
 static void mainmenu_ui_draw_version(void);
 static bool mainmenu_ui_press_mainmenu_in_play(tig_button_handle_t button_handle);
@@ -1806,9 +1808,19 @@ bool mainmenu_ui_handle(void)
         if (coop_lite_client_session_ready()) {
             tig_debug_printf("MainMenu-UI: coop session ready — closing menu\n");
             coop_lite_acknowledge_session_ready();
+            mainmenu_ui_coop_rejoin_pending = false;
             mainmenu_ui_start_new_game = false;
             sub_5412D0();
             break;
+        }
+        if (coop_lite_client_take_rejoin_no_pc()) {
+            /* PT69: first join (the host keeps no PC of ours): this is the
+               one case that needs character creation. Still connected. */
+            tig_debug_printf("MainMenu-UI: host has no PC for us - character creation\n");
+            mainmenu_ui_coop_rejoin_pending = false;
+            mainmenu_ui_close(false);
+            mainmenu_ui_window_type = MM_WINDOW_PICK_NEW_OR_PREGEN;
+            mainmenu_ui_open();
         }
         iso_redraw();
         tig_window_display();
@@ -1831,7 +1843,25 @@ bool mainmenu_ui_handle(void)
                     /* PT57: R - Reconnect to the last host (same address, port, token). */
                     tig_debug_printf("MainMenu-UI: R - reconnect to the host\n");
                     coop_lite_wait_host_set(false);
-                    mainmenu_ui_start_pregen(1);
+                    if (!mainmenu_ui_coop_rejoin()) {
+                        /* Host not up: keep retrying (Esc cancels). */
+                        coop_lite_wait_host_set(true);
+                        mainmenu_ui_close(false);
+                        mainmenu_ui_open();
+                    }
+                    break;
+                }
+                if (!msg.data.keyboard.pressed
+                    && msg.data.keyboard.scancode == SDL_SCANCODE_ESCAPE
+                    && mainmenu_ui_window_type == MM_WINDOW_MAINMENU
+                    && mainmenu_ui_coop_rejoin_pending) {
+                    /* PT69: stop waiting for the host's answer. */
+                    tig_debug_printf("MainMenu-UI: rejoin cancelled\n");
+                    mainmenu_ui_coop_rejoin_pending = false;
+                    coop_lite_session_reset();
+                    tig_net_reset_connection();
+                    mainmenu_ui_close(false);
+                    mainmenu_ui_open();
                     break;
                 }
                 if (!msg.data.keyboard.pressed
@@ -1957,8 +1987,7 @@ static void mainmenu_ui_pt62_tick(void)
                rejoin token brings the parked PC back; no New Game clicks.
                If the host is not up yet, keep trying like the auto-wait. */
             tig_debug_printf("MainMenu-UI: autojoin - rejoining the host\n");
-            if (coop_lite_client_reconnect()) {
-                mainmenu_ui_start_pregen(1);
+            if (mainmenu_ui_coop_rejoin()) {
                 return;
             }
             coop_lite_wait_host_set(true);
@@ -1974,11 +2003,64 @@ static void mainmenu_ui_pt62_tick(void)
     }
     next_try_ms = now + 3000;
     tig_debug_printf("MainMenu-UI: waiting for the host - trying to rejoin\n");
-    if (coop_lite_client_reconnect()) {
+    if (mainmenu_ui_coop_rejoin()) {
         coop_lite_wait_host_set(false);
         tig_debug_printf("MainMenu-UI: host is back - rejoining\n");
-        mainmenu_ui_start_pregen(1);
+        mainmenu_ui_close(false);
+        mainmenu_ui_open();
     }
+}
+
+/* PT69: join / rejoin straight from the main menu (R, the menu line, the
+   launcher's AUTOJOIN, the host-wait retry). Root cause of the old
+   behaviour: these went through the New Game windows (pick -> premade ->
+   character editor) and offered that throwaway character, which the host
+   then discarded for the PC it kept. Now: connect, put a placeholder PC in
+   (needed locally for the map teleport; never offered as a character, no
+   bundle), and ask the host for our kept PC (COOP_OFFER_F_REJOIN_ONLY).
+   SESSION_SYNC closes the menu into the host's world; COOP_SYNC_F_NO_PC
+   (first join) opens character creation instead. */
+static bool mainmenu_ui_coop_rejoin(void)
+{
+    PlayerCreateInfo player_create_info;
+    char* name = NULL;
+    bool ok;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_join_configured()) {
+        return false;
+    }
+    if (!tig_net_is_active() && !coop_lite_client_reconnect()) {
+        return false;
+    }
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return false;
+    }
+    player_create_info_init(&player_create_info);
+    player_create_info.loc = obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION);
+    player_create_info.basic_prototype = BP_GENERIC_PC + 1;
+    if (!player_obj_create_player(&player_create_info)) {
+        tig_debug_printf("MainMenu-UI: rejoin: placeholder PC not created\n");
+        tig_net_reset_connection();
+        return false;
+    }
+    mainmenu_ui_start_new_game = false;
+    obj_field_string_get(player_create_info.obj, OBJ_F_PC_PLAYER_NAME, &name);
+    ok = coop_lite_client_offer_rejoin(player_create_info.basic_prototype,
+        name != NULL ? name : "Companion");
+    if (name != NULL) {
+        FREE(name);
+    }
+    if (!ok) {
+        tig_net_reset_connection();
+        return false;
+    }
+    mainmenu_ui_coop_rejoin_pending = true;
+    tig_debug_printf("MainMenu-UI: rejoin requested - waiting for the host's session sync\n");
+    if (mainmenu_ui_window_type == MM_WINDOW_MAINMENU) {
+        mainmenu_ui_close(false);
+        mainmenu_ui_open();
+    }
+    return true;
 }
 
 /* PT57: the dev autostart steps, shared with R - Reconnect. Passing the
@@ -2264,11 +2346,18 @@ static void mainmenu_ui_coop_buttons_create(void)
             text_rect.height = font_desc.height;
             mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[0], &text_rect,
                 window->refresh_text_flags | 0x20);
-            if (tig_net_join_configured() && !tig_net_is_active()) {
-                /* PT57: visible hint for the reconnect key. */
-                snprintf(label[1], sizeof(label[1]), "%s", coop_lite_wait_host_active()
-                        ? coop_lite_lang("Ждём хоста... (Esc — отмена) / Waiting for host... (Esc to cancel)")
-                        : coop_lite_lang("R — переподключиться / R - Reconnect"));
+            if (tig_net_join_configured() && (!tig_net_is_active() || mainmenu_ui_coop_rejoin_pending)) {
+                /* PT57/PT69: visible, clickable rejoin line (same as R). */
+                const char* hint;
+
+                if (mainmenu_ui_coop_rejoin_pending) {
+                    hint = "Вход в сессию хоста... (Esc — отмена) / Joining the host session... (Esc to cancel)";
+                } else if (coop_lite_wait_host_active()) {
+                    hint = "Ждём хоста... (Esc — отмена) / Waiting for host... (Esc to cancel)";
+                } else {
+                    hint = "R — войти к хосту без новой игры / R - Rejoin host (no New Game)";
+                }
+                snprintf(label[1], sizeof(label[1]), "%s", coop_lite_lang(hint));
                 mainmenu_ui_coop_fit(label[1], sizeof(label[1]), font, 410 - window->field_30,
                     (window->refresh_text_flags & 0x04) != 0, &font_desc);
                 text_rect.x = 410 - window->field_30;
@@ -2280,6 +2369,19 @@ static void mainmenu_ui_coop_buttons_create(void)
                 text_rect.height = font_desc.height;
                 mainmenu_ui_refresh_text(mainmenu_ui_window_handle, label[1], &text_rect,
                     window->refresh_text_flags | 0x20);
+                if (!tig_net_is_active()) {
+                    MainMenuButtonInfo* button = &mainmenu_ui_coop_buttons[1];
+
+                    button->x = text_rect.x + window->field_30;
+                    button->y = 393;
+                    button->rect.x = 0;
+                    button->rect.y = 0;
+                    button->rect.width = font_desc.width;
+                    button->rect.height = font_desc.height;
+                    if (!main_menu_button_create(button, font_desc.width, font_desc.height)) {
+                        button->button_handle = TIG_BUTTON_HANDLE_INVALID;
+                    }
+                }
             }
             tig_window_display();
         }
@@ -2376,6 +2478,20 @@ static bool mainmenu_ui_release_mainmenu(tig_button_handle_t button_handle)
 
     if (button_handle == TIG_BUTTON_HANDLE_INVALID) {
         return false;
+    }
+    if (tig_net_is_coop_enabled()) {
+        /* PT69: co-op launch: the only line button is Rejoin (= R). */
+        if (button_handle != mainmenu_ui_coop_buttons[1].button_handle || tig_net_is_active()) {
+            return false;
+        }
+        tig_debug_printf("MainMenu-UI: rejoin line clicked\n");
+        coop_lite_wait_host_set(false);
+        if (!mainmenu_ui_coop_rejoin()) {
+            coop_lite_wait_host_set(true);
+            mainmenu_ui_close(false);
+            mainmenu_ui_open();
+        }
+        return true;
     }
     if (button_handle == mainmenu_ui_coop_buttons[0].button_handle) {
         join = false;

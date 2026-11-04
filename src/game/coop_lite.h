@@ -191,6 +191,13 @@ typedef struct PacketCoopSessionSync {
 /* The host gave this client back its parked PC (client_pc_oid): replace
    the local PC with the host's copy (requested as an object blob). */
 #define COOP_SYNC_F_REJOINED 0x1
+/* PT69: answer to a rejoin-only offer: the host holds no PC for this
+   player (first join) - the client goes to character creation. */
+#define COOP_SYNC_F_NO_PC 0x2
+
+/* PT69: PacketCoopCharOffer.has_oid is a bit set (old value 1 = has OID). */
+#define COOP_OFFER_F_HAS_OID 0x1
+#define COOP_OFFER_F_REJOIN_ONLY 0x2 /* main-menu rejoin: placeholder PC, no bundle */
 
 /* Wire layout must match across compilers (MSVC vs gcc/clang). */
 #if defined(__cplusplus)
@@ -1434,6 +1441,14 @@ bool coop_lite_test_pending_offer(int slot);
 
 /* Client: send CHAR_OFFER from local premade/created PC; return true if sent. */
 bool coop_lite_client_offer_character(int basic_prototype, const char* name);
+/* PT69: main-menu rejoin (R / menu line / launcher AUTOJOIN): ask the host
+   for our kept PC with a placeholder stand-in; no character creation. */
+bool coop_lite_client_offer_rejoin(int basic_prototype, const char* name);
+bool coop_lite_offer_flag_has_oid(int has_oid_field);
+bool coop_lite_offer_flag_rejoin_only(int has_oid_field);
+/* PT69: true once after the host answered COOP_SYNC_F_NO_PC. */
+bool coop_lite_client_take_rejoin_no_pc(void);
+bool coop_lite_test_pending_offer_rejoin_only(int slot);
 
 /* True while a coop client is waiting for SESSION_SYNC (no independent New Game). */
 bool coop_lite_client_waiting_for_sync(void);

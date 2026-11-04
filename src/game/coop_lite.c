@@ -488,12 +488,14 @@ static bool coop_lite_pending_follow_valid;
 static PacketCoopFollowHost coop_lite_pending_follow;
 static bool coop_lite_waiting_sync; /* client offered char; waiting for SESSION_SYNC */
 static bool coop_lite_session_synced; /* client has applied at least one SESSION_SYNC */
+static bool coop_lite_rejoin_no_pc; /* PT69: host had no PC for our rejoin */
 
 typedef struct CoopPendingOffer {
     bool valid;
     int proto;
     char name[64];
     bool has_oid;
+    bool rejoin_only; /* PT69: main-menu rejoin, placeholder PC */
     unsigned char oid[24];
     uint64_t token_hash;
 } CoopPendingOffer;
@@ -1427,6 +1429,7 @@ void coop_lite_session_reset(void)
     memset(&coop_lite_pending_follow, 0, sizeof(coop_lite_pending_follow));
     coop_lite_waiting_sync = false;
     coop_lite_session_synced = false;
+    coop_lite_rejoin_no_pc = false;
     coop_lite_client_in_session = false;
     coop_client_pos_valid = false;
     coop_last_census_ms = 0;
@@ -2328,7 +2331,37 @@ static void coop_lite_client_send_char_bundle(int64_t pc)
 }
 #endif
 
+bool coop_lite_offer_flag_has_oid(int has_oid_field)
+{
+    return (has_oid_field & COOP_OFFER_F_HAS_OID) != 0;
+}
+
+bool coop_lite_offer_flag_rejoin_only(int has_oid_field)
+{
+    return (has_oid_field & COOP_OFFER_F_REJOIN_ONLY) != 0;
+}
+
+bool coop_lite_client_take_rejoin_no_pc(void)
+{
+    bool v = coop_lite_rejoin_no_pc;
+
+    coop_lite_rejoin_no_pc = false;
+    return v;
+}
+
+static bool coop_lite_client_send_offer(int basic_prototype, const char* name, bool rejoin_only);
+
 bool coop_lite_client_offer_character(int basic_prototype, const char* name)
+{
+    return coop_lite_client_send_offer(basic_prototype, name, false);
+}
+
+bool coop_lite_client_offer_rejoin(int basic_prototype, const char* name)
+{
+    return coop_lite_client_send_offer(basic_prototype, name, true);
+}
+
+static bool coop_lite_client_send_offer(int basic_prototype, const char* name, bool rejoin_only)
 {
     PacketCoopCharOffer pkt;
 
@@ -2350,18 +2383,23 @@ bool coop_lite_client_offer_character(int basic_prototype, const char* name)
         if (pc != OBJ_HANDLE_NULL) {
             ObjectID oid = obj_get_id(pc);
             memcpy(pkt.pc_oid, &oid, sizeof(oid));
-            pkt.has_oid = 1;
+            pkt.has_oid = COOP_OFFER_F_HAS_OID;
         }
         coop_lite_load_or_create_token(pkt.token);
-        if (pc != OBJ_HANDLE_NULL) {
+        if (pc != OBJ_HANDLE_NULL && !rejoin_only) {
+            /* PT69: a rejoin placeholder is never offered as a character. */
             coop_lite_client_send_char_bundle(pc);
         }
     }
 #endif
+    if (rejoin_only) {
+        pkt.has_oid |= COOP_OFFER_F_REJOIN_ONLY;
+    }
+    coop_lite_rejoin_no_pc = false;
     tig_net_send_app_all(&pkt, sizeof(pkt));
     coop_lite_waiting_sync = true;
-    tig_debug_printf("CoopLite: CHAR_OFFER sent slot=%d proto=%d name=%s has_oid=%d\n",
-        pkt.slot, pkt.basic_prototype, pkt.name, pkt.has_oid);
+    tig_debug_printf("CoopLite: CHAR_OFFER sent slot=%d proto=%d name=%s has_oid=%d%s\n",
+        pkt.slot, pkt.basic_prototype, pkt.name, pkt.has_oid, rejoin_only ? " (rejoin only)" : "");
     return true;
 }
 
@@ -4269,6 +4307,21 @@ static bool coop_lite_host_spawn_client(int slot)
             }
             client_obj = existing;
         }
+    }
+    if (client_obj == OBJ_HANDLE_NULL && coop_pending_offers[slot].rejoin_only) {
+        /* PT69: rejoin from the client's main menu, but we hold no PC for
+           this player (first join, or it is gone): never adopt the
+           placeholder - send it to character creation. */
+        memset(&sync, 0, sizeof(sync));
+        sync.type = PACKET_COOP_SESSION_SYNC;
+        sync.flags = COOP_SYNC_F_NO_PC;
+        sync.map = map;
+        sync.client_slot = slot;
+        tig_net_send_app(&sync, sizeof(sync), slot);
+        coop_char_rx_free(&coop_char_rx[slot]);
+        coop_pending_offers[slot].valid = false;
+        tig_debug_printf("CoopLite: slot %d rejoin-only offer, no PC kept - client goes to character creation\n", slot);
+        return false;
     }
     if (client_obj == OBJ_HANDLE_NULL) {
         /* v2: the client's own character (stats, skills, spells, gear). */
@@ -6932,7 +6985,8 @@ void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt)
     coop_pending_offers[slot].proto = pkt->basic_prototype;
     memcpy(coop_pending_offers[slot].name, pkt->name, sizeof(coop_pending_offers[slot].name));
     coop_lite_terminate_name(coop_pending_offers[slot].name, sizeof(coop_pending_offers[slot].name));
-    coop_pending_offers[slot].has_oid = pkt->has_oid != 0;
+    coop_pending_offers[slot].has_oid = coop_lite_offer_flag_has_oid(pkt->has_oid);
+    coop_pending_offers[slot].rejoin_only = coop_lite_offer_flag_rejoin_only(pkt->has_oid);
     memcpy(coop_pending_offers[slot].oid, pkt->pc_oid, sizeof(coop_pending_offers[slot].oid));
     coop_pending_offers[slot].token_hash = coop_lite_token_hash(pkt->token);
     tig_debug_printf("CoopLite: CHAR_OFFER from slot=%d proto=%d name=%s has_oid=%d\n",
@@ -6945,6 +6999,11 @@ void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt)
         tig_debug_printf("CoopLite: offer queued until host enters world\n");
     }
 #endif
+}
+
+bool coop_lite_test_pending_offer_rejoin_only(int slot)
+{
+    return slot > 0 && slot < 8 && coop_pending_offers[slot].valid && coop_pending_offers[slot].rejoin_only;
 }
 
 bool coop_lite_test_pending_offer(int slot)
@@ -6988,6 +7047,15 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
     if (pkt->client_slot != sub_529520()) {
         tig_debug_printf("CoopLite: SESSION_SYNC for slot %d dropped (we are %d)\n",
             pkt->client_slot, sub_529520());
+        return;
+    }
+    if ((pkt->flags & COOP_SYNC_F_NO_PC) != 0) {
+        /* PT69: our rejoin found no PC on the host: create one (New Game). */
+        if (coop_lite_waiting_sync) {
+            coop_lite_waiting_sync = false;
+            coop_lite_rejoin_no_pc = true;
+            tig_debug_printf("CoopLite: host keeps no PC for us - character creation needed\n");
+        }
         return;
     }
     if (pkt->map <= 0) {

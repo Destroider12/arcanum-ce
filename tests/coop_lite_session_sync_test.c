@@ -85,6 +85,15 @@ static int test_skip_and_roles(void)
         fprintf(stderr, "SESSION_SYNC role\n");
         return 1;
     }
+    /* PT69: offer flag bits (old has_oid value 1 keeps its meaning). */
+    if (!coop_lite_offer_flag_has_oid(1) || coop_lite_offer_flag_rejoin_only(1)
+        || !coop_lite_offer_flag_rejoin_only(COOP_OFFER_F_REJOIN_ONLY)
+        || coop_lite_offer_flag_has_oid(COOP_OFFER_F_REJOIN_ONLY)
+        || !coop_lite_offer_flag_has_oid(COOP_OFFER_F_HAS_OID | COOP_OFFER_F_REJOIN_ONLY)
+        || TIG_NET_PROTOCOL < 42) {
+        fprintf(stderr, "PT69 offer flags\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -169,6 +178,38 @@ static int run_client(void)
         fprintf(stderr, "client: ack failed\n");
         return 1;
     }
+    /* PT69: main-menu rejoin - no character bundle, flag on the offer; a
+       NO_PC answer clears the wait without a map load or a ready session. */
+    {
+        int teleports = g_teleport_calls;
+
+        if (!coop_lite_client_offer_rejoin(16067, "Placeholder") || !coop_lite_client_waiting_for_sync()) {
+            fprintf(stderr, "client: PT69 rejoin offer failed\n");
+            return 1;
+        }
+        memset(&sync, 0, sizeof(sync));
+        sync.type = PACKET_COOP_SESSION_SYNC;
+        sync.flags = COOP_SYNC_F_NO_PC;
+        sync.map = 7;
+        sync.client_slot = 1;
+        coop_lite_handle_session_sync(&sync);
+        if (coop_lite_client_waiting_for_sync() || coop_lite_client_session_ready()
+            || g_teleport_calls != teleports) {
+            fprintf(stderr, "client: PT69 NO_PC handled like a sync\n");
+            return 1;
+        }
+        if (!coop_lite_client_take_rejoin_no_pc() || coop_lite_client_take_rejoin_no_pc()) {
+            fprintf(stderr, "client: PT69 NO_PC flag not reported exactly once\n");
+            return 1;
+        }
+        /* A stray NO_PC while not waiting is ignored. */
+        coop_lite_handle_session_sync(&sync);
+        if (coop_lite_client_take_rejoin_no_pc()) {
+            fprintf(stderr, "client: PT69 stray NO_PC accepted\n");
+            return 1;
+        }
+        pump_ms(100);
+    }
     tig_net_reset_connection();
     printf("client: PASS\n");
     return 0;
@@ -199,7 +240,21 @@ static int run_host(void)
         fprintf(stderr, "host: no client\n");
         return 1;
     }
-    pump_ms(800);
+    {
+        int waits = 0;
+
+        /* PT69: the second offer is the rejoin-only one. */
+        while (g_got_char_offer < 2 && waits < 3000) {
+            tig_net_pump();
+            usleep(1000);
+            waits++;
+        }
+    }
+    if (g_got_char_offer < 2 || !coop_lite_test_pending_offer_rejoin_only(1)) {
+        fprintf(stderr, "host: PT69 rejoin-only offer not seen (%d offers)\n", g_got_char_offer);
+        return 1;
+    }
+    pump_ms(200);
     if (g_got_char_offer < 1) {
         fprintf(stderr, "host: missed CHAR_OFFER\n");
         return 1;
