@@ -18465,7 +18465,7 @@ bool coop_lite_client_travel_intercept(const TeleportData* td)
     if (coop_treq_sent_ms == 0 || coop_lite_interval_elapsed(coop_treq_sent_ms, now, 3000u)) {
         coop_treq_sent_ms = now != 0 ? now : 1u;
         coop_treq_send(COOP_TREQ_ASK, td->map, td->loc, -1);
-        coop_lite_show_notice("Запрос на переход отправлен хосту. / Travel request sent to the host.", TF_TYPE_WHITE);
+        coop_lite_show_notice(coop_lite_lang_ru() ? "Запрос на переход отправлен хосту." : "Travel request sent to the host - waiting for Y / N.", TF_TYPE_WHITE);
         tig_debug_printf("CoopLite: PT57 travel request to map %d sent to the host\n", td->map);
     }
     return true; /* never alone */
@@ -18509,6 +18509,68 @@ static bool coop_treq_accept(void)
     return true;
 }
 
+/* PT64: the host shows the visible Y / N travel prompt for slot's ask
+   (from a PT57 packet or a transition the host itself ran for that PC). */
+static void coop_treq_host_ask(int slot, int map, int64_t loc, const char* via)
+{
+    int64_t pc;
+    char* map_nm = NULL;
+    char name[128];
+    char text[512];
+
+    pc = sub_4A2B60(slot);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !map_get_name(map, &map_nm)) {
+        coop_treq_send(COOP_TREQ_REFUSED, map, loc, slot);
+        return;
+    }
+    if (coop_treq_active && coop_treq_slot == slot && coop_treq.map == map) {
+        return; /* the same ask is already on screen (jump points re-fire) */
+    }
+    memset(&coop_treq, 0, sizeof(coop_treq));
+    coop_treq.type = PACKET_COOP_TRAVEL_REQ;
+    coop_treq.kind = COOP_TREQ_ASK;
+    coop_treq.map = map;
+    coop_treq.loc = loc;
+    coop_treq_active = true;
+    coop_treq_slot = slot;
+    object_examine(pc, pc, name);
+    if (coop_lite_lang_ru()) {
+        snprintf(text, sizeof(text), "%s хочет перейти в %s. Y - идти всей группой, N - отказать.",
+            name, coop_treq_map_name(map));
+    } else {
+        snprintf(text, sizeof(text), "%s wants to travel to %s. Y = the party goes, N = refuse.",
+            name, coop_treq_map_name(map));
+    }
+    if (coop_travel_show_hook != NULL) {
+        coop_travel_show_text(text);
+    }
+    /* always in the message line too, so it is never only in the log */
+    coop_lite_show_notice(text, TF_TYPE_WHITE);
+    tig_debug_printf("CoopLite: PT64 Travel request: slot %d asks to travel to map %d (%s)\n", slot, map, via);
+}
+
+/* PT64: a client PC stepped on a jump point / ran a scripted exit / portal
+   on the HOST (its moves and scripts run here): it must not leave alone. */
+bool coop_lite_host_remote_travel_intercept(const TeleportData* td)
+{
+    int slot;
+
+    if (td == NULL || coop_client_tp_auth > 0 || coop_travel_bypass || coop_lite_applying_follow
+        || !tig_net_is_coop_enabled() || !tig_net_is_active() || !tig_net_is_host()
+        || td->obj == OBJ_HANDLE_NULL || player_is_local_pc_obj(td->obj)
+        || td->map <= 0 || !map_is_valid() || td->map == map_current_map()) {
+        return false;
+    }
+    slot = coop_lite_slot_of_obj(td->obj);
+    if (slot <= 0 || slot >= 8) {
+        return false;
+    }
+    if (!coop_travel_active) {
+        coop_treq_host_ask(slot, td->map, td->loc, "host-side transition");
+    }
+    return true; /* never alone */
+}
+
 void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
 {
     if (!tig_net_is_active() || !coop_lite_travel_req_valid(pkt, tig_net_last_message_size())) {
@@ -18516,39 +18578,19 @@ void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
     }
     if (tig_net_is_host()) {
         int slot = sub_52A530();
-        int64_t pc;
-        char* map_nm = NULL;
-        char name[128];
-        char text[512];
 
         if (pkt->kind != COOP_TREQ_ASK || slot <= 0 || slot >= 8) {
             return;
         }
-        pc = sub_4A2B60(slot);
-        if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !map_get_name(pkt->map, &map_nm)) {
-            coop_treq_send(COOP_TREQ_REFUSED, pkt->map, pkt->loc, slot);
-            return;
-        }
-        coop_treq_active = true;
-        coop_treq_slot = slot;
-        coop_treq = *pkt;
-        object_examine(pc, pc, name);
-        snprintf(text, sizeof(text), "%s хочет перейти в %s. Y — идти, N — отказать.\n%s wants to travel to %s. Y = go, N = refuse.",
-            name, coop_treq_map_name(pkt->map), name, coop_treq_map_name(pkt->map));
-        if (coop_travel_show_hook != NULL) {
-            coop_travel_show_text(text);
-        } else {
-            coop_lite_show_notice(text, TF_TYPE_WHITE);
-        }
-        tig_debug_printf("CoopLite: PT57 slot %d asks to travel to map %d\n", slot, pkt->map);
+        coop_treq_host_ask(slot, pkt->map, pkt->loc, "client packet");
         return;
     }
     if (pkt->kind == COOP_TREQ_REFUSED) {
         coop_treq_sent_ms = 0;
-        coop_lite_show_notice("Хост отказал в переходе. / The host refused the trip.", TF_TYPE_RED);
+        coop_lite_show_notice(coop_lite_lang_ru() ? "Хост отказал в переходе." : "The host refused the trip.", TF_TYPE_RED);
     } else if (pkt->kind == COOP_TREQ_ACCEPTED) {
         coop_treq_sent_ms = 0;
-        coop_lite_show_notice("Хост согласился: группа отправляется. / The host agreed: the party is setting off.", TF_TYPE_WHITE);
+        coop_lite_show_notice(coop_lite_lang_ru() ? "Хост согласился: группа отправляется." : "The host agreed: the party is setting off.", TF_TYPE_WHITE);
     }
 }
 
@@ -18569,6 +18611,7 @@ bool coop_lite_travel_key(void) { return false; }
 void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
 bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }
 bool coop_lite_client_travel_intercept(const TeleportData* td) { (void)td; return false; }
+bool coop_lite_host_remote_travel_intercept(const TeleportData* td) { (void)td; return false; }
 bool coop_lite_travel_refuse_key(void) { return false; }
 void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt) { (void)pkt; }
 static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }

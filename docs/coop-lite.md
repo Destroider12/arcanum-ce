@@ -2801,3 +2801,31 @@ Wire: new world kind 6 (`COOP_WORLD_SCENERY`); `DOOR_STATE` accepts scenery, and
 - **Client crash 07239681** (`obj_find_remove` NULL ← `map_open` during the host-reload resync): the client emptied `Save\Current\maps\<map>` of the map that was **open**. `map_open_in_game` then flushed into it, and the sector cache read from it, which left dead inventory handles ("validate: dead inventory entry dropped") and a freed find node. For the open map, the wipe now happens inside `map_open` between `map_close` and the reload (`coop_lite_map_open_after_close`). `obj_find_remove` logs and skips a NULL node.
 - **Minidump**: it is now written from a helper thread with exception pointers, with dbghelp loaded from System32 and read/write file access. The log line has the error code.
 - **Autojoin**: launcher Reconnect starts a client with `ARCANUM_COOP_AUTOJOIN=1`. The menu then joins at once with the rejoin token (same path as R / auto-wait), and falls back to auto-wait if the host isn't up yet.
+
+## PT64: client travel requests that actually reach the host
+
+**Symptom.** A client walking onto an exit, jump point, dungeon entrance or
+scripted transition never produced the PT57 "Travel request" prompt on the host
+(the PT63 client log has no PT57 line at all).
+
+**Cause.** PT57 only intercepted `teleport_do` on the *client*. But a client
+PC's moves, tile scripts, portal/stairs scripts and jump points (`object.c`
+`sub_444270` -> `map_process_jumppoint`, `script.c`, `magictech.c`) run on the
+**host**, with `td->obj` = the client's PC. There `coop_lite_client_travel_intercept`
+is off (host) and `coop_lite_host_travel_gate` only looks at the host's own PC,
+so the request was never asked: the transition simply went through the
+vanilla path for a remote PC (or nothing visible happened).
+
+**Fix.** `teleport_do` now also calls `coop_lite_host_remote_travel_intercept`:
+on the host, a teleport of a remote co-op PC (slot 1..7) to another map, outside
+co-op's own authorised teleports (`coop_client_tp_auth`, follow, travel bypass),
+is blocked and turned into a travel request for that slot. Both paths (client
+packet and host-side transition) go through `coop_treq_host_ask`, which:
+- dedupes a repeat of the same ask (jump points re-fire on every step);
+- shows the prompt on the travel panel **and** always in the message line
+  ("<name> wants to travel to <map>. Y = the party goes, N = refuse.");
+- logs `CoopLite: PT64 Travel request: slot S asks to travel to map M (via)`.
+Y -> the host travels via its own path (ready check + party carry), the client
+gets "The host agreed". N -> nobody moves, the client gets "The host refused the
+trip." Client strings are English unless `ARCANUM_COOP_LANG=ru`.
+No wire change: protocol stays 41.

@@ -126,6 +126,11 @@ bool teleport_do(TeleportData* teleport_data)
         return false;
     }
 
+    /* PT64: a client's PC leaving via a jump point / script / portal run on the host. */
+    if (coop_lite_host_remote_travel_intercept(teleport_data)) {
+        return false;
+    }
+
     /* PT50: host leaving with clients far / busy -> ready check first. */
     if (coop_lite_host_travel_gate(teleport_data)) {
         return false;

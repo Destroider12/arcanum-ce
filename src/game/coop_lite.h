@@ -579,6 +579,7 @@ void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt);
 struct TeleportData;
 /* teleport_do hook (client): true = turned into a request, do not teleport. */
 bool coop_lite_client_travel_intercept(const struct TeleportData* td);
+bool coop_lite_host_remote_travel_intercept(const struct TeleportData* td);
 /* N key: host refuses a pending client travel request. True if consumed. */
 bool coop_lite_travel_refuse_key(void);
 
