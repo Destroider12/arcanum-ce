@@ -6102,6 +6102,12 @@ void intgame_dialog_end(void)
     intgame_mode_set(INTGAME_MODE_MAIN);
 }
 
+/* PT67: is a dialog input filter (and the dialog text window) installed? */
+bool intgame_dialog_is_active(void)
+{
+    return intgame_dialog_process_event_func != NULL;
+}
+
 // 0x553370
 void intgame_dialog_clear(void)
 {

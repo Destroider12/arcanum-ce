@@ -2405,6 +2405,12 @@ int main(int argc, char** argv)
             fprintf(stderr, "PT66 corpse keep\n");
             return 1;
         }
+        /* PT67: orphaned dialog window after the craft menu closed */
+        if (!coop_lite_dialog_ui_orphaned(true, false, false) || !coop_lite_dialog_ui_orphaned(true, true, true)
+            || coop_lite_dialog_ui_orphaned(true, true, false) || coop_lite_dialog_ui_orphaned(false, false, true)) {
+            fprintf(stderr, "PT67 dialog orphan\n");
+            return 1;
+        }
         if (!coop_lite_sector_list_add(list, &cnt, 3, 10) || !coop_lite_sector_list_add(list, &cnt, 3, 10)
             || cnt != 1 || !coop_lite_sector_list_add(list, &cnt, 3, 11) || !coop_lite_sector_list_add(list, &cnt, 3, 12)
             || coop_lite_sector_list_add(list, &cnt, 3, 13) || !coop_lite_sector_list_has(list, cnt, 11)

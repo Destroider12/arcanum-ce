@@ -107,7 +107,9 @@ void dialog_ui_reset(void)
 {
     int index;
 
-    if (dialog_ui_local_pc_dialog_active) {
+    /* PT67: any load/reset closes the dialog window, even when the flag was
+       already (stale-)cleared but the input filter stayed installed. */
+    if (dialog_ui_local_pc_dialog_active || intgame_dialog_is_active()) {
         intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = false;
     }
@@ -299,6 +301,17 @@ void dialog_ui_end_dialog(int64_t obj, int a2)
 
     entry = sub_567420(obj);
     if (!entry->field_1850) {
+        /* PT67: the single shared entry was already ended (e.g. by another
+           PC's dialog/bark on the host) while the local dialog window stayed
+           up; asking Magnus to craft then left an option-less dialog that
+           ate all input. Still tear the local window down. */
+        if (player_is_local_pc_obj(obj)
+            && (dialog_ui_local_pc_dialog_active || intgame_dialog_is_active())) {
+            tig_debug_printf("DialogUI: PT67 orphaned dialog window closed\n");
+            intgame_dialog_end();
+            dialog_ui_local_pc_dialog_active = 0;
+            coop_lite_host_dialog_closed();
+        }
         return;
     }
 
@@ -343,6 +356,15 @@ bool dialog_ui_is_local_pc_in_dialog(void)
         && intgame_mode_get() != INTGAME_MODE_DIALOG
         && intgame_mode_get() != INTGAME_MODE_BARTER) {
         tig_debug_printf("DialogUI: stale local dialog flag cleared (mode %d)\n", (int)intgame_mode_get());
+        dialog_ui_local_pc_dialog_active = false;
+    }
+    /* PT67: never leave the dialog filter installed without a dialog. */
+    if (tig_net_is_coop_enabled()
+        && coop_lite_dialog_ui_orphaned(intgame_dialog_is_active(),
+            sub_567420(OBJ_HANDLE_NULL)->field_1850 && dialog_ui_local_pc_dialog_active,
+            intgame_mode_get() == INTGAME_MODE_MAIN)) {
+        tig_debug_printf("DialogUI: PT67 orphaned dialog filter removed (mode %d)\n", (int)intgame_mode_get());
+        intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = false;
     }
     return dialog_ui_local_pc_dialog_active;

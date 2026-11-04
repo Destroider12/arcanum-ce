@@ -18625,6 +18625,15 @@ bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag)
     return is_pc || leads_to_pc || no_decay_flag;
 }
 
+/* PT67 (pure; tests): the dialog text window / input filter is still
+   installed but nothing owns it any more (the shared dialog entry was
+   already ended, or the mode stack is back in MAIN): it must be torn
+   down, or every click goes to an option-less dialog forever. */
+bool coop_lite_dialog_ui_orphaned(bool filter_installed, bool entry_active, bool mode_is_main)
+{
+    return filter_installed && (!entry_active || mode_is_main);
+}
+
 /* PT51: small sector-id set (pure; tests). add: false only when full. */
 bool coop_lite_sector_list_add(int64_t* list, int* cnt, int max, int64_t id)
 {

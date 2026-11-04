@@ -2883,3 +2883,14 @@ also skips kept bodies, so decay events already queued in older saves do not
 destroy them. The body stays where it died with its inventory; it syncs to
 clients as any other object, and resurrection works as for any existing body.
 Decision is the pure `coop_lite_corpse_keep` (policy test). Protocol unchanged (41).
+
+## PT67: dialog softlock after a companion craft menu
+
+Asking a companion (Magnus) to craft opens the schematic UI from dialog, which
+ends the dialog first. All PCs share one dialog entry on the host, so it could
+already be marked ended while the local dialog window and its input filter
+stayed installed; the end call then returned early and the empty dialog ate
+all input, even across loads (reset only closed it when a flag that had been
+stale-cleared was still set). Now ending a dialog, any save load/reset, and the
+Esc-menu stale check always remove an orphaned dialog window/filter
+(`coop_lite_dialog_ui_orphaned`, tested in coop_lite_policy_test).
