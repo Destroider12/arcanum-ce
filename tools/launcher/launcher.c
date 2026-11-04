@@ -17,6 +17,11 @@
  * Reconnect / Create bug report / Close. A crashed host is restarted at
  * once with ARCANUM_COOP_AUTOLOAD=latest (the game loads its newest save and
  * skips the menu); clients wait for it in their main menu and rejoin.
+ *
+ * PT65: on separate PCs one folder is enough (Coop-Setup is only for host +
+ * client on one PC). Optional update check ([update] enabled=1 in the ini,
+ * default off): replaces only the root arcanum-ce.exe from a verified
+ * GitHub release zip.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -24,6 +29,8 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <wininet.h>
+#include <bcrypt.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +62,9 @@
 #define IDC_RECONNECT 118
 #define IDC_BUGREPORT 119
 #define IDC_PANEL_CLOSE 120
+#define IDC_UPD_TEXT 121 /* PT65 */
+#define IDC_UPD_CHECK 122
+#define IDC_UPD_GO 123
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 
 #ifndef COOP_BUILD_SHA
@@ -415,6 +425,8 @@ static void start_game(void)
     GetSystemTimeAsFileTime(&g_game_started);
     show_panel(false);
     EnableWindow(item(IDC_START), FALSE);
+    EnableWindow(item(IDC_UPD_CHECK), FALSE); /* PT65: no update while the game runs */
+    EnableWindow(item(IDC_UPD_GO), FALSE);
     CloseHandle(CreateThread(NULL, 0, game_watch_thread, pi.hProcess, 0, NULL));
     set_status(host ? "Game started as host. Friends can join any time (late join)." : "Game started - joining the host.");
 }
@@ -695,6 +707,8 @@ static void on_game_exit(DWORD code, HANDLE proc)
     g_game = NULL;
     g_game_exit = code;
     EnableWindow(item(IDC_START), TRUE);
+    EnableWindow(item(IDC_UPD_CHECK), TRUE);
+    EnableWindow(item(IDC_UPD_GO), TRUE);
     crashed = code != 0 || new_crash_file();
     if (!crashed) {
         set_status("Game closed.");
@@ -1056,6 +1070,430 @@ static void add_firewall_rule(void)
                                 : "Firewall rule not added (cancelled or no admin rights).");
 }
 
+/* ---- PT65: optional self-update of arcanum-ce.exe from GitHub Releases ----
+   Off unless arcanum-coop-launcher.ini has [update] enabled=1. Source:
+   [update] releases_url (default the fork's API), tag_prefix (coop-lite-).
+   Only arcanum-ce.exe next to the launcher is replaced: never coop-host\ /
+   coop-client\, the launcher, game data, saves or the ini. */
+#define WM_APP_UPD (WM_APP + 4)
+#define UPD_DEFAULT_URL "https://api.github.com/repos/Destroider12/arcanum-ce/releases"
+
+typedef struct UpdInfo {
+    char tag[96];
+    char zip_url[512];
+    char sha_url[512];
+    char sha_hex[65]; /* from the body, if no sha256.txt */
+} UpdInfo;
+
+static UpdInfo g_upd;
+static volatile LONG g_upd_busy;
+static bool g_upd_ready;
+
+static bool upd_enabled(void)
+{
+    return GetPrivateProfileIntA("update", "enabled", 0, g_ini) != 0;
+}
+
+static void upd_post(int ready, const char* fmt, const char* a)
+{
+    char* t = (char*)malloc(300);
+
+    snprintf(t, 300, fmt, a != NULL ? a : "");
+    PostMessageA(g_wnd, WM_APP_UPD, (WPARAM)ready, (LPARAM)t);
+}
+
+/* whole body of a GET into a malloc'd buffer (NUL-terminated), or NULL */
+static char* upd_get(const char* url, DWORD* out_len, DWORD max)
+{
+    HINTERNET net;
+    HINTERNET req;
+    char* buf = NULL;
+    DWORD len = 0;
+    DWORD cap = 0;
+    DWORD got;
+    char chunk[16384];
+
+    net = InternetOpenA("arcanum-coop-launcher", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (net == NULL) {
+        return NULL;
+    }
+    req = InternetOpenUrlA(net, url, "Accept: application/vnd.github+json\r\n", (DWORD)-1,
+        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE, 0);
+    if (req != NULL) {
+        DWORD code = 0;
+        DWORD sz = sizeof(code);
+
+        HttpQueryInfoA(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &code, &sz, NULL);
+        if (code == 200) {
+            while (InternetReadFile(req, chunk, sizeof(chunk), &got) && got > 0) {
+                if (len + got + 1 > cap) {
+                    char* nb;
+
+                    cap = (len + got + 1) * 2;
+                    if (cap > max) {
+                        free(buf);
+                        buf = NULL;
+                        break;
+                    }
+                    nb = (char*)realloc(buf, cap);
+                    if (nb == NULL) {
+                        free(buf);
+                        buf = NULL;
+                        break;
+                    }
+                    buf = nb;
+                }
+                memcpy(buf + len, chunk, got);
+                len += got;
+            }
+            if (buf != NULL) {
+                buf[len] = '\0';
+            }
+        }
+        InternetCloseHandle(req);
+    }
+    InternetCloseHandle(net);
+    if (out_len != NULL) {
+        *out_len = len;
+    }
+    return buf;
+}
+
+/* "key":"value" at or after p (before end); copies value; returns past it */
+static const char* upd_json_str(const char* p, const char* end, const char* key, char* out, size_t size)
+{
+    char pat[64];
+    const char* q;
+    size_t n = 0;
+
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    for (q = strstr(p, pat); q != NULL && q < end; q = strstr(q + 1, pat)) {
+        q += strlen(pat);
+        while (*q == ' ') {
+            q++;
+        }
+        if (*q != '"') {
+            continue;
+        }
+        q++;
+        while (*q != '\0' && *q != '"' && q < end) {
+            if (*q == '\\' && q[1] != '\0') {
+                q++;
+            }
+            if (n + 1 < size) {
+                out[n++] = *q;
+            }
+            q++;
+        }
+        out[n] = '\0';
+        return q;
+    }
+    return NULL;
+}
+
+static bool upd_find_hex64(const char* p, const char* end, char* out)
+{
+    int run = 0;
+
+    for (; p < end && *p != '\0'; p++) {
+        bool hx = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F');
+
+        run = hx ? run + 1 : 0;
+        if (run == 64 && !(p + 1 < end && ((p[1] >= '0' && p[1] <= '9') || ((p[1] | 32) >= 'a' && (p[1] | 32) <= 'f')))) {
+            int i;
+
+            for (i = 0; i < 64; i++) {
+                out[i] = (char)(p[i - 63] | 32);
+            }
+            out[64] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+/* newest release (the API lists newest first, prereleases included) whose
+   tag starts with the prefix */
+static bool upd_pick(const char* json, const char* prefix, UpdInfo* u)
+{
+    const char* p = json;
+    const char* end = json + strlen(json);
+
+    while ((p = strstr(p, "\"tag_name\":")) != NULL) {
+        const char* next = strstr(p + 1, "\"tag_name\":");
+        const char* seg_end = next != NULL ? next : end;
+        const char* a;
+        char url[512];
+
+        memset(u, 0, sizeof(*u));
+        upd_json_str(p, seg_end, "tag_name", u->tag, sizeof(u->tag));
+        if (strncmp(u->tag, prefix, strlen(prefix)) == 0) {
+            for (a = p; (a = upd_json_str(a, seg_end, "browser_download_url", url, sizeof(url))) != NULL;) {
+                size_t n = strlen(url);
+
+                if (n > 4 && _stricmp(url + n - 4, ".zip") == 0 && u->zip_url[0] == '\0') {
+                    snprintf(u->zip_url, sizeof(u->zip_url), "%s", url);
+                } else if (n > 10 && _stricmp(url + n - 10, "sha256.txt") == 0) {
+                    snprintf(u->sha_url, sizeof(u->sha_url), "%s", url);
+                }
+            }
+            {
+                const char* b = strstr(p, "\"body\":");
+
+                if (b != NULL && b < seg_end) {
+                    upd_find_hex64(b, seg_end, u->sha_hex);
+                }
+            }
+            return true;
+        }
+        p = seg_end;
+        if (next == NULL) {
+            break;
+        }
+    }
+    return false;
+}
+
+static bool upd_is_current(const char* tag, const char* prefix)
+{
+    const char* sha = tag + strlen(prefix);
+    size_t n = strlen(COOP_BUILD_SHA);
+
+    return n >= 7 && _strnicmp(sha, COOP_BUILD_SHA, n) == 0;
+}
+
+static DWORD WINAPI upd_check_thread(LPVOID arg)
+{
+    char url[512];
+    char prefix[64];
+    char* json;
+    UpdInfo u;
+
+    (void)arg;
+    GetPrivateProfileStringA("update", "releases_url", UPD_DEFAULT_URL, url, sizeof(url), g_ini);
+    GetPrivateProfileStringA("update", "tag_prefix", "coop-lite-", prefix, sizeof(prefix), g_ini);
+    json = upd_get(url, NULL, 8u << 20);
+    if (json == NULL) {
+        upd_post(0, "Update check failed (offline or no releases).%s", NULL);
+    } else if (!upd_pick(json, prefix, &u) || u.zip_url[0] == '\0') {
+        upd_post(0, "No release with a zip found (build " COOP_BUILD_SHA ").%s", NULL);
+    } else if (upd_is_current(u.tag, prefix)) {
+        upd_post(0, "Up to date: %s", u.tag);
+    } else {
+        g_upd = u;
+        upd_post(1, "Update available: %s", u.tag);
+    }
+    free(json);
+    InterlockedExchange(&g_upd_busy, 0);
+    return 0;
+}
+
+static bool upd_sha256_file(const char* path, char* hex)
+{
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_HASH_HANDLE h = NULL;
+    unsigned char dig[32];
+    unsigned char buf[65536];
+    FILE* f;
+    size_t n;
+    bool ok = false;
+    int i;
+
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0
+        && BCryptCreateHash(alg, &h, NULL, 0, NULL, 0, 0) == 0) {
+        ok = true;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            if (BCryptHashData(h, buf, (ULONG)n, 0) != 0) {
+                ok = false;
+                break;
+            }
+        }
+        ok = ok && BCryptFinishHash(h, dig, sizeof(dig), 0) == 0;
+    }
+    if (h != NULL) {
+        BCryptDestroyHash(h);
+    }
+    if (alg != NULL) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+    }
+    fclose(f);
+    for (i = 0; ok && i < 32; i++) {
+        snprintf(hex + i * 2, 3, "%02x", dig[i]);
+    }
+    return ok;
+}
+
+static bool upd_run_hidden(char* cmd)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 1;
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 120000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+/* arcanum-ce.exe anywhere under dir (zips may have a top folder) */
+static bool upd_find_exe(const char* dir, char* out, int depth)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE fh;
+    char pat[MAX_PATH];
+    bool found = false;
+
+    snprintf(pat, sizeof(pat), "%s\\*", dir);
+    fh = FindFirstFileA(pat, &fd);
+    if (fh == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    do {
+        char sub[MAX_PATH];
+
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+        snprintf(sub, sizeof(sub), "%s\\%s", dir, fd.cFileName);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            found = depth < 3 && upd_find_exe(sub, out, depth + 1);
+        } else if (_stricmp(fd.cFileName, "arcanum-ce.exe") == 0) {
+            snprintf(out, MAX_PATH, "%s", sub);
+            found = true;
+        }
+    } while (!found && FindNextFileA(fh, &fd));
+    FindClose(fh);
+    return found;
+}
+
+static DWORD WINAPI upd_apply_thread(LPVOID arg)
+{
+    UpdInfo u = g_upd;
+    char tmp[MAX_PATH];
+    char work[MAX_PATH];
+    char zip[MAX_PATH];
+    char ext[MAX_PATH];
+    char cmd[2048];
+    char hex[65];
+    char want[65] = "";
+    char new_exe[MAX_PATH];
+    char dst[MAX_PATH];
+    char bak[MAX_PATH];
+    char* data;
+    DWORD len = 0;
+    FILE* f;
+
+    (void)arg;
+    GetTempPathA(sizeof(tmp), tmp);
+    snprintf(work, sizeof(work), "%sarcanum-coop-update-%lu", tmp, (unsigned long)GetTickCount());
+    CreateDirectoryA(work, NULL);
+    snprintf(zip, sizeof(zip), "%s\\update.zip", work);
+    snprintf(ext, sizeof(ext), "%s\\x", work);
+    upd_post(0, "Downloading %s ...", u.tag);
+    data = upd_get(u.zip_url, &len, 256u << 20);
+    if (data == NULL || len == 0) {
+        upd_post(1, "Download failed: %s", u.tag);
+        goto done;
+    }
+    f = fopen(zip, "wb");
+    if (f == NULL || fwrite(data, 1, len, f) != len) {
+        if (f != NULL) {
+            fclose(f);
+        }
+        free(data);
+        upd_post(1, "Cannot write the temp file.%s", NULL);
+        goto done;
+    }
+    fclose(f);
+    free(data);
+    if (u.sha_url[0] != '\0') {
+        char* t = upd_get(u.sha_url, NULL, 1u << 20);
+
+        if (t != NULL) {
+            upd_find_hex64(t, t + strlen(t), want);
+            free(t);
+        }
+    }
+    if (want[0] == '\0') {
+        snprintf(want, sizeof(want), "%s", u.sha_hex);
+    }
+    if (want[0] == '\0') {
+        upd_post(1, "Not updated: %s has no sha256 (sha256.txt or body).", u.tag);
+        goto done;
+    }
+    if (!upd_sha256_file(zip, hex) || strcmp(hex, want) != 0) {
+        upd_post(1, "Not updated: sha256 mismatch for %s.", u.tag);
+        goto done;
+    }
+    snprintf(cmd, sizeof(cmd),
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\"",
+        zip, ext);
+    if (!upd_run_hidden(cmd) || !upd_find_exe(ext, new_exe, 0)) {
+        upd_post(1, "Not updated: could not unpack arcanum-ce.exe.%s", NULL);
+        goto done;
+    }
+    if (g_game != NULL) {
+        upd_post(1, "Not updated: the game is running.%s", NULL);
+        goto done;
+    }
+    /* only the root exe; the old one is kept as .old until it works */
+    snprintf(dst, sizeof(dst), "%sarcanum-ce.exe", g_dir);
+    snprintf(bak, sizeof(bak), "%sarcanum-ce.exe.old", g_dir);
+    DeleteFileA(bak);
+    if (file_exists(dst) && !MoveFileExA(dst, bak, MOVEFILE_REPLACE_EXISTING)) {
+        upd_post(1, "Not updated: arcanum-ce.exe is in use.%s", NULL);
+        goto done;
+    }
+    if (!CopyFileA(new_exe, dst, FALSE)) {
+        MoveFileExA(bak, dst, MOVEFILE_REPLACE_EXISTING);
+        upd_post(1, "Not updated: copy failed (old exe restored).%s", NULL);
+        goto done;
+    }
+    upd_post(0, "Updated arcanum-ce.exe to %s.", u.tag);
+done:
+    snprintf(cmd, sizeof(cmd), "cmd.exe /c rmdir /s /q \"%s\"", work);
+    upd_run_hidden(cmd);
+    InterlockedExchange(&g_upd_busy, 0);
+    return 0;
+}
+
+static void upd_start(bool apply)
+{
+    if (!upd_enabled()) {
+        SetWindowTextA(item(IDC_UPD_TEXT), "Updates off ([update] enabled=1 in the ini).");
+        return;
+    }
+    if (g_game != NULL) {
+        SetWindowTextA(item(IDC_UPD_TEXT), "Updates are disabled while the game runs.");
+        return;
+    }
+    if (InterlockedCompareExchange(&g_upd_busy, 1, 0) != 0) {
+        return;
+    }
+    EnableWindow(item(IDC_UPD_GO), FALSE);
+    SetWindowTextA(item(IDC_UPD_TEXT), apply ? "Updating..." : "Checking for updates...");
+    CloseHandle(CreateThread(NULL, 0, apply ? upd_apply_thread : upd_check_thread, NULL, 0, NULL));
+}
+
+static void upd_on_msg(WPARAM ready, char* text)
+{
+    SetWindowTextA(item(IDC_UPD_TEXT), text);
+    free(text);
+    g_upd_ready = ready != 0;
+    ShowWindow(item(IDC_UPD_GO), g_upd_ready ? SW_SHOW : SW_HIDE);
+    EnableWindow(item(IDC_UPD_GO), g_upd_ready && g_game == NULL);
+}
+
 static HWND make(const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
 {
     HWND h_ = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_wnd,
@@ -1095,6 +1533,10 @@ static void create_controls(void)
     make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);
     make("BUTTON", "Create bug report", WS_TABSTOP, 114, 460, 130, 30, IDC_BUGREPORT);
     make("BUTTON", "Close", WS_TABSTOP, 250, 460, 70, 30, IDC_PANEL_CLOSE);
+    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 504, 196, 20, IDC_UPD_TEXT);
+    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 500, 120, 26, IDC_UPD_CHECK);
+    make("BUTTON", "Update", WS_TABSTOP, 340, 500, 90, 26, IDC_UPD_GO);
+    ShowWindow(item(IDC_UPD_GO), SW_HIDE);
     show_panel(false);
 }
 
@@ -1108,6 +1550,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         refresh();
         set_status("Host: start, then send your address (or SteamID64) to friends. Join: works while the host plays.");
         CloseHandle(CreateThread(NULL, 0, upnp_thread, NULL, 0, NULL));
+        {
+            char old[MAX_PATH];
+
+            snprintf(old, sizeof(old), "%sarcanum-ce.exe.old", g_dir);
+            DeleteFileA(old); /* PT65: last update's backup */
+        }
+        if (upd_enabled()) {
+            upd_start(false);
+        } else {
+            SetWindowTextA(item(IDC_UPD_TEXT), "Updates off ([update] enabled=1 in the ini).");
+        }
+        return 0;
+    case WM_APP_UPD:
+        upd_on_msg(wp, (char*)lp);
         return 0;
     case WM_APP_CHECK:
         SetWindowTextA(item(IDC_CHECK_OUT), (const char*)lp);
@@ -1155,6 +1611,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_BUGREPORT:
             create_bug_report();
             break;
+        case IDC_UPD_CHECK:
+            upd_start(false);
+            break;
+        case IDC_UPD_GO:
+            if (g_upd_ready) {
+                upd_start(true);
+            }
+            break;
         case IDC_PANEL_CLOSE:
             show_panel(false);
             set_status("");
@@ -1162,6 +1626,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_START:
             if (g_game != NULL) {
                 set_status("The game is already running.");
+                break;
+            }
+            if (g_upd_busy) {
+                set_status("Wait for the update to finish.");
                 break;
             }
             start_game();
@@ -1188,7 +1656,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     WNDCLASSA wc;
     WSADATA wsa;
     MSG m;
-    RECT r = { 0, 0, 444, 502 };
+    RECT r = { 0, 0, 444, 534 };
     char* slash;
     NONCLIENTMETRICSA ncm;
 

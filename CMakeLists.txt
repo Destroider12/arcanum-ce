@@ -728,7 +728,7 @@ add_test(NAME tig_net_transport COMMAND tig_net_transport_test)
 # PT58: co-op launcher (Win32 GUI, Windows builds only).
 if(WIN32)
     add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c")
-    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32 shell32)
+    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32 shell32 wininet bcrypt)
     # PT62: build sha + protocol go into the bug report.
     file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/net/tig_net.h" COOP_PROTO_LINE REGEX "^#define TIG_NET_PROTOCOL ")
     string(REGEX REPLACE ".*TIG_NET_PROTOCOL +([0-9]+).*" "\\1" COOP_PROTO_NUM "${COOP_PROTO_LINE}")

@@ -2829,3 +2829,37 @@ Y -> the host travels via its own path (ready check + party carry), the client
 gets "The host agreed". N -> nobody moves, the client gets "The host refused the
 trip." Client strings are English unless `ARCANUM_COOP_LANG=ru`.
 No wire change: protocol stays 41.
+
+## PT65: launcher update check (optional) and one folder per PC
+
+**Folders.** On separate PCs (the normal case) one folder is enough: unzip the
+package next to the game data and run `arcanum-coop-launcher.exe`; it starts the
+`arcanum-ce.exe` next to it for both Host and Join. `Coop-Setup` (the
+`coop-host\` / `coop-client\` instances) is only for testing host + client on
+the same PC. The launcher keeps using those folders only when they exist.
+
+**Update check (off by default).** `arcanum-coop-launcher.ini`:
+
+```
+[update]
+enabled=1
+releases_url=https://api.github.com/repos/Destroider12/arcanum-ce/releases
+tag_prefix=coop-lite-
+```
+
+With `enabled=0` (or no `[update]` section) the launcher makes no network
+request and shows "Updates off". When on, it checks at start and on
+**Check for updates** (WinINet): the newest release whose tag starts with
+`tag_prefix` (prereleases included, API order = newest first) and has a `.zip`
+asset. If the tag's sha is not this build's (`COOP_BUILD_SHA`) it shows
+"Update available: <tag>" and **Update**, which:
+1. downloads the zip to `%TEMP%\arcanum-coop-update-*`;
+2. requires a sha256 from a `sha256.txt` asset or a 64-hex line in the release
+   body, and refuses on mismatch / missing (BCrypt SHA-256);
+3. unpacks with PowerShell `Expand-Archive`, finds `arcanum-ce.exe` in it;
+4. replaces **only** `arcanum-ce.exe` next to the launcher (the old one is
+   kept as `arcanum-ce.exe.old`, restored if the copy fails, deleted on the
+   next launcher start). It never touches `coop-host\` / `coop-client\`, the
+   launcher, scripts, game data, saves or the ini.
+Check / Update are disabled while the game runs, and Start waits for an update.
+No release publishing tooling is part of this (builds are handed out by hand).
