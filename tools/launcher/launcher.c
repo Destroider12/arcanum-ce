@@ -92,6 +92,8 @@ static char g_public_ip[64];
 static HANDLE g_game;
 static bool g_game_host;
 static char g_game_dir_now[MAX_PATH];
+static bool g_game_legacy; /* PT70 */
+static DWORD g_game_start_tick; /* PT70 */
 static char g_game_data_dir[MAX_PATH]; /* PT68: where logs / crash files of the running role go */
 static char g_game_log[64];
 static FILETIME g_game_started;
@@ -317,7 +319,7 @@ static int copy_files_once(const char* src_dir, const char* dst_dir)
 /* PT68: one-time copy of a Coop-Setup instance (coop-host\ / coop-client\)
    into coop\host\ / coop\client\. A marker file makes it run once; the
    old folders are left untouched. */
-static void migrate_legacy(bool host)
+static void migrate_legacy(bool host, const char* base)
 {
     char legacy[MAX_PATH];
     char role[MAX_PATH];
@@ -332,9 +334,9 @@ static void migrate_legacy(bool host)
     if (GetFileAttributesA(legacy) == INVALID_FILE_ATTRIBUTES) {
         return;
     }
-    snprintf(dst, sizeof(dst), "%scoop\\", g_dir);
+    snprintf(dst, sizeof(dst), "%scoop\\", base);
     CreateDirectoryA(dst, NULL);
-    snprintf(role, sizeof(role), "%scoop\\%s\\", g_dir, host ? "host" : "client");
+    snprintf(role, sizeof(role), "%scoop\\%s\\", base, host ? "host" : "client");
     CreateDirectoryA(role, NULL);
     snprintf(marker, sizeof(marker), "%smigrated-from-%s.txt", role, host ? "coop-host" : "coop-client");
     if (file_exists(marker)) {
@@ -366,20 +368,84 @@ static void migrate_legacy(bool host)
 
 /* Game folder (PT68): the launcher's own folder when arcanum-ce.exe is there;
    the old coop-host\ / coop-client\ instance only when it is not. */
-static void game_dir(bool host, char* out, size_t size)
+static bool has_game_data(const char* dir)
 {
-    char exe[MAX_PATH];
+    char p[MAX_PATH];
 
-    snprintf(exe, sizeof(exe), "%sarcanum-ce.exe", g_dir);
-    if (file_exists(exe)) {
-        snprintf(out, size, "%s", g_dir);
-        return;
+    snprintf(p, sizeof(p), "%stig.dat", dir);
+    if (!file_exists(p)) {
+        return false;
     }
-    snprintf(out, size, "%s%s\\", g_dir, host ? "coop-host" : "coop-client");
-    snprintf(exe, sizeof(exe), "%sarcanum-ce.exe", out);
-    if (!file_exists(exe)) {
-        snprintf(out, size, "%s", g_dir);
+    snprintf(p, sizeof(p), "%sarcanum1.dat", dir);
+    return file_exists(p);
+}
+
+static LONGLONG file_size(const char* path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA d;
+
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &d)) {
+        return -1;
     }
+    return ((LONGLONG)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+}
+
+/* PT70: where to run the game. exe_out = the exe to start, out = its working
+   folder (must hold the Arcanum data: tig.dat, arcanum1.dat, modules\), and
+   *legacy = an old Coop-Setup instance (coop-host\ / coop-client\).
+   1) the launcher folder, if the data is there (normal one-folder install);
+   2) an Arcanum\ subfolder or the parent folder with the data (the package
+      unpacked next to / inside the game, as Coop-Setup -Source allowed);
+   3) an old instance folder (its exe refreshed from the root build);
+   Returns false when no game data was found anywhere. */
+static bool game_dir(bool host, char* out, size_t size, char* exe_out, size_t exe_size, bool* legacy)
+{
+    char root_exe[MAX_PATH];
+    char cand[MAX_PATH];
+    char* slash;
+
+    *legacy = false;
+    snprintf(root_exe, sizeof(root_exe), "%sarcanum-ce.exe", g_dir);
+    if (file_exists(root_exe)) {
+        snprintf(exe_out, exe_size, "%s", root_exe);
+        if (has_game_data(g_dir)) {
+            snprintf(out, size, "%s", g_dir);
+            return true;
+        }
+        snprintf(cand, sizeof(cand), "%sArcanum\\", g_dir);
+        if (has_game_data(cand)) {
+            snprintf(out, size, "%s", cand);
+            return true;
+        }
+        snprintf(cand, sizeof(cand), "%s", g_dir);
+        cand[strlen(cand) - 1] = '\0';
+        slash = strrchr(cand, '\\');
+        if (slash != NULL) {
+            slash[1] = '\0';
+            if (has_game_data(cand)) {
+                snprintf(out, size, "%s", cand);
+                return true;
+            }
+        }
+    }
+    snprintf(cand, sizeof(cand), "%s%s\\", g_dir, host ? "coop-host" : "coop-client");
+    if (has_game_data(cand)) {
+        char inst_exe[MAX_PATH];
+
+        snprintf(inst_exe, sizeof(inst_exe), "%sarcanum-ce.exe", cand);
+        if (file_exists(root_exe) && file_size(root_exe) != file_size(inst_exe)) {
+            CopyFileA(root_exe, inst_exe, FALSE); /* like the old Start-*.bat */
+        }
+        if (file_exists(inst_exe)) {
+            snprintf(out, size, "%s", cand);
+            snprintf(exe_out, exe_size, "%s", inst_exe);
+            *legacy = true;
+            return true;
+        }
+    }
+    snprintf(out, size, "%s", g_dir);
+    snprintf(exe_out, exe_size, "%s", root_exe);
+    return false;
 }
 
 static DWORD WINAPI game_watch_thread(LPVOID arg)
@@ -414,6 +480,7 @@ static void start_game(void)
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     char* p;
+    bool legacy;
 
     GetWindowTextA(item(IDC_NAME), name, sizeof(name));
     GetWindowTextA(item(IDC_ADDR), addr, sizeof(addr));
@@ -439,21 +506,20 @@ static void start_game(void)
         return;
     }
     save_settings();
-    game_dir(host, dir, sizeof(dir));
-    snprintf(exe, sizeof(exe), "%sarcanum-ce.exe", dir);
-    if (!file_exists(exe)) {
-        set_status("arcanum-ce.exe not found next to the launcher (or in coop-host\\ / coop-client\\).");
+    if (!game_dir(host, dir, sizeof(dir), exe, sizeof(exe), &legacy)) {
+        set_status(file_exists(exe)
+                ? "Arcanum data (tig.dat, arcanum1.dat) not found: put the launcher and arcanum-ce.exe into the Arcanum folder."
+                : "arcanum-ce.exe not found next to the launcher.");
         return;
     }
     {
         /* PT68: the root folder: the game writes its log to coop\<role>\ by
            itself; an old instance folder keeps its log in its own root. */
-        bool legacy = strcmp(dir, g_dir) != 0;
         const char* log_arg = legacy ? (host ? " -log coop_host.log" : " -log coop_client.log") : "";
 
         if (!legacy) {
-            migrate_legacy(host);
-            snprintf(g_game_data_dir, sizeof(g_game_data_dir), "%scoop\\%s\\", g_dir, host ? "host" : "client");
+            migrate_legacy(host, dir);
+            snprintf(g_game_data_dir, sizeof(g_game_data_dir), "%scoop\\%s\\", dir, host ? "host" : "client");
         } else {
             snprintf(g_game_data_dir, sizeof(g_game_data_dir), "%s", dir);
         }
@@ -510,6 +576,8 @@ static void start_game(void)
     g_game = pi.hProcess;
     g_game_host = host;
     snprintf(g_game_dir_now, sizeof(g_game_dir_now), "%s", dir);
+    g_game_legacy = legacy;
+    g_game_start_tick = GetTickCount();
     snprintf(g_game_log, sizeof(g_game_log), "%s", host ? "coop_host.log" : "coop_client.log");
     GetSystemTimeAsFileTime(&g_game_started);
     show_panel(false);
@@ -755,15 +823,15 @@ static void create_bug_report(void)
         COOP_BUILD_SHA, COOP_PROTOCOL, g_game_host ? "host" : "client", g_game_exit, g_game_exit, t.wYear, t.wMonth,
         t.wDay, t.wHour, t.wMinute, t.wSecond, dir);
     zip_add_mem(&z, "info.txt", (const unsigned char*)info, strlen(info));
-    if (strcmp(dir, g_dir) == 0) {
+    if (!g_game_legacy) {
         /* PT68: one folder: each role's log and crash files in coop\<role>\ */
         char role_dir[MAX_PATH];
 
-        snprintf(path, sizeof(path), "%scoop\\host\\coop_host.log", g_dir);
+        snprintf(path, sizeof(path), "%scoop\\host\\coop_host.log", dir);
         zip_add_file(&z, path, "coop_host.log");
-        snprintf(path, sizeof(path), "%scoop\\client\\coop_client.log", g_dir);
+        snprintf(path, sizeof(path), "%scoop\\client\\coop_client.log", dir);
         zip_add_file(&z, path, "coop_client.log");
-        snprintf(role_dir, sizeof(role_dir), "%scoop\\%s\\", g_dir, g_game_host ? "host" : "client");
+        snprintf(role_dir, sizeof(role_dir), "%scoop\\%s\\", dir, g_game_host ? "host" : "client");
         zip_add_newest(&z, role_dir, "crash-*.txt", 2);
         zip_add_newest(&z, role_dir, "crash-*.dmp", 2);
     } else {
@@ -796,6 +864,41 @@ static bool host_restart_allowed(void)
     return true;
 }
 
+/* PT70: the game closed within seconds: show its exit code and the end of
+   the role log (the game writes "Error initializing ..." there). */
+static void show_early_exit(DWORD code)
+{
+    char log[MAX_PATH];
+    char text[2600];
+    char tail[2048];
+    char status[200];
+    FILE* f;
+    long size;
+    size_t n = 0;
+
+    if (g_game_legacy) {
+        snprintf(log, sizeof(log), "%s%s", g_game_dir_now, g_game_log);
+    } else {
+        snprintf(log, sizeof(log), "%s%s", g_game_data_dir, g_game_log);
+    }
+    tail[0] = '\0';
+    f = fopen(log, "rb");
+    if (f != NULL) {
+        fseek(f, 0, SEEK_END);
+        size = ftell(f);
+        fseek(f, size > (long)sizeof(tail) - 1 ? size - (long)(sizeof(tail) - 1) : 0, SEEK_SET);
+        n = fread(tail, 1, sizeof(tail) - 1, f);
+        tail[n] = '\0';
+        fclose(f);
+    }
+    snprintf(text, sizeof(text),
+        "The game closed right after the start (exit code %lu).\r\n\r\nGame folder: %s\r\nLog: %s\r\n\r\n%s",
+        code, g_game_dir_now, log, n > 0 ? tail : "(the log is missing or empty)");
+    snprintf(status, sizeof(status), "Game closed right after the start (exit code %lu) - see %s", code, log);
+    set_status(status);
+    MessageBoxA(g_wnd, text, "Arcanum Coop - game closed at start", MB_OK | MB_ICONWARNING);
+}
+
 static void on_game_exit(DWORD code, HANDLE proc)
 {
     char msg[256];
@@ -812,6 +915,12 @@ static void on_game_exit(DWORD code, HANDLE proc)
     EnableWindow(item(IDC_UPD_CHECK), TRUE);
     EnableWindow(item(IDC_UPD_GO), TRUE);
     crashed = code != 0 || new_crash_file();
+    if (GetTickCount() - g_game_start_tick < 15000) {
+        /* PT70: closed right after the start: show why, never auto-restart. */
+        show_early_exit(code);
+        show_panel(true);
+        return;
+    }
     if (!crashed) {
         set_status("Game closed.");
         return;

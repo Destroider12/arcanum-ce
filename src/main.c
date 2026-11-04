@@ -147,8 +147,11 @@ int main(int argc, char** argv)
         if (!log_set && getenv("ARCANUM_LOG_FILE") == NULL && coop_paths_role() != COOP_PATHS_ROLE_NONE) {
             static char coop_log[128];
 
-            coop_paths_cfg("arcanum.cfg"); /* creates the role folder (and seeds the cfg) */
-            if (coop_paths_join(coop_log, sizeof(coop_log),
+            /* PT70: the role folder first; without it keep the old log. */
+            if (!coop_paths_ensure_dir()) {
+                coop_paths_set_role(COOP_PATHS_ROLE_NONE);
+                tig_debug_set_log_file(coop_paths_role_from_args(argc, argv) == COOP_PATHS_ROLE_HOST ? "coop_host.log" : "coop_client.log");
+            } else if (coop_paths_join(coop_log, sizeof(coop_log),
                     coop_paths_role() == COOP_PATHS_ROLE_HOST ? "coop_host.log" : "coop_client.log")) {
                 tig_debug_set_log_file(coop_log);
             }
@@ -160,6 +163,12 @@ int main(int argc, char** argv)
 #endif
     /* PT28: which build is this (first log line, window title). */
     tig_debug_printf("Arcanum CE Coop Lite build %s\n", COOP_BUILD_SHA);
+    { /* PT70: where we run (the Arcanum data must be in this folder) */
+        char* cwd = SDL_GetCurrentDirectory();
+
+        tig_debug_printf("Working folder: %s\n", cwd != NULL ? cwd : "?");
+        SDL_free(cwd);
+    }
     crash_handler_install(COOP_BUILD_SHA); /* PT56a */
     if (coop_paths_role() != COOP_PATHS_ROLE_NONE) {
         crash_handler_set_subdir(coop_paths_dir()); /* PT68 */
@@ -344,7 +353,9 @@ int main(int argc, char** argv)
     /* PT56a: crash_handler_install (top of main) replaces PT31 crash_log. */
 
     if (tig_init(&init_info) != TIG_OK) {
-        return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
+        /* PT70: say why and exit non-zero, so the launcher reports it. */
+        tig_debug_printf("Startup failed: TIG init (is the Arcanum data - tig.dat, arcanum1.dat, modules\\ - in the working folder?)\n");
+        return EXIT_FAILURE;
     }
 
     if (!coop_paths_mount()) { /* PT68 */

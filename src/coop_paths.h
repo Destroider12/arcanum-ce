@@ -28,6 +28,7 @@ bool coop_paths_join(char* out, size_t size, const char* name);
 
 /* Creates the folder and mounts it as the tig write overlay (Save and
    Players private to it). Call after tig_init. No-op for no role. */
+bool coop_paths_ensure_dir(void);
 bool coop_paths_mount(void);
 
 /* Settings file: "arcanum.cfg" or coop\<role>\arcanum.cfg (seeded once from

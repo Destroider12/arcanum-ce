@@ -73,6 +73,21 @@ bool coop_paths_join(char* out, size_t size, const char* name)
     return n > 0 && (size_t)n < size;
 }
 
+/* PT70: create coop\ and coop\<role>\ (parents first). */
+bool coop_paths_ensure_dir(void)
+{
+    const char* dir;
+    SDL_PathInfo info;
+
+    if (coop_paths_cur_role == COOP_PATHS_ROLE_NONE) {
+        return false;
+    }
+    dir = coop_paths_cur_role == COOP_PATHS_ROLE_HOST ? "coop/host" : "coop/client";
+    SDL_CreateDirectory("coop");
+    SDL_CreateDirectory(dir);
+    return SDL_GetPathInfo(dir, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
+}
+
 bool coop_paths_mount(void)
 {
     static const char* const private_prefixes[] = { "Save", "Players" };
@@ -126,10 +141,9 @@ const char* coop_paths_cfg(const char* base_name)
         fclose(probe);
     } else {
         /* first coop run in this role: start from the player's options */
-        char dir[64];
-
-        snprintf(dir, sizeof(dir), "%s", coop_paths_cur_role == COOP_PATHS_ROLE_HOST ? "coop/host" : "coop/client");
-        SDL_CreateDirectory(dir);
+        if (!coop_paths_ensure_dir()) {
+            return base_name; /* PT70: no role folder - old shared cfg */
+        }
         coop_paths_copy_file(path, base_name);
     }
     return path;
