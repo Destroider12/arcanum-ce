@@ -1482,6 +1482,12 @@ int wmap_ui_is_created(void)
     return wmap_ui_created;
 }
 
+/* PT61: the location (town) map, not the world map. */
+bool wmap_ui_is_town_mode(void)
+{
+    return wmap_ui_created && wmap_ui_mode == WMAP_UI_MODE_TOWN;
+}
+
 // 0x560FA0
 bool wmap_ui_create(void)
 {

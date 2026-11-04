@@ -386,6 +386,8 @@ void sub_456FA0(int mt_id, unsigned int flags);
 void sub_457000(int mt_id, int action);
 void sub_457060(MagicTechRunInfo* a1);
 void sub_457100(void);
+int magictech_coop_free_stale(bool all); /* PT61 */
+int magictech_coop_locks_in_use(void); /* PT61 */
 void magictech_interrupt(int mt_id);
 void magictech_interrupt_delayed(int mt_id);
 void sub_4573D0(MagicTechInvocation* mt_invocation);

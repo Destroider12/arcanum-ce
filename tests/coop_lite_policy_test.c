@@ -982,12 +982,58 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 156 || TIG_NET_PROTOCOL < 37
+        || PACKET_COOP_TYPE_LIMIT != 158 || TIG_NET_PROTOCOL < 37
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
         fprintf(stderr, "PT37 fatigue/door packet layout or role wrong\n");
         return 1;
+    }
+    /* PT61: save/load requests, trap visuals, wall kind, slot description */
+    {
+        PacketCoopSaveReq q;
+        PacketCoopTrapFx f;
+        char desc[64];
+
+        memset(&q, 0, sizeof(q));
+        q.type = PACKET_COOP_SAVE_REQ;
+        q.kind = COOP_SREQ_SAVE;
+        if (!coop_lite_save_req_valid(&q, (int)sizeof(q)) || coop_lite_save_req_valid(&q, (int)sizeof(q) - 1)) {
+            fprintf(stderr, "PT61 save req size check wrong\n");
+            return 1;
+        }
+        q.kind = 0;
+        if (coop_lite_save_req_valid(&q, (int)sizeof(q))) {
+            fprintf(stderr, "PT61 save req kind 0 accepted\n");
+            return 1;
+        }
+        memset(&f, 0, sizeof(f));
+        f.type = PACKET_COOP_TRAP_FX;
+        f.count = COOP_TRAP_FX_VICTIMS + 1;
+        if (coop_lite_trap_fx_valid(&f, (int)sizeof(f))) {
+            fprintf(stderr, "PT61 trap fx too many victims accepted\n");
+            return 1;
+        }
+        f.count = 1;
+        if (!coop_lite_trap_fx_valid(&f, (int)sizeof(f))) {
+            fprintf(stderr, "PT61 trap fx rejected\n");
+            return 1;
+        }
+        coop_lite_coop_save_desc("Big Bob!", desc, sizeof(desc));
+        if (strcmp(desc, "coop-Big_Bob") != 0) {
+            fprintf(stderr, "PT61 desc '%s'\n", desc);
+            return 1;
+        }
+        coop_lite_coop_save_desc("", desc, sizeof(desc));
+        if (strcmp(desc, "coop-player") != 0) {
+            fprintf(stderr, "PT61 empty desc '%s'\n", desc);
+            return 1;
+        }
+        if (!coop_lite_object_state_kind_ok(COOP_WORLD_WALL) || coop_lite_object_state_kind_ok(COOP_WORLD_NPC)
+            || coop_lite_packet_allowed(PACKET_COOP_TRAP_FX, true, 1)) {
+            fprintf(stderr, "PT61 wall kind / trap fx role wrong\n");
+            return 1;
+        }
     }
     {
         PacketCoopDoorUse d;

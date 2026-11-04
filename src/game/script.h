@@ -361,6 +361,7 @@ bool script_load(GameLoadInfo* load_info);
 bool script_save(TigFile* stream);
 void script_set_callbacks(ScriptStartDialogFunc start_dialog_func, ScriptFloatLineFunc float_line_func);
 bool script_execute(ScriptInvocation* invocation);
+bool script_is_running(void); /* PT61 */
 int script_global_var_get(int index);
 void script_global_var_set(int index, int value);
 int script_global_flag_get(int index);

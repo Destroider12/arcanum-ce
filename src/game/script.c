@@ -276,7 +276,27 @@ void script_set_callbacks(ScriptStartDialogFunc start_dialog_func, ScriptFloatLi
 }
 
 // 0x4449B0
+/* PT61: >0 while a script runs (co-op syncs only script-driven wall changes). */
+static int script_running_depth;
+
+static bool script_execute_impl(ScriptInvocation* invocation);
+
+bool script_is_running(void)
+{
+    return script_running_depth > 0;
+}
+
 bool script_execute(ScriptInvocation* invocation)
+{
+    bool rc;
+
+    script_running_depth++;
+    rc = script_execute_impl(invocation);
+    script_running_depth--;
+    return rc;
+}
+
+static bool script_execute_impl(ScriptInvocation* invocation)
 {
     ScriptFlags flags;
     int attachee_type;

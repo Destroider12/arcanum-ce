@@ -519,6 +519,15 @@ void main_loop(void)
                 }
                 continue;
             }
+            {
+                char sreq_slot[16];
+                char sreq_desc[64];
+
+                if (coop_lite_take_client_save_request(sreq_slot, sizeof(sreq_slot), sreq_desc, sizeof(sreq_desc))) {
+                    /* PT61: a client's F7, saved on the host in that player's own slot */
+                    coop_lite_client_save_done(gamelib_save(sreq_slot, sreq_desc));
+                }
+            }
             if (coop_lite_take_dev_save_request()) {
                 coop_lite_export_local_character();
                 tig_debug_printf("CoopLite: dev save Slot9990: %s\n",
@@ -608,6 +617,9 @@ void main_loop(void)
                         }
                         break;
                     case SDL_SCANCODE_F7:
+                        if (coop_lite_client_request_save()) {
+                            break; /* PT61: a coop client saves on the host */
+                        }
                         if (!critter_is_dead(player_get_local_pc_obj())) {
                             if (wmap_ui_is_created()) {
                                 wmap_ui_close();
@@ -629,6 +641,9 @@ void main_loop(void)
                         }
                         break;
                     case SDL_SCANCODE_F8:
+                        if (coop_lite_client_request_load()) {
+                            break; /* PT61: a coop client never loads itself; the host is asked */
+                        }
                         mainmenu_ui_feedback_loading();
                         sub_543220();
                         mainmenu_ui_feedback_loading_completed();

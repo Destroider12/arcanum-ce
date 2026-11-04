@@ -322,8 +322,8 @@ int main(void)
     log_reset();
     g_proto[0] = TIG_NET_PROTOCOL - 1;
     connect_client(0);
-    for (i = 0; i < 3000 && !log_has("protocol 38 != ours"); i++) pump(1);
-    CHECK(log_has("protocol 38 != ours 39"), "S5: protocol mismatch logged");
+    for (i = 0; i < 3000 && !log_has("protocol 39 != ours"); i++) pump(1);
+    CHECK(log_has("protocol 39 != ours 40"), "S5: protocol mismatch logged");
     for (i = 0; i < 6000 && active_count() > 6; i++) pump(1);
     CHECK(active_count() == 6, "S5: mismatched client dropped");
     g_proto[0] = 0;

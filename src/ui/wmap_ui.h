@@ -16,6 +16,7 @@ void wmap_ui_open(void);
 void wmap_ui_select(int64_t obj, int spell);
 void wmap_ui_close(void);
 int wmap_ui_is_created(void);
+bool wmap_ui_is_town_mode(void);
 void wmap_ui_scroll(int direction);
 void sub_564000(int a1);
 void wmap_ui_mark_townmap(int64_t obj);

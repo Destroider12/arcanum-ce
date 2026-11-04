@@ -2118,6 +2118,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_WORLD_STATE: /* §7 world state → client */
     case PACKET_COOP_STORY_SYNC: /* PT35 quests / rumors / reputation → client */
     case PACKET_COOP_DOOR_STATE: /* PT53e host door state → clients */
+    case PACKET_COOP_TRAP_FX: /* PT61 host trap visuals → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -2136,6 +2137,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_DIALOG_STATE: /* PT36: host view → clients, client vote → host (kind-checked) */
     case PACKET_COOP_PARTY_CTRL: /* PT50: travel check / spell end (op-checked) */
     case PACKET_COOP_TRAVEL_REQ: /* PT57: client ask -> host, refusal -> client (kind-checked) */
+    case PACKET_COOP_SAVE_REQ: /* PT61: client save/load ask -> host, result -> client (kind-checked) */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3188,6 +3190,10 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopPartyCtrl);
     case PACKET_COOP_TRAVEL_REQ:
         return sizeof(PacketCoopTravelReq);
+    case PACKET_COOP_SAVE_REQ:
+        return sizeof(PacketCoopSaveReq);
+    case PACKET_COOP_TRAP_FX:
+        return sizeof(PacketCoopTrapFx);
     case PACKET_COOP_DIALOG_STATE:
         return offsetof(PacketCoopDialogState, npc_name);
     case PACKET_COOP_FOLLOWERS:
@@ -6267,7 +6273,9 @@ static unsigned int coop_host_wmap_ms;
 /* PT26 host: tell clients the world map is open (edge + every 3 s). */
 static void coop_lite_host_wmap_tick(unsigned int now_ms)
 {
-    bool open = wmap_ui_is_created();
+    /* PT61: only the world map dims the clients; the location (town) map,
+       looking or planning a route on it, does not. */
+    bool open = wmap_ui_is_created() && !wmap_ui_is_town_mode();
 
     if (open && (!coop_host_wmap_open || coop_lite_interval_elapsed(coop_host_wmap_ms, now_ms, 3000u))) {
         PacketCoopPartyState pkt;
@@ -6680,6 +6688,26 @@ static void coop_lite_client_resync(void)
         return;
     }
     coop_lite_session_reset();
+#ifndef COOP_LITE_TEST_STUBS
+    {
+        /* PT61: what a real load's map_reset does first (magictech, anims).
+           The rejoin skipped it: every host reload left all spell locks
+           behind and re-sent maintained spells added more, until
+           "magictech_id_new_lock: ran out of id's" quit the client. */
+        int locks;
+        int freed;
+
+        multiplayer_lock();
+        tig_net_local_suspend_begin();
+        anim_goal_interrupt_all_goals();
+        locks = magictech_coop_locks_in_use();
+        freed = magictech_coop_free_stale(true);
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: PT61 resync reset: anims interrupted, magictech %d lock(s) freed (%d in use)\n",
+            freed, locks);
+    }
+#endif
     if (critter_is_dead(pc)) {
         /* The host brings every PC back after a reload; match it locally. */
         multiplayer_lock();
@@ -14145,6 +14173,10 @@ static void coop_world_full_tick(unsigned int now_ms)
 }
 #endif
 
+#ifndef COOP_LITE_TEST_STUBS
+static void coop_lite_host_walls_to_slot(int slot); /* PT61 */
+#endif
+
 void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -14176,6 +14208,7 @@ void coop_lite_handle_world_req(PacketCoopWorldReq* pkt)
     }
     coop_world_req_host_seen[slot] = true;
     coop_world_req_host_ms[slot] = coop_obj_now_ms;
+    coop_lite_host_walls_to_slot(slot); /* PT61 */
 
     /* PT51: first request for this map (join, rejoin, map/area entry) gets
        the whole-map snapshot, paged from the tick. No radius reply while a
@@ -14329,6 +14362,15 @@ static void coop_lite_world_apply(const CoopWorldEntry* e)
             coop_world_stats[e->kind]++;
         }
         coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_NPC_OF_MASK, e->kind);
+        break;
+    case COOP_WORLD_WALL: /* PT61: never added to the prune set (walls are never pruned) */
+        if (type != OBJ_TYPE_WALL) {
+            return;
+        }
+        if (e->aid != 0 && (unsigned int)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != e->aid) {
+            object_set_current_aid(obj, (tig_art_id_t)e->aid);
+        }
+        coop_lite_world_apply_flags(obj, e->of_flags, COOP_WORLD_WALL_OF_MASK, COOP_WORLD_PORTAL);
         break;
     case COOP_WORLD_SCENERY: /* PT60b */
         if (type != OBJ_TYPE_SCENERY) {
@@ -14966,6 +15008,7 @@ bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size)
     return pkt != NULL && pkt->type == PACKET_COOP_DOOR_STATE && size >= (int)sizeof(PacketCoopDoorState)
         && coop_lite_object_state_kind_ok(pkt->e.kind) && pkt->slot >= -1 && pkt->slot < 8
         && (pkt->e.kind == COOP_WORLD_PORTAL || pkt->e.kind == COOP_WORLD_SCENERY
+            || pkt->e.kind == COOP_WORLD_WALL
             || (pkt->e.reserved[1] & COOP_WORLD_OBJ_GONE) != 0);
 }
 
@@ -14973,7 +15016,8 @@ bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size)
    containers. Never NPCs, ground items or traps (own paths). */
 bool coop_lite_object_state_kind_ok(int kind)
 {
-    return kind == COOP_WORLD_PORTAL || kind == COOP_WORLD_SCENERY || kind == COOP_WORLD_CONTAINER;
+    return kind == COOP_WORLD_PORTAL || kind == COOP_WORLD_SCENERY || kind == COOP_WORLD_CONTAINER
+        || kind == COOP_WORLD_WALL; /* PT61 */
 }
 
 bool coop_lite_door_pending_add(uint8_t (*set)[24], int* count, int max, const uint8_t* oid)
@@ -15220,6 +15264,156 @@ static int coop_door_log_next;
 
 static int coop_door_pend_kind[COOP_DOOR_PENDING_MAX]; /* PT60b */
 
+/* PT61: walls a script changed this session, per map (never all walls).
+   gone is recorded at destroy time: a wall not found later may only sit in
+   an unloaded sector, so a failed lookup never means "destroyed". */
+static struct {
+    uint8_t oid[24];
+    int map;
+    bool gone;
+    int64_t loc;
+} coop_wall_changed[COOP_WALL_CHANGED_MAX];
+static int coop_wall_changed_cnt;
+
+static int coop_lite_wall_find(const uint8_t* oid, int map)
+{
+    int i;
+
+    for (i = 0; i < coop_wall_changed_cnt; i++) {
+        if (coop_wall_changed[i].map == map && coop_lite_oid_raw_equal(coop_wall_changed[i].oid, oid)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Host: one changed wall's state -> slot (to_all: every client). Only
+   reads the host's wall, never changes it. */
+static void coop_lite_wall_send(const uint8_t* oid, int slot, bool to_all)
+{
+    PacketCoopDoorState pkt;
+    int idx = coop_lite_wall_find(oid, map_current_map());
+    int64_t wall;
+
+    if (idx < 0) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_DOOR_STATE;
+    pkt.map = map_current_map();
+    pkt.slot = -1;
+    memcpy(pkt.e.oid, oid, 24);
+    pkt.e.kind = COOP_WORLD_WALL;
+    pkt.e.hp_damage = -1;
+    pkt.e.loc = coop_wall_changed[idx].loc;
+    if (coop_wall_changed[idx].gone) {
+        pkt.e.reserved[1] = COOP_WORLD_OBJ_GONE;
+    } else {
+        wall = coop_lite_get_oid_obj(oid);
+        if (wall == OBJ_HANDLE_NULL || obj_field_int32_get(wall, OBJ_F_TYPE) != OBJ_TYPE_WALL
+            || (obj_field_int32_get(wall, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+            return;
+        }
+        pkt.e.aid = (unsigned int)obj_field_int32_get(wall, OBJ_F_CURRENT_AID);
+        pkt.e.of_flags = (unsigned int)obj_field_int32_get(wall, OBJ_F_FLAGS) & COOP_WORLD_WALL_OF_MASK;
+    }
+    if (to_all) {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else {
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+    }
+}
+
+void coop_lite_walls_reset(void)
+{
+    coop_wall_changed_cnt = 0;
+}
+
+void coop_lite_host_wall_touch(int64_t obj, bool destroyed)
+{
+    int depth;
+    bool host;
+    ObjectID oid;
+    int idx;
+    int map;
+    int before;
+
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    depth = tig_net_local_suspend_pause();
+    host = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
+    tig_net_local_suspend_resume(depth);
+    if (!host || !script_is_running() || !map_is_valid() || map_is_clearing_objects()
+        || obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_WALL) {
+        return;
+    }
+    oid = obj_get_id(obj);
+    if (oid.type == OID_TYPE_NULL) {
+        return;
+    }
+    map = map_current_map();
+    idx = coop_lite_wall_find((const uint8_t*)&oid, map);
+    if (idx < 0) {
+        if (coop_wall_changed_cnt >= COOP_WALL_CHANGED_MAX) {
+            static bool logged;
+
+            if (!logged) {
+                logged = true;
+                tig_debug_printf("CoopLite: PT61 changed-wall list full (%d) - later walls sync live only\n",
+                    COOP_WALL_CHANGED_MAX);
+            }
+        } else {
+            idx = coop_wall_changed_cnt++;
+            memcpy(coop_wall_changed[idx].oid, &oid, 24);
+            coop_wall_changed[idx].map = map;
+            coop_wall_changed[idx].gone = false;
+        }
+    }
+    if (idx >= 0) {
+        coop_wall_changed[idx].loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
+        if (destroyed) {
+            coop_wall_changed[idx].gone = true;
+        }
+    }
+    if (idx < 0) {
+        return;
+    }
+    before = coop_door_pend_cnt;
+    if (coop_lite_door_pending_add(coop_door_pend, &coop_door_pend_cnt, COOP_DOOR_PENDING_MAX,
+            (const uint8_t*)&oid)
+        && coop_door_pend_cnt > before) {
+        coop_door_pend_slot[coop_door_pend_cnt - 1] = -1;
+        coop_door_pend_kind[coop_door_pend_cnt - 1] = COOP_WORLD_WALL;
+    }
+    tig_debug_printf("CoopLite: PT61 wall changed by a script (%s) - queued for clients\n",
+        destroyed ? "destroyed" : "flags/art");
+}
+
+/* Host: on a client's world request, the changed walls of this map only. */
+static void coop_lite_host_walls_to_slot(int slot)
+{
+    int map = map_current_map();
+    int depth;
+    int i;
+    int n = 0;
+
+    if (coop_wall_changed_cnt == 0) {
+        return;
+    }
+    depth = tig_net_local_suspend_pause();
+    for (i = 0; i < coop_wall_changed_cnt; i++) {
+        if (coop_wall_changed[i].map == map) {
+            coop_lite_wall_send(coop_wall_changed[i].oid, slot, false);
+            n++;
+        }
+    }
+    tig_net_local_suspend_resume(depth);
+    if (n > 0) {
+        tig_debug_printf("CoopLite: PT61 %d changed wall(s) -> slot %d\n", n, slot);
+    }
+}
+
 void coop_lite_host_portal_touch(int64_t portal)
 {
     coop_lite_host_object_touch(portal);
@@ -15312,8 +15506,14 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
     }
     depth = tig_net_local_suspend_pause();
     for (i = 0; i < coop_door_pend_cnt; i++) {
-        int64_t portal = coop_lite_get_oid_obj(coop_door_pend[i]);
+        int64_t portal;
         unsigned int flags;
+
+        if (coop_door_pend_kind[i] == COOP_WORLD_WALL) {
+            coop_lite_wall_send(coop_door_pend[i], -1, true);
+            continue;
+        }
+        portal = coop_lite_get_oid_obj(coop_door_pend[i]);
 
         flags = portal != OBJ_HANDLE_NULL ? (unsigned int)obj_field_int32_get(portal, OBJ_F_FLAGS) : OF_DESTROYED;
         if (portal == OBJ_HANDLE_NULL || (flags & OF_DESTROYED) != 0) {
@@ -15404,6 +15604,7 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
         || obj_field_int32_get(portal, OBJ_F_TYPE)
             != (pkt->e.kind == COOP_WORLD_SCENERY       ? OBJ_TYPE_SCENERY
                     : pkt->e.kind == COOP_WORLD_CONTAINER ? OBJ_TYPE_CONTAINER
+                    : pkt->e.kind == COOP_WORLD_WALL      ? OBJ_TYPE_WALL
                                                           : OBJ_TYPE_PORTAL)) {
         return;
     }
@@ -15423,11 +15624,13 @@ void coop_lite_handle_door_state(PacketCoopDoorState* pkt)
         coop_lite_apply_end();
         multiplayer_unlock();
         tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host - removed here (slot %d)\n", oid_str,
-            pkt->e.kind == COOP_WORLD_PORTAL ? "door" : pkt->e.kind == COOP_WORLD_SCENERY ? "scenery" : "container",
+            pkt->e.kind == COOP_WORLD_PORTAL ? "door" : pkt->e.kind == COOP_WORLD_SCENERY ? "scenery"
+                : pkt->e.kind == COOP_WORLD_WALL                                         ? "wall"
+                                                                                         : "container",
             pkt->slot);
         return;
     }
-    if (pkt->e.kind == COOP_WORLD_SCENERY) {
+    if (pkt->e.kind == COOP_WORLD_SCENERY || pkt->e.kind == COOP_WORLD_WALL) {
         multiplayer_lock();
         coop_lite_apply_begin();
         coop_lite_world_apply(&pkt->e);
@@ -15819,6 +16022,8 @@ void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
 void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
+void coop_lite_host_wall_touch(int64_t obj, bool destroyed) { (void)obj; (void)destroyed; }
+void coop_lite_walls_reset(void) { }
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt) { (void)pkt; }
 void coop_lite_client_preshop_begin(void) { }
 void coop_lite_client_preshop_end(void) { }
@@ -17717,6 +17922,7 @@ static bool coop_treq_accept(void);
 void coop_lite_pt52_slot_gone(int slot)
 {
     if (slot > 0 && slot < 8) {
+        coop_lite_pt61_slot_gone(slot);
         if (coop_treq_active && coop_treq_slot == slot) {
             coop_treq_active = false; /* PT57: the asker left */
             coop_travel_hide();
@@ -18743,3 +18949,437 @@ void coop_lite_center_rect(int sw, int sh, int w, int h, int* x, int* y)
     *x = sw > w ? (sw - w) / 2 : 0;
     *y = sh > h ? (sh - h) / 2 : 0;
 }
+
+/* ---- PT61: client save / load requests, host trap visuals ---- */
+
+bool coop_lite_save_req_valid(const PacketCoopSaveReq* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_SAVE_REQ && size >= (int)sizeof(PacketCoopSaveReq)
+        && pkt->kind >= COOP_SREQ_SAVE && pkt->kind <= COOP_SREQ_BUSY;
+}
+
+bool coop_lite_trap_fx_valid(const PacketCoopTrapFx* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_TRAP_FX && size >= (int)sizeof(PacketCoopTrapFx)
+        && pkt->count >= 0 && pkt->count <= COOP_TRAP_FX_VICTIMS && pkt->base >= 0 && pkt->base < 1000;
+}
+
+void coop_lite_coop_save_desc(const char* player_name, char* out, size_t size)
+{
+    size_t n;
+    const char* p;
+
+    if (out == NULL || size == 0) {
+        return;
+    }
+    snprintf(out, size, "coop-");
+    n = strlen(out);
+    for (p = player_name != NULL ? player_name : ""; *p != '\0' && n + 1 < size && n < 5 + 24; p++) {
+        char c = *p;
+
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            out[n++] = c;
+        } else if (c == ' ' && n > 5 && out[n - 1] != '_') {
+            out[n++] = '_';
+        }
+    }
+    if (n == 5 && n + 6 < size) {
+        memcpy(out + n, "player", 6);
+        n += 6;
+    }
+    out[n] = '\0';
+}
+
+#ifndef COOP_LITE_TEST_STUBS
+static unsigned int coop_sreq_client_ms; /* client: last ask */
+static unsigned int coop_sreq_host_ms[8]; /* host: last accepted ask per slot */
+static bool coop_sreq_save_pending; /* host: a save waits for the main loop */
+static int coop_sreq_save_slot;
+static char coop_sreq_save_name[16];
+static char coop_sreq_save_desc[48];
+static bool coop_sreq_load_active; /* host: Y / N prompt up */
+static int coop_sreq_load_slot;
+static char coop_sreq_load_file[TIG_MAX_PATH]; /* full save list name */
+static char coop_sreq_load_label[64];
+
+static void coop_sreq_send(int kind, const char* text, int slot)
+{
+    PacketCoopSaveReq pkt;
+    int depth;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_SAVE_REQ;
+    pkt.kind = kind;
+    if (text != NULL) {
+        snprintf(pkt.text, sizeof(pkt.text), "%s", text);
+    }
+    depth = tig_net_local_suspend_pause();
+    if (slot < 0) {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else {
+        tig_net_send_app(&pkt, sizeof(pkt), slot);
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static void coop_sreq_player_name(int slot, char* out, size_t size)
+{
+    const char* nm = tig_net_client_info_get_name(slot);
+    int64_t pc = sub_4A2B60(slot);
+
+    if (nm != NULL && nm[0] != '\0') {
+        snprintf(out, size, "%s", nm);
+    } else if (pc != OBJ_HANDLE_NULL) {
+        char buf[128];
+
+        object_examine(pc, pc, buf);
+        snprintf(out, size, "%s", buf);
+    } else {
+        snprintf(out, size, "player%d", slot);
+    }
+}
+
+/* Host: the asker's slot. Found by description; else the first free
+   Slot9700..Slot9789. full (optional) gets the save list name. */
+static bool coop_sreq_find_slot(const char* desc, char* slot, size_t slot_size, char* full, size_t full_size,
+    bool create)
+{
+    GameSaveList list;
+    bool used[COOP_SREQ_SLOT_LAST - COOP_SREQ_SLOT_FIRST + 1];
+    unsigned int i;
+    int n;
+    bool found = false;
+
+    memset(used, 0, sizeof(used));
+    gamelib_savelist_create(&list);
+    for (i = 0; i < list.count; i++) {
+        const char* name = list.names[i];
+        int num;
+
+        if (strlen(name) < 8 || SDL_strncasecmp(name, "Slot", 4) != 0 || sscanf(name + 4, "%4d", &num) != 1
+            || num < COOP_SREQ_SLOT_FIRST || num > COOP_SREQ_SLOT_LAST) {
+            continue;
+        }
+        used[num - COOP_SREQ_SLOT_FIRST] = true;
+        if (!found && SDL_strcasecmp(name + 8, desc) == 0) {
+            found = true;
+            snprintf(slot, slot_size, "Slot%04d", num);
+            if (full != NULL) {
+                snprintf(full, full_size, "%s", name);
+            }
+        }
+    }
+    gamelib_savelist_destroy(&list);
+    if (found || !create) {
+        return found;
+    }
+    for (n = 0; n <= COOP_SREQ_SLOT_LAST - COOP_SREQ_SLOT_FIRST; n++) {
+        if (!used[n]) {
+            snprintf(slot, slot_size, "Slot%04d", COOP_SREQ_SLOT_FIRST + n);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Host: the save list name that starts with prefix (SlotAuto). */
+static bool coop_sreq_find_prefix(const char* prefix, char* full, size_t full_size)
+{
+    GameSaveList list;
+    unsigned int i;
+    bool found = false;
+
+    gamelib_savelist_create(&list);
+    for (i = 0; i < list.count; i++) {
+        if (SDL_strncasecmp(list.names[i], prefix, strlen(prefix)) == 0) {
+            snprintf(full, full_size, "%s", list.names[i]);
+            found = true;
+            break;
+        }
+    }
+    gamelib_savelist_destroy(&list);
+    return found;
+}
+
+bool coop_lite_client_load_blocked(void)
+{
+    return (tig_net_is_active() && !tig_net_is_host()) || coop_lite_client_in_session;
+}
+
+static bool coop_sreq_client_send(int kind)
+{
+    unsigned int now = coop_obj_now_ms;
+
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return false;
+    }
+    if (coop_sreq_client_ms != 0 && !coop_lite_interval_elapsed(coop_sreq_client_ms, now, 3000u)) {
+        coop_lite_show_notice("Request already sent - wait a moment.", TF_TYPE_RED);
+        return true;
+    }
+    coop_sreq_client_ms = now != 0 ? now : 1u;
+    coop_sreq_send(kind, NULL, -1);
+    tig_debug_printf("CoopLite: PT61 %s request sent to the host\n", kind == COOP_SREQ_SAVE ? "save" : "load");
+    return true;
+}
+
+bool coop_lite_client_request_save(void)
+{
+    if (!coop_sreq_client_send(COOP_SREQ_SAVE)) {
+        return false;
+    }
+    coop_lite_show_notice("Save request sent to the host.", TF_TYPE_WHITE);
+    return true;
+}
+
+bool coop_lite_client_request_load(void)
+{
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        if (coop_lite_client_load_blocked()) {
+            coop_lite_show_notice("Not allowed in co-op: loading is done by the host.", TF_TYPE_RED);
+            tig_debug_printf("CoopLite: PT61 local load blocked (coop client, not connected)\n");
+            return true;
+        }
+        return false;
+    }
+    coop_sreq_client_send(COOP_SREQ_LOAD);
+    coop_lite_show_notice("Loading is done by the host. Request sent.", TF_TYPE_WHITE);
+    tig_debug_printf("CoopLite: PT61 local load blocked (coop client) - asked the host\n");
+    return true;
+}
+
+bool coop_lite_take_client_save_request(char* slot, size_t slot_size, char* desc, size_t desc_size)
+{
+    if (!coop_sreq_save_pending) {
+        return false;
+    }
+    coop_sreq_save_pending = false;
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return false;
+    }
+    snprintf(slot, slot_size, "%s", coop_sreq_save_name);
+    snprintf(desc, desc_size, "%s", coop_sreq_save_desc);
+    return true;
+}
+
+void coop_lite_client_save_done(bool ok)
+{
+    char text[160];
+
+    tig_debug_printf("CoopLite: PT61 saved slot %d's request as %s '%s': %s\n", coop_sreq_save_slot,
+        coop_sreq_save_name, coop_sreq_save_desc, ok ? "ok" : "FAILED");
+    coop_sreq_send(ok ? COOP_SREQ_SAVED : COOP_SREQ_SAVE_FAILED, coop_sreq_save_desc, coop_sreq_save_slot);
+    snprintf(text, sizeof(text), ok ? "Saved for a player: %s" : "Save for a player failed: %s", coop_sreq_save_desc);
+    coop_lite_show_notice(text, ok ? TF_TYPE_WHITE : TF_TYPE_RED);
+}
+
+bool coop_lite_save_req_key(bool yes)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || !coop_sreq_load_active) {
+        return false;
+    }
+    coop_sreq_load_active = false;
+    coop_travel_hide();
+    if (!yes) {
+        coop_sreq_send(COOP_SREQ_LOAD_REFUSED, coop_sreq_load_label, coop_sreq_load_slot);
+        tig_debug_printf("CoopLite: PT61 host refused slot %d load of %s\n", coop_sreq_load_slot, coop_sreq_load_file);
+        return true;
+    }
+    coop_sreq_send(COOP_SREQ_LOAD_ACCEPTED, coop_sreq_load_label, coop_sreq_load_slot);
+    tig_debug_printf("CoopLite: PT61 host accepted slot %d load of %s - party reload\n", coop_sreq_load_slot,
+        coop_sreq_load_file);
+    /* The party-reload path: main loop loads, then the clients resync. */
+    snprintf(coop_reload_request_name, sizeof(coop_reload_request_name), "%s", coop_sreq_load_file);
+    coop_reload_request_valid = true;
+    coop_reload_resync_pending = true;
+    for (slot = 1; slot < 8; slot++) {
+        coop_reload_raise[slot] = tig_net_client_is_active(slot);
+    }
+    return true;
+}
+
+void coop_lite_handle_save_req(PacketCoopSaveReq* pkt)
+{
+    char text[256];
+
+    if (!tig_net_is_active() || !coop_lite_save_req_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    pkt->text[sizeof(pkt->text) - 1] = '\0';
+    if (tig_net_is_host()) {
+        int slot = sub_52A530();
+        char player[64];
+        char desc[48];
+        char name[16];
+
+        if ((pkt->kind != COOP_SREQ_SAVE && pkt->kind != COOP_SREQ_LOAD) || slot <= 0 || slot >= 8) {
+            return;
+        }
+        if (coop_sreq_host_ms[slot] != 0 && !coop_lite_interval_elapsed(coop_sreq_host_ms[slot], coop_obj_now_ms, 10000u)) {
+            coop_sreq_send(COOP_SREQ_BUSY, NULL, slot);
+            tig_debug_printf("CoopLite: PT61 slot %d request rate-limited\n", slot);
+            return;
+        }
+        coop_sreq_player_name(slot, player, sizeof(player));
+        coop_lite_coop_save_desc(player, desc, sizeof(desc));
+        if (pkt->kind == COOP_SREQ_SAVE) {
+            if (coop_sreq_save_pending || coop_sreq_load_active || !map_is_valid()
+                || !coop_sreq_find_slot(desc, name, sizeof(name), NULL, 0, true)) {
+                coop_sreq_send(COOP_SREQ_BUSY, NULL, slot);
+                return;
+            }
+            coop_sreq_host_ms[slot] = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
+            coop_sreq_save_pending = true;
+            coop_sreq_save_slot = slot;
+            snprintf(coop_sreq_save_name, sizeof(coop_sreq_save_name), "%s", name);
+            snprintf(coop_sreq_save_desc, sizeof(coop_sreq_save_desc), "%s", desc);
+            tig_debug_printf("CoopLite: PT61 slot %d (%s) asks to save -> %s '%s'\n", slot, player, name, desc);
+            return;
+        }
+        /* load: the asker's own coop slot, else the host's quicksave */
+        if (coop_sreq_load_active) {
+            coop_sreq_send(COOP_SREQ_BUSY, NULL, slot);
+            return;
+        }
+        if (coop_sreq_find_slot(desc, name, sizeof(name), coop_sreq_load_file, sizeof(coop_sreq_load_file), false)) {
+            snprintf(coop_sreq_load_label, sizeof(coop_sreq_load_label), "%s", desc);
+        } else if (coop_sreq_find_prefix("SlotAuto", coop_sreq_load_file, sizeof(coop_sreq_load_file))) {
+            snprintf(coop_sreq_load_label, sizeof(coop_sreq_load_label), "%s", "host quicksave");
+        } else {
+            coop_sreq_send(COOP_SREQ_LOAD_REFUSED, "no save", slot);
+            tig_debug_printf("CoopLite: PT61 slot %d load: no coop slot and no quicksave\n", slot);
+            return;
+        }
+        coop_sreq_host_ms[slot] = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
+        coop_sreq_load_active = true;
+        coop_sreq_load_slot = slot;
+        snprintf(text, sizeof(text), "%s asks to load %s. Y = load, N = refuse.", player, coop_sreq_load_label);
+        if (coop_travel_show_hook != NULL) {
+            coop_travel_show_hook(text);
+        } else {
+            coop_lite_show_notice(text, TF_TYPE_WHITE);
+        }
+        tig_debug_printf("CoopLite: PT61 slot %d (%s) asks to load %s\n", slot, player, coop_sreq_load_file);
+        return;
+    }
+    switch (pkt->kind) {
+    case COOP_SREQ_SAVED:
+        snprintf(text, sizeof(text), "Saved on the host as %s.", pkt->text);
+        coop_lite_show_notice(text, TF_TYPE_GREEN);
+        break;
+    case COOP_SREQ_SAVE_FAILED:
+        coop_lite_show_notice("The host could not save.", TF_TYPE_RED);
+        break;
+    case COOP_SREQ_LOAD_REFUSED:
+        snprintf(text, sizeof(text), "The host refused the load (%s).", pkt->text[0] ? pkt->text : "refused");
+        coop_lite_show_notice(text, TF_TYPE_RED);
+        break;
+    case COOP_SREQ_LOAD_ACCEPTED:
+        snprintf(text, sizeof(text), "The host is loading %s.", pkt->text);
+        coop_lite_show_notice(text, TF_TYPE_WHITE);
+        break;
+    case COOP_SREQ_BUSY:
+        coop_lite_show_notice("The host is busy - try again in a few seconds.", TF_TYPE_RED);
+        break;
+    default:
+        return;
+    }
+    coop_sreq_client_ms = 0;
+    tig_debug_printf("CoopLite: PT61 host answered %d (%s)\n", pkt->kind, pkt->text);
+}
+
+void coop_lite_pt61_slot_gone(int slot)
+{
+    if (coop_sreq_load_active && coop_sreq_load_slot == slot) {
+        coop_sreq_load_active = false;
+        coop_travel_hide();
+    }
+    if (slot > 0 && slot < 8) {
+        coop_sreq_host_ms[slot] = 0;
+    }
+}
+
+void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count)
+{
+    PacketCoopTrapFx pkt;
+    ObjectID oid;
+    int depth;
+    int i;
+    bool host;
+
+    depth = tig_net_local_suspend_pause();
+    host = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
+    tig_net_local_suspend_resume(depth);
+    if (!host || base < 0) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_TRAP_FX;
+    pkt.map = map_current_map();
+    pkt.base = base;
+    if (trap != OBJ_HANDLE_NULL) {
+        oid = obj_get_id(trap);
+        memcpy(pkt.trap, &oid, sizeof(oid));
+    }
+    if (triggerer != OBJ_HANDLE_NULL) {
+        oid = obj_get_id(triggerer);
+        memcpy(pkt.triggerer, &oid, sizeof(oid));
+    }
+    for (i = 0; i < count && pkt.count < COOP_TRAP_FX_VICTIMS; i++) {
+        if (victims[i] != OBJ_HANDLE_NULL) {
+            oid = obj_get_id(victims[i]);
+            memcpy(pkt.victims[pkt.count++], &oid, sizeof(oid));
+        }
+    }
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: PT61 trap fired (fx base %d, %d victims) - visuals sent to clients\n", base, pkt.count);
+}
+
+void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt)
+{
+    int64_t victims[COOP_TRAP_FX_VICTIMS];
+    int64_t trap;
+    int64_t triggerer;
+    int i;
+
+    if (!tig_net_is_active() || tig_net_is_host() || !coop_lite_trap_fx_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (!coop_lite_client_world_ready() || pkt->map != map_current_map() || map_is_clearing_objects()) {
+        return;
+    }
+    trap = coop_lite_get_oid_obj(pkt->trap);
+    triggerer = coop_lite_get_oid_obj(pkt->triggerer);
+    for (i = 0; i < pkt->count; i++) {
+        victims[i] = coop_lite_get_oid_obj(pkt->victims[i]);
+    }
+    multiplayer_lock();
+    coop_lite_apply_begin();
+    trap_coop_play_fx(trap, triggerer, pkt->base, victims, pkt->count);
+    coop_lite_apply_end();
+    multiplayer_unlock();
+    tig_debug_printf("CoopLite: PT61 trap visuals played (fx base %d, %d victims)\n", pkt->base, pkt->count);
+}
+#else
+bool coop_lite_client_load_blocked(void) { return false; }
+bool coop_lite_client_request_save(void) { return false; }
+bool coop_lite_client_request_load(void) { return false; }
+bool coop_lite_take_client_save_request(char* slot, size_t slot_size, char* desc, size_t desc_size)
+{
+    (void)slot; (void)slot_size; (void)desc; (void)desc_size;
+    return false;
+}
+void coop_lite_client_save_done(bool ok) { (void)ok; }
+bool coop_lite_save_req_key(bool yes) { (void)yes; return false; }
+void coop_lite_handle_save_req(PacketCoopSaveReq* pkt) { (void)pkt; }
+void coop_lite_pt61_slot_gone(int slot) { (void)slot; }
+void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count)
+{
+    (void)trap; (void)triggerer; (void)base; (void)victims; (void)count;
+}
+void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt) { (void)pkt; }
+#endif

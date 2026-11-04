@@ -4557,7 +4557,74 @@ void magictech_id_new_lock(MagicTechRunInfo** run_info_ptr)
     }
 
     tig_debug_printf("magictech_id_new_lock: Error: ran out of id's!\n");
+    if (tig_net_is_coop_enabled()) {
+        /* PT61: co-op never quits on this. Free the locks whose objects are
+           gone (stale after a resync), else all of them, and retry once. */
+        int freed = magictech_coop_free_stale(false);
+
+        if (freed == 0) {
+            freed = magictech_coop_free_stale(true);
+        }
+        tig_debug_printf("CoopLite: magictech ids exhausted - freed %d stale lock(s), recovering\n", freed);
+        for (index = 0; index < 512; index++) {
+            if (magictech_run_info[index].id == -1) {
+                magictech_run_info[index].id = index;
+                magictech_run_info[index].flags = MAGICTECH_RUN_ACTIVE;
+                magictech_run_info[index].action = MAGICTECH_ACTION_BEGIN;
+                *run_info_ptr = &(magictech_run_info[index]);
+                dword_6876DC++;
+                return;
+            }
+        }
+    }
     exit(EXIT_FAILURE);
+}
+
+/* PT61: co-op client resync / id exhaustion. all = every lock (what a real
+   load's map_reset does), else only locks whose objects no longer resolve.
+   Their time events go too. Returns the number freed. */
+int magictech_coop_free_stale(bool all)
+{
+    int index;
+    int freed = 0;
+
+    for (index = 0; index < 512; index++) {
+        MagicTechRunInfo* run_info = &(magictech_run_info[index]);
+
+        if (run_info->id == -1) {
+            continue;
+        }
+        if (!all && sub_455820(run_info)) {
+            continue;
+        }
+        dword_5B0BA0 = run_info->id;
+        timeevent_clear_one_ex(TIMEEVENT_TYPE_MAGICTECH, sub_4570E0);
+        dword_5B0BA0 = -1;
+        sub_455960(run_info);
+        freed++;
+    }
+    if (all) {
+        dword_6876DC = 0;
+    } else {
+        dword_6876DC -= freed;
+        if (dword_6876DC < 0) {
+            dword_6876DC = 0;
+        }
+    }
+    return freed;
+}
+
+int magictech_coop_locks_in_use(void)
+{
+    int index;
+    int n = 0;
+
+    for (index = 0; index < 512; index++) {
+        if (magictech_run_info[index].id != -1) {
+            n++;
+        }
+    }
+    return n;
 }
 
 // 0x4557C0

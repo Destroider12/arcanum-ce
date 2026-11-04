@@ -1,4 +1,5 @@
 #include "game/gamelib.h"
+#include "game/coop_lite.h"
 
 #include <stdio.h>
 
@@ -1082,6 +1083,8 @@ bool gamelib_load(const char* name)
     int index;
     unsigned int sentinel;
 
+    coop_lite_walls_reset(); /* PT61: the loaded save has its own walls */
+
     tig_debug_printf("\ngamelib_load: Loading from File: %s.\n", name);
     tig_timer_now(&start_time);
 
@@ -1234,8 +1237,20 @@ const char* gamelib_last_save_name(void)
     gamelib_savelist_create(&save_list);
     gamelib_savelist_sort(&save_list, GAME_SAVE_LIST_ORDER_DATE, true);
 
-    if (save_list.count > 0) {
-        strcpy(byte_5D0D88, save_list.names[0]);
+    {
+        unsigned int i;
+
+        for (i = 0; i < save_list.count; i++) {
+            /* PT61: a coop client's slot (Slot9700-Slot9789, saved on the
+               host for that player) is never the host's F8 / reload save. */
+            const char* n = save_list.names[i];
+
+            if (SDL_strncasecmp(n, "Slot97", 6) == 0 && n[6] >= '0' && n[6] <= '8' && n[7] >= '0' && n[7] <= '9') {
+                continue;
+            }
+            strcpy(byte_5D0D88, n);
+            break;
+        }
     }
 
     // FIX: Memory leak.

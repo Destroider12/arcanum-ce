@@ -3236,6 +3236,14 @@ bool sub_5432B0(const char* name)
     MesFileEntry mes_file_entry;
     UiMessage ui_message;
 
+    if (coop_lite_client_load_blocked()) {
+        /* PT61: a coop client never loads a save itself (crashes / drops);
+           the host is asked instead (F8, load menu, main menu). */
+        coop_lite_client_request_load();
+        tig_debug_printf("MainMenu-UI: coop client load of %s blocked\n", name != NULL ? name : "(null)");
+        return false;
+    }
+
     sub_542200();
 
     if (mainmenu_ui_gsi.version == 25) {

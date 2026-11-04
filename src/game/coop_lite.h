@@ -42,7 +42,9 @@ extern "C" {
 #define PACKET_COOP_INVEN_LAYOUT 153 /* PT53: client → host: my own pack layout (equip/grid/hotkeys) */
 #define PACKET_COOP_DOOR_STATE 154 /* PT53e: host → clients: one door's state (open/lock/jam/bust) */
 #define PACKET_COOP_TRAVEL_REQ 155 /* PT57: client -> host travel request; host -> client refusal */
-#define PACKET_COOP_TYPE_LIMIT 156
+#define PACKET_COOP_SAVE_REQ 156 /* PT61: client save/load ask -> host; host result -> client */
+#define PACKET_COOP_TRAP_FX 157 /* PT61: host trap trigger visuals -> clients */
+#define PACKET_COOP_TYPE_LIMIT 158
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -484,6 +486,60 @@ typedef struct PacketCoopTravelReq {
 } PacketCoopTravelReq;
 COOP_STATIC_ASSERT(sizeof(PacketCoopTravelReq) == 0x18, "PacketCoopTravelReq size");
 bool coop_lite_travel_req_valid(const PacketCoopTravelReq* pkt, int size);
+
+/* PT61: a client's F7 / F8 become requests. The host saves the whole game
+   into the asker's own slot (Slot97NN, description "coop-<name>"), never a
+   host slot; a load is asked (Y = load, N = refuse). */
+#define COOP_SREQ_SAVE 1 /* client -> host */
+#define COOP_SREQ_LOAD 2 /* client -> host */
+#define COOP_SREQ_SAVED 3 /* host -> client, text = slot description */
+#define COOP_SREQ_SAVE_FAILED 4 /* host -> client */
+#define COOP_SREQ_LOAD_REFUSED 5 /* host -> client */
+#define COOP_SREQ_LOAD_ACCEPTED 6 /* host -> client, text = what loads */
+#define COOP_SREQ_BUSY 7 /* host -> client: rate limit / another request */
+#define COOP_SREQ_SLOT_FIRST 9700
+#define COOP_SREQ_SLOT_LAST 9789
+typedef struct PacketCoopSaveReq {
+    /* 0000 */ int type;
+    /* 0004 */ int kind;
+    /* 0008 */ int reserved[2];
+    /* 0010 */ char text[48];
+} PacketCoopSaveReq;
+COOP_STATIC_ASSERT(sizeof(PacketCoopSaveReq) == 0x40, "PacketCoopSaveReq size");
+bool coop_lite_save_req_valid(const PacketCoopSaveReq* pkt, int size);
+void coop_lite_handle_save_req(PacketCoopSaveReq* pkt);
+/* PT61: "coop-<name>" from a player name (letters, digits, - and _ kept). */
+void coop_lite_coop_save_desc(const char* player_name, char* out, size_t size);
+/* PT61: client F7 / F8 (and any local load while a coop client): send the
+   request; true when handled (the caller must not save / load locally). */
+bool coop_lite_client_request_save(void);
+bool coop_lite_client_request_load(void);
+/* PT61: a coop client never loads a save itself. */
+bool coop_lite_client_load_blocked(void);
+/* PT61 host main loop: a client's save waits here (outside packet handling). */
+bool coop_lite_take_client_save_request(char* slot, size_t slot_size, char* desc, size_t desc_size);
+void coop_lite_client_save_done(bool ok);
+bool coop_lite_save_req_key(bool yes); /* host Y / N on a pending load request */
+void coop_lite_pt61_slot_gone(int slot);
+
+/* PT61: host trap trigger -> clients play the eye candy (no damage logic). */
+#define COOP_TRAP_FX_VICTIMS 8
+typedef struct PacketCoopTrapFx {
+    /* 0000 */ int type;
+    /* 0004 */ int map;
+    /* 0008 */ int base; /* eye-candy row base (TRAP_EYE_CANDY_TYPE_COUNT * script) */
+    /* 000C */ int count; /* victims */
+    /* 0010 */ uint8_t trap[24];
+    /* 0028 */ uint8_t triggerer[24];
+    /* 0040 */ uint8_t victims[COOP_TRAP_FX_VICTIMS][24];
+} PacketCoopTrapFx;
+COOP_STATIC_ASSERT(sizeof(PacketCoopTrapFx) == 0x100, "PacketCoopTrapFx size");
+bool coop_lite_trap_fx_valid(const PacketCoopTrapFx* pkt, int size);
+void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt);
+/* trap.c (host): send what trap_script_execute just drew. */
+void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count);
+/* trap.c (client): play it. */
+void trap_coop_play_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count);
 void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt);
 struct TeleportData;
 /* teleport_do hook (client): true = turned into a request, do not teleport. */
@@ -584,8 +640,12 @@ typedef enum CoopWorldKind {
     COOP_WORLD_GROUND_ITEM = 4,
     COOP_WORLD_TRAP = 5, /* PT42: floor trap object; kind_flags = COOP_WORLD_TRAP_ARMED */
     COOP_WORLD_SCENERY = 6, /* PT60b: breakable scenery (engines, machines); kind_flags = OBJ_F_SCENERY_FLAGS */
+    COOP_WORLD_WALL = 7, /* PT61: a wall a script changed (destroyed, switched off/on, new art) */
 } CoopWorldKind;
-#define COOP_WORLD_KIND_MAX COOP_WORLD_SCENERY
+#define COOP_WORLD_KIND_MAX COOP_WORLD_WALL
+/* PT61: wall flags the host shares (script hide/show, passability). */
+#define COOP_WORLD_WALL_OF_MASK (OF_OFF_BIT | 0x00000100u | OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT)
+#define COOP_WALL_CHANGED_MAX 256 /* PT61: host per-session list of changed walls */
 /* PT60b: scenery flags the host shares: off (respawning), invulnerable
    (busted), and the passability bits. */
 #define COOP_WORLD_SCENERY_OF_MASK (OF_OFF_BIT | OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT | 0x00400000u)
@@ -1180,6 +1240,9 @@ void coop_lite_host_portal_touch(int64_t portal);
    (queued; sent with the door flush). Items, critters, walls and
    projectiles/effects are ignored. */
 void coop_lite_host_object_touch(int64_t obj);
+/* PT61: host: a wall changed (script destroy / flags / art); destroyed = gone. */
+void coop_lite_host_wall_touch(int64_t obj, bool destroyed);
+void coop_lite_walls_reset(void);
 void coop_lite_handle_door_state(PacketCoopDoorState* pkt);
 bool coop_lite_door_state_valid(const PacketCoopDoorState* pkt, int size);
 /* PT53e: pending-door set (by OID bytes); false when full or a duplicate. */

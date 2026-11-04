@@ -1295,6 +1295,8 @@ void object_destroy(int64_t obj)
 
         if (t == OBJ_TYPE_PORTAL || t == OBJ_TYPE_SCENERY || t == OBJ_TYPE_CONTAINER) {
             coop_lite_host_object_touch(obj); /* PT60/PT60b: destroyed (damage or script) reaches the clients */
+        } else if (t == OBJ_TYPE_WALL && (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
+            coop_lite_host_wall_touch(obj, true); /* PT61: a script destroyed a wall */
         }
     }
 
@@ -1438,6 +1440,10 @@ void object_flags_set(int64_t obj, unsigned int flags)
     if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
         coop_lite_host_object_touch(obj); /* PT60b */
     }
+    if ((flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != (flags & COOP_WORLD_WALL_OF_MASK)) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script hid / changed a wall */
+    }
 
     if ((flags & OF_FLAT) != 0) {
         object_toggle_flat(obj, true);
@@ -1517,6 +1523,10 @@ void object_flags_unset(int64_t obj, unsigned int flags)
 
     if ((flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
         coop_lite_host_object_touch(obj); /* PT60b */
+    }
+    if ((flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != 0) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script showed / changed a wall */
     }
 
     if ((flags & OF_FLAT) != 0) {
@@ -2356,6 +2366,10 @@ void object_set_current_aid(int64_t obj, tig_art_id_t aid)
     TigRect dirty_rect;
     TigRect update_rect;
 
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && (tig_art_id_t)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != aid) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script changed a wall's art */
+    }
     if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
         object_get_rect(obj, 0x7, &dirty_rect);
         obj_field_int32_set(obj, OBJ_F_CURRENT_AID, aid);

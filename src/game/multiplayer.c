@@ -1188,6 +1188,12 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_TRAVEL_REQ:
         coop_lite_handle_travel_req((PacketCoopTravelReq*)msg);
         break;
+    case PACKET_COOP_SAVE_REQ:
+        coop_lite_handle_save_req((PacketCoopSaveReq*)msg);
+        break;
+    case PACKET_COOP_TRAP_FX:
+        coop_lite_handle_trap_fx((PacketCoopTrapFx*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;
