@@ -8805,8 +8805,15 @@ static void coop_lite_pc_build_apply(int64_t pc, const CoopPcBuild* b, int mode)
 
     if (mode == COOP_PCB_APPLY_OWNER) {
         int local_level = obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_LEVEL);
-        static const int host_stats[] = { STAT_LEVEL, STAT_EXPERIENCE_POINTS, STAT_ALIGNMENT, STAT_FATE_POINTS };
+        /* PT56: poison too - the host poisons and cures (antidotes run
+           there); our copy stayed poisoned after an antidote. */
+        static const int host_stats[] = { STAT_LEVEL, STAT_EXPERIENCE_POINTS, STAT_ALIGNMENT, STAT_FATE_POINTS,
+            STAT_POISON_LEVEL };
 
+        if (obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_POISON_LEVEL) != b->stats[STAT_POISON_LEVEL]) {
+            tig_debug_printf("CoopLite: PC stats: poison %d -> %d (host)\n",
+                obj_arrayfield_int32_get(pc, OBJ_F_CRITTER_STAT_BASE_IDX, STAT_POISON_LEVEL), b->stats[STAT_POISON_LEVEL]);
+        }
         for (i = 0; i < (int)(sizeof(host_stats) / sizeof(host_stats[0])); i++) {
             obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, host_stats[i], b->stats[host_stats[i]]);
         }
@@ -14312,11 +14319,12 @@ static int coop_lite_world_prune(void)
                 continue;
             }
             /* PT26: a junk pile the host destroyed when it was emptied
-               stayed here with stale contents ("transfer refused"). */
+               stayed here with stale contents ("transfer refused").
+               PT56: any container - one the host broke (object_bust ->
+               object_destroy) stayed here at negative HP. */
             if (!item_is_item(obj)
                 && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_TRAP /* PT42 */
-                && !(obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_CONTAINER
-                    && sub_49B290(obj) == BP_JUNK_PILE)) {
+                && obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
                 continue;
             }
             if (!coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
@@ -14336,6 +14344,10 @@ static int coop_lite_world_prune(void)
             objid_id_to_str(oid_str, obj_get_id(doomed[i]));
             tig_debug_printf("CoopLite: world trace: prune %s at %d,%d\n", oid_str,
                 (int)LOCATION_GET_X(l), (int)LOCATION_GET_Y(l));
+        }
+        if (obj_field_int32_get(doomed[i], OBJ_F_TYPE) == OBJ_TYPE_CONTAINER) {
+            tig_debug_printf("CoopLite: world: container gone on the host (broken/destroyed) - removed here (hp dmg %d)\n",
+                object_hp_damage_get(doomed[i]));
         }
         object_destroy(doomed[i]);
     }
@@ -15344,9 +15356,11 @@ static void coop_lite_host_use_item(PacketCoopSkillUse* pkt)
     if (pkt->target_oid[0] != 0) {
         target = coop_lite_get_oid_obj(pkt->target_oid);
         if (target == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE))
-            || object_dist(pc, target) > 4) {
+            || object_dist(pc, target) > COOP_USE_ITEM_TARGET_RANGE) {
             /* PT52: never redirect a targeted item onto the user */
-            tig_debug_printf("CoopLite: slot %d item use: bad target\n", slot);
+            tig_debug_printf("CoopLite: slot %d item use: bad target (%s)\n", slot,
+                target == OBJ_HANDLE_NULL ? "unknown here"
+                    : (!obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE)) ? "not a critter" : "too far"));
             coop_lite_host_sync_slot_inven(slot);
             return;
         }
@@ -15356,7 +15370,8 @@ static void coop_lite_host_use_item(PacketCoopSkillUse* pkt)
         target = pc;
     }
     item_use_on_obj(pc, item, target);
-    tig_debug_printf("CoopLite: slot %d used an item (host)\n", slot);
+    tig_debug_printf("CoopLite: slot %d used an item (host)%s\n", slot,
+        target != OBJ_HANDLE_NULL && target != pc ? " on another critter" : "");
     coop_lite_host_sync_slot_inven(slot);
 }
 

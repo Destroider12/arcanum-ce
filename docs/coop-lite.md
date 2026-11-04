@@ -2601,3 +2601,33 @@ Polish:
 - -Wall -Wextra is clean on the coop files; there are no TODO/FIXME left.
 - README-RU.txt (release staging, not in the repo) was still at PT28 and
   protocol 25. An updated copy is in `/workspace/release/README-RU.txt`.
+
+## PT56 — antidotes, healing others, breakable containers, world-map right-click
+
+- **Antidotes (client):** the host cures poison, but `STAT_POISON_LEVEL` was
+  not one of the host-authoritative stats in the owner PC_STATS apply. The
+  client's copy stayed poisoned, so it looked like the antidote did nothing.
+  The poison level now comes from the host (`CoopLite: PC stats: poison A -> B (host)`).
+- **Item cursor → host:** when an item needs a target (antidote on self,
+  healing kit on another NPC or PC), the item cursor queued
+  `anim_goal_use_item_on_obj`. That goal never runs for a client PC and is
+  never forwarded. `item_ui` now sends the use intent to the host
+  (`CoopLite: item use on target (item cursor) sent to host`). The host
+  accepts a critter target within `COOP_USE_ITEM_TARGET_RANGE` (10 tiles,
+  was 4) and logs `slot N used an item (host) on another critter`, or
+  `item use: bad target (unknown here|not a critter|too far)`.
+- **Breaking containers:** the host already resolved the client's attack.
+  On break, `object_bust` calls `object_destroy` on the container. The
+  client's world-state prune, however, skipped every container except junk
+  piles, so the broken crate stayed on the client at negative HP. The prune
+  now removes any container the host no longer lists
+  (`CoopLite: world: container gone on the host (broken/destroyed) - removed here`).
+- **World map right-click (host crash):** there was no stack trace. The log
+  ends about 0.5 s after `host opened the world map`. Hardening: the
+  selected waypoint is clamped to the route length on right-click and in
+  `sub_564940`, and the event is ignored when the map is not created. In
+  network games, diagnostics now log `WMapUI: right-click: …`,
+  `Intgame: right-click in world map mode …`,
+  `WMapUI: travel stopped … teleport` and `… teleport done`. The root cause
+  is not confirmed yet.
+- No wire change; protocol stays 36.

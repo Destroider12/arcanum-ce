@@ -1759,7 +1759,14 @@ bool wmap_ui_state_set(WmapUiState state)
             wmap_ui_state = state;
             intgame_pc_lens_do(PC_LENS_MODE_PASSTHROUGH, &wmap_ui_pc_lens);
             sub_561800(&(wmap_info->field_3C), &loc);
+            if (tig_net_is_active()) {
+                tig_debug_printf("WMapUI: travel stopped (state %d) - teleport to %d,%d\n", state,
+                    (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+            }
             wmap_ui_teleport(loc);
+            if (tig_net_is_active()) {
+                tig_debug_printf("WMapUI: travel stop teleport done\n");
+            }
             sub_5649F0(loc);
             break;
         case WMAP_UI_STATE_EDITING:
@@ -2012,6 +2019,17 @@ bool wmap_ui_message_filter(TigMessage* msg)
 
             return false;
         case TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP: {
+            // PT56 co-op: the host died right after a world map right-click
+            // (no trace). Log the state; ignore it when the map is gone.
+            if (tig_net_is_active()) {
+                WmapRouteType rt = wmap_ui_mode == WMAP_UI_MODE_TOWN ? WMAP_ROUTE_TYPE_TOWN : WMAP_ROUTE_TYPE_WORLD;
+
+                tig_debug_printf("WMapUI: right-click: created %d mode %d state %d route %d sel %d\n",
+                    wmap_ui_created, wmap_ui_mode, wmap_ui_state, wmap_ui_routes[rt].length, dword_5C9AD8);
+            }
+            if (!wmap_ui_created) {
+                return false;
+            }
             if (wmap_ui_state == WMAP_UI_STATE_EDITING) {
                 if (wmap_ui_mode == WMAP_UI_MODE_WORLD) {
                     wmap_ui_state_set(WMAP_UI_STATE_NORMAL);
@@ -2023,7 +2041,7 @@ bool wmap_ui_message_filter(TigMessage* msg)
             WmapRouteType route_type = wmap_ui_mode == WMAP_UI_MODE_TOWN
                 ? WMAP_ROUTE_TYPE_TOWN
                 : WMAP_ROUTE_TYPE_WORLD;
-            if (dword_5C9AD8 == -1) {
+            if (dword_5C9AD8 == -1 || dword_5C9AD8 >= wmap_ui_routes[route_type].length) {
                 dword_5C9AD8 = wmap_ui_routes[route_type].length - 1;
             }
 
@@ -3802,7 +3820,10 @@ void sub_5648E0(int a1, int a2, bool a3)
 // 0x564940
 void sub_564940(void)
 {
-    if (dword_5C9AD8 != -1 && wmap_ui_mode != WMAP_UI_MODE_TOWN) {
+    // PT56: the selection can outlive its waypoint (right-click removal).
+    if (dword_5C9AD8 >= 0 && dword_5C9AD8 < wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD].length
+        && dword_5C9AD8 < (int)(sizeof(wmap_ui_routes[0].waypoints) / sizeof(wmap_ui_routes[0].waypoints[0]))
+        && wmap_ui_mode != WMAP_UI_MODE_TOWN) {
         sub_564970(&(wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD].waypoints[dword_5C9AD8]));
     }
 }

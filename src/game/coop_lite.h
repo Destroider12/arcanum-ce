@@ -1181,6 +1181,9 @@ void coop_lite_follow_cancel(void);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);
+/* PT56: host range for a client's item used on another critter (was 4;
+   the item cursor now reaches the host, clicks come from farther). */
+#define COOP_USE_ITEM_TARGET_RANGE 10
 bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj);
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt);
 void coop_lite_handle_craft(PacketCoopCraft* pkt);

@@ -1939,6 +1939,9 @@ bool sub_54B5D0(TigMessage* msg)
             case INTGAME_MODE_CHAREDIT:
             case INTGAME_MODE_SCHEMATIC:
             case INTGAME_MODE_WRITTEN:
+                if (intgame_mode_get() == INTGAME_MODE_WMAP && tig_net_is_active()) {
+                    tig_debug_printf("Intgame: right-click in world map mode at %d,%d\n", msg->data.mouse.x, msg->data.mouse.y);
+                }
                 if (tig_window_data(dword_64C52C, &window_data) == TIG_OK) {
                     if (msg->data.mouse.x < window_data.rect.x
                         || msg->data.mouse.x - window_data.rect.x > window_data.rect.width) {
