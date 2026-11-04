@@ -63,7 +63,6 @@ set(SRCS
     "src/game/combat.c"
     "src/game/combat.h"
     "src/game/coop_lite.c"
-    "src/game/crash_log.c"
     "src/game/coop_menu.c"
     "src/game/coop_menu_sys.c"
     "src/game/coop_lite.h"
@@ -338,6 +337,7 @@ set(SRCS
     "src/net/coop_upnp.h"
     "src/net/tig_net.h"
     "src/main.c"
+    "src/crash_handler.c"
 )
 
 if(ANDROID)

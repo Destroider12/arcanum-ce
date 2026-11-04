@@ -35,8 +35,29 @@ void tig_debug_set_log_file(const char* path)
     SDL_UnlockSpinlock(&tig_debug_lock);
 }
 
+/* PT56a: last co-op line, for the crash report. */
+static char tig_debug_last_coop[256];
+
+const char* tig_debug_last_coop_line(void)
+{
+    return tig_debug_last_coop;
+}
+
+/* PT56a: crash handler only - no lock (the crash may hold it), no repeat
+   state; straight to the log file and flushed. */
+void tig_debug_crash_write(const char* str)
+{
+    if (tig_debug_log_file != NULL) {
+        fputs(str, tig_debug_log_file);
+        fflush(tig_debug_log_file);
+    }
+}
+
 static void tig_debug_log_write(const char* str)
 {
+    if (SDL_strstr(str, "CoopLite") != NULL) {
+        SDL_strlcpy(tig_debug_last_coop, str, sizeof(tig_debug_last_coop));
+    }
     if (!tig_debug_log_file_tried) {
         const char* path = tig_debug_log_path;
 

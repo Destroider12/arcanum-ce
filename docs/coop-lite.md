@@ -2631,3 +2631,26 @@ Polish:
   `WMapUI: travel stopped … teleport` and `… teleport done`. The root cause
   is not confirmed yet.
 - No wire change; protocol stays 36.
+
+## PT56a: crash logs + world-map stop review
+
+**Crash handler** (`src/crash_handler.c`, Windows only, installed at the top of `main`):
+`SetUnhandledExceptionFilter` (chains to any previous filter) plus a `SIGABRT` handler.
+On a crash it writes, to the game log (flushed, lock-free) and to `crash-YYYYmmdd-HHMMSS.txt`
+next to the exe: exception code/address, `exe+0xOFFSET` per address, exe base, access-violation
+read/write address, thread id, coop active/host/slot, the last `CoopLite` log line, and an
+x64 stack walk (`RtlVirtualUnwind`, no PDB needed). A minidump `crash-YYYYmmdd-HHMMSS.dmp`
+(MiniDumpNormal, dbghelp loaded at runtime) is written next to it.
+Resolve offsets: `nm address = 0x140000000 + offset`, look it up in
+`/workspace/release/syms-<sha>/nm.txt`. Files to send: the game log, `crash-*.txt`, `crash-*.dmp`.
+Test: `ARCANUM_CRASH_TEST=1` (access violation) / `=2` (abort). The old PT31 `crash_log.c`
+(non-chaining filter installed later) was removed.
+
+**World-map stop review:** `wmap_ui_teleport` calls `sector_flush(0)` before the teleport.
+`sector_flush` (upstream code) moved `sector_cache_size - 1` indexes instead of
+`size - index - 1`, writing `index` ints past the end of the cache index array once the cache is
+full — which co-op makes likely (sectors locked for every client PC). Heap corruption on a
+world-map right-click stop: fixed. The follow path itself (carry list, `after_party_carry`,
+FOLLOW_HOST) only touches existing PCs and locks sectors via `sector_lock`; no NULL issues found.
+Known (not changed): if the ready check defers the stop teleport, the host stands at the old
+spot until the check finishes or the stop is repeated (repeat forces travel). Protocol unchanged (36).

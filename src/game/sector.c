@@ -1033,9 +1033,13 @@ void sector_flush(unsigned int flags)
             if ((flags & 0x1) == 0) {
                 sector_cache_evict(&(cache_entry->sector));
                 cache_entry->used = false;
+                // PT56a FIX: was `sector_cache_size - 1` elements: copied
+                // `index` ints past the end of the array (heap overflow once
+                // the cache is full - co-op keeps sectors locked, and the
+                // world map travel stop calls sector_flush(0)).
                 memmove(&(sector_cache_indexes[index]),
                     &(sector_cache_indexes[index + 1]),
-                    sizeof(*sector_cache_indexes) * (sector_cache_size - 1));
+                    sizeof(*sector_cache_indexes) * (sector_cache_size - index - 1));
                 index--;
                 sector_cache_size--;
             }

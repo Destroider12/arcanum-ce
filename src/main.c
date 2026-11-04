@@ -1,8 +1,12 @@
 #include "net/coop_upnp.h"
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <SDL3/SDL_main.h>
+
+#include "crash_handler.h"
 
 #ifdef SDL_PLATFORM_WINDOWS
 #include <direct.h>
@@ -17,7 +21,6 @@
 #include "game/coop_menu.h"
 #include "game/anim.h"
 #include "game/combat.h"
-#include "game/crash_log.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -138,6 +141,15 @@ int main(int argc, char** argv)
 #endif
     /* PT28: which build is this (first log line, window title). */
     tig_debug_printf("Arcanum CE Coop Lite build %s\n", COOP_BUILD_SHA);
+    crash_handler_install(COOP_BUILD_SHA); /* PT56a */
+    /* PT56a: ARCANUM_CRASH_TEST=1 crashes on purpose (checks the report). */
+    if (getenv("ARCANUM_CRASH_TEST") != NULL && getenv("ARCANUM_CRASH_TEST")[0] == '1') {
+        tig_debug_printf("ARCANUM_CRASH_TEST: crashing on purpose\n");
+        *(volatile int*)(uintptr_t)0x10 = 1;
+    } else if (getenv("ARCANUM_CRASH_TEST") != NULL && getenv("ARCANUM_CRASH_TEST")[0] == '2') {
+        tig_debug_printf("ARCANUM_CRASH_TEST: abort on purpose\n");
+        abort();
+    }
 
     highres_config_load();
     highres_config = highres_config_get();
@@ -306,7 +318,7 @@ int main(int argc, char** argv)
         init_info.window_name = "Arcanum CE - CO-OP CLIENT [" COOP_BUILD_SHA "]";
     }
 
-    crash_log_install();
+    /* PT56a: crash_handler_install (top of main) replaces PT31 crash_log. */
 
     if (tig_init(&init_info) != TIG_OK) {
         return EXIT_SUCCESS; // FIXME: Should be `EXIT_FAILURE`.
