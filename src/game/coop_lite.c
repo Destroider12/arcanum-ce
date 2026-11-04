@@ -1251,6 +1251,7 @@ static CoopInterpRing coop_interp[8];
 /* Not cleared by session_reset: it fires after the session is gone. */
 static bool coop_host_left_menu_armed;
 static unsigned int coop_host_left_menu_ms;
+static bool coop_wait_host; /* PT62: main menu retries the host */
 static void (*coop_return_to_menu_hook)(void);
 #ifndef COOP_LITE_TEST_STUBS
 static void coop_lite_obj_pending_reset(void);
@@ -13137,7 +13138,30 @@ void coop_lite_client_host_left(void)
     coop_lite_show_notice("Связь с хостом потеряна (вышел, вылет или таймаут). Возврат в главное меню; R — переподключиться. / Lost connection to the host (left, crashed or timed out). Returning to the main menu; press R there to reconnect.", TF_TYPE_RED);
     coop_host_left_menu_armed = true;
     coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    /* PT62: wait in the main menu and rejoin when the host is back (its
+       launcher restarts it from the last save). ARCANUM_COOP_WAIT_HOST=0 off. */
+    coop_wait_host = coop_lite_wait_host_enabled(coop_lite_env("ARCANUM_COOP_WAIT_HOST"));
 #endif
+}
+
+bool coop_lite_wait_host_enabled(const char* env)
+{
+    return env == NULL || env[0] != '0';
+}
+
+bool coop_lite_wait_host_active(void)
+{
+    return coop_wait_host;
+}
+
+void coop_lite_wait_host_set(bool on)
+{
+    coop_wait_host = on;
+}
+
+bool coop_lite_autoload_wanted(const char* env)
+{
+    return env != NULL && (strcmp(env, "latest") == 0 || strcmp(env, "1") == 0);
 }
 
 bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms)

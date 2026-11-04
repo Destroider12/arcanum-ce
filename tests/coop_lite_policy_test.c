@@ -2325,6 +2325,19 @@ int main(int argc, char** argv)
         fprintf(stderr, "host-left menu timing wrong\n");
         return 1;
     }
+    /* PT62 */
+    if (!coop_lite_wait_host_enabled(NULL) || !coop_lite_wait_host_enabled("1")
+        || coop_lite_wait_host_enabled("0") || !coop_lite_autoload_wanted("latest")
+        || !coop_lite_autoload_wanted("1") || coop_lite_autoload_wanted(NULL)
+        || coop_lite_autoload_wanted("") || coop_lite_autoload_wanted("0")) {
+        fprintf(stderr, "PT62 wait-host / autoload switches wrong\n");
+        return 1;
+    }
+    coop_lite_wait_host_set(true);
+    if (!coop_lite_wait_host_active()) {
+        return 1;
+    }
+    coop_lite_wait_host_set(false);
 
     if (argc >= 2 && strcmp(argv[1], "--client") == 0) {
         return run_client();

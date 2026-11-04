@@ -11,6 +11,12 @@
  * present, else arcanum-ce.exe next to the launcher. Joining a host that is
  * already playing is the game's normal late-join. Settings persist in
  * arcanum-coop-launcher.ini next to the launcher.
+ *
+ * PT62: the launcher stays open and watches the game process. A non-zero
+ * exit or a new crash-*.txt shows "Game closed unexpectedly" with
+ * Reconnect / Create bug report / Close. A crashed host is restarted at
+ * once with ARCANUM_COOP_AUTOLOAD=latest (the game loads its newest save and
+ * skips the menu); clients wait for it in their main menu and rejoin.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -46,6 +52,17 @@
 #define IDC_CHECK 115
 #define IDC_FIREWALL 116
 #define IDC_CHECK_OUT 117
+#define IDC_RECONNECT 118
+#define IDC_BUGREPORT 119
+#define IDC_PANEL_CLOSE 120
+#define WM_APP_GAMEEXIT (WM_APP + 3)
+
+#ifndef COOP_BUILD_SHA
+#define COOP_BUILD_SHA "unknown"
+#endif
+#ifndef COOP_PROTOCOL
+#define COOP_PROTOCOL 0
+#endif
 
 static HWND g_wnd;
 static HFONT g_font;
@@ -53,6 +70,16 @@ static char g_dir[MAX_PATH]; /* launcher folder, trailing backslash */
 static char g_ini[MAX_PATH];
 static char g_local_ip[64];
 static char g_public_ip[64];
+
+/* PT62: the running game. */
+static HANDLE g_game;
+static bool g_game_host;
+static char g_game_dir_now[MAX_PATH];
+static char g_game_log[64];
+static FILETIME g_game_started;
+static DWORD g_game_exit;
+static DWORD g_restart_ticks[3]; /* host auto-restarts, crash-loop guard */
+static bool g_autoload_next;
 
 static HWND item(int id)
 {
@@ -269,6 +296,24 @@ static void game_dir(bool host, char* out, size_t size)
     }
 }
 
+static DWORD WINAPI game_watch_thread(LPVOID arg)
+{
+    HANDLE proc = (HANDLE)arg;
+    DWORD code = 0;
+
+    WaitForSingleObject(proc, INFINITE);
+    GetExitCodeProcess(proc, &code);
+    PostMessageA(g_wnd, WM_APP_GAMEEXIT, (WPARAM)code, (LPARAM)proc);
+    return 0;
+}
+
+static void show_panel(bool on)
+{
+    ShowWindow(item(IDC_RECONNECT), on ? SW_SHOW : SW_HIDE);
+    ShowWindow(item(IDC_BUGREPORT), on ? SW_SHOW : SW_HIDE);
+    ShowWindow(item(IDC_PANEL_CLOSE), on ? SW_SHOW : SW_HIDE);
+}
+
 static void start_game(void)
 {
     char name[64];
@@ -330,6 +375,8 @@ static void start_game(void)
     SetEnvironmentVariableA("ARCANUM_COOP_NAME", name);
     SetEnvironmentVariableA("ARCANUM_COOP_TRANSPORT", steam ? "steam" : "direct");
     SetEnvironmentVariableA("ARCANUM_COOP_STEAM_HOST", !host && steam ? steam_id : NULL);
+    SetEnvironmentVariableA("ARCANUM_COOP_AUTOLOAD", host && g_autoload_next ? "latest" : NULL);
+    g_autoload_next = false;
     if (steam) {
         char dll[MAX_PATH];
         char appid[MAX_PATH];
@@ -359,8 +406,313 @@ static void start_game(void)
         return;
     }
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    g_game = pi.hProcess;
+    g_game_host = host;
+    snprintf(g_game_dir_now, sizeof(g_game_dir_now), "%s", dir);
+    snprintf(g_game_log, sizeof(g_game_log), "%s", host ? "coop_host.log" : "coop_client.log");
+    GetSystemTimeAsFileTime(&g_game_started);
+    show_panel(false);
+    EnableWindow(item(IDC_START), FALSE);
+    CloseHandle(CreateThread(NULL, 0, game_watch_thread, pi.hProcess, 0, NULL));
     set_status(host ? "Game started as host. Friends can join any time (late join)." : "Game started - joining the host.");
+}
+
+/* ---- PT62: game exit / crash handling and the bug report ---- */
+
+/* crash-*.txt written in the game folder since the game started. */
+static bool new_crash_file(void)
+{
+    char pat[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    bool found = false;
+
+    snprintf(pat, sizeof(pat), "%scrash-*.txt", g_game_dir_now);
+    h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    do {
+        if (CompareFileTime(&fd.ftLastWriteTime, &g_game_started) >= 0) {
+            found = true;
+        }
+    } while (!found && FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+static unsigned int crc_table[256];
+
+static unsigned int crc32_update(unsigned int crc, const unsigned char* p, size_t n)
+{
+    size_t i;
+
+    if (crc_table[1] == 0) {
+        unsigned int k, c;
+        int j;
+
+        for (k = 0; k < 256; k++) {
+            c = k;
+            for (j = 0; j < 8; j++) {
+                c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            }
+            crc_table[k] = c;
+        }
+    }
+    crc = ~crc;
+    for (i = 0; i < n; i++) {
+        crc = crc_table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return ~crc;
+}
+
+/* Minimal "stored" (uncompressed) zip writer: no deps, Explorer opens it. */
+#define ZIP_MAX 64
+typedef struct ZipEntry {
+    char name[96];
+    unsigned int crc, size, offset;
+} ZipEntry;
+
+typedef struct Zip {
+    FILE* f;
+    ZipEntry e[ZIP_MAX];
+    int n;
+} Zip;
+
+static void put16(FILE* f, unsigned int v)
+{
+    fputc(v & 0xFF, f);
+    fputc((v >> 8) & 0xFF, f);
+}
+
+static void put32(FILE* f, unsigned int v)
+{
+    put16(f, v & 0xFFFF);
+    put16(f, v >> 16);
+}
+
+static void zip_header(FILE* f, const ZipEntry* e, bool central)
+{
+    put32(f, central ? 0x02014b50u : 0x04034b50u);
+    if (central) {
+        put16(f, 20);
+    }
+    put16(f, 20); /* version needed */
+    put16(f, 0); /* flags */
+    put16(f, 0); /* stored */
+    put16(f, 0); /* time */
+    put16(f, 0x21); /* date 1980-01-01 */
+    put32(f, e->crc);
+    put32(f, e->size);
+    put32(f, e->size);
+    put16(f, (unsigned int)strlen(e->name));
+    put16(f, 0); /* extra */
+    if (central) {
+        put16(f, 0); /* comment */
+        put16(f, 0); /* disk */
+        put16(f, 0); /* internal attr */
+        put32(f, 0); /* external attr */
+        put32(f, e->offset);
+    }
+    fwrite(e->name, 1, strlen(e->name), f);
+}
+
+static bool zip_add_mem(Zip* z, const char* name, const unsigned char* data, size_t size)
+{
+    ZipEntry* e;
+
+    if (z->n >= ZIP_MAX || size > 0x7FFFFFFFu) {
+        return false;
+    }
+    e = &z->e[z->n++];
+    snprintf(e->name, sizeof(e->name), "%s", name);
+    e->crc = crc32_update(0, data, size);
+    e->size = (unsigned int)size;
+    e->offset = (unsigned int)ftell(z->f);
+    zip_header(z->f, e, false);
+    fwrite(data, 1, size, z->f);
+    return true;
+}
+
+static bool zip_add_file(Zip* z, const char* path, const char* name)
+{
+    HANDLE h;
+    LARGE_INTEGER sz;
+    unsigned char* buf;
+    DWORD got = 0;
+    bool ok;
+
+    /* Shared read: the log may still be open. */
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart > 512LL * 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
+    buf = (unsigned char*)malloc(sz.QuadPart > 0 ? (size_t)sz.QuadPart : 1);
+    if (buf == NULL) {
+        CloseHandle(h);
+        return false;
+    }
+    ok = ReadFile(h, buf, (DWORD)sz.QuadPart, &got, NULL) && zip_add_mem(z, name, buf, got);
+    free(buf);
+    CloseHandle(h);
+    return ok;
+}
+
+static void zip_finish(Zip* z)
+{
+    unsigned int start = (unsigned int)ftell(z->f);
+    unsigned int end;
+    int i;
+
+    for (i = 0; i < z->n; i++) {
+        zip_header(z->f, &z->e[i], true);
+    }
+    end = (unsigned int)ftell(z->f);
+    put32(z->f, 0x06054b50u);
+    put16(z->f, 0);
+    put16(z->f, 0);
+    put16(z->f, (unsigned int)z->n);
+    put16(z->f, (unsigned int)z->n);
+    put32(z->f, end - start);
+    put32(z->f, start);
+    put16(z->f, 0);
+    fclose(z->f);
+}
+
+/* The newest `count` files matching the pattern (crash-*.txt / .dmp). */
+static void zip_add_newest(Zip* z, const char* dir, const char* pattern, int count)
+{
+    char pat[MAX_PATH];
+    char path[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    struct { char name[MAX_PATH]; FILETIME t; } best[4];
+    int nbest = 0;
+    int i, j;
+    HANDLE h;
+
+    snprintf(pat, sizeof(pat), "%s%s", dir, pattern);
+    h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    if (count > 4) {
+        count = 4;
+    }
+    do {
+        for (i = 0; i < nbest && CompareFileTime(&fd.ftLastWriteTime, &best[i].t) <= 0; i++) {
+        }
+        if (i >= count) {
+            continue;
+        }
+        for (j = (nbest < count ? nbest : count - 1); j > i; j--) {
+            best[j] = best[j - 1];
+        }
+        snprintf(best[i].name, sizeof(best[i].name), "%s", fd.cFileName);
+        best[i].t = fd.ftLastWriteTime;
+        if (nbest < count) {
+            nbest++;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    for (i = 0; i < nbest; i++) {
+        snprintf(path, sizeof(path), "%s%s", dir, best[i].name);
+        zip_add_file(z, path, best[i].name);
+    }
+}
+
+static void create_bug_report(void)
+{
+    char zpath[MAX_PATH];
+    char path[MAX_PATH];
+    char info[1024];
+    char params[MAX_PATH + 32];
+    SYSTEMTIME t;
+    Zip z;
+    const char* dir = g_game_dir_now[0] != '\0' ? g_game_dir_now : g_dir;
+
+    save_settings();
+    GetLocalTime(&t);
+    snprintf(zpath, sizeof(zpath), "%sbugreport-%04d%02d%02d-%02d%02d%02d.zip", g_dir, t.wYear, t.wMonth, t.wDay,
+        t.wHour, t.wMinute, t.wSecond);
+    memset(&z, 0, sizeof(z));
+    z.f = fopen(zpath, "wb");
+    if (z.f == NULL) {
+        set_status("Could not create the bug report zip next to the launcher.");
+        return;
+    }
+    snprintf(info, sizeof(info),
+        "Arcanum Coop bug report\r\nbuild: %s\r\nprotocol: %d\r\nrole: %s\r\nexit code: 0x%08lX (%lu)\r\n"
+        "time: %04d-%02d-%02d %02d:%02d:%02d (local)\r\ngame folder: %s\r\n"
+        "Note: the launcher ini is included as is (player name, host address / SteamID).\r\n",
+        COOP_BUILD_SHA, COOP_PROTOCOL, g_game_host ? "host" : "client", g_game_exit, g_game_exit, t.wYear, t.wMonth,
+        t.wDay, t.wHour, t.wMinute, t.wSecond, dir);
+    zip_add_mem(&z, "info.txt", (const unsigned char*)info, strlen(info));
+    snprintf(path, sizeof(path), "%scoop_host.log", dir);
+    zip_add_file(&z, path, "coop_host.log");
+    snprintf(path, sizeof(path), "%scoop_client.log", dir);
+    zip_add_file(&z, path, "coop_client.log");
+    zip_add_newest(&z, dir, "crash-*.txt", 2);
+    zip_add_newest(&z, dir, "crash-*.dmp", 2);
+    zip_add_file(&z, g_ini, "arcanum-coop-launcher.ini");
+    zip_finish(&z);
+    snprintf(params, sizeof(params), "/select,\"%s\"", zpath);
+    ShellExecuteA(g_wnd, "open", "explorer.exe", params, NULL, SW_SHOWNORMAL);
+    snprintf(info, sizeof(info), "Bug report saved: %s", strrchr(zpath, '\\') + 1);
+    set_status(info);
+}
+
+/* Host crash loop guard: at most 3 automatic restarts per 2 minutes. */
+static bool host_restart_allowed(void)
+{
+    DWORD now = GetTickCount();
+
+    if (g_restart_ticks[0] != 0 && now - g_restart_ticks[0] < 120000) {
+        return false;
+    }
+    g_restart_ticks[0] = g_restart_ticks[1];
+    g_restart_ticks[1] = g_restart_ticks[2];
+    g_restart_ticks[2] = now != 0 ? now : 1;
+    return true;
+}
+
+static void on_game_exit(DWORD code, HANDLE proc)
+{
+    char msg[256];
+    bool crashed;
+
+    if (proc != g_game) {
+        CloseHandle(proc);
+        return;
+    }
+    CloseHandle(g_game);
+    g_game = NULL;
+    g_game_exit = code;
+    EnableWindow(item(IDC_START), TRUE);
+    crashed = code != 0 || new_crash_file();
+    if (!crashed) {
+        set_status("Game closed.");
+        return;
+    }
+    show_panel(true);
+    if (g_game_host && host_restart_allowed()) {
+        snprintf(msg, sizeof(msg),
+            "Game closed unexpectedly (exit 0x%08lX). Restarting the host from the last save - friends rejoin by themselves.",
+            code);
+        set_status(msg);
+        g_autoload_next = true;
+        start_game();
+        show_panel(true);
+        set_status(msg);
+        return;
+    }
+    snprintf(msg, sizeof(msg), "Game closed unexpectedly (exit 0x%08lX).%s", code,
+        g_game_host ? " Several crashes in a row - not restarting." : "");
+    set_status(msg);
 }
 
 /* ---- PT59: port check (launcher only) ----
@@ -738,6 +1090,10 @@ static void create_controls(void)
         12, 262, 418, 150, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
     make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
+    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);
+    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 460, 130, 30, IDC_BUGREPORT);
+    make("BUTTON", "Close", WS_TABSTOP, 250, 460, 70, 30, IDC_PANEL_CLOSE);
+    show_panel(false);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -755,6 +1111,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowTextA(item(IDC_CHECK_OUT), (const char*)lp);
         free((void*)lp);
         InterlockedExchange(&g_check_running, 0);
+        return 0;
+    case WM_APP_GAMEEXIT:
+        on_game_exit((DWORD)wp, (HANDLE)lp);
         return 0;
     case WM_APP_PUBIP:
         snprintf(g_public_ip, sizeof(g_public_ip), "%s", (const char*)lp);
@@ -785,7 +1144,24 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_COPY:
             copy_address();
             break;
+        case IDC_RECONNECT:
+            if (g_game == NULL) {
+                g_autoload_next = g_game_host; /* a host resumes its last save */
+                start_game();
+            }
+            break;
+        case IDC_BUGREPORT:
+            create_bug_report();
+            break;
+        case IDC_PANEL_CLOSE:
+            show_panel(false);
+            set_status("");
+            break;
         case IDC_START:
+            if (g_game != NULL) {
+                set_status("The game is already running.");
+                break;
+            }
             start_game();
             if (is_host() && !is_steam()) {
                 /* PT59: never blocks the start; the game owns the port now */

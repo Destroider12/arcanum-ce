@@ -135,6 +135,7 @@ static void mainmenu_ui_new_char_mouse_idle(int x, int y);
 static bool mainmenu_ui_new_char_execute(int btn);
 static void mainmenu_ui_pregen_char_create(void);
 static void mainmenu_ui_dev_autostart_tick(void);
+static void mainmenu_ui_pt62_tick(void);
 static void mainmenu_ui_pregen_char_refresh(TigRect* rect);
 static bool mainmenu_ui_pregen_char_button_released(tig_button_handle_t button_handle);
 static bool mainmenu_ui_pregen_char_execute(int btn);
@@ -1797,6 +1798,7 @@ bool mainmenu_ui_handle(void)
         timeevent_ping(timestamp);
         gamelib_ping();
         mainmenu_ui_dev_autostart_tick();
+        mainmenu_ui_pt62_tick();
         if (!mainmenu_ui_active) {
             break;
         }
@@ -1828,7 +1830,19 @@ bool mainmenu_ui_handle(void)
                     && tig_net_is_coop_enabled() && tig_net_join_configured() && !tig_net_is_active()) {
                     /* PT57: R - Reconnect to the last host (same address, port, token). */
                     tig_debug_printf("MainMenu-UI: R - reconnect to the host\n");
+                    coop_lite_wait_host_set(false);
                     mainmenu_ui_start_pregen(1);
+                    break;
+                }
+                if (!msg.data.keyboard.pressed
+                    && msg.data.keyboard.scancode == SDL_SCANCODE_ESCAPE
+                    && mainmenu_ui_window_type == MM_WINDOW_MAINMENU
+                    && coop_lite_wait_host_active()) {
+                    /* PT62: stop waiting for the host. */
+                    tig_debug_printf("MainMenu-UI: waiting for the host cancelled\n");
+                    coop_lite_wait_host_set(false);
+                    mainmenu_ui_close(false);
+                    mainmenu_ui_open();
                     break;
                 }
                 if (!msg.data.keyboard.pressed
@@ -1898,6 +1912,55 @@ static void mainmenu_ui_dev_autostart_tick(void)
 
     tig_debug_printf("MainMenu-UI: dev autostart: New Game with pregen %d\n", idx);
     mainmenu_ui_start_pregen(idx);
+}
+
+/* PT62: (a) host started by the launcher after a crash
+   (ARCANUM_COOP_AUTOLOAD=latest): load the newest own save, skip the menu.
+   (b) coop client after a lost host: retry the host every few seconds and
+   rejoin by itself (same path as R); Esc cancels. One attempt blocks the
+   menu for up to ~5 s (ENet connect wait), the screen says so. */
+static void mainmenu_ui_pt62_tick(void)
+{
+    static bool autoload_done;
+    static int frames;
+    static unsigned int next_try_ms;
+    unsigned int now;
+
+    if (mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
+        return;
+    }
+    if (!autoload_done) {
+        if (++frames < 30) {
+            return;
+        }
+        autoload_done = true;
+        if (coop_lite_autoload_wanted(coop_lite_env("ARCANUM_COOP_AUTOLOAD"))
+            && !tig_net_join_configured()) {
+            const char* path = gamelib_last_save_name();
+
+            if (path[0] != '\0') {
+                tig_debug_printf("MainMenu-UI: autoload of the last save %s\n", path);
+                mainmenu_ui_coop_reload_save(path);
+                return;
+            }
+            tig_debug_printf("MainMenu-UI: autoload: no save, staying in the menu\n");
+        }
+    }
+    if (!coop_lite_wait_host_active() || !tig_net_is_coop_enabled() || !tig_net_join_configured()
+        || tig_net_is_active()) {
+        return;
+    }
+    now = SDL_GetTicks();
+    if (next_try_ms != 0 && (int)(now - next_try_ms) < 0) {
+        return;
+    }
+    next_try_ms = now + 3000;
+    tig_debug_printf("MainMenu-UI: waiting for the host - trying to rejoin\n");
+    if (coop_lite_client_reconnect()) {
+        coop_lite_wait_host_set(false);
+        tig_debug_printf("MainMenu-UI: host is back - rejoining\n");
+        mainmenu_ui_start_pregen(1);
+    }
 }
 
 /* PT57: the dev autostart steps, shared with R - Reconnect. Passing the
@@ -2185,7 +2248,9 @@ static void mainmenu_ui_coop_buttons_create(void)
                 window->refresh_text_flags | 0x20);
             if (tig_net_join_configured() && !tig_net_is_active()) {
                 /* PT57: visible hint for the reconnect key. */
-                snprintf(label[1], sizeof(label[1]), "%s", coop_lite_lang("R — переподключиться / R - Reconnect"));
+                snprintf(label[1], sizeof(label[1]), "%s", coop_lite_wait_host_active()
+                        ? coop_lite_lang("Ждём хоста... (Esc — отмена) / Waiting for host... (Esc to cancel)")
+                        : coop_lite_lang("R — переподключиться / R - Reconnect"));
                 mainmenu_ui_coop_fit(label[1], sizeof(label[1]), font, 410 - window->field_30,
                     (window->refresh_text_flags & 0x04) != 0, &font_desc);
                 text_rect.x = 410 - window->field_30;

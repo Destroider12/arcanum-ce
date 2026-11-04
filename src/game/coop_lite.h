@@ -924,6 +924,11 @@ void coop_lite_set_dialog_end_hook(void (*hook)(int64_t pc_obj, int a2));
 void coop_lite_set_return_to_menu_hook(void (*hook)(void));
 /* Pure: should the deferred return-to-menu fire now? */
 bool coop_lite_host_left_menu_due(bool armed, unsigned int armed_ms, unsigned int now_ms);
+/* PT62: client waits for a lost host in the main menu; host autoload. */
+bool coop_lite_wait_host_enabled(const char* env);
+bool coop_lite_wait_host_active(void);
+void coop_lite_wait_host_set(bool on);
+bool coop_lite_autoload_wanted(const char* env);
 
 /*
  * Parked PCs (rejoin). A leaving client's PC is switched OF_OFF instead of
