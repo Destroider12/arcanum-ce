@@ -98,6 +98,9 @@ static char g_game_data_dir[MAX_PATH]; /* PT68: where logs / crash files of the 
 static char g_game_log[64];
 static FILETIME g_game_started;
 static DWORD g_game_exit;
+/* PT76a: a crashed host's exit code + log survive its auto-restart. */
+static DWORD g_prev_crash_exit;
+static bool g_prev_crash_valid;
 static DWORD g_restart_ticks[3]; /* host auto-restarts, crash-loop guard */
 static bool g_autoload_next;
 
@@ -822,6 +825,14 @@ static void create_bug_report(void)
         "Note: the launcher ini is included as is (player name, host address / SteamID).\r\n",
         COOP_BUILD_SHA, COOP_PROTOCOL, g_game_host ? "host" : "client", g_game_exit, g_game_exit, t.wYear, t.wMonth,
         t.wDay, t.wHour, t.wMinute, t.wSecond, dir);
+    if (g_prev_crash_valid) {
+        size_t len = strlen(info);
+
+        /* PT76a */
+        snprintf(info + len, sizeof(info) - len,
+            "previous host run crashed: exit code 0x%08lX (auto-restarted; its log is coop_host.crash.log)\r\n",
+            g_prev_crash_exit);
+    }
     zip_add_mem(&z, "info.txt", (const unsigned char*)info, strlen(info));
     if (!g_game_legacy) {
         /* PT68: one folder: each role's log and crash files in coop\<role>\ */
@@ -829,6 +840,10 @@ static void create_bug_report(void)
 
         snprintf(path, sizeof(path), "%scoop\\host\\coop_host.log", dir);
         zip_add_file(&z, path, "coop_host.log");
+        if (g_prev_crash_valid) {
+            snprintf(path, sizeof(path), "%scoop\\host\\coop_host.crash.log", dir);
+            zip_add_file(&z, path, "coop_host.crash.log");
+        }
         snprintf(path, sizeof(path), "%scoop\\client\\coop_client.log", dir);
         zip_add_file(&z, path, "coop_client.log");
         snprintf(role_dir, sizeof(role_dir), "%scoop\\%s\\", dir, g_game_host ? "host" : "client");
@@ -837,6 +852,10 @@ static void create_bug_report(void)
     } else {
         snprintf(path, sizeof(path), "%scoop_host.log", dir);
         zip_add_file(&z, path, "coop_host.log");
+        if (g_prev_crash_valid) {
+            snprintf(path, sizeof(path), "%scoop_host.crash.log", dir);
+            zip_add_file(&z, path, "coop_host.crash.log");
+        }
         snprintf(path, sizeof(path), "%scoop_client.log", dir);
         zip_add_file(&z, path, "coop_client.log");
         zip_add_newest(&z, dir, "crash-*.txt", 2);
@@ -927,6 +946,16 @@ static void on_game_exit(DWORD code, HANDLE proc)
     }
     show_panel(true);
     if (g_game_host && host_restart_allowed()) {
+        char log[MAX_PATH];
+        char keep[MAX_PATH + 16];
+
+        /* PT76a: the restarted host overwrites its log - keep the crashed
+           run's log next to it (coop_host.crash.log) for the bug report. */
+        snprintf(log, sizeof(log), "%s%s", g_game_legacy ? g_game_dir_now : g_game_data_dir, g_game_log);
+        snprintf(keep, sizeof(keep), "%.*s.crash.log", (int)(strlen(log) - 4), log);
+        CopyFileA(log, keep, FALSE);
+        g_prev_crash_exit = code;
+        g_prev_crash_valid = true;
         snprintf(msg, sizeof(msg),
             "Game closed unexpectedly (exit 0x%08lX). Restarting the host from the last save - friends rejoin by themselves.",
             code);
