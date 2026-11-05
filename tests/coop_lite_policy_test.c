@@ -2510,6 +2510,17 @@ int main(int argc, char** argv)
                     fprintf(stderr, "PT77d log origin clamp %d,%d\n", lx, ly);
                     return 1;
                 }
+                /* PT77g: trap devices may target doors, potions only critters */
+                if (!coop_lite_use_item_target_ok(true, 1)
+                    || !coop_lite_use_item_target_ok(true, 2)
+                    || !coop_lite_use_item_target_ok(false, 16)
+                    || !coop_lite_use_item_target_ok(true, 15)
+                    || coop_lite_use_item_target_ok(false, 1)
+                    || coop_lite_use_item_target_ok(true, 3)
+                    || coop_lite_use_item_target_ok(true, 5)) {
+                    fprintf(stderr, "PT77g use item target\n");
+                    return 1;
+                }
                 /* PT77f: quit-to-menu leaves the session whenever connected */
                 if (!coop_lite_client_leave_on_reset(true, false, false, true)
                     || !coop_lite_client_leave_on_reset(true, false, true, false)

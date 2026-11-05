@@ -1544,6 +1544,11 @@ void item_use_on_loc(int64_t obj, int64_t item_obj, int64_t target_loc)
         return;
     }
 
+    /* PT77g: coop client - the host places trap devices for us. */
+    if (coop_lite_client_use_item_loc_intent(obj, item_obj, target_loc)) {
+        return;
+    }
+
     item_parent(item_obj, &parent_obj);
 
     if (target_loc == 0

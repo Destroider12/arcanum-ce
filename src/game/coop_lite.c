@@ -15647,6 +15647,19 @@ bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int 
     return can_use_worldmap || (!selecting && townmap != 0);
 }
 
+/* PT77g: what a client's item may target on the host: critters (potions,
+   healing kits, scrolls); trap devices also doors, containers and walls
+   (trap_use_on_obj decides the rest, e.g. scripted doors). */
+bool coop_lite_use_item_target_ok(bool trap_device, int target_type)
+{
+    /* Raw obj.h values (this builds in the policy test too):
+       0 wall, 1 portal, 2 container, 15 PC, 16 NPC. */
+    if (target_type == 15 || target_type == 16) {
+        return true;
+    }
+    return trap_device && target_type >= 0 && target_type <= 2;
+}
+
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size)
 {
     return coop_lite_skill_use_valid(pkt, size) && pkt->skill == COOP_SKILL_USE_ITEM
@@ -16330,6 +16343,12 @@ static bool coop_lite_item_host_usable(int64_t item)
     if (type == OBJ_TYPE_FOOD || type == OBJ_TYPE_SCROLL) {
         return true;
     }
+    /* PT77g: trap devices (Magickal Trap on a door, dynamite...) too: run
+       locally they only trapped the client's copy and the host's inventory
+       sync gave the item back. */
+    if (trap_is_trap_device(item)) {
+        return true;
+    }
     if (type == OBJ_TYPE_WRITTEN || type == OBJ_TYPE_KEY || type == OBJ_TYPE_KEY_RING) {
         return false;
     }
@@ -16369,6 +16388,31 @@ bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int6
     return true;
 }
 
+/* PT77g: client trap device on a tile (item_use_on_loc). */
+bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc)
+{
+    PacketCoopSkillUse pkt;
+    int64_t pc = player_get_local_pc_obj();
+    int64_t parent = OBJ_HANDLE_NULL;
+    int depth;
+
+    if (coop_preshop || !tig_net_is_coop_client() || !coop_lite_client_in_session
+        || pc == OBJ_HANDLE_NULL || source_obj != pc || item_obj == OBJ_HANDLE_NULL || target_loc == 0
+        || !item_parent(item_obj, &parent) || parent != pc || !trap_is_trap_device(item_obj)) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_SKILL_USE;
+    pkt.skill = COOP_SKILL_USE_ITEM;
+    coop_lite_put_oid(pkt.item_oid, item_obj);
+    pkt.target_loc = target_loc;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: trap placement sent to host\n");
+    return true;
+}
+
 static void coop_lite_host_use_item(PacketCoopSkillUse* pkt)
 {
     int slot = sub_52A530();
@@ -16390,15 +16434,28 @@ static void coop_lite_host_use_item(PacketCoopSkillUse* pkt)
     }
     if (pkt->target_oid[0] != 0) {
         target = coop_lite_get_oid_obj(pkt->target_oid);
-        if (target == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE))
+        if (target == OBJ_HANDLE_NULL
+            || !coop_lite_use_item_target_ok(trap_is_trap_device(item), obj_field_int32_get(target, OBJ_F_TYPE))
             || object_dist(pc, target) > COOP_USE_ITEM_TARGET_RANGE) {
             /* PT52: never redirect a targeted item onto the user */
             tig_debug_printf("CoopLite: slot %d item use: bad target (%s)\n", slot,
                 target == OBJ_HANDLE_NULL ? "unknown here"
-                    : (!obj_type_is_critter(obj_field_int32_get(target, OBJ_F_TYPE)) ? "not a critter" : "too far"));
+                    : (!coop_lite_use_item_target_ok(trap_is_trap_device(item), obj_field_int32_get(target, OBJ_F_TYPE))
+                            ? "wrong target type" : "too far"));
             coop_lite_host_sync_slot_inven(slot);
             return;
         }
+    } else if (pkt->target_loc != 0 && trap_is_trap_device(item)) {
+        /* PT77g: a trap device placed on a tile. */
+        if (location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), pkt->target_loc) > COOP_USE_ITEM_TARGET_RANGE) {
+            tig_debug_printf("CoopLite: slot %d trap placement too far\n", slot);
+            coop_lite_host_sync_slot_inven(slot);
+            return;
+        }
+        item_use_on_loc(pc, item, pkt->target_loc);
+        tig_debug_printf("CoopLite: slot %d placed a trap device (host)\n", slot);
+        coop_lite_host_sync_slot_inven(slot);
+        return;
     } else if ((obj_field_int32_get(item, OBJ_F_ITEM_FLAGS) & OIF_NEEDS_TARGET) == 0) {
         target = OBJ_HANDLE_NULL;
     } else {
@@ -16594,6 +16651,7 @@ void coop_lite_client_preshop_end(void) { }
 bool coop_lite_client_skill_intent(struct SkillInvocation* si) { (void)si; return false; }
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt) { (void)pkt; }
 bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj) { (void)source_obj; (void)item_obj; (void)target_obj; return false; }
+bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc) { (void)source_obj; (void)item_obj; (void)target_loc; return false; }
 bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
 void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
 void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }
