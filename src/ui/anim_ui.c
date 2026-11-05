@@ -13,6 +13,7 @@
 #include "ui/intgame.h"
 #include "ui/inven_ui.h"
 #include "ui/mainmenu_ui.h"
+#include "ui/mp_ctrl_ui.h"
 #include "ui/sleep_ui.h"
 #include "ui/slide_ui.h"
 #include "ui/wmap_ui.h"
@@ -47,7 +48,7 @@ bool anim_ui_init(GameInitInfo* init_info)
     callbacks.sleeping_func = sleep_ui_process_callback;
     callbacks.clock_func = intgame_clock_process_callback;
     callbacks.mainmenu_func = mainmenu_ui_process_callback;
-    callbacks.mp_ctrl_ui_func = NULL;
+    callbacks.mp_ctrl_ui_func = mp_ctrl_ui_process_callback;
     timeevent_set_funcs(&callbacks);
 
     timeevent.type = TIMEEVENT_TYPE_AMBIENT_LIGHTING;

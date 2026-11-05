@@ -1,4 +1,6 @@
 #include "game/gamelib.h"
+#include "game/coop_lite.h"
+#include "coop_paths.h"
 
 #include <stdio.h>
 
@@ -264,6 +266,7 @@ static char gamelib_mod_dat_path[TIG_MAX_PATH];
 
 // 0x5D10AC
 static void (*gamelib_draw_func)(GameDrawInfo* draw_info);
+static void (*gamelib_overlay_draw_func)(GameDrawInfo* draw_info);
 
 // 0x5D10B0
 static TigGuid gamelib_mod_guid;
@@ -318,7 +321,7 @@ bool gamelib_init(GameInitInfo* init_info)
     if (init_info->editor) {
         settings_init(&settings, "worlded.cfg");
     } else {
-        settings_init(&settings, "arcanum.cfg");
+        settings_init(&settings, coop_paths_cfg("arcanum.cfg")); /* PT68: per coop role */
     }
 
     settings_load(&settings);
@@ -456,6 +459,7 @@ void gamelib_reset(void)
 // 0x4024D0
 void gamelib_exit(void)
 {
+    multiplayer_restore_sp_settings();
     settings_save(&settings);
 
     for (int index = MODULE_COUNT - 1; index >= 0; index--) {
@@ -577,6 +581,7 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
     unsigned int module_index;
     bool have_mp;
     char path[TIG_MAX_PATH];
+    const char* modules_prefix = "Modules\\";
 
     module_list->count = 0;
     module_list->selected = 0;
@@ -588,6 +593,11 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
     }
 
     tig_file_list_create(&file_list, "Modules\\*.*");
+    if (file_list.count == 0) {
+        tig_file_list_destroy(&file_list);
+        tig_file_list_create(&file_list, "modules\\*.*");
+        modules_prefix = "modules\\";
+    }
 
     for (file_index = 0; file_index < file_list.count; file_index++) {
         cont = false;
@@ -616,7 +626,7 @@ void gamelib_modlist_create(GameModuleList* module_list, int type)
             }
 
             if (!found) {
-                strcpy(path, "Modules\\");
+                strcpy(path, modules_prefix);
                 strcat(path, file_list.entries[file_index].path);
                 if (is_file) {
                     strcat(path, ".dat");
@@ -794,6 +804,11 @@ void gamelib_update_view(ViewOptions* view_options)
 void gamelib_get_view_options(ViewOptions* view_options)
 {
     *view_options = gamelib_view_options;
+}
+
+void gamelib_set_overlay_draw_func(void (*func)(GameDrawInfo* draw_info))
+{
+    gamelib_overlay_draw_func = func;
 }
 
 // 0x402D30
@@ -1024,10 +1039,16 @@ bool gamelib_save(const char* name, const char* description)
         tig_debug_printf("done. Time (ms): %d\n", duration);
     }
 
-    if (!gamelib_saveinfo_init(name, description, &save_info)) {
-        tig_debug_printf("gamelib_save(): error creating saveinfo\n");
-        in_save = false;
-        return false;
+    {
+        /* PT68: "[Host] " / "[Client] " in front of coop saves. */
+        char tagged[256];
+
+        coop_paths_save_description(description, tagged, sizeof(tagged));
+        if (!gamelib_saveinfo_init(name, tagged, &save_info)) {
+            tig_debug_printf("gamelib_save(): error creating saveinfo\n");
+            in_save = false;
+            return false;
+        }
     }
 
     if (!gamelib_saveinfo_save(&save_info)) {
@@ -1074,6 +1095,8 @@ bool gamelib_load(const char* name)
     GameLoadInfo load_info;
     int index;
     unsigned int sentinel;
+
+    coop_lite_walls_reset(); /* PT61: the loaded save has its own walls */
 
     tig_debug_printf("\ngamelib_load: Loading from File: %s.\n", name);
     tig_timer_now(&start_time);
@@ -1227,8 +1250,20 @@ const char* gamelib_last_save_name(void)
     gamelib_savelist_create(&save_list);
     gamelib_savelist_sort(&save_list, GAME_SAVE_LIST_ORDER_DATE, true);
 
-    if (save_list.count > 0) {
-        strcpy(byte_5D0D88, save_list.names[0]);
+    {
+        unsigned int i;
+
+        for (i = 0; i < save_list.count; i++) {
+            /* PT61: a coop client's slot (Slot9700-Slot9789, saved on the
+               host for that player) is never the host's F8 / reload save. */
+            const char* n = save_list.names[i];
+
+            if (SDL_strncasecmp(n, "Slot97", 6) == 0 && n[6] >= '0' && n[6] <= '8' && n[7] >= '0' && n[7] <= '9') {
+                continue;
+            }
+            strcpy(byte_5D0D88, n);
+            break;
+        }
     }
 
     // FIX: Memory leak.
@@ -1711,6 +1746,9 @@ void gamelib_draw_game(GameDrawInfo* draw_info)
         tb_draw(draw_info);
         tf_draw(draw_info);
         tc_draw(draw_info);
+        if (gamelib_overlay_draw_func != NULL) {
+            gamelib_overlay_draw_func(draw_info);
+        }
         tig_video_3d_end_scene();
     }
 }
@@ -1845,7 +1883,13 @@ bool gamelib_load_module_data(const char* module_name)
     if (module_name[0] == '\\' || module_name[0] == '.' || module_name[1] == ':') {
         path1[0] = '\0';
     } else {
-        strcpy(path1, ".\\Modules\\");
+        /* Linux Steam/archive extracts may use modules/ (lowercase). Prefer
+           classic Modules\\ then fall back so Coop Lite playtests work. */
+        if (tig_file_is_directory(".\\Modules") || tig_file_exists(".\\Modules", NULL)) {
+            strcpy(path1, ".\\Modules\\");
+        } else {
+            strcpy(path1, ".\\modules\\");
+        }
     }
 
     strcat(path1, module_name);

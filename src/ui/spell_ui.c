@@ -1,5 +1,6 @@
 #include "ui/spell_ui.h"
 
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/item.h"
 #include "game/magictech.h"
@@ -400,6 +401,13 @@ void spell_ui_maintain_click(int slot)
     }
 
     stru_5CB3A8[slot].field_4 = 2;
+
+    /* PT50: a co-op client's maintained spell runs on the host; ask it to
+       end there (it sends Packet61 back). A local interrupt would only end
+       the client's shadow copy while the host kept draining fatigue. */
+    if (coop_lite_client_spell_end(stru_5CB3A8[slot].mt_id)) {
+        return;
+    }
 
     magictech_interrupt(stru_5CB3A8[slot].mt_id);
 }

@@ -46,6 +46,10 @@ void tig_file_exit(void);
 bool tig_file_repository_add(const char* path);
 bool tig_file_repository_remove(const char* path);
 bool tig_file_repository_remove_all(void);
+/* Coop Lite PT68: a writable directory kept on top of the search list; the
+   given path prefixes (e.g. "Save", "Players") resolve only inside it. NULL
+   path turns it off. */
+bool tig_file_set_overlay(const char* path, const char* const* private_prefixes, int count);
 bool tig_file_repository_guid(const char* path, TigGuid* guid);
 int tig_file_mkdir_ex(const char* path);
 int tig_file_rmdir_ex(const char* path);

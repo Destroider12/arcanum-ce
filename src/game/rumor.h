@@ -24,6 +24,8 @@ bool rumor_load(GameLoadInfo* load_info);
 bool rumor_save(TigFile* stream);
 bool rumor_qstate_get(int rumor);
 void rumor_qstate_set(int rumor);
+bool rumor_qstate_raw_get(int idx);
+void rumor_qstate_raw_set(int idx, bool quelled);
 void rumor_copy_interaction_str(int64_t pc_obj, int64_t npc_obj, int rumor, char* buffer);
 void rumor_known_set(int64_t obj, int rumor);
 bool rumor_known_get(int64_t obj, int rumor);

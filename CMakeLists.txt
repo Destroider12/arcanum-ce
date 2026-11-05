@@ -14,6 +14,18 @@ add_subdirectory("third_party/sdl3" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/sdl3_mixer" EXCLUDE_FROM_ALL)
 add_subdirectory("third_party/zlib" EXCLUDE_FROM_ALL)
 
+# ENet v1.3.18 (MIT) — vendored under third_party/enet; C-only target so we
+# do not require a C++ toolchain just for networking.
+add_subdirectory("third_party/enet" EXCLUDE_FROM_ALL)
+
+# PT51: optional UPnP port mapping for the co-op host. miniupnpc 2.2.8
+# (BSD-3-Clause) vendored under third_party/miniupnpc; static, C only, links
+# ws2_32 + iphlpapi on Windows (mingw-w64 OK).
+option(ARCANUM_UPNP "Co-op host maps its UDP port via UPnP (miniupnpc)" ON)
+if(ARCANUM_UPNP)
+    add_subdirectory("third_party/miniupnpc" EXCLUDE_FROM_ALL)
+endif()
+
 add_subdirectory("first_party/bink_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/mss_compat" EXCLUDE_FROM_ALL)
 add_subdirectory("first_party/tig" EXCLUDE_FROM_ALL)
@@ -50,6 +62,10 @@ set(SRCS
     "src/game/ci.h"
     "src/game/combat.c"
     "src/game/combat.h"
+    "src/game/coop_lite.c"
+    "src/game/coop_menu.c"
+    "src/game/coop_menu_sys.c"
+    "src/game/coop_lite.h"
     "src/game/context.h"
     "src/game/criticals.h"
     "src/game/critter.c"
@@ -254,6 +270,8 @@ set(SRCS
     "src/ui/anim_ui.h"
     "src/ui/broadcast_ui.c"
     "src/ui/broadcast_ui.h"
+    "src/ui/coop_chat_ui.c"
+    "src/ui/coop_chat_ui.h"
     "src/ui/charedit_ui.c"
     "src/ui/charedit_ui.h"
     "src/ui/combat_ui.c"
@@ -284,6 +302,8 @@ set(SRCS
     "src/ui/logbook_ui.h"
     "src/ui/mainmenu_ui.c"
     "src/ui/mainmenu_ui.h"
+    "src/ui/mp_ctrl_ui.c"
+    "src/ui/mp_ctrl_ui.h"
     "src/ui/options_ui.c"
     "src/ui/options_ui.h"
     "src/ui/roller_ui.c"
@@ -314,7 +334,16 @@ set(SRCS
     "src/ui/written_ui.c"
     "src/ui/written_ui.h"
     "src/net_compat.h"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/net/coop_upnp.c"
+    "src/net/coop_upnp.h"
+    "src/net/tig_net.h"
     "src/main.c"
+    "src/crash_handler.c"
+    "src/coop_paths.c"
+    "src/coop_paths.h"
 )
 
 if(ANDROID)
@@ -327,13 +356,297 @@ target_sources(arcanum-ce PUBLIC
     ${SRCS}
 )
 
+# PT28: build id (git short sha at configure time) for the log and title.
+execute_process(
+    COMMAND git rev-parse --short=8 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE COOP_BUILD_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT COOP_BUILD_SHA)
+    set(COOP_BUILD_SHA "unknown")
+endif()
+set_source_files_properties(src/main.c PROPERTIES COMPILE_DEFINITIONS "COOP_BUILD_SHA=\"${COOP_BUILD_SHA}\"")
+
 target_include_directories(arcanum-ce PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(arcanum-ce PUBLIC
     ${TIG_LIBRARY}
+    enet
 )
+if(ARCANUM_UPNP)
+    target_link_libraries(arcanum-ce PRIVATE miniupnpc)
+    target_compile_definitions(arcanum-ce PRIVATE ARCANUM_UPNP=1)
+endif()
+
+# Headless transport loopback test (no game data / SDL window required).
+add_executable(tig_net_loopback_test
+    "tests/tig_net_loopback_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+)
+target_include_directories(tig_net_loopback_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(tig_net_loopback_test PRIVATE
+    enet
+)
+# Minimal tig_debug_printf stub for the test binary (avoid linking full tig/SDL).
+target_compile_definitions(tig_net_loopback_test PRIVATE TIG_NET_TEST_STUB_DEBUG=1)
+if(WIN32)
+    target_link_libraries(tig_net_loopback_test PRIVATE ws2_32 winmm)
+    target_link_libraries(arcanum-ce PUBLIC ws2_32 winmm)
+endif()
+
+enable_testing()
+add_test(NAME tig_net_loopback COMMAND tig_net_loopback_test)
+
+if(NOT WIN32 AND NOT ANDROID)
+    # tig file helpers against the real tig library (native paths only).
+    add_executable(tig_file_empty_dir_test "tests/tig_file_empty_dir_test.c")
+    target_link_libraries(tig_file_empty_dir_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_file_empty_dir COMMAND tig_file_empty_dir_test)
+    # PT68: coop role overlay (one game folder, separate host/client saves).
+    add_executable(tig_file_overlay_test "tests/tig_file_overlay_test.c")
+    target_link_libraries(tig_file_overlay_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_file_overlay COMMAND tig_file_overlay_test)
+    # PT53c: overflowing partial debug line (no OOB read, no stalled log).
+    add_executable(tig_debug_long_line_test "tests/tig_debug_long_line_test.c")
+    target_link_libraries(tig_debug_long_line_test PRIVATE ${TIG_LIBRARY})
+    add_test(NAME tig_debug_long_line COMMAND tig_debug_long_line_test)
+endif()
+
+add_executable(coop_lite_policy_test
+    "tests/coop_lite_policy_test.c"
+    "src/net/coop_upnp.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_policy_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_policy_test PRIVATE enet)
+target_compile_definitions(coop_lite_policy_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_policy_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
+
+add_executable(coop_story_test
+    "tests/coop_story_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_story_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_story_test PRIVATE enet)
+target_compile_definitions(coop_story_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_story_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_story COMMAND coop_story_test)
+
+add_executable(coop_dialog_test
+    "tests/coop_dialog_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_dialog_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_dialog_test PRIVATE enet)
+target_compile_definitions(coop_dialog_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_dialog_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_dialog COMMAND coop_dialog_test)
+
+add_executable(coop_menu_test
+    "tests/coop_menu_test.c"
+    "src/game/coop_menu.c"
+)
+target_include_directories(coop_menu_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+add_test(NAME coop_menu COMMAND coop_menu_test)
+
+add_executable(coop_lite_dialog_filter_test
+    "tests/coop_lite_dialog_filter_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_dialog_filter_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_dialog_filter_test PRIVATE enet)
+target_compile_definitions(coop_lite_dialog_filter_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_dialog_filter_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_dialog_filter COMMAND coop_lite_dialog_filter_test
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(coop_lite_session_sync_test
+    "tests/coop_lite_session_sync_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_session_sync_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_session_sync_test PRIVATE enet)
+target_compile_definitions(coop_lite_session_sync_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_session_sync_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_session_sync COMMAND coop_lite_session_sync_test)
+
+add_executable(coop_lite_net_hardening_test
+    "tests/coop_lite_net_hardening_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_net_hardening_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_net_hardening_test PRIVATE enet)
+target_compile_definitions(coop_lite_net_hardening_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_net_hardening_test PRIVATE ws2_32 winmm)
+endif()
+if(NOT WIN32)
+    add_test(NAME coop_lite_net_hardening COMMAND coop_lite_net_hardening_test)
+endif()
+
+
+# PT53d: transport-level receive-handler fuzz (host via loopback, client role direct).
+add_executable(coop_lite_rx_fuzz_test
+    "tests/coop_lite_rx_fuzz_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_rx_fuzz_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_rx_fuzz_test PRIVATE enet)
+target_compile_definitions(coop_lite_rx_fuzz_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(NOT WIN32)
+    add_test(NAME coop_lite_rx_fuzz COMMAND coop_lite_rx_fuzz_test)
+    set_tests_properties(coop_lite_rx_fuzz PROPERTIES ENVIRONMENT "COOP_RX_FUZZ_SECONDS=3")
+endif()
+
+# PT52j: validator fuzz + notice text + 8-player pure logic.
+add_executable(coop_lite_fuzz8_test
+    "tests/coop_lite_fuzz8_test.c"
+    "src/net/coop_upnp.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_fuzz8_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_fuzz8_test PRIVATE enet)
+target_compile_definitions(coop_lite_fuzz8_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_lite_fuzz8_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_lite_fuzz8 COMMAND coop_lite_fuzz8_test)
+
+# PT52k: 7 raw-ENet clients vs a tig_net host (storms, malformed packets).
+add_executable(coop_lite_net8_test
+    "tests/coop_lite_net8_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_net8_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_net8_test PRIVATE enet)
+target_compile_definitions(coop_lite_net8_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(NOT WIN32)
+    add_test(NAME coop_lite_net8 COMMAND coop_lite_net8_test)
+endif()
+
+# PT55: 8-slot stress / edge cases over ENet loopback.
+add_executable(coop_lite_stress8_test
+    "tests/coop_lite_stress8_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+)
+target_include_directories(coop_lite_stress8_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_lite_stress8_test PRIVATE enet)
+target_compile_definitions(coop_lite_stress8_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(NOT WIN32)
+    add_test(NAME coop_lite_stress8 COMMAND coop_lite_stress8_test)
+    set_tests_properties(coop_lite_stress8 PROPERTIES TIMEOUT 300)
+endif()
 
 # SDL HID on Android requires C++ linker.
 if(ANDROID)
@@ -400,4 +713,39 @@ if(APPLE)
     endif()
 
     include(CPack)
+endif()
+
+# PT58: transport abstraction (loopback fake + Steam backend on a fake flat API).
+add_executable(tig_net_transport_test
+    "tests/tig_net_transport_test.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+)
+target_include_directories(tig_net_transport_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(tig_net_transport_test PRIVATE enet)
+target_compile_definitions(tig_net_transport_test PRIVATE TIG_NET_TEST_STUB_DEBUG=1)
+if(WIN32)
+    target_link_libraries(tig_net_transport_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME tig_net_transport COMMAND tig_net_transport_test)
+
+# PT58: co-op launcher (Win32 GUI, Windows builds only).
+if(WIN32)
+    add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c")
+    target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32 shell32 wininet bcrypt)
+    # PT62: build sha + protocol go into the bug report.
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/net/tig_net.h" COOP_PROTO_LINE REGEX "^#define TIG_NET_PROTOCOL ")
+    string(REGEX REPLACE ".*TIG_NET_PROTOCOL +([0-9]+).*" "\\1" COOP_PROTO_NUM "${COOP_PROTO_LINE}")
+    target_compile_definitions(arcanum-coop-launcher PRIVATE COOP_BUILD_SHA="${COOP_BUILD_SHA}" COOP_PROTOCOL=${COOP_PROTO_NUM})
+    if(ARCANUM_UPNP)
+        target_link_libraries(arcanum-coop-launcher PRIVATE miniupnpc)
+        target_compile_definitions(arcanum-coop-launcher PRIVATE LAUNCHER_UPNP=1)
+    endif()
+    if(MINGW)
+        target_link_options(arcanum-coop-launcher PRIVATE -static -static-libgcc)
+    endif()
 endif()

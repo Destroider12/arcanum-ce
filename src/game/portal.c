@@ -1,4 +1,5 @@
 #include "game/portal.h"
+#include "game/coop_lite.h"
 
 #include "game/a_name.h"
 #include "game/gsound.h"
@@ -31,6 +32,7 @@ void portal_bust(int64_t portal_obj, int64_t triggerer_obj)
         flags = obj_field_int32_get(portal_obj, OBJ_F_PORTAL_FLAGS);
         flags |= OPF_BUSTED;
         obj_field_int32_set(portal_obj, OBJ_F_PORTAL_FLAGS, flags);
+        coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
         // Update appearance.
         object_set_current_aid(portal_obj, art_id);
@@ -105,6 +107,7 @@ bool portal_is_open(int64_t portal_obj)
  */
 void portal_toggle(int64_t portal_obj)
 {
+    coop_lite_host_portal_changed(); /* PT37: clients refresh doors promptly */
     if (tig_art_id_frame_get(obj_field_int32_get(portal_obj, OBJ_F_CURRENT_AID)) == 0) {
         // Portal is closed, wait until it is completely open.
         while (portal_open(portal_obj)) {
@@ -200,6 +203,7 @@ bool portal_open(int64_t portal_obj)
     }
 
     object_set_current_aid(portal_obj, art_id);
+    coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
     return true;
 }
@@ -287,6 +291,7 @@ bool portal_close(int64_t portal_obj)
     }
 
     object_set_current_aid(portal_obj, art_id);
+    coop_lite_host_portal_touch(portal_obj); /* PT53e */
 
     return true;
 }

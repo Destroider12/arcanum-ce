@@ -1,4 +1,5 @@
 #include "ui/schematic_ui.h"
+#include "game/coop_lite.h"
 
 #include <stdio.h>
 
@@ -887,6 +888,9 @@ bool schematic_ui_message_filter(TigMessage* msg)
             if (msg->data.button.button_handle == schematic_ui_buttons[SCHEMATIC_UI_BUTTON_COMBINE].button_handle) {
                 switch (schematic_ui_readiness) {
                 case SCHEMATIC_UI_READINESS_OK:
+                    if (coop_lite_client_craft_intent(schematic_ui_current_id())) {
+                        break; /* PT40: the host combines; INVEN_SYNC brings the product */
+                    }
                     schematic_ui_process(schematic_ui_current_id(), schematic_ui_primary_obj, schematic_ui_secondary_obj);
                     schematic_ui_redraw();
                     break;
@@ -1453,6 +1457,14 @@ bool schematic_ui_process(int schematic, int64_t primary_obj, int64_t secondary_
         }
     }
     if (ingridient2 == 3) {
+        return false;
+    }
+
+    /* PT40: expertise check here too (a coop host runs this for a client). */
+    if (tech_degree_level_get(primary_obj, obj_field_int32_get(ingridient1_obj, OBJ_F_ITEM_DISCIPLINE))
+            < -obj_field_int32_get(ingridient1_obj, OBJ_F_ITEM_MAGIC_TECH_COMPLEXITY)
+        || tech_degree_level_get(primary_obj, obj_field_int32_get(ingridient2_obj, OBJ_F_ITEM_DISCIPLINE))
+            < -obj_field_int32_get(ingridient2_obj, OBJ_F_ITEM_MAGIC_TECH_COMPLEXITY)) {
         return false;
     }
 

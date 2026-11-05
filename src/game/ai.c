@@ -3,6 +3,7 @@
 #include "game/anim.h"
 #include "game/anim_private.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -10,6 +11,7 @@
 #include "game/magictech.h"
 #include "game/map.h"
 #include "game/monstergen.h"
+#include "game/multiplayer.h"
 #include "game/mt_ai.h"
 #include "game/mt_item.h"
 #include "game/obj.h"
@@ -102,6 +104,7 @@ static void sub_4AB2A0(int64_t a1, int64_t a2);
 static bool ai_should_flee(int64_t source_obj, int64_t target_obj);
 static int64_t ai_find_target(int64_t a1);
 static bool sub_4AB990(int64_t a1, int64_t a2);
+static int ai_check_kos_party(int64_t source_obj, int64_t target_obj);
 static void sub_4ABC20(Ai* ai);
 static bool sub_4ABC70(Ai* ai);
 static int sub_4ABE20(Ai* ai);
@@ -489,6 +492,17 @@ bool ai_heal(Ai* ai)
     object_list_destroy(&objects);
 
     if (node == NULL) {
+        /* PT27 co-op: the other players' PCs and followers too. */
+        int64_t party[32];
+        int cnt = coop_lite_party_heal_targets(ai->obj, party, 32);
+        int idx;
+
+        for (idx = 0; idx < cnt; idx++) {
+            if (ai_heal_func(ai, party[idx], force)) {
+                tig_debug_printf("AI: coop: healing another player's party member\n");
+                return true;
+            }
+        }
         return false;
     }
 
@@ -939,6 +953,13 @@ void ai_attack(int64_t source_obj, int64_t target_obj, int loudness, unsigned in
         return;
     }
 
+    /* Coop Lite PT25: no aggression inside the co-op party (a host caught
+       pickpocketing a client PC made that PC and Virgil fight the host). */
+    if (coop_lite_party_friendly(source_obj, target_obj)) {
+        tig_debug_printf("AI: coop party members never fight - aggression ignored\n");
+        return;
+    }
+
     source_obj_type = obj_field_int32_get(source_obj, OBJ_F_TYPE);
     if (obj_type_is_critter(source_obj_type)) {
         if ((flags & 0x04) != 0) {
@@ -1048,6 +1069,9 @@ void ai_attack(int64_t source_obj, int64_t target_obj, int loudness, unsigned in
             source_obj,
             NULL);
     }
+
+    /* Coop Lite: companion PC aggression counts as party aggression on host. */
+    coop_lite_propagate_party_aggression(source_obj, target_obj);
 }
 
 // 0x4A9AD0
@@ -1066,6 +1090,14 @@ void sub_4A9AD0(int64_t attacker_obj, int64_t target_obj)
         if (combat_turn_based_is_active()) {
             combat_turn_based_whos_turn_set(target_obj);
         }
+    }
+
+    // PT25 co-op: a client's PC is never driven by the host - no automatic
+    // counter-attack here (with the host's auto-attack setting it chased
+    // whoever hit it, the host's PC included, and the owner only saw FORCE
+    // position snaps). Its owner attacks by itself.
+    if (coop_lite_is_remote_slot_pc(attacker_obj)) {
+        return;
     }
 
     if (!sub_423300(attacker_obj, NULL) || anim_is_idle(attacker_obj)) {
@@ -1990,7 +2022,7 @@ int64_t ai_find_target(int64_t critter_obj)
                     v1 = handles[idx];
                 }
 
-                if (ai_check_kos(critter_obj, handles[idx]) != AI_KOS_NO) {
+                if (ai_check_kos_party(critter_obj, handles[idx]) != AI_KOS_NO) {
                     danger_source_obj = handles[idx];
                     break;
                 }
@@ -2872,6 +2904,16 @@ bool ai_timeevent_process(TimeEvent* timeevent)
         return true;
     }
 
+    /*
+     * Coop client: the host simulates every NPC (AI, heartbeat scripts,
+     * monster generators); poses arrive via PACKET_COOP_NPC_POS. Running AI
+     * here only produced Packet4 move intents for NPCs the host rejects
+     * ("Packet4 from slot 1 for an object it does not own", PT9).
+     */
+    if (tig_net_is_coop_enabled() && coop_lite_is_client_role()) {
+        return true;
+    }
+
     skip = false;
     v1 = false;
     if (!critter_is_dead(obj) && timeevent->params[1].integer_value != 0) {
@@ -2947,7 +2989,8 @@ bool sub_4AD420(int64_t obj)
         return false;
     }
 
-    if (object_dist(player_get_local_pc_obj(), obj) <= 30) {
+    /* PT23: any coop PC keeps NPCs awake, not just the host's. */
+    if (coop_lite_ai_nearest_pc_dist(obj) <= 30) {
         return true;
     }
 
@@ -3005,7 +3048,7 @@ int ai_distance_to_nearest_player(int64_t obj)
 {
     int64_t nearest_dist;
 
-    nearest_dist = object_dist(player_get_local_pc_obj(), obj);
+    nearest_dist = coop_lite_ai_nearest_pc_dist(obj);
 
     return nearest_dist >= 0 && nearest_dist <= 30 ? (int)nearest_dist : 30;
 }
@@ -3420,6 +3463,54 @@ void ai_calc_party_size_and_level_internal(int64_t obj, int* cnt_ptr, int* lvl_p
 }
 
 // 0x4AE120
+/* PT26 co-op: the party shares an NPC's hostility. An NPC that hates one
+   player's PC (reaction) or already fights one ignored the other players
+   until they hit it. Target search only (dialog keeps per-PC reaction). */
+static int ai_check_kos_party(int64_t source_obj, int64_t target_obj)
+{
+    int rc = ai_check_kos(source_obj, target_obj);
+    int danger_type;
+    int64_t danger_obj;
+    int slot;
+
+    if (rc != AI_KOS_NO
+        || !coop_lite_is_party_pc(target_obj)
+        || obj_field_int32_get(source_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC
+        || critter_pc_leader_get(source_obj) != OBJ_HANDLE_NULL
+        || critter_is_dead(source_obj)
+        || !sub_4AB990(source_obj, target_obj)) {
+        return rc;
+    }
+    ai_danger_source(source_obj, &danger_type, &danger_obj);
+    if (danger_type == AI_DANGER_SOURCE_TYPE_COMBAT_FOCUS && danger_obj != OBJ_HANDLE_NULL
+        && danger_obj != target_obj && coop_lite_is_party_pc(danger_obj)) {
+        return AI_KOS_REACTION;
+    }
+    /* PT27 item 6: not only a bad reaction - an NPC that is KOS to another
+       player's PC by faction or alignment (a rat to the host, say) ignored
+       a client whose own stats did not trip it. Any of those, for any co-op
+       PC on this map, makes the whole party fair game. */
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int other;
+
+        if (pc == OBJ_HANDLE_NULL || pc == target_obj || critter_is_dead(pc)
+            || object_dist(source_obj, pc) > 120) {
+            continue;
+        }
+        other = ai_check_kos(source_obj, pc);
+        if (other == AI_KOS_REACTION || other == AI_KOS_FACTION || other == AI_KOS_ALIGNMENT) {
+            return other;
+        }
+    }
+    return rc;
+}
+
+int ai_check_kos_party_dev(int64_t source_obj, int64_t target_obj)
+{
+    return ai_check_kos_party(source_obj, target_obj);
+}
+
 int ai_check_kos(int64_t source_obj, int64_t target_obj)
 {
     int64_t pc_leader_obj;
@@ -4247,6 +4338,10 @@ void ai_shitlist_add(int64_t npc_obj, int64_t shit_obj)
 {
     int idx;
     int64_t obj;
+
+    if (coop_lite_party_friendly(npc_obj, shit_obj)) {
+        return; /* PT25: a co-op follower never blacklists a co-op PC */
+    }
 
     if (obj_field_int32_get(shit_obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         obj = critter_pc_leader_get(shit_obj);

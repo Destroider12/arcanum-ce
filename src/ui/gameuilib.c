@@ -4,6 +4,7 @@
 #include "game/target.h"
 #include "ui/anim_ui.h"
 #include "ui/broadcast_ui.h"
+#include "ui/coop_chat_ui.h"
 #include "ui/charedit_ui.h"
 #include "ui/combat_ui.h"
 #include "ui/compact_ui.h"
@@ -96,6 +97,7 @@ static GameUiLibModule gameuilib_modules[] = {
     { "Inven-UI", inven_ui_init, inven_ui_reset, NULL, NULL, inven_ui_exit, NULL, NULL, NULL },
     { "Item-UI", item_ui_init, NULL, NULL, NULL, item_ui_exit, NULL, NULL, NULL },
     { "Broadcast-UI", broadcast_ui_init, broadcast_ui_reset, NULL, NULL, broadcast_ui_exit, NULL, NULL, NULL },
+    { "CoopChat-UI", coop_chat_ui_init, coop_chat_ui_reset, NULL, NULL, coop_chat_ui_exit, NULL, NULL, coop_chat_ui_resize },
     { "Dialog-UI", dialog_ui_init, dialog_ui_reset, NULL, NULL, dialog_ui_exit, NULL, NULL, NULL },
     { "Fate-UI", fate_ui_init, fate_ui_reset, NULL, NULL, fate_ui_exit, NULL, NULL, NULL },
     { "Combat-UI", combat_ui_init, combat_ui_reset, NULL, NULL, combat_ui_exit, NULL, NULL, combat_ui_resize },

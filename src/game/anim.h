@@ -110,6 +110,7 @@ bool anim_goal_follow_obj(int64_t source_obj, int64_t target_obj);
 bool sub_4348E0(int64_t obj, int action_points);
 bool anim_goal_flee(int64_t obj, int64_t flee_from);
 bool anim_goal_attack(int64_t attacker_obj, int64_t target_obj);
+int anim_debug_active_runs(void);
 bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id);
 bool anim_goal_get_up(int64_t obj);
 bool anim_goal_knockback(int64_t target_obj, int rot, int range, int64_t source_obj);
@@ -120,6 +121,7 @@ bool anim_goal_use_item_on_obj_with_skill(int64_t obj, int64_t item_obj, int64_t
 bool anim_goal_use_item_on_obj(int64_t obj, int64_t target_obj, int64_t item_obj, unsigned int flags);
 bool anim_goal_use_item_on_loc(int64_t obj, int64_t target_loc, int64_t item_obj, unsigned int flags);
 bool anim_goal_pickup_item(int64_t obj, int64_t item_obj);
+bool anim_goal_pickup_item_as_click(int64_t obj, int64_t item_obj);
 bool anim_goal_animate_stunned(int64_t obj);
 bool anim_goal_projectile(int64_t source_obj, int64_t missile_obj, tig_art_id_t missile_art_id, int a4, int a5, int64_t target_obj, int64_t target_loc, int64_t weapon_obj);
 bool sub_435A00(int64_t proj_obj, int64_t a2, int64_t a3);

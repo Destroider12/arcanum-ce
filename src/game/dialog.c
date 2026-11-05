@@ -24,6 +24,8 @@
 #include "game/tc.h"
 #include "game/timeevent.h"
 #include "game/ui.h"
+#include "game/coop_lite.h"
+#include "game/obj_pool.h"
 
 typedef enum GeneratedDialog {
     GD_PC2M,
@@ -1900,6 +1902,15 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             }
         }
 
+        /* Coop client: shared-state actions (quests, flags, join, items …)
+           are host-owned. Covers NPC-line actions too, which run on display. */
+        if (act < DIALOG_ACTION_COUNT
+            && coop_lite_is_client_role()
+            && coop_lite_dialog_action_blocked(code)) {
+            tig_debug_printf("Dialog: coop client skipped action '%s' (host-owned)\n", code);
+            continue;
+        }
+
         switch (act) {
         case DIALOG_ACTION_GOLD:
             if (value > 0) {
@@ -2170,6 +2181,7 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             stat_base_set(a1->pc_obj,
                 STAT_FATE_POINTS,
                 stat_base_get(a1->pc_obj, STAT_FATE_POINTS) + 1);
+            coop_lite_host_party_fate_point(a1->pc_obj); /* PT40 */
             break;
         case DIALOG_ACTION_SU:
             dialog_copy_npc_order_ok_msg(a1->npc_obj, a1->pc_obj, a1->reply, &(a1->speech_id));
@@ -3355,6 +3367,19 @@ void dialog_offer_training(int* skills, int cnt, int back_response_val, DialogSt
 {
     int index;
 
+    /* PT45: a co-op client's local (merchant) dialog would train only its
+       own copy; training runs in the host's party dialog instead. */
+    if (tig_net_is_coop_client() && coop_lite_party_dialog_pc() == OBJ_HANDLE_NULL) {
+        snprintf(state->reply, sizeof(state->reply), "%s", coop_lite_lang(
+            "Здесь я вас обучить не могу. (Кооп: обучение — в общем диалоге с лидером группы.) / I cannot train you here. (Co-op: training happens in the party dialog with the host.)"));
+        state->num_options = 1;
+        dialog_copy_pc_class_specific_msg(state->options[0], state, 1000);
+        state->field_17F0[0] = 0;
+        state->field_1804[0] = 0;
+        state->actions[0] = NULL;
+        return;
+    }
+
     // "What type of training are you seeking?"
     dialog_copy_npc_class_specific_msg(state->reply, state, 3000);
 
@@ -3432,6 +3457,10 @@ void dialog_perform_training(int skill, DialogState* state)
         tech_skill_training_set(state->pc_obj, GET_TECH_SKILL(skill), TRAINING_APPRENTICE);
     } else {
         basic_skill_training_set(state->pc_obj, GET_BASIC_SKILL(skill), TRAINING_APPRENTICE);
+    }
+    /* PT45: host-run party dialog trained a client's PC (gold too). */
+    if (state->pc_obj != OBJ_HANDLE_NULL && obj_handle_is_valid(state->pc_obj)) { /* PT52g */
+        coop_lite_host_pc_changed(state->pc_obj, true);
     }
 
     // "Your apprentice training is complete."

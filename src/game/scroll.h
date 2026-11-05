@@ -39,4 +39,6 @@ int scroll_distance_get(void);
 void scroll_set_center(int64_t location);
 void scroll_set_scroll_func(ScrollFunc func);
 
+void scroll_view_by(int64_t dx, int64_t dy);
+
 #endif /* ARCANUM_GAME_SCROLL_H_ */

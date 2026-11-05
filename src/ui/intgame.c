@@ -1,6 +1,12 @@
 #include "ui/intgame.h"
 
+#include "game/obj_pool.h"
+
+#include "game/coop_lite.h"
+
+#include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "game/ai.h"
 #include "game/anim.h"
@@ -165,6 +171,9 @@ static void intgame_force_fullscreen(void);
 static void intgame_unforce_fullscreen(void);
 static void sub_551F80(void);
 static bool sub_552050(int x, int y, TargetDescriptor* td);
+static bool intgame_dev_click_obj(int64_t obj, int button);
+static bool intgame_dev_probe_obj(int64_t obj, int* x, int* y);
+static void intgame_coop_click_trace(const char* fmt, ...);
 static void sub_5520D0(RotatingWindowType window_type, int step);
 static void iso_interface_window_swap(RotatingWindowType window_type);
 static void intgame_clock_refresh(void);
@@ -969,6 +978,8 @@ bool intgame_init(GameInitInfo* init_info)
     TigFont font;
 
     (void)init_info;
+    coop_lite_set_dev_click_obj_hook(intgame_dev_click_obj);
+    coop_lite_set_dev_probe_obj_hook(intgame_dev_probe_obj);
 
     if (!mes_load("mes\\intgame.mes", &intgame_mes_file)) {
         return false;
@@ -1930,6 +1941,9 @@ bool sub_54B5D0(TigMessage* msg)
             case INTGAME_MODE_CHAREDIT:
             case INTGAME_MODE_SCHEMATIC:
             case INTGAME_MODE_WRITTEN:
+                if (intgame_mode_get() == INTGAME_MODE_WMAP && tig_net_is_active()) {
+                    tig_debug_printf("Intgame: right-click in world map mode at %d,%d\n", msg->data.mouse.x, msg->data.mouse.y);
+                }
                 if (tig_window_data(dword_64C52C, &window_data) == TIG_OK) {
                     if (msg->data.mouse.x < window_data.rect.x
                         || msg->data.mouse.x - window_data.rect.x > window_data.rect.width) {
@@ -1958,6 +1972,7 @@ bool sub_54B5D0(TigMessage* msg)
             }
             break;
         case TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP:
+            coop_lite_follow_cancel(); /* PT47: a manual command ends follow */
             if (inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
                 sub_57DC20();
             }
@@ -2499,6 +2514,22 @@ bool sub_54B5D0(TigMessage* msg)
                     intgame_secondary_button_toggle(INTGAME_SECONDARY_BUTTON_SKILLS, ROTWIN_TYPE_SKILLS);
                 }
                 return true;
+            case SDL_SCANCODE_Y:
+                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(true) || coop_lite_travel_key())) {
+                    return true; /* PT50: travel ready / host go now */
+                }
+                break;
+            case SDL_SCANCODE_N:
+                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(false) || coop_lite_travel_refuse_key())) {
+                    return true; /* PT57: host refuses a client's travel request */
+                }
+                break;
+            case SDL_SCANCODE_G:
+                /* PT71: G (F is the game's Fate key). */
+                if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_follow_toggle()) {
+                    return true; /* PT47: follow/guard nearest player */
+                }
+                break;
             case SDL_SCANCODE_M:
                 if (!mainmenu_ui_is_active()) {
                     intgame_secondary_button_toggle(INTGAME_SECONDARY_BUTTON_SPELLS, ROTWIN_TYPE_SPELLS);
@@ -2715,7 +2746,10 @@ void intgame_process_event(TigMessage* msg)
                             }
 
                             if (!hotkey_ui_is_dragging()) {
-                                if (critter_is_active(pc_obj)) {
+                                if (coop_lite_client_throw_denied()) {
+                                    sub_575770();
+                                    intgame_refresh_cursor();
+                                } else if (critter_is_active(pc_obj)) {
                                     sub_573840();
                                     intgame_refresh_cursor();
                                     anim_goal_throw_item(pc_obj, v2, td.loc);
@@ -3272,8 +3306,11 @@ void sub_54ED30(TargetDescriptor* td)
 
     target_type = obj_field_int32_get(td->obj, OBJ_F_TYPE);
     if (!td->is_loc && td->obj == pc_obj) {
+        intgame_coop_click_trace("on own PC, ignored");
         return;
     }
+    intgame_coop_click_trace("object type %d, combat mode %d, auto attack %d",
+        target_type, combat_critter_is_combat_mode_active(pc_obj), combat_auto_attack_get(pc_obj));
 
     spell_flags = obj_field_int32_get(pc_obj, OBJ_F_SPELL_FLAGS);
     critter_flags = obj_field_int32_get(pc_obj, OBJ_F_CRITTER_FLAGS);
@@ -3289,6 +3326,12 @@ void sub_54ED30(TargetDescriptor* td)
         }
 
         item_obj = inven_ui_drag_item_obj_get();
+        if (coop_lite_client_throw_denied()) {
+            /* PT39: the item never left the inventory; just drop the cursor. */
+            sub_575770();
+            intgame_refresh_cursor();
+            return;
+        }
         if (hotkey_ui_is_dragging()) {
             hotkey_ui_cancel_drag();
             sub_573740(item_obj, false);
@@ -3504,8 +3547,10 @@ void sub_54ED30(TargetDescriptor* td)
 
     // 0x54F25B
     if (!sub_44D500(&goal_data, pc_obj, anim)) {
+        intgame_coop_click_trace("goal %d refused (sub_44D500)", anim);
         return;
     }
+    intgame_coop_click_trace("goal %d", anim);
 
     goal_data.params[AGDATA_TARGET_OBJ].obj = td->obj;
 
@@ -3532,6 +3577,7 @@ void sub_54ED30(TargetDescriptor* td)
         if (weapon_obj != OBJ_HANDLE_NULL
             && obj_field_int32_get(weapon_obj, OBJ_F_TYPE) == OBJ_TYPE_WEAPON
             && (obj_field_int32_get(weapon_obj, OBJ_F_WEAPON_FLAGS) & OWF_DEFAULT_THROWS) != 0
+            && !coop_lite_client_throw_denied()
             && !item_check_remove(weapon_obj)) {
             int64_t throwable_instance_obj = item_find_first_matching_prototype(pc_obj, weapon_obj);
             if (throwable_instance_obj == OBJ_HANDLE_NULL) {
@@ -3548,9 +3594,26 @@ void sub_54ED30(TargetDescriptor* td)
         }
     }
 
+    /* Core-systems test: a coop client's attack click built a local AG_ATTACK
+       goal that never reached the host (AG_ATTACK isn't client-local), so the
+       client's PC swung at nothing. Send it as an attack intent; the host
+       resolves the hit (anim_goal_attack plays the swing here when adjacent). */
+    if ((anim == AG_ATTACK || anim == AG_ATTEMPT_ATTACK)
+        && tig_net_is_active()
+        && !tig_net_is_host()
+        && tig_net_is_coop_enabled()) {
+        intgame_coop_click_trace("goal %d: sent to the host as an attack intent", anim);
+        anim_goal_attack(pc_obj, td->obj);
+        return;
+    }
+
     if (combat_auto_attack_get(pc_obj)) {
-        if (sub_44E6F0(pc_obj, &goal_data)
-            || !sub_424070(pc_obj, 3, 0, 0)) {
+        if (sub_44E6F0(pc_obj, &goal_data)) {
+            intgame_coop_click_trace("goal %d: already running (sub_44E6F0)", anim);
+            return;
+        }
+        if (!sub_424070(pc_obj, 3, 0, 0)) {
+            intgame_coop_click_trace("goal %d: current anim not interruptible", anim);
             return;
         }
 
@@ -3570,14 +3633,18 @@ void sub_54ED30(TargetDescriptor* td)
         }
 
         if (!anim_goal_add_ex(&goal_data, &anim_id, flags)) {
+            intgame_coop_click_trace("goal %d: add failed", anim);
             return;
         }
+        intgame_coop_click_trace("goal %d added (auto-attack path)", anim);
 
         if (tig_net_is_active()) {
             return;
         }
     } else if (sub_423300(pc_obj, &anim_id)) {
         // 0x54F68E
+        intgame_coop_click_trace("goal %d: PC busy, %s path", anim,
+            combat_turn_based_is_active() ? "turn-based fidget" : "subgoal/interrupt");
         if (combat_turn_based_is_active()) {
             AnimID fidget_anim_id;
             if (anim_is_current_goal_type(pc_obj, AG_ANIM_FIDGET, &fidget_anim_id)
@@ -3709,6 +3776,7 @@ void intgame_hotkey_activate(Hotkey* hotkey)
     int64_t v2;
 
     if ((hotkey->flags & HOTKEY_DRAGGED) != 0) {
+        intgame_coop_click_trace("hotkey: ignored (being dragged)");
         return;
     }
 
@@ -3718,16 +3786,20 @@ void intgame_hotkey_activate(Hotkey* hotkey)
     }
 
     if (critter_is_dead(pc_obj)) {
+        intgame_coop_click_trace("hotkey: ignored (PC dead)");
         return;
     }
 
     if (critter_is_unconscious(pc_obj)) {
+        intgame_coop_click_trace("hotkey: ignored (PC unconscious)");
         return;
     }
 
     if ((obj_field_int32_get(pc_obj, OBJ_F_CRITTER_FLAGS) & (OCF_PARALYZED | OCF_STUNNED)) != 0) {
+        intgame_coop_click_trace("hotkey: ignored (PC paralyzed/stunned)");
         return;
     }
+    intgame_coop_click_trace("hotkey: type %d data %d, mode before %d", hotkey->type, hotkey->data, intgame_mode_get());
 
     switch (hotkey->type) {
     case HOTKEY_NONE:
@@ -5151,6 +5223,135 @@ bool sub_552050(int x, int y, TargetDescriptor* td)
     return target_pick_at_screen_xy(x, y, td, intgame_fullscreen);
 }
 
+/* Coop: one line per world click, so a playtest log shows what a click on
+   an object turned into (PT17b: ground pickups that never started). */
+static void intgame_coop_click_trace(const char* fmt, ...)
+{
+    char buf[256];
+    va_list args;
+
+    if (!tig_net_is_coop_enabled()) {
+        return;
+    }
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    tig_debug_printf("Intgame: click: %s\n", buf);
+}
+
+/*
+ * Coop dev: a real mouse click on an object. The button down/up messages are
+ * queued the way SDL input is, so they go through tig buttons, the window
+ * message filters and intgame_process_event exactly like a player's click.
+ * button: 0 = left, 1 = right, 2 = probe only (find the spot, queue
+ * nothing). Returns false when no spot on the object picks it.
+ */
+/* Coop dev (PT18 GUI): the first spot on the object's art that picks it
+   (game-window coordinates, what a player would click). 0 = found,
+   1 = no screen rect (off screen), 2 = no spot picks it. */
+static int intgame_dev_find_spot(int64_t obj, int* out_x, int* out_y)
+{
+    TigRect rect;
+    TigWindowData window_data;
+    TargetDescriptor td;
+    int x;
+    int y;
+    int dx;
+    int dy;
+
+    if (obj == OBJ_HANDLE_NULL || tig_window_data(dword_64C52C, &window_data) != TIG_OK) {
+        return 1;
+    }
+    object_get_rect(obj, 0, &rect);
+    if (rect.width <= 0 || rect.height <= 0) {
+        return 1;
+    }
+    for (dy = 0; dy < 5; dy++) {
+        for (dx = 0; dx < 5; dx++) {
+            static const int order[5] = { 2, 1, 3, 0, 4 };
+
+            x = rect.x + rect.width * (1 + 2 * order[dx]) / 10 + window_data.rect.x;
+            y = rect.y + rect.height * (1 + 2 * order[dy]) / 10 + (intgame_fullscreen ? 0 : window_data.rect.y);
+            if (sub_552050(x, y, &td) && !td.is_loc && td.obj == obj) {
+                *out_x = x;
+                *out_y = y;
+                return 0;
+            }
+        }
+    }
+    *out_x = rect.x + rect.width / 2 + window_data.rect.x;
+    *out_y = rect.y + rect.height / 2 + (intgame_fullscreen ? 0 : window_data.rect.y);
+    return 2;
+}
+
+static bool intgame_dev_probe_obj(int64_t obj, int* x, int* y)
+{
+    return intgame_dev_find_spot(obj, x, y) == 0;
+}
+
+static bool intgame_dev_click_obj(int64_t obj, int button)
+{
+    TigRect rect;
+    TigWindowData window_data;
+    TigMessage msg;
+    TargetDescriptor td;
+    int x;
+    int y;
+    int dx;
+    int dy;
+    bool found = false;
+
+    if (obj == OBJ_HANDLE_NULL || tig_window_data(dword_64C52C, &window_data) != TIG_OK) {
+        return false;
+    }
+    object_get_rect(obj, 0, &rect);
+    if (rect.width <= 0 || rect.height <= 0) {
+        tig_debug_printf("Intgame: dev click: object has no screen rect\n");
+        return false;
+    }
+    /* Centre first, then a small grid over the art: the first spot that
+       picks this object is where a player would click. */
+    for (dy = 0; dy < 5 && !found; dy++) {
+        for (dx = 0; dx < 5 && !found; dx++) {
+            static const int order[5] = { 2, 1, 3, 0, 4 };
+
+            x = rect.x + rect.width * (1 + 2 * order[dx]) / 10 + window_data.rect.x;
+            y = rect.y + rect.height * (1 + 2 * order[dy]) / 10 + (intgame_fullscreen ? 0 : window_data.rect.y);
+            if (sub_552050(x, y, &td) && !td.is_loc && td.obj == obj) {
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        x = rect.x + rect.width / 2 + window_data.rect.x;
+        y = rect.y + rect.height / 2 + (intgame_fullscreen ? 0 : window_data.rect.y);
+        if (sub_552050(x, y, &td)) {
+            tig_debug_printf("Intgame: dev click: no spot on the object picks it; centre (%d,%d) picks %s type %d\n",
+                x, y, td.is_loc ? "a tile" : "an object",
+                td.is_loc ? -1 : obj_field_int32_get(td.obj, OBJ_F_TYPE));
+        } else {
+            tig_debug_printf("Intgame: dev click: no spot on the object picks anything (rect %d,%d %dx%d)\n",
+                rect.x, rect.y, rect.width, rect.height);
+        }
+        return false;
+    }
+    tig_debug_printf("Intgame: dev click: %s at (%d,%d), mode %d\n",
+        button == 0 ? "left" : (button == 1 ? "right" : "probe ok"), x, y, intgame_mode_get());
+    if (button == 2) {
+        return true;
+    }
+    memset(&msg, 0, sizeof(msg));
+    tig_timer_now(&(msg.timestamp));
+    msg.type = TIG_MESSAGE_MOUSE;
+    msg.data.mouse.x = x;
+    msg.data.mouse.y = y;
+    msg.data.mouse.event = button == 0 ? TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN : TIG_MESSAGE_MOUSE_RIGHT_BUTTON_DOWN;
+    tig_message_enqueue(&msg);
+    msg.data.mouse.event = button == 0 ? TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP : TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP;
+    tig_message_enqueue(&msg);
+    return true;
+}
+
 // 0x552070
 RotatingWindowType iso_interface_window_get(void)
 {
@@ -5902,6 +6103,12 @@ void intgame_dialog_end(void)
     intgame_dialog_process_event_func = NULL;
     tc_hide();
     intgame_mode_set(INTGAME_MODE_MAIN);
+}
+
+/* PT67: is a dialog input filter (and the dialog text window) installed? */
+bool intgame_dialog_is_active(void)
+{
+    return intgame_dialog_process_event_func != NULL;
 }
 
 // 0x553370
@@ -8071,6 +8278,9 @@ void sub_556E60(void)
 {
     int64_t parent_obj;
 
+    if (qword_64C688 != OBJ_HANDLE_NULL && !obj_handle_is_valid(qword_64C688)) {
+        qword_64C688 = OBJ_HANDLE_NULL; /* PT77i: destroyed meanwhile */
+    }
     if (qword_64C688 != OBJ_HANDLE_NULL) {
         parent_obj = obj_field_handle_get(qword_64C688, OBJ_F_ITEM_PARENT);
         if (parent_obj == OBJ_HANDLE_NULL || !player_is_local_pc_obj(parent_obj)) {
@@ -8179,9 +8389,14 @@ void intgame_notify_item_inserted_or_removed(int64_t item_obj, bool removed, int
 
     if (removed) {
         hotkey_ui_notify_item_inserted_or_removed(item_obj, removed);
-        if (qword_64C688 == item_obj
-            && intgame_iso_window_type == ROTWIN_TYPE_MAGICTECH) {
-            iso_interface_window_set(ROTWIN_TYPE_MSG);
+        if (qword_64C688 == item_obj) {
+            /* PT77i: forget the item even when the tech window is not the
+               one shown. It was kept, the item was then destroyed (a coop
+               client planting it on another PC), and the next inventory
+               update read the freed object (crash in sub_556E60). */
+            if (intgame_iso_window_type == ROTWIN_TYPE_MAGICTECH) {
+                iso_interface_window_set(ROTWIN_TYPE_MSG);
+            }
             qword_64C688 = OBJ_HANDLE_NULL;
         }
 

@@ -14,6 +14,9 @@ typedef unsigned int TeleportFlags;
 #define TELEPORT_RENDER_LOCK 0x0020u
 #define TELEPORT_MOVIE2 0x0040u
 #define TELEPORT_SKIP_FOLLOWERS 0x0100u
+/* Coop Lite PT37: reload the destination map from disk even when it is the
+   current one (client after a host save reload). */
+#define TELEPORT_FORCE_RELOAD 0x0200u
 
 typedef struct TeleportData {
     /* 0000 */ TeleportFlags flags;

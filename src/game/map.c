@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+#include "net/tig_net.h"
+
 #include "game/anim.h"
 #include "game/critter.h"
 #include "game/description.h"
@@ -33,6 +35,7 @@
 #include "game/tile.h"
 #include "game/timeevent.h"
 #include "game/townmap.h"
+#include "game/coop_lite.h"
 #include "game/ui.h"
 #include "game/wall.h"
 #include "game/wallcheck.h"
@@ -606,6 +609,7 @@ bool map_open(const char* base_path, const char* save_path, bool a3)
     }
 
     tig_file_mkdir(save_path);
+    coop_lite_map_open_after_close(save_path); /* PT63: a co-op resync wipe of this map's state, now that it is closed */
     if (!a3) {
         tig_file_empty_directory(save_path);
     }
@@ -781,6 +785,7 @@ bool map_open(const char* base_path, const char* save_path, bool a3)
 
     duration = tig_timer_elapsed(start_timestamp);
     tig_debug_printf("map_open(): Done.  Total time: %d ms.\n", duration);
+    coop_lite_on_map_opened();
 
     dword_5D11E8 = false;
     map_valid = true;
@@ -810,7 +815,9 @@ bool map_open_in_game(int map, bool a2, bool a3)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed pre-load in map_open_in_game.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
         // FIXME: Execution continues after quit.
     }
 
@@ -841,7 +848,9 @@ bool map_open_in_game(int map, bool a2, bool a3)
 
     if (!obj_validate_system(1)) {
         tig_debug_println("Object system validate failed post-load in map_open_in_game.");
-        tig_message_post_quit(0);
+        if (!tig_net_is_coop_enabled()) { /* PT54a: co-op never quits here */
+            tig_message_post_quit(0);
+        }
     }
 
     return true;
@@ -954,6 +963,7 @@ void map_flush(unsigned int flags)
     char path[TIG_MAX_PATH];
     TigFile* stream;
 
+    coop_lite_before_map_flush();
     wallcheck_flush();
 
     if (!map_save_preprocess()) {
@@ -1148,6 +1158,7 @@ void map_close(void)
     if (!dword_5D11E8) {
         dword_5D11E8 = true;
 
+        coop_lite_before_map_flush();
         wallcheck_flush();
         gsound_flush();
 

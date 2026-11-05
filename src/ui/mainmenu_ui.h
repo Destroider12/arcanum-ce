@@ -70,6 +70,8 @@ void sub_5412D0(void);
 bool mainmenu_ui_handle(void);
 bool mainmenu_ui_is_active(void);
 TigWindowModalDialogChoice mainmenu_ui_confirm_quit(void);
+/* Coop Lite: host loads a save by slot name ("SlotNNNN") from in game. */
+bool mainmenu_ui_coop_reload_save(const char* name);
 void mainmenu_ui_reset(void);
 void mainmenu_ui_open(void);
 void mainmenu_ui_close(bool back);

@@ -4,6 +4,8 @@
 #include "game/player.h"
 #include "ui/intgame.h"
 #include "ui/textedit_ui.h"
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
 
 static void broadcast_ui_text_edit_on_enter(TextEdit* textedit);
 static void broadcast_ui_text_edit_on_change(TextEdit* textedit);
@@ -31,6 +33,8 @@ static bool dword_6810CC;
 
 // 0x6810D0
 static bool broadcast_ui_opened;
+/* PT77d: rotating window to restore on close (dialogue when opened from a dialog). */
+static RotatingWindowType broadcast_ui_prev_rotwin = ROTWIN_TYPE_MSG;
 
 // 0x5717F0
 bool broadcast_ui_init(GameInitInfo* init_info)
@@ -63,6 +67,11 @@ void broadcast_ui_reset(void)
 }
 
 // 0x5718A0
+bool broadcast_ui_is_open(void)
+{
+    return broadcast_ui_opened;
+}
+
 void broadcast_ui_open(void)
 {
     if (broadcast_ui_opened || iso_interface_window_get_2() == ROTWIN_TYPE_BROADCAST) {
@@ -71,11 +80,17 @@ void broadcast_ui_open(void)
     }
 
     broadcast_ui_bcast.loc = 0;
+    broadcast_ui_prev_rotwin = iso_interface_window_get_2() == ROTWIN_TYPE_DIALOGUE
+        ? ROTWIN_TYPE_DIALOGUE
+        : ROTWIN_TYPE_MSG;
     iso_interface_window_set(ROTWIN_TYPE_BROADCAST);
     textedit_ui_focus(&broadcast_ui_textedit);
     dword_6810CC = true;
     intgame_text_edit_refresh(broadcast_ui_textedit.buffer, broadcast_ui_font);
     broadcast_ui_opened = true;
+    if (tig_net_is_coop_enabled()) {
+        coop_lite_chat_set_typing(true);
+    }
 }
 
 // 0x571910
@@ -86,7 +101,11 @@ void broadcast_ui_close(void)
         dword_6810CC = false;
         textedit_ui_unfocus(&broadcast_ui_textedit);
         *broadcast_ui_textedit.buffer = '\0';
-        iso_interface_window_set(ROTWIN_TYPE_MSG);
+        iso_interface_window_set(broadcast_ui_prev_rotwin);
+        broadcast_ui_prev_rotwin = ROTWIN_TYPE_MSG;
+        if (tig_net_is_coop_enabled()) {
+            coop_lite_chat_set_typing(false);
+        }
     }
 }
 
@@ -96,6 +115,10 @@ void broadcast_ui_text_edit_on_enter(TextEdit* textedit)
     if (*textedit->buffer != '\0') {
         intgame_get_location_under_cursor(&(broadcast_ui_bcast.loc));
         broadcast_msg(player_get_local_pc_obj(), &broadcast_ui_bcast);
+        /* PT77: after the local bubble, relay typed chat (not follower cmds). */
+        if (tig_net_is_coop_enabled() && tig_net_is_active()) {
+            coop_lite_chat_on_local_broadcast(broadcast_ui_bcast.str);
+        }
     }
     broadcast_ui_close();
 }
