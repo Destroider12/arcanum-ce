@@ -28,7 +28,7 @@ static char crash_build[32] = "unknown";
 static volatile LONG crash_entered;
 static LPTOP_LEVEL_EXCEPTION_FILTER crash_prev_filter;
 
-static FILE* crash_txt;
+static HANDLE crash_txt = INVALID_HANDLE_VALUE; /* PT77p: no CRT heap (it may be the corrupt one) */
 static char crash_subdir[64]; /* PT68: "coop\\host" etc., "" = next to the exe */
 
 static void crash_out(const char* fmt, ...)
@@ -40,9 +40,10 @@ static void crash_out(const char* fmt, ...)
     vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
     tig_debug_crash_write(line);
-    if (crash_txt != NULL) {
-        fputs(line, crash_txt);
-        fflush(crash_txt);
+    if (crash_txt != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+
+        WriteFile(crash_txt, line, (DWORD)strlen(line), &written, NULL);
     }
 }
 
@@ -207,19 +208,16 @@ static void crash_report(const char* what, EXCEPTION_POINTERS* ep)
     char path[MAX_PATH + 64];
     char stamp[32];
     char where[MAX_PATH + 32];
-    time_t now = time(NULL);
-    struct tm* tm = localtime(&now);
+    SYSTEMTIME st;
     HMODULE exe = GetModuleHandleA(NULL);
     const char* last;
 
     if (InterlockedExchange(&crash_entered, 1) != 0) {
         return; /* a crash inside the report */
     }
-    if (tm != NULL) {
-        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", tm);
-    } else {
-        snprintf(stamp, sizeof(stamp), "%lld", (long long)now);
-    }
+    GetLocalTime(&st);
+    snprintf(stamp, sizeof(stamp), "%04u%02u%02u-%02u%02u%02u", (unsigned)st.wYear, (unsigned)st.wMonth,
+        (unsigned)st.wDay, (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond);
     crash_exe_dir(dir, sizeof(dir));
     if (crash_subdir[0] != '\0' && strlen(dir) + strlen(crash_subdir) + 2 < sizeof(dir)) {
         strcat(dir, crash_subdir);
@@ -227,7 +225,7 @@ static void crash_report(const char* what, EXCEPTION_POINTERS* ep)
         strcat(dir, "\\");
     }
     snprintf(path, sizeof(path), "%scrash-%s.txt", dir, stamp);
-    crash_txt = fopen(path, "w");
+    crash_txt = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
     crash_out("\n==== CRASH (%s) ====\n", what);
     crash_out("build %s, crash file %s\n", crash_build, path);
@@ -251,13 +249,23 @@ static void crash_report(const char* what, EXCEPTION_POINTERS* ep)
     crash_out("last coop event: %s%s", last[0] != '\0' ? last : "(none)",
         last[0] != '\0' && last[strlen(last) - 1] == '\n' ? "" : "\n");
     crash_stack(ep != NULL ? ep->ContextRecord : NULL);
+    {
+        /* PT77p: what led up to it (heap corruption is found late). */
+        int i;
+        const char* crumb;
+
+        crash_out("last co-op / travel events (oldest first):\n");
+        for (i = 0; (crumb = tig_debug_breadcrumb(i)) != NULL; i++) {
+            crash_out("  %s%s", crumb, crumb[0] != '\0' && crumb[strlen(crumb) - 1] == '\n' ? "" : "\n");
+        }
+    }
 
     snprintf(path, sizeof(path), "%scrash-%s.dmp", dir, stamp);
     crash_minidump(path, ep);
     crash_out("==== END CRASH ====\n");
-    if (crash_txt != NULL) {
-        fclose(crash_txt);
-        crash_txt = NULL;
+    if (crash_txt != INVALID_HANDLE_VALUE) {
+        CloseHandle(crash_txt);
+        crash_txt = INVALID_HANDLE_VALUE;
     }
 }
 
@@ -268,6 +276,45 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep)
         return crash_prev_filter(ep);
     }
     return EXCEPTION_CONTINUE_SEARCH; /* the default: Windows ends the process */
+}
+
+/* PT77p: heap corruption (0xC0000374) and a raised stack-cookie / fail-fast
+   exception never reach the unhandled filter: Windows ends the process
+   from RtlReportCriticalFailure. A first-chance vectored handler sees them. */
+static LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep)
+{
+    DWORD code = ep != NULL && ep->ExceptionRecord != NULL ? ep->ExceptionRecord->ExceptionCode : 0;
+
+    if (code == 0xC0000374u /* STATUS_HEAP_CORRUPTION */
+        || code == 0xC0000409u /* STATUS_STACK_BUFFER_OVERRUN (raised form) */
+        || code == 0xC0000602u /* STATUS_FAIL_FAST_EXCEPTION */) {
+        crash_report(code == 0xC0000374u ? "heap corruption" : "fail-fast", ep);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* PT77p: ARCANUM_COOP_DEBUGHEAP=1 - validate the process heaps 4x a second,
+   so a corruption is reported close to (after) the event that caused it. */
+static DWORD WINAPI crash_heap_watch(LPVOID param)
+{
+    (void)param;
+    for (;;) {
+        HANDLE heaps[64];
+        DWORD n = GetProcessHeaps(64, heaps);
+        DWORD i;
+
+        if (n > 64) {
+            n = 64;
+        }
+        for (i = 0; i < n; i++) {
+            if (!HeapValidate(heaps[i], 0, NULL)) {
+                crash_report("heap validation failed (ARCANUM_COOP_DEBUGHEAP)", NULL);
+                InterlockedExchange(&crash_entered, 0); /* the real crash still gets its report */
+                return 0;
+            }
+        }
+        Sleep(250);
+    }
 }
 
 static void crash_sigabrt(int sig)
@@ -284,6 +331,20 @@ void crash_handler_install(const char* build_id)
         snprintf(crash_build, sizeof(crash_build), "%s", build_id);
     }
     crash_prev_filter = SetUnhandledExceptionFilter(crash_filter);
+    AddVectoredExceptionHandler(1, crash_vectored); /* PT77p */
+    HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
+    {
+        const char* dbg = getenv("ARCANUM_COOP_DEBUGHEAP");
+
+        if (dbg != NULL && dbg[0] == '1') {
+            HANDLE t = CreateThread(NULL, 0, crash_heap_watch, NULL, 0, NULL);
+
+            if (t != NULL) {
+                CloseHandle(t);
+            }
+            tig_debug_printf("Crash handler: ARCANUM_COOP_DEBUGHEAP=1 - heap validated every 250 ms\n");
+        }
+    }
     signal(SIGABRT, crash_sigabrt);
 #if defined(_MSC_VER)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);

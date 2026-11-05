@@ -38,6 +38,32 @@ void tig_debug_set_log_file(const char* path)
 /* PT56a: last co-op line, for the crash report. */
 static char tig_debug_last_coop[256];
 
+/* PT77p: the last co-op / travel lines, for the crash report (static, so a
+   corrupted heap does not matter). */
+#define TIG_DEBUG_CRUMBS 64
+#define TIG_DEBUG_CRUMB_LEN 200
+static char tig_debug_crumbs[TIG_DEBUG_CRUMBS][TIG_DEBUG_CRUMB_LEN];
+static unsigned int tig_debug_crumb_next;
+
+static void tig_debug_crumb_add(const char* str)
+{
+    unsigned int ms = (unsigned int)SDL_GetTicks();
+    char* dst = tig_debug_crumbs[tig_debug_crumb_next % TIG_DEBUG_CRUMBS];
+
+    SDL_snprintf(dst, TIG_DEBUG_CRUMB_LEN, "[%u.%03u] %s", ms / 1000u, ms % 1000u, str);
+    tig_debug_crumb_next++;
+}
+
+const char* tig_debug_breadcrumb(int index)
+{
+    unsigned int n = tig_debug_crumb_next < TIG_DEBUG_CRUMBS ? tig_debug_crumb_next : TIG_DEBUG_CRUMBS;
+
+    if (index < 0 || (unsigned int)index >= n) {
+        return NULL;
+    }
+    return tig_debug_crumbs[(tig_debug_crumb_next - n + (unsigned int)index) % TIG_DEBUG_CRUMBS];
+}
+
 const char* tig_debug_last_coop_line(void)
 {
     return tig_debug_last_coop;
@@ -57,6 +83,11 @@ static void tig_debug_log_write(const char* str)
 {
     if (SDL_strstr(str, "CoopLite") != NULL) {
         SDL_strlcpy(tig_debug_last_coop, str, sizeof(tig_debug_last_coop));
+    }
+    if (SDL_strstr(str, "CoopLite") != NULL || SDL_strstr(str, "WMap") != NULL
+        || SDL_strstr(str, "tig_net:") != NULL || SDL_strstr(str, "MP:") != NULL
+        || SDL_strstr(str, "map_open") != NULL || SDL_strstr(str, "teleport") != NULL) {
+        tig_debug_crumb_add(str);
     }
     if (!tig_debug_log_file_tried) {
         const char* path = tig_debug_log_path;
