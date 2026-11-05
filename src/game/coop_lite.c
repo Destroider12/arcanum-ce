@@ -7274,6 +7274,26 @@ void coop_lite_handle_char_offer(PacketCoopCharOffer* pkt)
         slot, pkt->basic_prototype, coop_pending_offers[slot].name, pkt->has_oid);
 
 #ifndef COOP_LITE_TEST_STUBS
+    /* PT77n: the same player (same token) came back on a new slot while its
+       old connection had not timed out yet (log: slot 2 joined, slot 1 left
+       4 s later and parked the PC slot 2 now used -> "parked PC is gone",
+       character creation). Drop the stale slot first so its PC is parked
+       and this offer takes it back. */
+    {
+        int other;
+
+        for (other = 1; other < 8; other++) {
+            if (other != slot && coop_pending_offers[slot].token_hash != 0
+                && coop_slot_token_hash[other] == coop_pending_offers[slot].token_hash) {
+                tig_debug_printf("CoopLite: PT77n slot %d is a stale connection of the player on slot %d - dropping it\n",
+                    other, slot);
+                if (!tig_net_kick_slot(other)) {
+                    coop_lite_host_on_client_disconnect(other);
+                    coop_lite_host_remove_left_pc(other, sub_4A2B60(other));
+                }
+            }
+        }
+    }
     if (coop_lite_client_in_world()) {
         coop_lite_host_spawn_client(slot);
     } else {

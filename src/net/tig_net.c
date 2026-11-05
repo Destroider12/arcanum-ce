@@ -1069,6 +1069,31 @@ void tig_net_local_server_set_options(unsigned int options)
     server_options = options;
 }
 
+/* PT77n: host drops a slot right away (same player reconnected on a new
+   slot before ENet timed the old peer out). Same cleanup and event as a
+   transport DISCONNECT, so the game parks that slot's PC synchronously. */
+bool tig_net_kick_slot(int slot)
+{
+    TigNetTPeer* peer;
+
+    if (!is_host || slot <= 0 || slot >= TIG_NET_MAX_PLAYERS || clients[slot].peer == NULL) {
+        return false;
+    }
+    peer = clients[slot].peer;
+    tig_debug_printf("tig_net: kicking stale slot %d\n", slot);
+    *tp->peer_data(peer) = NULL;
+    tp->disconnect(peer, true);
+    clients[slot].peer = NULL;
+    clients[slot].active = false;
+    clients[slot].waiting = false;
+    clients[slot].loading = false;
+    clients[slot].refused = false;
+    clients[slot].handshaken = false;
+    clients[slot].name[0] = '\0';
+    tig_net_fire_event(TIG_NET_EVENT_DISCONNECT, slot, NULL, 0);
+    return true;
+}
+
 bool tig_net_client_is_active(int client_id)
 {
     if (client_id < 0 || client_id >= TIG_NET_MAX_PLAYERS) {

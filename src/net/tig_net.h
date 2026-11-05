@@ -84,6 +84,7 @@ unsigned int tig_net_local_server_get_options(void);
 void tig_net_local_server_set_options(unsigned int options);
 
 bool tig_net_client_is_active(int client_id);
+bool tig_net_kick_slot(int slot); /* PT77n: host drops a stale slot now */
 /* Unreliable+sequenced pose traffic on its own channel (review M7). */
 void tig_net_send_pose_all(void* data, int size);
 void tig_net_send_pose_except(void* data, int size, int client_id);
