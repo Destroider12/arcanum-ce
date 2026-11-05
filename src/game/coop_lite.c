@@ -10517,6 +10517,37 @@ static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms)
     }
 }
 
+/* PT77m: is this container some merchant's stock (an NPC's substitute
+   inventory)? A client could drag store goods to the barter window's drop
+   slot (refused on the host, but the item lay on ITS ground) and pick that
+   copy up: the pickup (Packet28) looted the store chest in reach for free. */
+static bool coop_lite_container_is_store(int64_t container, int64_t pc)
+{
+    ObjectList npcs;
+    ObjectNode* node;
+    bool store = false;
+    int slot;
+
+    if (container == OBJ_HANDLE_NULL || obj_field_int32_get(container, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
+        return false;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        if (coop_barter[slot].valid
+            && coop_lite_store_of(obj_pool_perm_lookup(coop_barter[slot].npc)) == container) {
+            return true;
+        }
+    }
+    object_list_vicinity(pc, OBJ_TM_NPC, &npcs);
+    for (node = npcs.head; node != NULL; node = node->next) {
+        if (coop_lite_store_of(node->obj) == container) {
+            store = true;
+            break;
+        }
+    }
+    object_list_destroy(&npcs);
+    return store;
+}
+
 void coop_lite_host_handle_item_op(int type, void* msg)
 {
     int slot;
@@ -10593,6 +10624,10 @@ void coop_lite_host_handle_item_op(int type, void* msg)
             if (obj_field_int32_get(parent, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER
                 || object_locked_get(parent)
                 || !coop_lite_item_near(pc, obj_field_int64_get(parent, OBJ_F_LOCATION))) {
+                break;
+            }
+            if (coop_lite_container_is_store(parent, pc)) {
+                tig_debug_printf("CoopLite: item op: slot %d tried to take a merchant's stock for free - refused\n", slot);
                 break;
             }
             extra = parent;
