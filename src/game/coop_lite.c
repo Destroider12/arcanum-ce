@@ -176,6 +176,8 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "ui/wmap_ui.h"
 #include "ui/inven_ui.h"
 #include "ui/sleep_ui.h"
+#include "ui/dialog_ui.h"
+#include "coop_paths.h"
 
 static bool coop_lite_npc_is_merchant(int64_t npc_obj)
 {
@@ -2261,6 +2263,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_TRAVEL_REQ: /* PT57: client ask -> host, refusal -> client (kind-checked) */
     case PACKET_COOP_SAVE_REQ: /* PT61: client save/load ask -> host, result -> client (kind-checked) */
     case PACKET_COOP_HOTBAR: /* PT63: client layout -> host, kept layout -> client */
+    case PACKET_COOP_CHAT: /* PT77: client text -> host, host relay -> all */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3359,6 +3362,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopTrapFx);
     case PACKET_COOP_WMAP_POS:
         return sizeof(PacketCoopWmapPos);
+    case PACKET_COOP_CHAT:
+        return sizeof(PacketCoopChat);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -7627,6 +7632,7 @@ void coop_lite_ping(unsigned int now_ms)
     if (!tig_net_is_active()) {
         return;
     }
+    coop_lite_lobby_tick(now_ms); /* PT77: launcher lobby IPC */
     coop_lite_diag_tick(now_ms);
 
     if (!tig_net_is_host()) {
@@ -18956,6 +18962,110 @@ bool coop_lite_wmap_pos_should_send(bool have_last, unsigned int last_ms, unsign
     return dt >= 1000u;
 }
 
+/* ---- PT77 chat (pure) --------------------------------------------------- */
+
+bool coop_lite_chat_valid(const PacketCoopChat* pkt, int size)
+{
+    int i;
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_CHAT || size < (int)sizeof(PacketCoopChat)) {
+        return false;
+    }
+    if (pkt->slot < 0 || pkt->slot >= 8) {
+        return false;
+    }
+    if (pkt->name[COOP_CHAT_MAX_NAME - 1] != '\0' || pkt->text[COOP_CHAT_MAX_TEXT - 1] != '\0') {
+        return false;
+    }
+    if (pkt->text[0] == '\0') {
+        return false;
+    }
+    for (i = 0; i < COOP_CHAT_MAX_NAME; i++) {
+        if (pkt->name[i] == '\0') {
+            break;
+        }
+        if ((unsigned char)pkt->name[i] < 0x20 || pkt->name[i] == 0x7F) {
+            return false;
+        }
+    }
+    for (i = 0; i < COOP_CHAT_MAX_TEXT; i++) {
+        if (pkt->text[i] == '\0') {
+            return true;
+        }
+        if ((unsigned char)pkt->text[i] < 0x20 || pkt->text[i] == 0x7F) {
+            return false;
+        }
+    }
+    return false;
+}
+
+void coop_lite_chat_sanitize(char* text, size_t max_len)
+{
+    size_t i;
+    size_t o;
+    char* start;
+
+    if (text == NULL || max_len == 0) {
+        return;
+    }
+    for (i = 0; text[i] != '\0' && i + 1 < max_len; i++) {
+        if ((unsigned char)text[i] < 0x20 || text[i] == 0x7F) {
+            text[i] = ' ';
+        }
+    }
+    text[max_len - 1] = '\0';
+    /* trim leading spaces */
+    start = text;
+    while (*start == ' ') {
+        start++;
+    }
+    if (start != text) {
+        memmove(text, start, strlen(start) + 1);
+    }
+    /* trim trailing spaces */
+    o = strlen(text);
+    while (o > 0 && text[o - 1] == ' ') {
+        text[--o] = '\0';
+    }
+}
+
+bool coop_lite_chat_prepare(const char* in, char* out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (in == NULL || out_size < 2) {
+        return false;
+    }
+    strncpy(out, in, out_size - 1);
+    out[out_size - 1] = '\0';
+    coop_lite_chat_sanitize(out, out_size);
+    return out[0] != '\0';
+}
+
+void coop_lite_chat_format_line(const char* name, const char* text, char* out, size_t out_size)
+{
+    const char* n = (name != NULL && name[0] != '\0') ? name : "Player";
+    const char* t = (text != NULL) ? text : "";
+
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    snprintf(out, out_size, "[%s]: %s", n, t);
+}
+
+bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsigned int now_ms, unsigned int fade_ms)
+{
+    if (typing) {
+        return true;
+    }
+    if (last_activity_ms == 0 || fade_ms == 0) {
+        return false;
+    }
+    return (unsigned int)(now_ms - last_activity_ms) < fade_ms;
+}
+
 /* PT72 (pure; tests): a SESSION_SYNC that found no local PC is retried
    (about 10 s at the 250 ms retry pace) before the client gives up. */
 bool coop_lite_sync_retry_allowed(int tries)
@@ -20310,3 +20420,307 @@ void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int
 }
 void coop_lite_handle_trap_fx(PacketCoopTrapFx* pkt) { (void)pkt; }
 #endif
+
+
+/* ---- PT77: chat + launcher lobby --------------------------------------- */
+
+#ifndef COOP_LITE_TEST_STUBS
+
+static void (*coop_chat_on_line_hook)(const char* line);
+static void (*coop_chat_set_visible_hook)(bool on);
+static bool coop_chat_typing;
+static unsigned int coop_chat_last_ms;
+static unsigned int coop_chat_seq;
+static unsigned int coop_chat_last_send_ms[8];
+static unsigned int coop_chat_last_visible_ms;
+static bool coop_chat_log_shown;
+
+void coop_lite_set_chat_ui_hooks(void (*on_line)(const char* line), void (*set_visible)(bool on))
+{
+    coop_chat_on_line_hook = on_line;
+    coop_chat_set_visible_hook = set_visible;
+}
+
+void coop_lite_chat_set_typing(bool typing)
+{
+    coop_chat_typing = typing;
+    if (typing) {
+        unsigned int now = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1u;
+
+        coop_chat_last_ms = now;
+        if (coop_chat_set_visible_hook != NULL) {
+            coop_chat_set_visible_hook(true);
+            coop_chat_log_shown = true;
+            coop_chat_last_visible_ms = now;
+        }
+    }
+}
+
+static void coop_chat_log_activity(unsigned int now_ms)
+{
+    bool show;
+
+    if (now_ms == 0) {
+        now_ms = 1u;
+    }
+    coop_chat_last_ms = now_ms;
+    show = coop_lite_chat_log_visible(coop_chat_typing, coop_chat_last_ms, now_ms, COOP_CHAT_FADE_MS);
+    if (show != coop_chat_log_shown && coop_chat_set_visible_hook != NULL) {
+        coop_chat_set_visible_hook(show);
+        coop_chat_log_shown = show;
+    }
+    if (show) {
+        coop_chat_last_visible_ms = now_ms;
+    }
+}
+
+static void coop_chat_present(int slot, const char* name, const char* text, bool bubble)
+{
+    char line[COOP_CHAT_MAX_NAME + COOP_CHAT_MAX_TEXT + 8];
+    unsigned int now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
+    int64_t pc;
+
+    coop_lite_chat_format_line(name, text, line, sizeof(line));
+    tig_debug_printf("[CHAT] %s\n", line);
+    if (coop_chat_on_line_hook != NULL) {
+        coop_chat_on_line_hook(line);
+    }
+    coop_chat_log_activity(now);
+
+    if (!bubble) {
+        return;
+    }
+    pc = (slot >= 0 && slot < 8) ? sub_4A2B60(slot) : OBJ_HANDLE_NULL;
+    if (pc == OBJ_HANDLE_NULL || !obj_handle_is_valid(pc)) {
+        return;
+    }
+    if ((obj_field_int32_get(pc, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
+        return;
+    }
+    dialog_ui_float_line(pc, OBJ_HANDLE_NULL, text, -1);
+}
+
+static void coop_chat_fill_pkt(PacketCoopChat* pkt, int slot, const char* name, const char* text)
+{
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = PACKET_COOP_CHAT;
+    pkt->slot = slot;
+    pkt->seq = ++coop_chat_seq;
+    if (name != NULL) {
+        strncpy(pkt->name, name, COOP_CHAT_MAX_NAME - 1);
+    }
+    if (text != NULL) {
+        strncpy(pkt->text, text, COOP_CHAT_MAX_TEXT - 1);
+    }
+    pkt->name[COOP_CHAT_MAX_NAME - 1] = '\0';
+    pkt->text[COOP_CHAT_MAX_TEXT - 1] = '\0';
+    coop_lite_chat_sanitize(pkt->name, sizeof(pkt->name));
+    coop_lite_chat_sanitize(pkt->text, sizeof(pkt->text));
+}
+
+static const char* coop_chat_local_name(void)
+{
+    const char* n = tig_net_client_info_get_name(sub_529520());
+
+    if (n == NULL || n[0] == '\0') {
+        n = getenv("ARCANUM_COOP_NAME");
+    }
+    if (n == NULL || n[0] == '\0') {
+        n = "Player";
+    }
+    return n;
+}
+
+static void coop_chat_net_send(const char* text, bool present_local, bool bubble_local)
+{
+    PacketCoopChat pkt;
+    char clean[COOP_CHAT_MAX_TEXT];
+    int local_slot;
+    unsigned int now;
+
+    if (!coop_lite_chat_prepare(text, clean, sizeof(clean))) {
+        return;
+    }
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        if (present_local) {
+            coop_chat_present(sub_529520(), coop_chat_local_name(), clean, bubble_local);
+        }
+        return;
+    }
+    local_slot = sub_529520();
+    now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
+    if (local_slot >= 0 && local_slot < 8) {
+        if (coop_chat_last_send_ms[local_slot] != 0
+            && !coop_lite_interval_elapsed(coop_chat_last_send_ms[local_slot], now, COOP_CHAT_RATE_MS)) {
+            return;
+        }
+        coop_chat_last_send_ms[local_slot] = now != 0 ? now : 1u;
+    }
+    coop_chat_fill_pkt(&pkt, local_slot, coop_chat_local_name(), clean);
+    if (present_local) {
+        coop_chat_present(local_slot, pkt.name, pkt.text, bubble_local);
+    }
+    if (tig_net_is_host()) {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else {
+        tig_net_send_app(&pkt, sizeof(pkt), 0);
+    }
+}
+
+void coop_lite_chat_on_local_broadcast(const char* text)
+{
+    /* Bubble already shown by broadcast_msg_client; only log + relay. */
+    coop_chat_net_send(text, true, false);
+}
+
+void coop_lite_chat_submit(const char* text)
+{
+    coop_chat_net_send(text, true, true);
+}
+
+void coop_lite_handle_chat(PacketCoopChat* pkt)
+{
+    PacketCoopChat out;
+    int sender;
+    unsigned int now;
+    const char* name;
+    char clean[COOP_CHAT_MAX_TEXT];
+
+    if (!tig_net_is_active() || pkt == NULL || pkt->type != PACKET_COOP_CHAT) {
+        return;
+    }
+    now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
+
+    if (tig_net_is_host()) {
+        sender = sub_52A530();
+        if (sender <= 0 || sender >= 8) {
+            return; /* host chat is sent locally in coop_chat_net_send */
+        }
+        if (tig_net_last_message_size() < (int)sizeof(PacketCoopChat)) {
+            return;
+        }
+        if (!coop_lite_chat_prepare(pkt->text, clean, sizeof(clean))) {
+            return;
+        }
+        if (coop_chat_last_send_ms[sender] != 0
+            && !coop_lite_interval_elapsed(coop_chat_last_send_ms[sender], now, COOP_CHAT_RATE_MS)) {
+            return;
+        }
+        coop_chat_last_send_ms[sender] = now != 0 ? now : 1u;
+        name = tig_net_client_info_get_name(sender);
+        if (name == NULL || name[0] == '\0') {
+            name = pkt->name[0] != '\0' ? pkt->name : "Player";
+        }
+        coop_chat_fill_pkt(&out, sender, name, clean);
+        coop_chat_present(out.slot, out.name, out.text, true);
+        tig_net_send_app_except(&out, sizeof(out), sender);
+        return;
+    }
+
+    /* Client receives host relay. */
+    if (!coop_lite_chat_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (pkt->slot == sub_529520()) {
+        coop_chat_log_activity(now);
+        return;
+    }
+    coop_chat_present(pkt->slot, pkt->name, pkt->text, true);
+}
+
+void coop_lite_lobby_tick(unsigned int now_ms)
+{
+    bool show;
+    char path[260];
+    FILE* f;
+    static unsigned int lobby_players_ms;
+    static unsigned int lobby_in_ms;
+    int slot;
+
+    coop_paths_ensure_dir();
+    show = coop_lite_chat_log_visible(coop_chat_typing, coop_chat_last_ms, now_ms, COOP_CHAT_FADE_MS);
+    if (show != coop_chat_log_shown && coop_chat_set_visible_hook != NULL) {
+        coop_chat_set_visible_hook(show);
+        coop_chat_log_shown = show;
+    }
+
+    if (!coop_paths_join(path, sizeof(path), "lobby_chat_in.txt")) {
+        return;
+    }
+    if (coop_lite_interval_elapsed(lobby_in_ms, now_ms, 250u)) {
+        lobby_in_ms = now_ms != 0 ? now_ms : 1u;
+        f = fopen(path, "rb");
+        if (f != NULL) {
+            char buf[512];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+
+            fclose(f);
+            remove(path);
+            if (n > 0) {
+                char* line = buf;
+                char* nl;
+
+                buf[n] = '\0';
+                while (line != NULL && *line != '\0') {
+                    nl = strchr(line, '\n');
+                    if (nl != NULL) {
+                        *nl = '\0';
+                        if (nl > line && nl[-1] == '\r') {
+                            nl[-1] = '\0';
+                        }
+                    }
+                    while (*line == ' ' || *line == '\t') {
+                        line++;
+                    }
+                    if (strncmp(line, "CHAT\t", 5) == 0) {
+                        coop_lite_chat_submit(line + 5);
+                    } else if (line[0] != '\0') {
+                        coop_lite_chat_submit(line);
+                    }
+                    line = nl != NULL ? nl + 1 : NULL;
+                }
+            }
+        }
+    }
+
+    if (!coop_lite_interval_elapsed(lobby_players_ms, now_ms, 1000u)) {
+        return;
+    }
+    lobby_players_ms = now_ms != 0 ? now_ms : 1u;
+    if (!coop_paths_join(path, sizeof(path), "lobby_players.txt")) {
+        return;
+    }
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        return;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        const char* name;
+        const char* role = (slot == 0) ? "host" : "client";
+
+        if (!tig_net_client_is_active(slot)) {
+            continue;
+        }
+        name = tig_net_client_info_get_name(slot);
+        if (name == NULL || name[0] == '\0') {
+            name = (slot == sub_529520()) ? coop_chat_local_name() : "Player";
+        }
+        fprintf(f, "%d\t%s\t%s\t1\n", slot, name, role);
+    }
+    fclose(f);
+}
+
+#else /* COOP_LITE_TEST_STUBS */
+
+void coop_lite_set_chat_ui_hooks(void (*on_line)(const char* line), void (*set_visible)(bool on))
+{
+    (void)on_line;
+    (void)set_visible;
+}
+void coop_lite_chat_set_typing(bool typing) { (void)typing; }
+void coop_lite_chat_on_local_broadcast(const char* text) { (void)text; }
+void coop_lite_chat_submit(const char* text) { (void)text; }
+void coop_lite_handle_chat(PacketCoopChat* pkt) { (void)pkt; }
+void coop_lite_lobby_tick(unsigned int now_ms) { (void)now_ms; }
+
+#endif /* COOP_LITE_TEST_STUBS */

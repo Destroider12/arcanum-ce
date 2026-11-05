@@ -46,7 +46,8 @@ extern "C" {
 #define PACKET_COOP_TRAP_FX 157 /* PT61: host trap trigger visuals -> clients */
 #define PACKET_COOP_HOTBAR 158 /* PT63: client -> host hotbar layout; host -> client restore */
 #define PACKET_COOP_WMAP_POS 159 /* PT73: host -> clients: party marker on the world map */
-#define PACKET_COOP_TYPE_LIMIT 160
+#define PACKET_COOP_CHAT 160 /* PT77: player chat text (client->host->all) */
+#define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -598,6 +599,43 @@ bool coop_lite_wmap_pos_valid(const PacketCoopWmapPos* pkt, int size);
 bool coop_lite_wmap_pos_should_send(bool have_last, unsigned int last_ms, unsigned int now_ms,
     int last_x, int last_y, int x, int y);
 void coop_lite_handle_wmap_pos(PacketCoopWmapPos* pkt);
+
+/* PT77: in-game chat (Enter/broadcast bubble + log). Text length matches
+   Broadcast.str (128) minus a little headroom for sanitising. */
+#define COOP_CHAT_MAX_TEXT 120
+#define COOP_CHAT_MAX_NAME 32
+#define COOP_CHAT_FADE_MS 12000u
+#define COOP_CHAT_RATE_MS 400u
+#define COOP_CHAT_LOG_LINES 6
+typedef struct PacketCoopChat {
+    /* 0000 */ int type;
+    /* 0004 */ int slot; /* 0..7, stamped by the host on relay */
+    /* 0008 */ unsigned int seq;
+    /* 000C */ int reserved;
+    /* 0010 */ char name[COOP_CHAT_MAX_NAME];
+    /* 0030 */ char text[COOP_CHAT_MAX_TEXT];
+} PacketCoopChat;
+COOP_STATIC_ASSERT(sizeof(PacketCoopChat) == 0xA8, "PacketCoopChat size");
+bool coop_lite_chat_valid(const PacketCoopChat* pkt, int size);
+/* Strip/replace control chars, trim, clamp to max_len (NUL-terminated). */
+void coop_lite_chat_sanitize(char* text, size_t max_len);
+/* Copy + sanitize into out; returns false if the result is empty. */
+bool coop_lite_chat_prepare(const char* in, char* out, size_t out_size);
+/* Format "[Name]: text" into out; always NUL-terminated. */
+void coop_lite_chat_format_line(const char* name, const char* text, char* out, size_t out_size);
+/* Pure: the on-screen log is shown while typing, or within fade_ms of activity. */
+bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsigned int now_ms, unsigned int fade_ms);
+void coop_lite_handle_chat(PacketCoopChat* pkt);
+/* Local player submitted a chat line (broadcast Enter, or launcher lobby). */
+void coop_lite_chat_submit(const char* text);
+/* Net-only path after the local bubble was already shown by broadcast. */
+void coop_lite_chat_on_local_broadcast(const char* text);
+/* UI: add a line / typing flag / draw hook. */
+void coop_lite_chat_set_typing(bool typing);
+void coop_lite_set_chat_ui_hooks(void (*on_line)(const char* line), void (*set_visible)(bool on));
+/* Lobby IPC (launcher): tick while coop is active. */
+void coop_lite_lobby_tick(unsigned int now_ms);
+
 void coop_lite_handle_hotbar(PacketCoopHotbar* pkt);
 /* Kept table (pure; unit-tested): put replaces the same token's layout. */
 void coop_lite_hotbar_kept_reset(void);

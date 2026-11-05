@@ -982,7 +982,7 @@ static int test_packet_hardening(void)
     /* PT37: fatigue rides in the old reserved slot (size unchanged); door use */
     if (offsetof(PacketCoopNpcPosEntry, fatigue_damage) != 0x34 || sizeof(PacketCoopNpcPosEntry) != 0x38
         || sizeof(PacketCoopDoorUse) != 0x20 || PACKET_COOP_DOOR_USE != 149
-        || PACKET_COOP_TYPE_LIMIT != 160 || TIG_NET_PROTOCOL < 37
+        || PACKET_COOP_TYPE_LIMIT < 161 || TIG_NET_PROTOCOL < 37
         || coop_lite_coop_packet_min_size(PACKET_COOP_DOOR_USE) != (int)sizeof(PacketCoopDoorUse)
         || coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, false, 0)
         || !coop_lite_packet_allowed(PACKET_COOP_DOOR_USE, true, 1)) {
@@ -2440,6 +2440,57 @@ int main(int argc, char** argv)
                 fprintf(stderr, "PT73 wmap pos bounds\n");
                 return 1;
             }
+        }
+        /* PT77: chat packet, sanitize, fade */
+        {
+            PacketCoopChat ch;
+            char buf[64];
+            char line[96];
+
+            memset(&ch, 0, sizeof(ch));
+            ch.type = PACKET_COOP_CHAT;
+            ch.slot = 1;
+            strcpy(ch.name, "Alice");
+            strcpy(ch.text, "Hello");
+            if (!coop_lite_chat_valid(&ch, (int)sizeof(ch)) || coop_lite_chat_valid(&ch, 8)
+                || TIG_NET_PROTOCOL < 45 || PACKET_COOP_CHAT != 160
+                || PACKET_COOP_TYPE_LIMIT <= PACKET_COOP_CHAT
+                || coop_lite_coop_packet_min_size(PACKET_COOP_CHAT) != (int)sizeof(PacketCoopChat)
+                || coop_lite_packet_allowed(PACKET_COOP_CHAT, true, 1) != true
+                || coop_lite_packet_allowed(PACKET_COOP_CHAT, false, 0) != true
+                || coop_lite_packet_allowed(PACKET_COOP_CHAT, false, 1)) {
+                fprintf(stderr, "PT77 chat packet/role\n");
+                return 1;
+            }
+            strcpy(buf, "  hi\tthere\r\n ");
+            coop_lite_chat_sanitize(buf, sizeof(buf));
+            if (strcmp(buf, "hi there") != 0) {
+                fprintf(stderr, "PT77 sanitize got '%s'\n", buf);
+                return 1;
+            }
+            if (coop_lite_chat_prepare("   ", buf, sizeof(buf)) || !coop_lite_chat_prepare("yo", buf, sizeof(buf))) {
+                fprintf(stderr, "PT77 prepare\n");
+                return 1;
+            }
+            coop_lite_chat_format_line("Bob", "hi", line, sizeof(line));
+            if (strcmp(line, "[Bob]: hi") != 0) {
+                fprintf(stderr, "PT77 format '%s'\n", line);
+                return 1;
+            }
+            if (!coop_lite_chat_log_visible(true, 0, 1000, COOP_CHAT_FADE_MS)
+                || coop_lite_chat_log_visible(false, 0, 1000, COOP_CHAT_FADE_MS)
+                || !coop_lite_chat_log_visible(false, 1000, 5000, COOP_CHAT_FADE_MS)
+                || coop_lite_chat_log_visible(false, 1000, 1000 + COOP_CHAT_FADE_MS, COOP_CHAT_FADE_MS)
+                || !coop_lite_chat_log_visible(false, 1000, 1000 + COOP_CHAT_FADE_MS - 1, COOP_CHAT_FADE_MS)) {
+                fprintf(stderr, "PT77 fade timing\n");
+                return 1;
+            }
+            ch.text[0] = '\x01';
+            if (coop_lite_chat_valid(&ch, (int)sizeof(ch))) {
+                fprintf(stderr, "PT77 control char accepted\n");
+                return 1;
+            }
+            printf("PT77 chat OK\n");
         }
         /* PT72: no-local-PC sync is retried, bounded */
         if (coop_lite_sync_retry_allowed(0) || !coop_lite_sync_retry_allowed(1)
