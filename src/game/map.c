@@ -975,6 +975,14 @@ void map_flush(unsigned int flags)
             tig_debug_println("Error: map_save_objects failed in map_flush.");
         }
     } else {
+        /* PT77k: the map's Save\Current folder can vanish under an open map
+           (host crash b45b36cf: every write in map_flush failed, then
+           sector_save_game closed a NULL stream). Recreate it before saving. */
+        if (map_save_path[0] != '\0' && !tig_file_is_directory(map_save_path)) {
+            tig_debug_printf("map_flush: save folder %s missing - recreating\n", map_save_path);
+            tig_file_mkdir(map_save_path);
+        }
+
         if (!map_save_difs()) {
             tig_debug_println("Error: map_save_difs failed in map_flush.");
         }

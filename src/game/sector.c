@@ -1845,7 +1845,6 @@ bool sector_save_editor_internal(Sector* sector, const char* base_path)
     stream = tig_file_fopen(path, "wb");
     if (stream == NULL) {
         tig_debug_printf("Error creating sector data file %s\n", path);
-        tig_file_fclose(stream); // FIXME: Crash! (dereferencing NULL).
         return false;
     }
 
@@ -2013,7 +2012,6 @@ bool sector_save_game(Sector* sector)
     stream = tig_file_fopen(path, "wb");
     if (stream == NULL) {
         tig_debug_printf("Error creating differences file %s\n", path);
-        tig_file_fclose(stream); // FIXME: Crash!
         return false;
     }
 
