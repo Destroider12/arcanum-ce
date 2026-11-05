@@ -47,8 +47,14 @@ static void coop_chat_ui_redraw(void)
     }
     tig_window_fill(coop_chat_window, NULL, coop_chat_color_key);
     if (!coop_chat_visible || coop_chat_count <= 0) {
+        if (!tig_window_is_hidden(coop_chat_window)) {
+            tig_window_hide(coop_chat_window);
+        }
         tig_window_invalidate_rect(NULL);
         return;
+    }
+    if (tig_window_is_hidden(coop_chat_window)) {
+        tig_window_show(coop_chat_window);
     }
     tig_font_push(coop_chat_font);
     y = COOP_CHAT_UI_PAD;
@@ -99,17 +105,15 @@ static void coop_chat_ui_create_window(void)
         return;
     }
     memset(&window_data, 0, sizeof(window_data));
-    window_data.flags = TIG_WINDOW_TRANSPARENT | TIG_WINDOW_MESSAGE_FILTER;
-    window_data.rect.x = 8;
-    window_data.rect.y = 420;
+    /* PT77d: ALWAYS_ON_TOP - the HUD strips and dialog windows are created
+       after this UI module, so a normal window ended up underneath them.
+       Placed just above the bottom HUD strip's left edge (centred 800 wide)
+       so it never covers the health bulb / gold counter. */
+    window_data.flags = TIG_WINDOW_TRANSPARENT | TIG_WINDOW_MESSAGE_FILTER | TIG_WINDOW_ALWAYS_ON_TOP | TIG_WINDOW_HIDDEN;
     window_data.rect.width = COOP_CHAT_UI_W;
     window_data.rect.height = COOP_CHAT_UI_H;
-    hrp_apply(&window_data.rect, GRAVITY_LEFT | GRAVITY_BOTTOM);
-    /* Nudge above the bottom HUD / hotbar strip. */
-    window_data.rect.y -= 90;
-    if (window_data.rect.y < 0) {
-        window_data.rect.y = 0;
-    }
+    coop_lite_chat_log_origin(hrp_iso_window_width_get(), hrp_iso_window_height_get(), COOP_CHAT_UI_H,
+        &window_data.rect.x, &window_data.rect.y);
     coop_chat_color_key = tig_color_make(255, 0, 255);
     window_data.color_key = coop_chat_color_key;
     window_data.message_filter = coop_chat_ui_filter;

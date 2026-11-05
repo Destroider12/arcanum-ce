@@ -19066,6 +19066,40 @@ bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsi
     return (unsigned int)(now_ms - last_activity_ms) < fade_ms;
 }
 
+void coop_lite_chat_log_origin(int screen_w, int screen_h, int log_h, int* x, int* y)
+{
+    int hud_x = (screen_w - COOP_CHAT_HUD_W) / 2;
+    int ox = hud_x + 8;
+    int oy = screen_h - COOP_CHAT_HUD_H - log_h - 4;
+
+    if (hud_x < 0) {
+        ox = 8;
+    }
+    if (oy < 0) {
+        oy = 0;
+    }
+    if (x != NULL) {
+        *x = ox;
+    }
+    if (y != NULL) {
+        *y = oy;
+    }
+}
+
+int coop_lite_dialog_chat_route(bool coop_enabled, bool textedit_focused, bool is_keyboard, bool is_text_input, bool enter_pressed)
+{
+    if (!coop_enabled) {
+        return 0;
+    }
+    if (textedit_focused && (is_keyboard || is_text_input)) {
+        return 2;
+    }
+    if (is_keyboard && enter_pressed) {
+        return 1;
+    }
+    return 0;
+}
+
 /* PT72 (pure; tests): a SESSION_SYNC that found no local PC is retried
    (about 10 s at the 250 ms retry pace) before the client gives up. */
 bool coop_lite_sync_retry_allowed(int tries)

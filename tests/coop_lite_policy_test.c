@@ -2490,6 +2490,37 @@ int main(int argc, char** argv)
                 fprintf(stderr, "PT77 control char accepted\n");
                 return 1;
             }
+            {
+                int lx = -1, ly = -1;
+
+                /* PT77d: 800x600 - above the bottom HUD (top at 441), left edge. */
+                coop_lite_chat_log_origin(800, 600, 104, &lx, &ly);
+                if (lx != 8 || ly != 600 - COOP_CHAT_HUD_H - 104 - 4 || ly + 104 > 441) {
+                    fprintf(stderr, "PT77d log origin 800x600 %d,%d\n", lx, ly);
+                    return 1;
+                }
+                /* high-res: follows the centred HUD, stays above it */
+                coop_lite_chat_log_origin(1920, 1080, 104, &lx, &ly);
+                if (lx != (1920 - 800) / 2 + 8 || ly + 104 > 1080 - COOP_CHAT_HUD_H) {
+                    fprintf(stderr, "PT77d log origin 1920x1080 %d,%d\n", lx, ly);
+                    return 1;
+                }
+                coop_lite_chat_log_origin(640, 100, 104, &lx, &ly);
+                if (lx != 8 || ly != 0) {
+                    fprintf(stderr, "PT77d log origin clamp %d,%d\n", lx, ly);
+                    return 1;
+                }
+                /* PT77d: dialog key routing */
+                if (coop_lite_dialog_chat_route(false, true, true, false, true) != 0
+                    || coop_lite_dialog_chat_route(true, false, true, false, true) != 1
+                    || coop_lite_dialog_chat_route(true, false, true, false, false) != 0
+                    || coop_lite_dialog_chat_route(true, false, false, true, false) != 0
+                    || coop_lite_dialog_chat_route(true, true, false, true, false) != 2
+                    || coop_lite_dialog_chat_route(true, true, true, false, true) != 2) {
+                    fprintf(stderr, "PT77d dialog chat route\n");
+                    return 1;
+                }
+            }
             printf("PT77 chat OK\n");
         }
         /* PT72: no-local-PC sync is retried, bounded */

@@ -625,6 +625,15 @@ bool coop_lite_chat_prepare(const char* in, char* out, size_t out_size);
 void coop_lite_chat_format_line(const char* name, const char* text, char* out, size_t out_size);
 /* Pure: the on-screen log is shown while typing, or within fade_ms of activity. */
 bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsigned int now_ms, unsigned int fade_ms);
+/* PT77d (pure): chat log origin. Bottom-left of the (centred, 800 wide,
+   159 high) bottom HUD strip, just above it, for any iso window size. */
+#define COOP_CHAT_HUD_W 800
+#define COOP_CHAT_HUD_H 159
+void coop_lite_chat_log_origin(int screen_w, int screen_h, int log_h, int* x, int* y);
+/* PT77d (pure): how a dialog's key filter treats a keyboard/text message in
+   co-op. 0 = not chat (dialog handles it), 1 = open the chat field (Enter),
+   2 = feed the open chat field (text edit focused). */
+int coop_lite_dialog_chat_route(bool coop_enabled, bool textedit_focused, bool is_keyboard, bool is_text_input, bool enter_pressed);
 void coop_lite_handle_chat(PacketCoopChat* pkt);
 /* Local player submitted a chat line (broadcast Enter, or launcher lobby). */
 void coop_lite_chat_submit(const char* text);

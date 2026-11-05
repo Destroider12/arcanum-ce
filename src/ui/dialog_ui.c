@@ -20,11 +20,13 @@
 #include "game/script_name.h"
 #include "game/stat.h"
 #include "game/tb.h"
+#include "ui/broadcast_ui.h"
 #include "ui/charedit_ui.h"
 #include "ui/intgame.h"
 #include "ui/inven_ui.h"
 #include "ui/schematic_ui.h"
 #include "ui/tb_ui.h"
+#include "ui/textedit_ui.h"
 #include "ui/wmap_ui.h"
 
 #define MAX_ENTRIES 8
@@ -495,6 +497,25 @@ bool dialog_ui_message_filter(TigMessage* msg)
         && msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE) {
         dialog_ui_end_dialog(entry->state.pc_obj, 0);
         return true;
+    }
+
+    /* PT77d: the dialog filter swallowed every key, so the host (who runs
+       the real dialog) could not open chat. Enter opens the chat field and,
+       while it is focused, keys/text go to it; other keys stay dialog keys. */
+    switch (coop_lite_dialog_chat_route(tig_net_is_coop_enabled(),
+        textedit_ui_is_focused(),
+        msg->type == TIG_MESSAGE_KEYBOARD,
+        msg->type == TIG_MESSAGE_TEXT_INPUT,
+        msg->type == TIG_MESSAGE_KEYBOARD && msg->data.keyboard.pressed
+            && msg->data.keyboard.key == SDLK_RETURN)) {
+    case 1:
+        broadcast_ui_open();
+        return true;
+    case 2:
+        textedit_ui_process_message(msg);
+        return true;
+    default:
+        break;
     }
 
     option = intgame_dialog_get_option(msg);
