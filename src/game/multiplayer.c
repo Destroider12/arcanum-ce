@@ -1203,6 +1203,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_CHAT:
         coop_lite_handle_chat((PacketCoopChat*)msg);
         break;
+    case PACKET_COOP_BODY_DRAG:
+        coop_lite_handle_body_drag((PacketCoopBodyDrag*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

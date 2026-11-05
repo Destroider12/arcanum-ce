@@ -2510,6 +2510,24 @@ int main(int argc, char** argv)
                     fprintf(stderr, "PT77d log origin clamp %d,%d\n", lx, ly);
                     return 1;
                 }
+                /* PT77h: body drag packet validation */
+                {
+                    PacketCoopBodyDrag bd;
+                    memset(&bd, 0, sizeof(bd));
+                    bd.type = PACKET_COOP_BODY_DRAG;
+                    bd.oid[0] = 1;
+                    if (!coop_lite_body_drag_valid(&bd, sizeof(bd))
+                        || coop_lite_body_drag_valid(&bd, sizeof(bd) - 1)
+                        || coop_lite_body_drag_valid(NULL, sizeof(bd))) {
+                        fprintf(stderr, "PT77h body drag valid\n");
+                        return 1;
+                    }
+                    bd.oid[0] = 0;
+                    if (coop_lite_body_drag_valid(&bd, sizeof(bd))) {
+                        fprintf(stderr, "PT77h body drag empty oid\n");
+                        return 1;
+                    }
+                }
                 /* PT77g: trap devices may target doors, potions only critters */
                 if (!coop_lite_use_item_target_ok(true, 1)
                     || !coop_lite_use_item_target_ok(true, 2)

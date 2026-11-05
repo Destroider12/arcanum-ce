@@ -5366,6 +5366,12 @@ void sub_4445A0(int64_t a1, int64_t a2)
     int type;
     int64_t loc;
 
+    /* PT77h: a coop client asks the host to drag (it would snap back). */
+    if (obj_type_is_critter(obj_field_int32_get(a2, OBJ_F_TYPE))
+        && coop_lite_client_body_drag_intent(a1, a2)) {
+        return;
+    }
+
     type = obj_field_int32_get(a2, OBJ_F_TYPE);
     if (obj_type_is_critter(type)
         || (obj_type_is_item(type) && (obj_field_int32_get(a2, OBJ_F_TYPE) & OF_INVENTORY) == 0)) {

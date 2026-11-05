@@ -2208,6 +2208,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_NPC_REQ: /* PT26 unknown NPC request */
     case PACKET_COOP_DOOR_USE: /* PT37 client door use → host */
     case PACKET_COOP_SKILL_USE: /* PT40 pick lock / disarm intent */
+    case PACKET_COOP_BODY_DRAG: /* PT77h corpse drag intent */
     case PACKET_COOP_CRAFT: /* PT40 schematic combine intent */
     case PACKET_COOP_INVEN_LAYOUT: /* PT53 own-pack layout intent */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
@@ -3365,6 +3366,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopWmapPos);
     case PACKET_COOP_CHAT:
         return sizeof(PacketCoopChat);
+    case PACKET_COOP_BODY_DRAG:
+        return sizeof(PacketCoopBodyDrag);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -15660,6 +15663,12 @@ bool coop_lite_use_item_target_ok(bool trap_device, int target_type)
     return trap_device && target_type >= 0 && target_type <= 2;
 }
 
+bool coop_lite_body_drag_valid(const PacketCoopBodyDrag* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_BODY_DRAG && size >= (int)sizeof(PacketCoopBodyDrag)
+        && pkt->reserved == 0 && pkt->oid[0] != 0;
+}
+
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size)
 {
     return coop_lite_skill_use_valid(pkt, size) && pkt->skill == COOP_SKILL_USE_ITEM
@@ -16388,6 +16397,59 @@ bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int6
     return true;
 }
 
+/* PT77h: Alt-click on a corpse drags it one step to the PC (vanilla
+   sub_4445A0). On a client that was a local move the host's NPC pose sync
+   undid: the host does the move and its sync carries it to everyone. */
+bool coop_lite_client_body_drag_intent(int64_t pc_obj, int64_t target_obj)
+{
+    PacketCoopBodyDrag pkt;
+    int depth;
+
+    if (!tig_net_is_coop_client() || !coop_lite_client_in_session
+        || pc_obj == OBJ_HANDLE_NULL || pc_obj != player_get_local_pc_obj() || target_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_BODY_DRAG;
+    coop_lite_put_oid(pkt.oid, target_obj);
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopLite: body drag sent to host\n");
+    return true;
+}
+
+void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt)
+{
+    int slot;
+    int64_t pc;
+    int64_t target;
+    int type;
+
+    if (!tig_net_is_active() || !tig_net_is_host()
+        || !coop_lite_body_drag_valid(pkt, tig_net_last_message_size())
+        || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    target = coop_lite_get_oid_obj(pkt->oid);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || target == OBJ_HANDLE_NULL || target == pc) {
+        return;
+    }
+    type = obj_field_int32_get(target, OBJ_F_TYPE);
+    /* Only corpses (never a living critter or another player's PC). */
+    if (!obj_type_is_critter(type) || !critter_is_dead(target) || type == OBJ_TYPE_PC) {
+        tig_debug_printf("CoopLite: slot %d body drag refused (not a corpse)\n", slot);
+        return;
+    }
+    sub_4445A0(pc, target); /* range check (adjacent) is vanilla's */
+    tig_debug_printf("CoopLite: slot %d dragged a corpse (host)\n", slot);
+}
+
 /* PT77g: client trap device on a tile (item_use_on_loc). */
 bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc)
 {
@@ -16652,6 +16714,8 @@ bool coop_lite_client_skill_intent(struct SkillInvocation* si) { (void)si; retur
 void coop_lite_handle_skill_use(PacketCoopSkillUse* pkt) { (void)pkt; }
 bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int64_t target_obj) { (void)source_obj; (void)item_obj; (void)target_obj; return false; }
 bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc) { (void)source_obj; (void)item_obj; (void)target_loc; return false; }
+bool coop_lite_client_body_drag_intent(int64_t pc_obj, int64_t target_obj) { (void)pc_obj; (void)target_obj; return false; }
+void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt) { (void)pkt; }
 bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
 void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
 void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }

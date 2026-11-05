@@ -47,6 +47,7 @@ extern "C" {
 #define PACKET_COOP_HOTBAR 158 /* PT63: client -> host hotbar layout; host -> client restore */
 #define PACKET_COOP_WMAP_POS 159 /* PT73: host -> clients: party marker on the world map */
 #define PACKET_COOP_CHAT 160 /* PT77: player chat text (client->host->all) */
+#define PACKET_COOP_BODY_DRAG 161 /* PT77h: client -> host: Alt-drag this corpse/item to me */
 #define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
@@ -607,6 +608,17 @@ void coop_lite_handle_wmap_pos(PacketCoopWmapPos* pkt);
 #define COOP_CHAT_FADE_MS 12000u
 #define COOP_CHAT_RATE_MS 400u
 #define COOP_CHAT_LOG_LINES 6
+/* PT77h: client Alt-drag of a corpse (vanilla sub_4445A0) - the host moves it. */
+typedef struct PacketCoopBodyDrag {
+    /* 0000 */ int type;
+    /* 0004 */ int reserved;
+    /* 0008 */ uint8_t oid[24];
+} PacketCoopBodyDrag;
+COOP_STATIC_ASSERT(sizeof(PacketCoopBodyDrag) == 0x20, "PacketCoopBodyDrag size");
+bool coop_lite_body_drag_valid(const PacketCoopBodyDrag* pkt, int size);
+bool coop_lite_client_body_drag_intent(int64_t pc_obj, int64_t target_obj);
+void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt);
+
 typedef struct PacketCoopChat {
     /* 0000 */ int type;
     /* 0004 */ int slot; /* 0..7, stamped by the host on relay */
