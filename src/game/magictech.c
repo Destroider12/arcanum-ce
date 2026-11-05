@@ -4327,6 +4327,12 @@ bool sub_4551C0(int64_t a1, int64_t a2, int64_t a3)
             return false;
         }
 
+        /* PT77i: a coop client replays the host's result (Packet75)
+           outside any spell run: no run info - the host already decided. */
+        if (magictech_cur_run_info == NULL) {
+            return true;
+        }
+
         if (lock_difficulty >= 0 && magictech_cur_run_info->parent_obj.aptitude < lock_difficulty) {
             return false;
         }
