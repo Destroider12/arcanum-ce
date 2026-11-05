@@ -9184,7 +9184,8 @@ static void coop_lite_fill_item_state(PacketCoopInvenEntry* e, int64_t item)
     e->hp_damage = obj_field_int32_get(item, OBJ_F_HP_DAMAGE);
     e->mana_store = obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE);
     e->spell_mana_store = obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE);
-    e->state_flags = COOP_INVEN_E_STATE;
+    e->state_flags = coop_lite_inven_state_flags(false,
+        tig_art_item_id_destroyed_get(obj_field_int32_get(item, OBJ_F_CURRENT_AID)) != 0);
 }
 
 /* PT18 (Argon #3 pt 4c): what the host last told slot N about its own PC.
@@ -10361,7 +10362,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
                 e->item_flags = (unsigned int)obj_field_int32_get(items[idx], OBJ_F_ITEM_FLAGS);
                 coop_lite_fill_item_state(e, items[idx]);
                 if (coop_lite_is_stackable(items[idx])) {
-                    e->state_flags = COOP_INVEN_E_STACK;
+                    e->state_flags = coop_lite_inven_state_flags(true, false);
                     e->mana_store = coop_lite_stack_qty(items[idx]);
                 }
                 if (coop_lite_env("ARCANUM_DEV_INVEN_TRACE") != NULL) {
@@ -12775,6 +12776,22 @@ static void coop_lite_client_apply_inven_batch(void)
                 if (obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE) != e->spell_mana_store) {
                     obj_field_int32_set(item, OBJ_F_ITEM_SPELL_MANA_STORE, e->spell_mana_store);
                     refreshed++;
+                }
+                /* PT77o: the "broken" art bit follows the host both ways
+                   (a bust on one side only showed up as an intact item
+                   arriving broken after a gift). */
+                {
+                    int fix = coop_lite_inven_broken_fix(e->state_flags,
+                        tig_art_item_id_destroyed_get(obj_field_int32_get(item, OBJ_F_CURRENT_AID)) != 0);
+
+                    if (fix >= 0) {
+                        object_set_current_aid(item,
+                            tig_art_item_id_destroyed_set(obj_field_int32_get(item, OBJ_F_CURRENT_AID), fix));
+                        obj_field_int32_set(item, OBJ_F_ITEM_INV_AID,
+                            tig_art_item_id_destroyed_set(obj_field_int32_get(item, OBJ_F_ITEM_INV_AID), fix));
+                        tig_debug_printf("CoopLite: inven: item broken state %s (host)\n", fix ? "set" : "cleared");
+                        refreshed++;
+                    }
                 }
                 /* Keys added to (or taken off) a ring: fetch the host's ring. */
                 if (coop_lite_item_keyring_hash(item) != e->keyring_hash && num_rings < 16
@@ -15708,6 +15725,28 @@ int coop_lite_pcs_portrait_unpack(unsigned int flags)
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source)
 {
     return !moved && !stackable && still_at_source;
+}
+
+unsigned int coop_lite_inven_state_flags(bool stackable, bool broken)
+{
+    if (stackable) {
+        return COOP_INVEN_E_STACK;
+    }
+    return COOP_INVEN_E_STATE | (broken ? COOP_INVEN_E_BROKEN : 0u);
+}
+
+int coop_lite_inven_broken_fix(unsigned int state_flags, bool locally_broken)
+{
+    bool host_broken;
+
+    if ((state_flags & COOP_INVEN_E_STATE) == 0) {
+        return -1;
+    }
+    host_broken = (state_flags & COOP_INVEN_E_BROKEN) != 0;
+    if (host_broken == locally_broken) {
+        return -1;
+    }
+    return host_broken ? 1 : 0;
 }
 
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)

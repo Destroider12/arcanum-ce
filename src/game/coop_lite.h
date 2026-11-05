@@ -318,6 +318,12 @@ typedef struct PacketCoopBarter {
    (durability, charges, keys), not only moved. */
 #define COOP_INVEN_E_STATE 0x1 /* hp_damage / mana fields are valid */
 #define COOP_INVEN_E_STACK 0x2 /* PT26: a container's gold/ammo stack; mana_store = quantity */
+#define COOP_INVEN_E_BROKEN 0x4 /* PT77o: busted on the host (art "destroyed" bit) */
+
+/* PT77o: an entry's COOP_INVEN_E_* flags (stacks carry no item state). */
+unsigned int coop_lite_inven_state_flags(bool stackable, bool broken);
+/* PT77o: -1 = leave the item alone, 0 = clear its broken art, 1 = set it. */
+int coop_lite_inven_broken_fix(unsigned int state_flags, bool locally_broken);
 
 typedef struct PacketCoopInvenEntry {
     /* 0000 */ uint8_t oid[24];

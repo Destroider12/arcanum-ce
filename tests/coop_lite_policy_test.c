@@ -1223,6 +1223,18 @@ static int test_packet_hardening(void)
             fprintf(stderr, "party gift rule wrong\n");
             return 1;
         }
+        /* PT77o: an intact gifted item stays intact; host-broken follows. */
+        if (coop_lite_inven_state_flags(false, false) != COOP_INVEN_E_STATE
+            || coop_lite_inven_state_flags(false, true) != (COOP_INVEN_E_STATE | COOP_INVEN_E_BROKEN)
+            || coop_lite_inven_state_flags(true, true) != COOP_INVEN_E_STACK
+            || coop_lite_inven_broken_fix(coop_lite_inven_state_flags(false, false), true) != 0
+            || coop_lite_inven_broken_fix(coop_lite_inven_state_flags(false, false), false) != -1
+            || coop_lite_inven_broken_fix(coop_lite_inven_state_flags(false, true), false) != 1
+            || coop_lite_inven_broken_fix(coop_lite_inven_state_flags(false, true), true) != -1
+            || coop_lite_inven_broken_fix(coop_lite_inven_state_flags(true, false), true) != -1) {
+            fprintf(stderr, "PT77o item broken-state sync wrong\n");
+            return 1;
+        }
         if (!coop_lite_oid_unmap_ok(5, 5) || !coop_lite_oid_unmap_ok(0, 5)
             || coop_lite_oid_unmap_ok(7, 5)) {
             fprintf(stderr, "duplicate OID unmap wrong\n");
