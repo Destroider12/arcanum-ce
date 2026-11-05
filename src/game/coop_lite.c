@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "net/tig_net.h"
 
@@ -19066,6 +19067,30 @@ bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsi
     return (unsigned int)(now_ms - last_activity_ms) < fade_ms;
 }
 
+void coop_lite_chat_format_full(const char* nick, int hh, int mm, const char* character, const char* text, char* out, size_t out_size)
+{
+    bool has_nick = nick != NULL && nick[0] != '\0';
+    bool has_char = character != NULL && character[0] != '\0';
+    const char* t = text != NULL ? text : "";
+
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    if (hh < 0 || hh > 23) {
+        hh = 0;
+    }
+    if (mm < 0 || mm > 59) {
+        mm = 0;
+    }
+    if (has_nick && has_char) {
+        snprintf(out, out_size, "(%s) [%02d:%02d] %s: %s", nick, hh, mm, character, t);
+    } else if (has_nick || has_char) {
+        snprintf(out, out_size, "[%02d:%02d] %s: %s", hh, mm, has_nick ? nick : character, t);
+    } else {
+        snprintf(out, out_size, "[%02d:%02d] Player: %s", hh, mm, t);
+    }
+}
+
 void coop_lite_chat_log_origin(int screen_w, int screen_h, int log_h, int* x, int* y)
 {
     int hud_x = (screen_w - COOP_CHAT_HUD_W) / 2;
@@ -19083,6 +19108,47 @@ void coop_lite_chat_log_origin(int screen_w, int screen_h, int log_h, int* x, in
     }
     if (y != NULL) {
         *y = oy;
+    }
+}
+
+void coop_lite_chat_text_area(int screen_w, int screen_h, int lines, int line_h, int* x, int* y, int* w, int* h)
+{
+    int ah = lines * line_h;
+    int ax;
+    int ay;
+    int aw;
+
+    if (ah < 0) {
+        ah = 0;
+    }
+    if (ah > screen_h) {
+        ah = screen_h;
+    }
+    coop_lite_chat_log_origin(screen_w, screen_h, ah - 2, &ax, &ay);
+    aw = screen_w - ax - 8;
+    if (aw > 560) {
+        aw = 560;
+    }
+    if (aw < 0) {
+        aw = 0;
+    }
+    if (ay + ah > screen_h) {
+        ay = screen_h - ah;
+    }
+    if (ay < 0) {
+        ay = 0;
+    }
+    if (x != NULL) {
+        *x = ax;
+    }
+    if (y != NULL) {
+        *y = ay;
+    }
+    if (w != NULL) {
+        *w = aw;
+    }
+    if (h != NULL) {
+        *h = ah;
     }
 }
 
@@ -20510,11 +20576,29 @@ static void coop_chat_log_activity(unsigned int now_ms)
 
 static void coop_chat_present(int slot, const char* name, const char* text, bool bubble)
 {
-    char line[COOP_CHAT_MAX_NAME + COOP_CHAT_MAX_TEXT + 8];
+    char line[COOP_CHAT_MAX_NAME + COOP_CHAT_MAX_TEXT + 96];
+    char character[64];
     unsigned int now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
     int64_t pc;
+    time_t tnow = time(NULL);
+    struct tm* lt = localtime(&tnow);
 
-    coop_lite_chat_format_line(name, text, line, sizeof(line));
+    /* PT77e: "(Nick) [HH:MM] Character: text" (local time of receipt). */
+    character[0] = '\0';
+    pc = (slot >= 0 && slot < 8) ? sub_4A2B60(slot) : OBJ_HANDLE_NULL;
+    if (pc != OBJ_HANDLE_NULL && obj_handle_is_valid(pc)) {
+        char* pname = NULL;
+
+        obj_field_string_get(pc, OBJ_F_PC_PLAYER_NAME, &pname);
+        if (pname != NULL) {
+            strncpy(character, pname, sizeof(character) - 1);
+            character[sizeof(character) - 1] = '\0';
+            FREE(pname);
+            coop_lite_chat_sanitize(character, sizeof(character));
+        }
+    }
+    coop_lite_chat_format_full(name, lt != NULL ? lt->tm_hour : 0, lt != NULL ? lt->tm_min : 0,
+        character, text, line, sizeof(line));
     tig_debug_printf("[CHAT] %s\n", line);
     if (coop_chat_on_line_hook != NULL) {
         coop_chat_on_line_hook(line);
@@ -20524,7 +20608,6 @@ static void coop_chat_present(int slot, const char* name, const char* text, bool
     if (!bubble) {
         return;
     }
-    pc = (slot >= 0 && slot < 8) ? sub_4A2B60(slot) : OBJ_HANDLE_NULL;
     if (pc == OBJ_HANDLE_NULL || !obj_handle_is_valid(pc)) {
         return;
     }

@@ -2510,6 +2510,48 @@ int main(int argc, char** argv)
                     fprintf(stderr, "PT77d log origin clamp %d,%d\n", lx, ly);
                     return 1;
                 }
+                /* PT77e: plain text area right above the HUD strip */
+                {
+                    int ax, ay, aw, ah;
+                    char fl[256];
+
+                    coop_lite_chat_text_area(800, 600, 6, 16, &ax, &ay, &aw, &ah);
+                    if (ax != 8 || ah != 96 || ay + ah > 600 - COOP_CHAT_HUD_H || ay + ah < 600 - COOP_CHAT_HUD_H - 8
+                        || aw <= 0 || ax + aw > 800) {
+                        fprintf(stderr, "PT77e area 800x600 %d,%d %dx%d\n", ax, ay, aw, ah);
+                        return 1;
+                    }
+                    coop_lite_chat_text_area(1920, 1080, 6, 16, &ax, &ay, &aw, &ah);
+                    if (ax != 568 || ay + ah > 1080 - COOP_CHAT_HUD_H || ay + ah < 1080 - COOP_CHAT_HUD_H - 8 || ax + aw > 1920) {
+                        fprintf(stderr, "PT77e area 1920x1080 %d,%d %dx%d\n", ax, ay, aw, ah);
+                        return 1;
+                    }
+                    coop_lite_chat_text_area(320, 50, 6, 16, &ax, &ay, &aw, &ah);
+                    if (ay < 0 || ah > 50 || aw < 0) {
+                        fprintf(stderr, "PT77e area clamp\n");
+                        return 1;
+                    }
+                    coop_lite_chat_format_full("Denis", 9, 5, "Virgil", "hi", fl, sizeof(fl));
+                    if (strcmp(fl, "(Denis) [09:05] Virgil: hi") != 0) {
+                        fprintf(stderr, "PT77e format '%s'\n", fl);
+                        return 1;
+                    }
+                    coop_lite_chat_format_full("", 23, 59, "Virgil", "x", fl, sizeof(fl));
+                    if (strcmp(fl, "[23:59] Virgil: x") != 0) {
+                        fprintf(stderr, "PT77e no nick '%s'\n", fl);
+                        return 1;
+                    }
+                    coop_lite_chat_format_full("Denis", 7, 0, NULL, "x", fl, sizeof(fl));
+                    if (strcmp(fl, "[07:00] Denis: x") != 0) {
+                        fprintf(stderr, "PT77e no char '%s'\n", fl);
+                        return 1;
+                    }
+                    coop_lite_chat_format_full(NULL, 99, -1, NULL, "x", fl, sizeof(fl));
+                    if (strcmp(fl, "[00:00] Player: x") != 0) {
+                        fprintf(stderr, "PT77e none '%s'\n", fl);
+                        return 1;
+                    }
+                }
                 /* PT77d: dialog key routing */
                 if (coop_lite_dialog_chat_route(false, true, true, false, true) != 0
                     || coop_lite_dialog_chat_route(true, false, true, false, true) != 1

@@ -266,6 +266,7 @@ static char gamelib_mod_dat_path[TIG_MAX_PATH];
 
 // 0x5D10AC
 static void (*gamelib_draw_func)(GameDrawInfo* draw_info);
+static void (*gamelib_overlay_draw_func)(GameDrawInfo* draw_info);
 
 // 0x5D10B0
 static TigGuid gamelib_mod_guid;
@@ -803,6 +804,11 @@ void gamelib_update_view(ViewOptions* view_options)
 void gamelib_get_view_options(ViewOptions* view_options)
 {
     *view_options = gamelib_view_options;
+}
+
+void gamelib_set_overlay_draw_func(void (*func)(GameDrawInfo* draw_info))
+{
+    gamelib_overlay_draw_func = func;
 }
 
 // 0x402D30
@@ -1740,6 +1746,9 @@ void gamelib_draw_game(GameDrawInfo* draw_info)
         tb_draw(draw_info);
         tf_draw(draw_info);
         tc_draw(draw_info);
+        if (gamelib_overlay_draw_func != NULL) {
+            gamelib_overlay_draw_func(draw_info);
+        }
         tig_video_3d_end_scene();
     }
 }

@@ -630,10 +630,16 @@ bool coop_lite_chat_log_visible(bool typing, unsigned int last_activity_ms, unsi
 #define COOP_CHAT_HUD_W 800
 #define COOP_CHAT_HUD_H 159
 void coop_lite_chat_log_origin(int screen_w, int screen_h, int log_h, int* x, int* y);
+/* PT77e (pure): rectangle (iso window coords) for `lines` text lines of
+   line_h px, bottom edge right above the HUD strip, left-aligned with it. */
+void coop_lite_chat_text_area(int screen_w, int screen_h, int lines, int line_h, int* x, int* y, int* w, int* h);
 /* PT77d (pure): how a dialog's key filter treats a keyboard/text message in
    co-op. 0 = not chat (dialog handles it), 1 = open the chat field (Enter),
    2 = feed the open chat field (text edit focused). */
 int coop_lite_dialog_chat_route(bool coop_enabled, bool textedit_focused, bool is_keyboard, bool is_text_input, bool enter_pressed);
+/* PT77e (pure): "(Nick) [HH:MM] Character: text". Missing nick -> character
+   name only, missing character -> nick, both missing -> "Player". */
+void coop_lite_chat_format_full(const char* nick, int hh, int mm, const char* character, const char* text, char* out, size_t out_size);
 void coop_lite_handle_chat(PacketCoopChat* pkt);
 /* Local player submitted a chat line (broadcast Enter, or launcher lobby). */
 void coop_lite_chat_submit(const char* text);

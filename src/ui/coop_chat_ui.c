@@ -1,6 +1,11 @@
 /*
- * PT77: small co-op chat log (bottom-left, above the hotbar). Semi-transparent
- * text over a colour-keyed window so empty pixels do not steal mouse clicks.
+ * PT77e: co-op chat log as plain text lines (no window, frame or background),
+ * drawn straight into the iso view right above the bottom HUD strip, after the
+ * map, objects and text floaters (gamelib overlay hook). It is part of the
+ * iso view's own pixels, so it never takes a click and needs no window of
+ * its own; it sits in the strip above the HUD that the HUD does not cover.
+ * Shown while typing and ~12 s after the last line, then the area is
+ * invalidated so the map repaints over it.
  */
 #include "ui/coop_chat_ui.h"
 
@@ -8,66 +13,150 @@
 #include <string.h>
 
 #include "game/coop_lite.h"
+#include "game/gamelib.h"
 #include "game/hrp.h"
-#include "net/tig_net.h"
 #include "tig/art.h"
 #include "tig/color.h"
 #include "tig/font.h"
 #include "tig/video.h"
+#include "tig/rect.h"
 #include "tig/window.h"
 
 #define COOP_CHAT_UI_LINES COOP_CHAT_LOG_LINES
 #define COOP_CHAT_UI_LINE_H 16
-#define COOP_CHAT_UI_PAD 4
-#define COOP_CHAT_UI_W 380
-#define COOP_CHAT_UI_H (COOP_CHAT_UI_PAD * 2 + COOP_CHAT_UI_LINES * COOP_CHAT_UI_LINE_H)
 
-static tig_window_handle_t coop_chat_window = TIG_WINDOW_HANDLE_INVALID;
+static tig_window_handle_t coop_chat_iso_window = TIG_WINDOW_HANDLE_INVALID;
+static TigRect coop_chat_iso_rect; /* iso window size */
 static tig_font_handle_t coop_chat_font = TIG_FONT_HANDLE_INVALID;
-static unsigned int coop_chat_color_key;
-static char coop_chat_lines[COOP_CHAT_UI_LINES][192];
+static char coop_chat_lines[COOP_CHAT_UI_LINES][256];
 static int coop_chat_count;
 static bool coop_chat_visible;
 static bool coop_chat_inited;
+/* Text is rendered into a colour-keyed buffer and blitted into the iso view
+   the same way text floaters (tf.c) are; writing fonts straight into the iso
+   window buffer does not show up. */
+static TigVideoBuffer* coop_chat_vb;
+static int coop_chat_vb_w;
+static int coop_chat_vb_h;
+static tig_color_t coop_chat_key;
+static bool coop_chat_vb_dirty = true;
 
-static bool coop_chat_ui_filter(TigMessage* msg)
+static void coop_chat_ui_area(TigRect* rect)
 {
-    (void)msg;
-    return false; /* never consume input */
+    coop_lite_chat_text_area(coop_chat_iso_rect.width, coop_chat_iso_rect.height,
+        COOP_CHAT_UI_LINES, COOP_CHAT_UI_LINE_H,
+        &rect->x, &rect->y, &rect->width, &rect->height);
 }
 
-static void coop_chat_ui_redraw(void)
+static void coop_chat_ui_invalidate(void)
 {
     TigRect rect;
-    int i;
-    int y;
 
-    if (coop_chat_window == TIG_WINDOW_HANDLE_INVALID) {
+    if (!coop_chat_inited) {
         return;
     }
-    tig_window_fill(coop_chat_window, NULL, coop_chat_color_key);
-    if (!coop_chat_visible || coop_chat_count <= 0) {
-        if (!tig_window_is_hidden(coop_chat_window)) {
-            tig_window_hide(coop_chat_window);
+    coop_chat_ui_area(&rect);
+    gamelib_invalidate_rect(&rect);
+}
+
+static void coop_chat_ui_vb_destroy(void)
+{
+    if (coop_chat_vb != NULL) {
+        tig_video_buffer_destroy(coop_chat_vb);
+        coop_chat_vb = NULL;
+    }
+    coop_chat_vb_w = 0;
+    coop_chat_vb_h = 0;
+}
+
+static bool coop_chat_ui_vb_render(const TigRect* area)
+{
+    TigVideoBufferCreateInfo vb_create_info;
+    TigRect content;
+    TigRect line_rect;
+    TigRect dirty;
+    int i;
+    int first;
+
+    if (area->width <= 0 || area->height <= 0) {
+        return false;
+    }
+    if (coop_chat_vb != NULL && (coop_chat_vb_w != area->width || coop_chat_vb_h != area->height)) {
+        coop_chat_ui_vb_destroy();
+    }
+    if (coop_chat_vb == NULL) {
+        coop_chat_key = tig_color_make(0, 0, 255);
+        vb_create_info.flags = TIG_VIDEO_BUFFER_CREATE_COLOR_KEY | TIG_VIDEO_BUFFER_CREATE_VIDEO_MEMORY;
+        vb_create_info.width = area->width;
+        vb_create_info.height = area->height;
+        vb_create_info.background_color = coop_chat_key;
+        vb_create_info.color_key = coop_chat_key;
+        if (tig_video_buffer_create(&vb_create_info, &coop_chat_vb) != TIG_OK) {
+            coop_chat_vb = NULL;
+            return false;
         }
-        tig_window_invalidate_rect(NULL);
-        return;
+        coop_chat_vb_w = area->width;
+        coop_chat_vb_h = area->height;
+        coop_chat_vb_dirty = true;
     }
-    if (tig_window_is_hidden(coop_chat_window)) {
-        tig_window_show(coop_chat_window);
+    if (!coop_chat_vb_dirty) {
+        return true;
     }
+    content.x = 0;
+    content.y = 0;
+    content.width = area->width;
+    content.height = area->height;
+    tig_video_buffer_fill(coop_chat_vb, &content, coop_chat_key);
+    /* Newest line at the bottom, right above the HUD. */
+    first = COOP_CHAT_UI_LINES - coop_chat_count;
     tig_font_push(coop_chat_font);
-    y = COOP_CHAT_UI_PAD;
     for (i = 0; i < coop_chat_count; i++) {
-        rect.x = COOP_CHAT_UI_PAD;
-        rect.y = y;
-        rect.width = COOP_CHAT_UI_W - COOP_CHAT_UI_PAD * 2;
-        rect.height = COOP_CHAT_UI_LINE_H;
-        tig_window_text_write(coop_chat_window, coop_chat_lines[i], &rect);
-        y += COOP_CHAT_UI_LINE_H;
+        line_rect.x = 0;
+        line_rect.y = (first + i) * COOP_CHAT_UI_LINE_H;
+        line_rect.width = area->width;
+        line_rect.height = COOP_CHAT_UI_LINE_H;
+        tig_font_write(coop_chat_vb, coop_chat_lines[i], &line_rect, &dirty);
     }
     tig_font_pop();
-    tig_window_invalidate_rect(NULL);
+    coop_chat_vb_dirty = false;
+    return true;
+}
+
+static void coop_chat_ui_draw(GameDrawInfo* draw_info)
+{
+    TigRect area;
+    TigRect src_rect;
+    TigRect dst_rect;
+    TigRectListNode* node;
+    TigWindowBlitInfo blit;
+
+    if (!coop_chat_visible || coop_chat_count <= 0
+        || coop_chat_iso_window == TIG_WINDOW_HANDLE_INVALID
+        || coop_chat_font == TIG_FONT_HANDLE_INVALID) {
+        return;
+    }
+    coop_chat_ui_area(&area);
+    if (!coop_chat_ui_vb_render(&area)) {
+        return;
+    }
+    memset(&blit, 0, sizeof(blit));
+    blit.type = TIG_WINDOW_BLIT_VIDEO_BUFFER_TO_WINDOW;
+    blit.vb_blit_flags = TIG_VIDEO_BUFFER_BLIT_BLEND_ALPHA_CONST;
+    blit.alpha[0] = 255;
+    blit.src_video_buffer = coop_chat_vb;
+    blit.src_rect = &src_rect;
+    blit.dst_rect = &dst_rect;
+    blit.dst_window_handle = coop_chat_iso_window;
+    for (node = *draw_info->rects; node != NULL; node = node->next) {
+        if (tig_rect_intersection(&(node->rect), &area, &dst_rect) != TIG_OK) {
+            continue;
+        }
+        src_rect.x = dst_rect.x - area.x;
+        src_rect.y = dst_rect.y - area.y;
+        src_rect.width = dst_rect.width;
+        src_rect.height = dst_rect.height;
+        tig_window_blit(&blit);
+    }
 }
 
 static void coop_chat_ui_on_line(const char* line)
@@ -87,55 +176,57 @@ static void coop_chat_ui_on_line(const char* line)
     coop_chat_lines[coop_chat_count][sizeof(coop_chat_lines[0]) - 1] = '\0';
     coop_chat_count++;
     coop_chat_visible = true;
-    coop_chat_ui_redraw();
+    coop_chat_vb_dirty = true;
+    coop_chat_ui_invalidate();
 }
 
 static void coop_chat_ui_set_visible(bool on)
 {
-    coop_chat_visible = on;
-    coop_chat_ui_redraw();
+    if (coop_chat_visible != on) {
+        coop_chat_visible = on;
+    }
+    coop_chat_ui_invalidate();
 }
 
-static void coop_chat_ui_create_window(void)
+static void coop_chat_ui_set_iso(tig_window_handle_t window_handle)
 {
     TigWindowData window_data;
+
+    coop_chat_iso_window = window_handle;
+    coop_chat_iso_rect.x = 0;
+    coop_chat_iso_rect.y = 0;
+    coop_chat_iso_rect.width = hrp_iso_window_width_get();
+    coop_chat_iso_rect.height = hrp_iso_window_height_get();
+    if (window_handle != TIG_WINDOW_HANDLE_INVALID && tig_window_data(window_handle, &window_data) == TIG_OK) {
+        coop_chat_iso_rect.width = window_data.rect.width;
+        coop_chat_iso_rect.height = window_data.rect.height;
+    }
+}
+
+static void coop_chat_ui_create_font(void)
+{
     TigFont font_desc;
 
-    if (coop_chat_window != TIG_WINDOW_HANDLE_INVALID) {
-        return;
-    }
-    memset(&window_data, 0, sizeof(window_data));
-    /* PT77d: ALWAYS_ON_TOP - the HUD strips and dialog windows are created
-       after this UI module, so a normal window ended up underneath them.
-       Placed just above the bottom HUD strip's left edge (centred 800 wide)
-       so it never covers the health bulb / gold counter. */
-    window_data.flags = TIG_WINDOW_TRANSPARENT | TIG_WINDOW_MESSAGE_FILTER | TIG_WINDOW_ALWAYS_ON_TOP | TIG_WINDOW_HIDDEN;
-    window_data.rect.width = COOP_CHAT_UI_W;
-    window_data.rect.height = COOP_CHAT_UI_H;
-    coop_lite_chat_log_origin(hrp_iso_window_width_get(), hrp_iso_window_height_get(), COOP_CHAT_UI_H,
-        &window_data.rect.x, &window_data.rect.y);
-    coop_chat_color_key = tig_color_make(255, 0, 255);
-    window_data.color_key = coop_chat_color_key;
-    window_data.message_filter = coop_chat_ui_filter;
-    if (tig_window_create(&window_data, &coop_chat_window) != TIG_OK) {
-        coop_chat_window = TIG_WINDOW_HANDLE_INVALID;
+    if (coop_chat_font != TIG_FONT_HANDLE_INVALID) {
         return;
     }
     memset(&font_desc, 0, sizeof(font_desc));
-    font_desc.flags = TIG_FONT_SHADOW;
-    tig_art_misc_id_create(TIG_ART_SYSTEM_FONT, 0, &font_desc.art_id);
-    font_desc.color = tig_color_make(220, 220, 200);
+    /* Same font setup as the vanilla text floaters (tf.c). The system
+     * font (misc art) blits nothing into an off-screen colour-keyed buffer. */
+    font_desc.flags = TIG_FONT_NO_ALPHA_BLEND | TIG_FONT_SHADOW;
+    tig_art_interface_id_create(229, 0, 0, 0, &font_desc.art_id);
+    font_desc.color = tig_color_make(235, 235, 210);
     tig_font_create(&font_desc, &coop_chat_font);
-    tig_window_fill(coop_chat_window, NULL, coop_chat_color_key);
 }
 
 bool coop_chat_ui_init(GameInitInfo* init_info)
 {
-    (void)init_info;
     memset(coop_chat_lines, 0, sizeof(coop_chat_lines));
     coop_chat_count = 0;
     coop_chat_visible = false;
-    coop_chat_ui_create_window();
+    coop_chat_ui_set_iso(init_info != NULL ? init_info->iso_window_handle : TIG_WINDOW_HANDLE_INVALID);
+    coop_chat_ui_create_font();
+    gamelib_set_overlay_draw_func(coop_chat_ui_draw);
     coop_lite_set_chat_ui_hooks(coop_chat_ui_on_line, coop_chat_ui_set_visible);
     coop_chat_inited = true;
     return true;
@@ -144,14 +235,13 @@ bool coop_chat_ui_init(GameInitInfo* init_info)
 void coop_chat_ui_exit(void)
 {
     coop_lite_set_chat_ui_hooks(NULL, NULL);
-    if (coop_chat_window != TIG_WINDOW_HANDLE_INVALID) {
-        tig_window_destroy(coop_chat_window);
-        coop_chat_window = TIG_WINDOW_HANDLE_INVALID;
-    }
+    gamelib_set_overlay_draw_func(NULL);
     if (coop_chat_font != TIG_FONT_HANDLE_INVALID) {
         tig_font_destroy(coop_chat_font);
         coop_chat_font = TIG_FONT_HANDLE_INVALID;
     }
+    coop_chat_ui_vb_destroy();
+    coop_chat_iso_window = TIG_WINDOW_HANDLE_INVALID;
     coop_chat_inited = false;
 }
 
@@ -160,23 +250,16 @@ void coop_chat_ui_reset(void)
     memset(coop_chat_lines, 0, sizeof(coop_chat_lines));
     coop_chat_count = 0;
     coop_chat_visible = false;
-    coop_chat_ui_redraw();
+    coop_chat_vb_dirty = true;
+    coop_chat_ui_invalidate();
 }
 
 void coop_chat_ui_resize(GameResizeInfo* resize_info)
 {
-    (void)resize_info;
-    if (!coop_chat_inited) {
+    if (!coop_chat_inited || resize_info == NULL) {
         return;
     }
-    if (coop_chat_window != TIG_WINDOW_HANDLE_INVALID) {
-        tig_window_destroy(coop_chat_window);
-        coop_chat_window = TIG_WINDOW_HANDLE_INVALID;
-    }
-    if (coop_chat_font != TIG_FONT_HANDLE_INVALID) {
-        tig_font_destroy(coop_chat_font);
-        coop_chat_font = TIG_FONT_HANDLE_INVALID;
-    }
-    coop_chat_ui_create_window();
-    coop_chat_ui_redraw();
+    coop_chat_ui_set_iso(resize_info->window_handle);
+    coop_chat_vb_dirty = true;
+    coop_chat_ui_invalidate();
 }

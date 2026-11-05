@@ -98,6 +98,8 @@ bool gamelib_in_reset(void);
 int gamelib_cheat_level_get(void);
 void gamelib_cheat_level_set(int level);
 void gamelib_invalidate_rect(TigRect* rect);
+/* PT77e: optional overlay drawn into the iso window after floaters (chat). */
+void gamelib_set_overlay_draw_func(void (*func)(GameDrawInfo* draw_info));
 bool gamelib_draw(void);
 void gamelib_renderlock_acquire(void);
 void gamelib_renderlock_release(void);
