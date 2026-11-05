@@ -592,7 +592,7 @@ static void lobby_poll(void)
         fclose(f);
     }
     if (players[0] == '\0') {
-        snprintf(players, sizeof(players), "(waiting for game…)");
+        snprintf(players, sizeof(players), "(waiting for game...)");
     }
     if (GetWindowTextLengthA(item(IDC_PLAYERS)) != (int)strlen(players)
         || GetWindowTextA(item(IDC_PLAYERS), buf, sizeof(buf)) <= 0
@@ -662,7 +662,7 @@ static void show_lobby(bool on)
     if (on) {
         g_lobby_log_off = 0;
         SetWindowTextA(item(IDC_LOBBY_CHAT), "");
-        SetWindowTextA(item(IDC_PLAYERS), "(waiting for game…)");
+        SetWindowTextA(item(IDC_PLAYERS), "(waiting for game...)");
         SetTimer(g_wnd, IDT_LOBBY, 500, NULL);
         SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
         SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) | BS_DEFPUSHBUTTON);
@@ -1994,7 +1994,7 @@ static void create_controls(void)
     make("BUTTON", "Check for updates", WS_TABSTOP, 214, 500, 120, 26, IDC_UPD_CHECK);
     make("BUTTON", "Update", WS_TABSTOP, 340, 500, 90, 26, IDC_UPD_GO);
     ShowWindow(item(IDC_UPD_GO), SW_HIDE);
-    make("STATIC", "Lobby — players & chat (while the game runs):", 0, 12, 536, 418, 18, IDC_LOBBY_LABEL);
+    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 536, 418, 18, IDC_LOBBY_LABEL);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         12, 556, 200, 100, IDC_PLAYERS);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,

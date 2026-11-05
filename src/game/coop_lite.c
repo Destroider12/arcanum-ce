@@ -3520,7 +3520,8 @@ void coop_lite_on_game_reset(void)
     if (!tig_net_is_coop_enabled()) {
         return;
     }
-    if (tig_net_is_active() && !tig_net_is_host() && coop_lite_client_in_session) {
+    if (coop_lite_client_leave_on_reset(tig_net_is_active(), tig_net_is_host(),
+            coop_lite_client_in_session, coop_lite_waiting_sync)) {
         /*
          * Client: Quit Game tears the world down. Leave the session cleanly
          * (the host removes our PC) instead of handling host world packets
@@ -3532,10 +3533,22 @@ void coop_lite_on_game_reset(void)
         tig_net_reset_connection();
         return;
     }
-    if (coop_lite_client_in_session || tig_net_is_host()) {
+    if (coop_lite_client_in_session || coop_lite_waiting_sync || tig_net_is_host()) {
         coop_lite_session_reset();
     }
 #endif
+}
+
+/* PT77f: a client quitting to the menu leaves the host's session whenever
+   it is connected - also half-way through a resync (waiting for the
+   host's SESSION_SYNC after a host save load). The old in_session-only
+   check kept the connection and waiting_sync alive there, so the menu
+   thought the client was still in the session and hid Join Host. */
+bool coop_lite_client_leave_on_reset(bool active, bool host, bool in_session, bool waiting_sync)
+{
+    (void)in_session;
+    (void)waiting_sync;
+    return active && !host;
 }
 
 void coop_lite_host_remove_left_pc(int slot, int64_t pc_obj)
@@ -6984,7 +6997,13 @@ static void coop_lite_client_resync(void)
     int proto;
 
     if (pc == OBJ_HANDLE_NULL) {
-        tig_debug_printf("CoopLite: resync skipped - no local PC\n");
+        /* PT77f: used to just return, leaving the client in limbo with no
+           PC and no way back. Ask the host for our kept PC instead (it
+           sends us to character creation when it holds none). */
+        tig_debug_printf("CoopLite: resync - no local PC, sending a rejoin-only offer\n");
+        coop_lite_session_reset();
+        coop_lite_show_notice("Лидер группы загрузился. Переподключение... / The party leader reloaded. Rejoining...", TF_TYPE_WHITE);
+        coop_lite_client_send_offer(BP_GENERIC_PC, "Companion", true);
         return;
     }
     coop_lite_session_reset();

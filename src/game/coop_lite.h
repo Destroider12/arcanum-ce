@@ -1539,6 +1539,8 @@ bool coop_lite_offer_flag_rejoin_only(int has_oid_field);
 bool coop_lite_client_take_rejoin_no_pc(void);
 /* PT71: in the host's session (or already asked to join it). */
 bool coop_lite_client_is_in_session(void);
+/* PT77f: Quit-to-menu on a client drops the connection (rejoin later). */
+bool coop_lite_client_leave_on_reset(bool active, bool host, bool in_session, bool waiting_sync);
 bool coop_lite_test_pending_offer_rejoin_only(int slot);
 
 /* True while a coop client is waiting for SESSION_SYNC (no independent New Game). */

@@ -2510,6 +2510,15 @@ int main(int argc, char** argv)
                     fprintf(stderr, "PT77d log origin clamp %d,%d\n", lx, ly);
                     return 1;
                 }
+                /* PT77f: quit-to-menu leaves the session whenever connected */
+                if (!coop_lite_client_leave_on_reset(true, false, false, true)
+                    || !coop_lite_client_leave_on_reset(true, false, true, false)
+                    || !coop_lite_client_leave_on_reset(true, false, false, false)
+                    || coop_lite_client_leave_on_reset(true, true, true, true)
+                    || coop_lite_client_leave_on_reset(false, false, true, true)) {
+                    fprintf(stderr, "PT77f leave on reset\n");
+                    return 1;
+                }
                 /* PT77e: plain text area right above the HUD strip */
                 {
                     int ax, ay, aw, ah;

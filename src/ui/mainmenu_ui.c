@@ -2344,6 +2344,14 @@ static void mainmenu_ui_coop_buttons_create(void)
     if (mainmenu_ui_window_type != MM_WINDOW_MAINMENU) {
         return;
     }
+    if (mainmenu_ui_coop_client_launch() && !mainmenu_ui_coop_rejoin_pending
+        && coop_lite_client_is_in_session()) {
+        /* PT77f: the plain main menu means no world: a session flag left
+           over (e.g. a host save load interrupted our resync) must not
+           hide Join Host. */
+        tig_debug_printf("MainMenu-UI: stale co-op session state cleared - Join Host offered\n");
+        coop_lite_session_reset();
+    }
     if (mainmenu_ui_coop_client_launch()) {
         /* PT71: grey out and disable Single Player (0) and Credits (2). */
         int dis[2] = { 0, 2 };
