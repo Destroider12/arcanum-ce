@@ -2994,3 +2994,30 @@ Clicks work as before:
 - There is still no right-click order menu for teammates.
 
 The team column is shown even when the follower bar is collapsed.
+
+## PT77: in-game chat + launcher lobby (protocol 45)
+
+Vanilla Enter/broadcast already floats a text bubble over the local PC, but
+other co-op players never saw it and there was no shared log.
+
+**Wire:** `PACKET_COOP_CHAT` (160), protocol **45**, type limit raised to 168.
+Client → host → all (host stamps slot + network name). Text is sanitized
+(control chars → space, trimmed, max 120). ~400 ms per-slot rate limit.
+
+**In game:**
+- Enter (broadcast UI) still shows the bubble locally; Coop Lite then relays
+  the line so every peer floats it over the sender's PC.
+- A small bottom-left chat log (`[Name]: text`, colour-keyed so it does not
+  steal clicks) shows the last few lines globally, fades after ~12 s of
+  inactivity, and reappears on a new line or while typing.
+- Lines are also written to `coop_host.log` / `coop_client.log` as
+  `[CHAT] [Name]: text` for the launcher.
+
+**Launcher lobby:** while the game runs, a pane lists players
+(`lobby_players.txt` in the role folder) and mirrors `[CHAT]` lines from the
+log. An input box writes `lobby_chat_in.txt`; the game polls it and submits
+as normal chat (late join unchanged).
+
+Keys: **Enter** opens the vanilla broadcast field (same as before); lobby
+**Send** / Enter sends into the same chat from the launcher.
+

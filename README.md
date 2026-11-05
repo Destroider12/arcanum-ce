@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 41`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 45`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -49,6 +49,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Traps:** trap visual effects (clients show the effects; damage is the host's).
 - **Spells:** casting, FX and **maintained spells**.
 - **Dialogs:** NPC dialogs run on the host, with restrictions on which player may talk.
+- **Chat:** Enter opens the broadcast field; messages float over the sender and appear in a small fading log for everyone. The launcher mirrors chat while the game runs.
 - **Loot, merchants, and pickpocketing**, resolved by the host.
 - Animation and combat state of PCs and NPCs.
 
@@ -78,6 +79,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 ### Launcher (`arcanum-coop-launcher.exe`)
 
 - Name, Host/Join, transport **Direct + UPnP** or **Steam**, port (default 7777) or host address / SteamID64, Windowed mode.
+- **Lobby pane** while the game runs: connected players and a chat mirror with Send.
 - Shows your local IP and, through UPnP, your public IP, with a **Copy** button.
 - **Port check:** local bind, STUN (public IP and port mapping), UPnP mapping test, CGNAT detection, Windows firewall rule check, and an optional "Add firewall rule" (runs elevated, only when you click it).
 - Crash recovery as described above.
@@ -93,6 +95,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 | **F7** | client | save on the host |
 | **F8** | client | ask the host to load |
 | **J** / **Enter** | client main menu | Join Host (rejoin the last host, no New Game) |
+| **Enter** | in game | open chat / broadcast bubble (relayed in co-op) |
 
 ### Command line and environment variables
 
