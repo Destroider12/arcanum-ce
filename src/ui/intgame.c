@@ -1,5 +1,7 @@
 #include "ui/intgame.h"
 
+#include "game/obj_pool.h"
+
 #include "game/coop_lite.h"
 
 #include <stdarg.h>
@@ -8276,6 +8278,9 @@ void sub_556E60(void)
 {
     int64_t parent_obj;
 
+    if (qword_64C688 != OBJ_HANDLE_NULL && !obj_handle_is_valid(qword_64C688)) {
+        qword_64C688 = OBJ_HANDLE_NULL; /* PT77i: destroyed meanwhile */
+    }
     if (qword_64C688 != OBJ_HANDLE_NULL) {
         parent_obj = obj_field_handle_get(qword_64C688, OBJ_F_ITEM_PARENT);
         if (parent_obj == OBJ_HANDLE_NULL || !player_is_local_pc_obj(parent_obj)) {
@@ -8384,9 +8389,14 @@ void intgame_notify_item_inserted_or_removed(int64_t item_obj, bool removed, int
 
     if (removed) {
         hotkey_ui_notify_item_inserted_or_removed(item_obj, removed);
-        if (qword_64C688 == item_obj
-            && intgame_iso_window_type == ROTWIN_TYPE_MAGICTECH) {
-            iso_interface_window_set(ROTWIN_TYPE_MSG);
+        if (qword_64C688 == item_obj) {
+            /* PT77i: forget the item even when the tech window is not the
+               one shown. It was kept, the item was then destroyed (a coop
+               client planting it on another PC), and the next inventory
+               update read the freed object (crash in sub_556E60). */
+            if (intgame_iso_window_type == ROTWIN_TYPE_MAGICTECH) {
+                iso_interface_window_set(ROTWIN_TYPE_MSG);
+            }
             qword_64C688 = OBJ_HANDLE_NULL;
         }
 
