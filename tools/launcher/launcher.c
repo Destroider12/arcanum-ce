@@ -29,6 +29,10 @@
  * client on one PC). Optional update check ([update] enabled=1 in the ini,
  * default off): replaces only the root arcanum-ce.exe from a verified
  * GitHub release zip.
+ *
+ * PT77: while the game runs, a lobby pane lists connected players and mirrors
+ * in-game chat (game log [CHAT] lines + lobby_players.txt / lobby_chat_in.txt
+ * in the role folder).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -72,7 +76,13 @@
 #define IDC_UPD_TEXT 121 /* PT65 */
 #define IDC_UPD_CHECK 122
 #define IDC_UPD_GO 123
+#define IDC_PLAYERS 124 /* PT77 */
+#define IDC_LOBBY_CHAT 125
+#define IDC_LOBBY_INPUT 126
+#define IDC_LOBBY_SEND 127
+#define IDC_LOBBY_LABEL 128
 #define WM_APP_GAMEEXIT (WM_APP + 3)
+#define IDT_LOBBY 1
 
 #ifndef COOP_BUILD_SHA
 #define COOP_BUILD_SHA "unknown"
@@ -103,6 +113,8 @@ static DWORD g_prev_crash_exit;
 static bool g_prev_crash_valid;
 static DWORD g_restart_ticks[3]; /* host auto-restarts, crash-loop guard */
 static bool g_autoload_next;
+static long g_lobby_log_off; /* PT77: byte offset into the game log */
+static bool g_lobby_on;
 
 static HWND item(int id)
 {
@@ -462,6 +474,209 @@ static DWORD WINAPI game_watch_thread(LPVOID arg)
     return 0;
 }
 
+
+/* ---- PT77 lobby (player list + chat mirror) ---- */
+
+static void lobby_path(char* out, size_t size, const char* name)
+{
+    snprintf(out, size, "%s%s", g_game_data_dir[0] != '\0' ? g_game_data_dir : g_dir, name);
+}
+
+static void lobby_append_chat(const char* line)
+{
+    HWND h = item(IDC_LOBBY_CHAT);
+    int len;
+
+    if (h == NULL || line == NULL || line[0] == '\0') {
+        return;
+    }
+    len = GetWindowTextLengthA(h);
+    SendMessageA(h, EM_SETSEL, len, len);
+    SendMessageA(h, EM_REPLACESEL, FALSE, (LPARAM)line);
+    SendMessageA(h, EM_REPLACESEL, FALSE, (LPARAM)"\r\n");
+    SendMessageA(h, EM_SCROLLCARET, 0, 0);
+}
+
+static void lobby_send_chat(void)
+{
+    char text[256];
+    char path[MAX_PATH];
+    FILE* f;
+    char* p;
+
+    if (g_game == NULL) {
+        set_status("Start the game first to use lobby chat.");
+        return;
+    }
+    GetWindowTextA(item(IDC_LOBBY_INPUT), text, sizeof(text));
+    for (p = text; *p == ' ' || *p == '\t'; p++) {
+    }
+    memmove(text, p, strlen(p) + 1);
+    for (p = text + strlen(text); p > text && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r' || p[-1] == '\n'); p--) {
+        p[-1] = '\0';
+    }
+    if (text[0] == '\0') {
+        return;
+    }
+    if (g_game_data_dir[0] != '\0') {
+        CreateDirectoryA(g_game_data_dir, NULL);
+    }
+    lobby_path(path, sizeof(path), "lobby_chat_in.txt");
+    f = fopen(path, "ab");
+    if (f == NULL) {
+        set_status("Could not write lobby_chat_in.txt (is the game role folder ready?).");
+        return;
+    }
+    fprintf(f, "CHAT\t%s\n", text);
+    fclose(f);
+    SetWindowTextA(item(IDC_LOBBY_INPUT), "");
+}
+
+static void lobby_poll(void)
+{
+    char path[MAX_PATH];
+    char buf[4096];
+    FILE* f;
+    long size;
+    size_t n;
+    char* line;
+    char* nl;
+    char players[1024];
+    size_t poff = 0;
+
+    if (g_game == NULL || !g_lobby_on) {
+        return;
+    }
+
+    /* Player list file from the game. */
+    lobby_path(path, sizeof(path), "lobby_players.txt");
+    f = fopen(path, "rb");
+    players[0] = '\0';
+    if (f != NULL) {
+        while (fgets(buf, sizeof(buf), f) != NULL) {
+            int slot = -1;
+            char name[64];
+            char role[16];
+            int ok = 0;
+            char* tab1;
+            char* tab2;
+            char* tab3;
+            char row[96];
+
+            buf[strcspn(buf, "\r\n")] = '\0';
+            tab1 = strchr(buf, '\t');
+            if (tab1 == NULL) {
+                continue;
+            }
+            *tab1 = '\0';
+            slot = atoi(buf);
+            tab2 = strchr(tab1 + 1, '\t');
+            if (tab2 == NULL) {
+                continue;
+            }
+            *tab2 = '\0';
+            snprintf(name, sizeof(name), "%s", tab1 + 1);
+            tab3 = strchr(tab2 + 1, '\t');
+            if (tab3 != NULL) {
+                *tab3 = '\0';
+            }
+            snprintf(role, sizeof(role), "%s", tab2 + 1);
+            (void)ok;
+            snprintf(row, sizeof(row), "%s%s (%s)", poff > 0 ? "\r\n" : "", name, role);
+            if (poff + strlen(row) + 1 < sizeof(players)) {
+                memcpy(players + poff, row, strlen(row) + 1);
+                poff += strlen(row);
+            }
+            (void)slot;
+        }
+        fclose(f);
+    }
+    if (players[0] == '\0') {
+        snprintf(players, sizeof(players), "(waiting for game…)");
+    }
+    if (GetWindowTextLengthA(item(IDC_PLAYERS)) != (int)strlen(players)
+        || GetWindowTextA(item(IDC_PLAYERS), buf, sizeof(buf)) <= 0
+        || strcmp(buf, players) != 0) {
+        SetWindowTextA(item(IDC_PLAYERS), players);
+    }
+
+    /* Tail the game log for [CHAT] lines. */
+    lobby_path(path, sizeof(path), g_game_log);
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    if (size < g_lobby_log_off) {
+        g_lobby_log_off = 0; /* log rotated / truncated */
+    }
+    if (size > g_lobby_log_off) {
+        fseek(f, g_lobby_log_off, SEEK_SET);
+        while (g_lobby_log_off < size) {
+            long chunk = size - g_lobby_log_off;
+
+            if (chunk > (long)sizeof(buf) - 1) {
+                chunk = (long)sizeof(buf) - 1;
+            }
+            n = fread(buf, 1, (size_t)chunk, f);
+            if (n == 0) {
+                break;
+            }
+            buf[n] = '\0';
+            g_lobby_log_off += (long)n;
+            line = buf;
+            while (line != NULL && *line != '\0') {
+                nl = strchr(line, '\n');
+                if (nl != NULL) {
+                    *nl = '\0';
+                    if (nl > line && nl[-1] == '\r') {
+                        nl[-1] = '\0';
+                    }
+                }
+                {
+                    char* chat = strstr(line, "[CHAT] ");
+                    if (chat != NULL) {
+                        lobby_append_chat(chat + 7);
+                    }
+                }
+                line = nl != NULL ? nl + 1 : NULL;
+            }
+        }
+    }
+    fclose(f);
+}
+
+static void show_lobby(bool on)
+{
+    int show = on ? SW_SHOW : SW_HIDE;
+    RECT r;
+    HWND hwnd = g_wnd;
+
+    g_lobby_on = on;
+    ShowWindow(item(IDC_LOBBY_LABEL), show);
+    ShowWindow(item(IDC_PLAYERS), show);
+    ShowWindow(item(IDC_LOBBY_CHAT), show);
+    ShowWindow(item(IDC_LOBBY_INPUT), show);
+    ShowWindow(item(IDC_LOBBY_SEND), show);
+    if (on) {
+        g_lobby_log_off = 0;
+        SetWindowTextA(item(IDC_LOBBY_CHAT), "");
+        SetWindowTextA(item(IDC_PLAYERS), "(waiting for game…)");
+        SetTimer(g_wnd, IDT_LOBBY, 500, NULL);
+        SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
+        SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) | BS_DEFPUSHBUTTON);
+        SetWindowPos(hwnd, NULL, 0, 0, 460, 780, SWP_NOMOVE | SWP_NOZORDER);
+        lobby_poll();
+    } else {
+        KillTimer(g_wnd, IDT_LOBBY);
+        SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
+        SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) | BS_DEFPUSHBUTTON);
+        SetWindowPos(hwnd, NULL, 0, 0, 460, 573, SWP_NOMOVE | SWP_NOZORDER);
+    }
+    (void)r;
+}
+
 static void show_panel(bool on)
 {
     ShowWindow(item(IDC_RECONNECT), on ? SW_SHOW : SW_HIDE);
@@ -588,6 +803,7 @@ static void start_game(void)
     EnableWindow(item(IDC_UPD_CHECK), FALSE); /* PT65: no update while the game runs */
     EnableWindow(item(IDC_UPD_GO), FALSE);
     CloseHandle(CreateThread(NULL, 0, game_watch_thread, pi.hProcess, 0, NULL));
+    show_lobby(true);
     set_status(host ? "Game started as host. Friends can join any time (late join)." : "Game started - joining the host.");
 }
 
@@ -930,6 +1146,7 @@ static void on_game_exit(DWORD code, HANDLE proc)
     CloseHandle(g_game);
     g_game = NULL;
     g_game_exit = code;
+    show_lobby(false);
     EnableWindow(item(IDC_START), TRUE);
     EnableWindow(item(IDC_UPD_CHECK), TRUE);
     EnableWindow(item(IDC_UPD_GO), TRUE);
@@ -1777,7 +1994,16 @@ static void create_controls(void)
     make("BUTTON", "Check for updates", WS_TABSTOP, 214, 500, 120, 26, IDC_UPD_CHECK);
     make("BUTTON", "Update", WS_TABSTOP, 340, 500, 90, 26, IDC_UPD_GO);
     ShowWindow(item(IDC_UPD_GO), SW_HIDE);
+    make("STATIC", "Lobby — players & chat (while the game runs):", 0, 12, 536, 418, 18, IDC_LOBBY_LABEL);
+    make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        12, 556, 200, 100, IDC_PLAYERS);
+    make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        220, 556, 210, 100, IDC_LOBBY_CHAT);
+    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 662, 330, 22, IDC_LOBBY_INPUT);
+    SendMessageA(item(IDC_LOBBY_INPUT), EM_LIMITTEXT, 120, 0);
+    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 660, 80, 26, IDC_LOBBY_SEND);
     show_panel(false);
+    show_lobby(false);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1816,6 +2042,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_APP_PUBIP:
         snprintf(g_public_ip, sizeof(g_public_ip), "%s", (const char*)lp);
         refresh();
+        return 0;
+    case WM_TIMER:
+        if (wp == IDT_LOBBY) {
+            lobby_poll();
+        }
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
@@ -1862,6 +2093,16 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_PANEL_CLOSE:
             show_panel(false);
             set_status("");
+            break;
+        case IDC_LOBBY_SEND:
+            lobby_send_chat();
+            break;
+        case IDC_LOBBY_INPUT:
+            if (HIWORD(wp) == EN_UPDATE && g_lobby_on) {
+                /* Enter in a single-line edit notifies the parent dialog-style;
+                   IsDialogMessage already routes default button - Send is DEFPUSHBUTTON
+                   only while lobby is up; keep an explicit path via button. */
+            }
             break;
         case IDC_START:
             if (g_game != NULL) {
