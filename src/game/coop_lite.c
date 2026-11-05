@@ -156,6 +156,7 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/magictech.h"
 #include "game/tf.h"
 #include "game/gamelib.h"
+#include "game/wallcheck.h"
 #include "game/stat.h"
 #include "game/timeevent.h"
 #include "tig/file.h"
@@ -4572,6 +4573,25 @@ static bool coop_lite_host_spawn_client(int slot)
 
 static void coop_lite_client_request_own_pc(const unsigned char oid[24]);
 
+/* PT77l: after a host save reload the client's PC is bound on a freshly
+   loaded map without moving, so nothing told wallcheck where the local PC
+   is (map_flush resets it). Inside a building the roof stayed drawn over
+   the PC - it looked like the client never came back. Make sure the PC is
+   on, centre the camera and recalc roofs/walls at its spot. */
+static void coop_lite_client_refresh_own_view(int64_t pc)
+{
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    if ((obj_field_int32_get(pc, OBJ_F_FLAGS) & OF_OFF) != 0) {
+        tig_debug_printf("CoopLite: PT77l own PC was OFF after sync - turned on\n");
+        object_flags_unset(pc, OF_OFF);
+    }
+    location_origin_set(obj_field_int64_get(pc, OBJ_F_LOCATION));
+    sub_438530(pc);
+    gamelib_invalidate_rect(NULL);
+}
+
 /* Client, after the map is loaded: bind PCs from a pending SESSION_SYNC. */
 static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
 {
@@ -4644,8 +4664,8 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     coop_lite_client_in_session = true;
     coop_client_pos_valid = false;
 
-    /* Camera on our own PC (like SP New Game). */
-    location_origin_set(obj_field_int64_get(local_pc, OBJ_F_LOCATION));
+    /* Camera on our own PC (like SP New Game); roofs/walls too (PT77l). */
+    coop_lite_client_refresh_own_view(local_pc);
 
     /* Stale/duplicate PCs (e.g. leftovers in the client's Save\Current map
        state or earlier placeholder proxies) — remove anything unbound. */
@@ -11742,7 +11762,7 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
     multiplayer_unlock();
 
     coop_client_pos_valid = false;
-    location_origin_set(obj_field_int64_get(pc, OBJ_F_LOCATION));
+    coop_lite_client_refresh_own_view(pc);
     tig_debug_printf("CoopLite: rejoin: parked PC restored (level %d, %d bytes)\n",
         stat_level_get(pc, STAT_LEVEL), pkt->size);
     coop_lite_client_request_barter(pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
