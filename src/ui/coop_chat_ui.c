@@ -59,6 +59,23 @@ static void coop_chat_ui_invalidate(void)
     gamelib_invalidate_rect(&rect);
 }
 
+/* PT77k2: the iso scroll shifts the window pixels (chat text included) and
+   only repaints the newly exposed strip, which smeared the chat. Repaint
+   the chat area and where its shifted copy landed. */
+static void coop_chat_ui_on_scroll(int dx, int dy)
+{
+    TigRect rect;
+
+    if (!coop_chat_inited || !coop_chat_visible || coop_chat_count <= 0) {
+        return;
+    }
+    coop_chat_ui_area(&rect);
+    gamelib_invalidate_rect(&rect);
+    rect.x += dx;
+    rect.y += dy;
+    gamelib_invalidate_rect(&rect);
+}
+
 static void coop_chat_ui_vb_destroy(void)
 {
     if (coop_chat_vb != NULL) {
@@ -227,6 +244,7 @@ bool coop_chat_ui_init(GameInitInfo* init_info)
     coop_chat_ui_set_iso(init_info != NULL ? init_info->iso_window_handle : TIG_WINDOW_HANDLE_INVALID);
     coop_chat_ui_create_font();
     gamelib_set_overlay_draw_func(coop_chat_ui_draw);
+    gamelib_set_overlay_scroll_func(coop_chat_ui_on_scroll);
     coop_lite_set_chat_ui_hooks(coop_chat_ui_on_line, coop_chat_ui_set_visible);
     coop_chat_inited = true;
     return true;
@@ -236,6 +254,7 @@ void coop_chat_ui_exit(void)
 {
     coop_lite_set_chat_ui_hooks(NULL, NULL);
     gamelib_set_overlay_draw_func(NULL);
+    gamelib_set_overlay_scroll_func(NULL);
     if (coop_chat_font != TIG_FONT_HANDLE_INVALID) {
         tig_font_destroy(coop_chat_font);
         coop_chat_font = TIG_FONT_HANDLE_INVALID;

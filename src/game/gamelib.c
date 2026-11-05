@@ -811,6 +811,20 @@ void gamelib_set_overlay_draw_func(void (*func)(GameDrawInfo* draw_info))
     gamelib_overlay_draw_func = func;
 }
 
+static void (*gamelib_overlay_scroll_func)(int dx, int dy);
+
+void gamelib_set_overlay_scroll_func(void (*func)(int dx, int dy))
+{
+    gamelib_overlay_scroll_func = func;
+}
+
+void gamelib_overlay_scrolled(int dx, int dy)
+{
+    if (gamelib_overlay_scroll_func != NULL) {
+        gamelib_overlay_scroll_func(dx, dy);
+    }
+}
+
 // 0x402D30
 void gamelib_invalidate_rect(TigRect* rect)
 {
