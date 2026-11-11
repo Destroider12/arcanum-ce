@@ -3100,3 +3100,32 @@ wrote 6.4 MB of a 9.1 MB log — mostly looping torch/fire candy. The one-line
 first failure at that file:line, and at most once a minute after that, with
 a short "repeated N times" reminder. No protocol change.
 
+
+## PT77ac: host crash leaving BMC (stale sector-light object handles)
+
+The host crashed with 0xC0000005 on a map-changing exit from the Black
+Mountain Clan mines (and the same sequence appears to have crashed an
+earlier attempt whose log the launcher did not keep). The stack was
+`teleport_ping` → `map_open_in_game` → `map_flush` → `sector_flush` →
+`sector_cache_evict` → `sector_light_list_reset` →
+`light_unset_flags_internal` → `obj_arrayfield_uint32_set` (read of
+0x37c07).
+
+A same-map portal just before the crash did not flush the map and
+survived. The map-changing jumppoint evicts unlocked sectors and, for
+every light still tagged as object-attached, stops animation and writes
+flags back through `light->obj`. That handle can be stale: it was saved
+in the sector light list and is not a live object-pool handle after the
+object was destroyed or the game was reloaded. `obj_lock` does not check
+validity.
+
+This is not the same bug as e399f4e4 (duplicate list nodes / half-loaded
+slots / `sector_lock` during `cache_reset` on F8) or 4d22c6a2 (drop an
+unreadable .dif). Those remain; this path was still open.
+
+**Fix.** `light_obj_is_live` checks `obj_handle_is_valid` and clears a
+stale handle. `sub_4DD110` (static light) treats a stale handle as
+unattached, so evict frees it instead of writing through it. Flag/art/color
+writers, `light_read`, and `light_write` use the same check. No protocol
+change (stays 47).
+
