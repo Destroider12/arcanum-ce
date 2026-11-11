@@ -14647,6 +14647,8 @@ static unsigned int coop_world_full_ms[8];
 #define COOP_WORLD_FULL_MAX_OIDS 16384
 static ObjectID* coop_world_full_oids[8];
 static int coop_world_full_oid_cnt[8];
+static int64_t coop_world_full_sectors[8][COOP_WORLD_FULL_SECTORS];
+static int coop_world_full_sector_cnt[8];
 static bool coop_world_full_first[8]; /* PT52c */
 
 static void coop_world_full_free(int slot)
@@ -14656,6 +14658,7 @@ static void coop_world_full_free(int slot)
     }
     coop_world_full_oids[slot] = NULL;
     coop_world_full_oid_cnt[slot] = 0;
+    coop_world_full_sector_cnt[slot] = 0;
 }
 
 /* PT60b: breakable scenery the snapshot lists: anything not invulnerable,
@@ -14674,6 +14677,11 @@ static bool coop_world_scenery_listed(int64_t obj, int type)
         || obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) > 0;
 }
 
+static int64_t* coop_world_scope_dst;
+static int* coop_world_scope_n;
+static int coop_world_scope_cap;
+static bool coop_world_scope_cb(Sector* sector);
+
 static bool coop_world_full_snapshot(int slot)
 {
     int64_t obj;
@@ -14682,6 +14690,25 @@ static bool coop_world_full_snapshot(int slot)
 
     coop_world_full_free(slot);
     coop_world_full_first[slot] = true;
+    /* Lock the 3x3 around every PC before we snapshot, then remember exactly
+       those loaded sectors. Emitting a later sector_enumerate (after more
+       sectors lock) marked neighbours for prune without listing their
+       corpses. */
+    {
+        int64_t host_pc = sub_4A2B60(0);
+
+        if (host_pc != OBJ_HANDLE_NULL) {
+            coop_lite_keep_sector(0, obj_field_int64_get(host_pc, OBJ_F_LOCATION));
+        }
+        coop_lite_keep_remote_sectors();
+    }
+    coop_world_scope_dst = coop_world_full_sectors[slot];
+    coop_world_full_sector_cnt[slot] = 0;
+    coop_world_scope_n = &coop_world_full_sector_cnt[slot];
+    coop_world_scope_cap = COOP_WORLD_FULL_SECTORS;
+    sector_enumerate(coop_world_scope_cb);
+    coop_world_scope_dst = NULL;
+    coop_world_scope_n = NULL;
     coop_world_full_oids[slot] = (ObjectID*)MALLOC(sizeof(ObjectID) * COOP_WORLD_FULL_MAX_OIDS);
     if (coop_world_full_oids[slot] == NULL) {
         return false; /* PT52d: caller falls back to the radius reply */
@@ -14720,10 +14747,6 @@ static bool coop_world_full_next(int slot, int* cursor, int64_t* obj_ptr)
     }
     return false;
 }
-
-static int64_t* coop_world_scope_dst;
-static int* coop_world_scope_n;
-static int coop_world_scope_cap;
 
 static bool coop_world_scope_cb(Sector* sector)
 {
@@ -14777,22 +14800,16 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
     /* PT77y: first page of a full snapshot lists every host-loaded sector
        so the client prunes emptied ones that have no object entries. */
     if (full && first) {
-        int64_t scope_ids[COOP_WORLD_FULL_SECTORS];
-        int scope_n = 0;
         int si;
+        int scope_n = coop_world_full_sector_cnt[slot];
 
-        coop_world_scope_dst = scope_ids;
-        coop_world_scope_n = &scope_n;
-        coop_world_scope_cap = COOP_WORLD_FULL_SECTORS;
-        sector_enumerate(coop_world_scope_cb);
-        coop_world_scope_dst = NULL;
-        coop_world_scope_n = NULL;
         for (si = 0; si < scope_n; si++) {
             CoopWorldEntry* e = &out->entries[out->count];
 
             memset(e, 0, sizeof(*e));
             e->kind = COOP_WORLD_SECTOR_SCOPE;
-            e->loc = LOCATION_MAKE(SECTOR_X(scope_ids[si]) * 64, SECTOR_Y(scope_ids[si]) * 64);
+            e->loc = LOCATION_MAKE(SECTOR_X(coop_world_full_sectors[slot][si]) * 64,
+                SECTOR_Y(coop_world_full_sectors[slot][si]) * 64);
             if (++out->count == COOP_WORLD_CHUNK) {
                 out->flags = COOP_WORLD_F_FULL;
                 coop_lite_world_flush(out, slot, false, &first);
@@ -15330,8 +15347,9 @@ static int coop_lite_world_prune(void)
 {
     int64_t pc = player_get_local_pc_obj();
     int64_t center;
-    int64_t doomed[256];
+    int64_t doomed[2048];
     int num = 0;
+    int total = 0;
     int64_t obj;
     int iter;
     int i;
@@ -15343,6 +15361,8 @@ static int coop_lite_world_prune(void)
     if (coop_world_rx_full && coop_world_rx_sector_overflow) {
         return 0;
     }
+again:
+    num = 0;
     if (obj_inst_first(&obj, &iter)) {
         do {
             unsigned int flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
@@ -15357,7 +15377,7 @@ static int coop_lite_world_prune(void)
                 if (!coop_world_npc_seen->overflow
                     && coop_world_prune_in_scope(obj_field_int64_get(obj, OBJ_F_LOCATION), center)) {
                     oid = obj_get_id(obj);
-                    if (!coop_oid_set_has(coop_world_npc_seen, (const uint8_t*)&oid) && num < 256) {
+                    if (!coop_oid_set_has(coop_world_npc_seen, (const uint8_t*)&oid) && num < 2048) {
                         doomed[num++] = obj;
                     }
                 }
@@ -15379,7 +15399,7 @@ static int coop_lite_world_prune(void)
                 continue;
             }
             oid = obj_get_id(obj);
-            if (!coop_oid_set_has(coop_world_seen, (const uint8_t*)&oid) && num < 256) {
+            if (!coop_oid_set_has(coop_world_seen, (const uint8_t*)&oid) && num < 2048) {
                 doomed[num++] = obj;
             }
         } while (obj_inst_next(&obj, &iter));
@@ -15403,7 +15423,11 @@ static int coop_lite_world_prune(void)
         }
         object_destroy(doomed[i]);
     }
-    return num;
+    total += num;
+    if (num == 2048) {
+        goto again; /* more than one batch of leftovers */
+    }
+    return total;
 }
 #endif
 
