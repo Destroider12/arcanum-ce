@@ -39,12 +39,14 @@ static void crash_out(const char* fmt, ...)
     va_start(args, fmt);
     vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
-    tig_debug_crash_write(line);
+    /* PT77q: write crash-*.txt first. On STATUS_HEAP_CORRUPTION (0xC0000374)
+       tig_debug_crash_write may block on a CRT lock before the line is kept. */
     if (crash_txt != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
 
         WriteFile(crash_txt, line, (DWORD)strlen(line), &written, NULL);
     }
+    tig_debug_crash_write(line);
 }
 
 static void crash_exe_dir(char* out, size_t size)
