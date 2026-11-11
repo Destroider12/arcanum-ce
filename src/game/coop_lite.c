@@ -507,6 +507,9 @@ typedef struct CoopPendingOffer {
 
 /* Host: token hash of each bound slot's player (for parking on leave). */
 static char coop_map_wipe_path[260]; /* PT63 */
+static char coop_carry_mdy_path[260]; /* PT77aa: carried mobile.mdy, outside the wipe dir */
+static bool coop_carry_mdy_started; /* PT77aa */
+#define COOP_LITE_CARRY_MDY "Save\\Current\\coop_lite_carry.mdy"
 static uint64_t coop_slot_token_hash[8];
 
 static CoopPendingOffer coop_pending_offers[8];
@@ -7502,6 +7505,8 @@ void coop_lite_handle_session_sync(PacketCoopSessionSync* pkt)
                    handles, then obj_find_remove on NULL in map_open). Wipe it
                    between map_close and the reload instead. */
                 snprintf(coop_map_wipe_path, sizeof(coop_map_wipe_path), "%s", path);
+                coop_carry_mdy_path[0] = '\0';
+                coop_carry_mdy_started = false;
                 tig_debug_printf("CoopLite: PT63 stale state of the open map %s - wiped after it closes\n", path);
             } else if (tig_file_is_directory(path)) {
                 tig_debug_printf("CoopLite: clearing stale client map state %s\n", path);
@@ -7521,6 +7526,8 @@ void coop_lite_map_open_after_close(const char* save_path)
 #ifdef COOP_LITE_TEST_STUBS
     (void)save_path;
     coop_map_wipe_path[0] = '\0';
+    coop_carry_mdy_path[0] = '\0';
+    coop_carry_mdy_started = false;
 #else
     if (save_path == NULL || coop_map_wipe_path[0] == '\0') {
         return;
@@ -7528,8 +7535,31 @@ void coop_lite_map_open_after_close(const char* save_path)
     if (SDL_strcasecmp(save_path, coop_map_wipe_path) == 0) {
         tig_debug_printf("CoopLite: PT63 clearing stale client map state %s (map closed)\n", save_path);
         tig_file_empty_directory(save_path);
+        /* PT77aa: teleport already wrote the carried local PC (and anything
+           else on the teleport list) to a side file. This wipe would have
+           deleted dest\mobile.mdy, and finish_sync then found no local PC
+           (client log: "PT72 finish sync: no local PC", then vanish / menu). */
+        if (coop_carry_mdy_started && coop_carry_mdy_path[0] != '\0') {
+            char dest[TIG_MAX_PATH];
+            TigFileInfo info;
+
+            snprintf(dest, sizeof(dest), "%s\\mobile.mdy", save_path);
+            memset(&info, 0, sizeof(info));
+            if (tig_file_exists(coop_carry_mdy_path, &info)) {
+                tig_file_remove(dest);
+                if (tig_file_rename(coop_carry_mdy_path, dest) == 0
+                    || tig_file_copy(coop_carry_mdy_path, dest)) {
+                    tig_file_remove(coop_carry_mdy_path);
+                    tig_debug_printf("CoopLite: PT77aa restored carried mobile.mdy after the map wipe\n");
+                } else {
+                    tig_debug_printf("CoopLite: PT77aa failed to restore carried mobile.mdy after the map wipe\n");
+                }
+            }
+        }
     }
     coop_map_wipe_path[0] = '\0';
+    coop_carry_mdy_path[0] = '\0';
+    coop_carry_mdy_started = false;
 #endif
 }
 
@@ -20123,6 +20153,67 @@ int coop_lite_dialog_chat_route(bool coop_enabled, bool textedit_focused, bool i
         return 1;
     }
     return 0;
+}
+
+/* PT77aa (pure; tests): a post-close wipe of the destination map folder
+   would delete the mobile.mdy teleport just wrote with the carried PC. */
+bool coop_lite_carry_mdy_needs_side_file(const char* dst_map_dir, const char* wipe_dir)
+{
+    if (dst_map_dir == NULL || dst_map_dir[0] == '\0'
+        || wipe_dir == NULL || wipe_dir[0] == '\0') {
+        return false;
+    }
+#ifdef COOP_LITE_TEST_STUBS
+    return strcasecmp(dst_map_dir, wipe_dir) == 0;
+#else
+    return SDL_strcasecmp(dst_map_dir, wipe_dir) == 0;
+#endif
+}
+
+void coop_lite_carry_mdy_side_path(char* out, size_t out_sz)
+{
+    if (out == NULL || out_sz == 0) {
+        return;
+    }
+    snprintf(out, out_sz, "%s", COOP_LITE_CARRY_MDY);
+}
+
+const char* coop_lite_teleport_mobile_mdy_path(const char* dst_map_dir, char* buf, size_t buf_sz)
+{
+    if (coop_lite_carry_mdy_needs_side_file(dst_map_dir, coop_map_wipe_path)) {
+        coop_lite_carry_mdy_side_path(coop_carry_mdy_path, sizeof(coop_carry_mdy_path));
+#ifndef COOP_LITE_TEST_STUBS
+        if (!coop_carry_mdy_started) {
+            tig_file_mkdir_ex("Save\\Current");
+            tig_file_remove(coop_carry_mdy_path);
+            coop_carry_mdy_started = true;
+        }
+#endif
+#ifdef COOP_LITE_TEST_STUBS
+        coop_carry_mdy_started = true;
+#endif
+        return coop_carry_mdy_path;
+    }
+    if (buf == NULL || buf_sz == 0) {
+        return COOP_LITE_CARRY_MDY;
+    }
+    if (dst_map_dir == NULL || dst_map_dir[0] == '\0') {
+        snprintf(buf, buf_sz, "mobile.mdy");
+        return buf;
+    }
+    snprintf(buf, buf_sz, "%s\\mobile.mdy", dst_map_dir);
+    return buf;
+}
+
+void coop_lite_test_set_map_wipe_path(const char* path)
+{
+    if (path == NULL || path[0] == '\0') {
+        coop_map_wipe_path[0] = '\0';
+    } else {
+        snprintf(coop_map_wipe_path, sizeof(coop_map_wipe_path), "%s", path);
+    }
+    coop_carry_mdy_path[0] = '\0';
+    coop_carry_mdy_started = false;
 }
 
 /* PT72 (pure; tests): a SESSION_SYNC that found no local PC is retried

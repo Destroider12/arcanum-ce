@@ -1465,6 +1465,13 @@ int coop_lite_world_pick_candidate(const int* types, const bool* dead, const uns
 void coop_lite_host_object_destroyed(int64_t obj); /* PT63 */
 void coop_lite_map_open_after_close(const char* save_path); /* PT63 */
 extern bool coop_lite_world_hooks_on; /* PT63 */
+/* PT77aa: true when a post-close wipe of wipe_dir would delete dst_map_dir\mobile.mdy
+   (the file teleport just wrote with the carried local PC). */
+bool coop_lite_carry_mdy_needs_side_file(const char* dst_map_dir, const char* wipe_dir);
+void coop_lite_carry_mdy_side_path(char* out, size_t out_sz);
+/* While that wipe is pending, write carried objects here instead of dst_map_dir\mobile.mdy. */
+const char* coop_lite_teleport_mobile_mdy_path(const char* dst_map_dir, char* buf, size_t buf_sz);
+void coop_lite_test_set_map_wipe_path(const char* path); /* tests */
 /* PT53e: a coop PC portrait is drawn from its engine portrait number when
    it has one (Players\<oid>.bmp exists only on the machine that made it). */
 bool coop_lite_portrait_use_number(bool coop, int num, bool alt_file_found);

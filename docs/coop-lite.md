@@ -3065,3 +3065,25 @@ flags 0x02) refuses before any gold/ammo transfer, and `item_drop_ex` on
 the host is the backstop. Vanilla single-player is unchanged. Own-item
 drops, companion inventory, loot and steal still work. No protocol change.
 
+
+## PT77aa: client vanishes after the host reloads a save
+
+After a host save load, the already-connected client got `COOP_PARTY_RESYNC`,
+sent a CHAR_OFFER, and immediately received SESSION_SYNC for the same map it
+was standing on. The client force-reloads that map so stale NPCs/objects do
+not linger (PT37), and PT63 empties `Save\\Current\\maps\\<map>` *after*
+`map_close` (wiping it while the map is still open crashed the client).
+
+Teleport writes the carried local PC into `dest\\mobile.mdy` *before*
+`map_close`. The PT63 wipe then deleted that file, so `map_open` loaded a
+pristine map with no PC. `PT72 finish sync` retried "no local PC" and either
+gave up or the player Escaped to the main menu (which tears the session down).
+A manual Join Host from ShopMap worked, because that is a *different* map:
+the destination folder is emptied *before* teleport writes `mobile.mdy`.
+
+**Fix.** While a post-close wipe of the destination folder is pending,
+teleport writes the carried objects to `Save\\Current\\coop_lite_carry.mdy`
+(outside the wiped directory). After the wipe, that file is moved into
+`dest\\mobile.mdy` and the local PC is loaded as usual. `finish_sync` can
+then apply SESSION_SYNC and, when `COOP_SYNC_F_REJOINED` is set, request the
+host's parked copy of the PC. No protocol change (stays 47).

@@ -2850,6 +2850,52 @@ int main(int argc, char** argv)
         }
         printf("PT77z throw intent + projectile fx OK\n");
     }
+    /* PT77aa: same-map host-reload wipe must not delete the carried PC's mobile.mdy. */
+    {
+        char side[260];
+        char buf[260];
+        const char* p;
+        const char* wipe = "Save\\Current\\maps\\BMC";
+
+        if (!coop_lite_carry_mdy_needs_side_file(wipe, wipe)
+            || coop_lite_carry_mdy_needs_side_file(wipe, "Save\\Current\\maps\\Other")
+            || coop_lite_carry_mdy_needs_side_file(wipe, "")
+            || coop_lite_carry_mdy_needs_side_file(NULL, wipe)
+            || coop_lite_carry_mdy_needs_side_file(wipe, NULL)
+            || !coop_lite_carry_mdy_needs_side_file("save\\current\\maps\\bmc", wipe)) {
+            fprintf(stderr, "PT77aa needs_side_file\n");
+            return 1;
+        }
+        coop_lite_carry_mdy_side_path(side, sizeof(side));
+        if (side[0] == '\0'
+            || strstr(side, "maps\\BMC") != NULL
+            || strstr(side, "maps/BMC") != NULL
+            || strstr(side, "mobile.mdy") != NULL) {
+            fprintf(stderr, "PT77aa side path inside wipe dir: %s\n", side);
+            return 1;
+        }
+        coop_lite_test_set_map_wipe_path(NULL);
+        p = coop_lite_teleport_mobile_mdy_path(wipe, buf, sizeof(buf));
+        if (p == NULL || strstr(p, "mobile.mdy") == NULL || strstr(p, "BMC") == NULL) {
+            fprintf(stderr, "PT77aa default mdy path %s\n", p ? p : "(null)");
+            return 1;
+        }
+        coop_lite_test_set_map_wipe_path(wipe);
+        p = coop_lite_teleport_mobile_mdy_path(wipe, buf, sizeof(buf));
+        if (p == NULL || strcmp(p, side) != 0) {
+            fprintf(stderr, "PT77aa pending wipe should use side file, got %s\n", p ? p : "(null)");
+            coop_lite_test_set_map_wipe_path(NULL);
+            return 1;
+        }
+        p = coop_lite_teleport_mobile_mdy_path("Save\\Current\\maps\\Other", buf, sizeof(buf));
+        if (p == NULL || strstr(p, "Other") == NULL || strstr(p, "mobile.mdy") == NULL) {
+            fprintf(stderr, "PT77aa other map should write its own mdy, got %s\n", p ? p : "(null)");
+            coop_lite_test_set_map_wipe_path(NULL);
+            return 1;
+        }
+        coop_lite_test_set_map_wipe_path(NULL);
+        printf("PT77aa carry mdy around PT63 wipe OK\n");
+    }
     return 0;
     }
 }

@@ -476,8 +476,11 @@ bool sub_4D39A0(TeleportData* teleport_data)
             obj_field_int32_set(node->obj, OBJ_F_OFFSET_X, 0);
             obj_field_int32_set(node->obj, OBJ_F_OFFSET_Y, 0);
 
-            snprintf(path, sizeof(path), "%s\\mobile.mdy", dst_map_path);
-            stream = tig_file_fopen(path, "ab");
+            /* PT77aa: if a post-close wipe of this map folder is pending,
+               write the carried PC to a side file so the wipe cannot delete it. */
+            stream = tig_file_fopen(
+                coop_lite_teleport_mobile_mdy_path(dst_map_path, path, sizeof(path)),
+                "ab");
             if (stream == NULL) {
                 return false;
             }
