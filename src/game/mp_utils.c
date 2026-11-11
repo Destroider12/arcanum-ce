@@ -963,7 +963,7 @@ void mp_handle_packet60(PacketPlayerSpellMaintainAdd* pkt)
         return;
     }
     if (pkt->player == sub_529520()) {
-        ui_spell_maintain_add(pkt->mt_id);
+        ui_spell_maintain_add_for_spell(pkt->mt_id, pkt->spell_id);
     }
 }
 
@@ -1319,7 +1319,7 @@ _Static_assert(sizeof(PacketPerformRepairService) == 88, "PacketPerformRepairSer
 _Static_assert(sizeof(PacketPlaySound) == 40, "PacketPlaySound wire layout");
 _Static_assert(sizeof(PacketPlayerCastSpell) == 232, "PacketPlayerCastSpell wire layout");
 _Static_assert(sizeof(PacketPlayerRequestCastSpell) == 232, "PacketPlayerRequestCastSpell wire layout");
-_Static_assert(sizeof(PacketPlayerSpellMaintainAdd) == 12, "PacketPlayerSpellMaintainAdd wire layout");
+_Static_assert(sizeof(PacketPlayerSpellMaintainAdd) == 16, "PacketPlayerSpellMaintainAdd wire layout");
 _Static_assert(sizeof(PacketPlayerSpellMaintainEnd) == 12, "PacketPlayerSpellMaintainEnd wire layout");
 _Static_assert(sizeof(PacketSummon) == 224, "PacketSummon wire layout");
 _Static_assert(sizeof(PacketUpdateInven) == 32, "PacketUpdateInven wire layout");

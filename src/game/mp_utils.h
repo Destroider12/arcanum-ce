@@ -225,10 +225,11 @@ typedef struct PacketPlayerSpellMaintainAdd {
     /* 0000 */ int type;
     /* 0004 */ int mt_id;
     /* 0008 */ int player;
+    /* 000C */ int spell_id; /* PT77z: host spell; client icon must not use a drifted mt_id */
 } PacketPlayerSpellMaintainAdd;
 
 // Serializeable.
-static_assert(sizeof(PacketPlayerSpellMaintainAdd) == 0xC, "wrong size");
+static_assert(sizeof(PacketPlayerSpellMaintainAdd) == 0x10, "wrong size");
 
 typedef struct PacketPlayerSpellMaintainEnd {
     /* 0000 */ int type;

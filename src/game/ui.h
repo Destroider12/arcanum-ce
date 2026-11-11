@@ -242,6 +242,9 @@ void sub_460410(int64_t a1, int64_t a2);
 int ui_is_in_dialog(int64_t obj);
 void ui_spell_add(int64_t obj, int spell);
 bool ui_spell_maintain_add(int mt_id);
+/* PT77z: same, but the icon is taken from spell_id when it is in range. */
+bool ui_spell_maintain_add_for_spell(int mt_id, int spell_id);
+int ui_spell_maintain_take_spell(void);
 void ui_spell_maintain_end(int mt_id);
 void ui_spell_maintain_refresh(void);
 void sub_4604F0(int64_t a1, int64_t a2);

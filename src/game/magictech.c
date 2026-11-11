@@ -3992,6 +3992,7 @@ bool sub_4547F0(TimeEvent* timeevent, DateTime* datetime)
             pkt.type = 60;
             pkt.mt_id = magictech_cur_run_info->id;
             pkt.player = player;
+            pkt.spell_id = magictech_cur_run_info->spell;
 
             tig_net_send_app_all(&pkt, sizeof(pkt));
         }

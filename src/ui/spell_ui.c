@@ -360,7 +360,17 @@ bool spell_ui_maintain_add(int mt_id)
 
     stru_5CB3A8[candidate].mt_id = mt_id;
     stru_5CB3A8[candidate].field_4 = 1;
-    intgame_spell_maintain_art_set(candidate, sub_458AE0(mt_id));
+    {
+        int spell_id = ui_spell_maintain_take_spell();
+        tig_art_id_t art_id = TIG_ART_ID_INVALID;
+
+        if (spell_id >= 0 && spell_id < SPELL_COUNT
+            && tig_art_interface_id_create(spell_icon(spell_id), 0, 0, 0, &art_id) == TIG_OK) {
+            intgame_spell_maintain_art_set(candidate, art_id);
+        } else {
+            intgame_spell_maintain_art_set(candidate, sub_458AE0(mt_id));
+        }
+    }
 
     return true;
 }
