@@ -4232,36 +4232,51 @@ bool anim_eye_candy_interrupt(int64_t obj, tig_art_id_t eye_candy_id, int mt_id)
         return true;
     }
 
-    if (!anim_find_first_of_type(obj, AG_EYE_CANDY, &cur_anim_id)) {
-        return true;
+    {
+        static const int goal_types[] = {
+            AG_EYE_CANDY,
+            AG_EYE_CANDY_REVERSE,
+            AG_EYE_CANDY_CALLBACK,
+            AG_EYE_CANDY_REVERSE_CALLBACK,
+            AG_EYE_CANDY_END_CALLBACK,
+            AG_EYE_CANDY_REVERSE_END_CALLBACK,
+            AG_EYE_CANDY_FIRE_DMG,
+            AG_EYE_CANDY_REVERSE_FIRE_DMG,
+        };
+        int gi;
+
+        num = tig_art_num_get(eye_candy_id);
+        for (gi = 0; gi < (int)(sizeof(goal_types) / sizeof(goal_types[0])); gi++) {
+            anim_id_init(&prev_anim_id);
+            if (!anim_find_first_of_type(obj, goal_types[gi], &cur_anim_id)) {
+                continue;
+            }
+            do {
+                if (anim_id_is_equal(&prev_anim_id, &cur_anim_id)) {
+                    break;
+                }
+
+                run_info = &(anim_run_info[cur_anim_id.slot_num]);
+
+                ASSERT(run_info->current_goal > -1); // 2839, "pRunInfo->current_goal > -1"
+                ASSERT(run_info->current_goal < 14); // 2840, "pRunInfo->current_goal < ANIM_GOAL_MAX_SUBNODES"
+
+                if (run_info->current_goal > -1 && run_info->current_goal < 14) {
+                    if (run_info->cur_stack_data == NULL) {
+                        run_info->cur_stack_data = &(run_info->goals[run_info->current_goal]);
+                    }
+
+                    if (run_info->cur_stack_data->params[AGDATA_SPELL_DATA].data == mt_id
+                        && tig_art_num_get(run_info->cur_stack_data->params[AGDATA_ANIM_ID].data) == num
+                        && anim_interrupt(&(run_info->id), PRIORITY_HIGHEST)) {
+                        return true;
+                    }
+                }
+
+                prev_anim_id = cur_anim_id;
+            } while (anim_find_next_of_type(obj, goal_types[gi], &cur_anim_id));
+        }
     }
-
-    num = tig_art_num_get(eye_candy_id);
-
-    do {
-        if (anim_id_is_equal(&prev_anim_id, &cur_anim_id)) {
-            break;
-        }
-
-        run_info = &(anim_run_info[cur_anim_id.slot_num]);
-
-        ASSERT(run_info->current_goal > -1); // 2839, "pRunInfo->current_goal > -1"
-        ASSERT(run_info->current_goal < 14); // 2840, "pRunInfo->current_goal < ANIM_GOAL_MAX_SUBNODES"
-
-        if (run_info->current_goal > -1 && run_info->current_goal < 14) {
-            if (run_info->cur_stack_data == NULL) {
-                run_info->cur_stack_data = &(run_info->goals[run_info->current_goal]);
-            }
-
-            if (run_info->cur_stack_data->params[AGDATA_SPELL_DATA].data == mt_id
-                && tig_art_num_get(run_info->cur_stack_data->params[AGDATA_ANIM_ID].data) == num
-                && anim_interrupt(&(run_info->id), PRIORITY_HIGHEST)) {
-                break;
-            }
-        }
-
-        prev_anim_id = cur_anim_id;
-    } while (anim_find_next_of_type(obj, AG_EYE_CANDY, &cur_anim_id));
 
     return true;
 }

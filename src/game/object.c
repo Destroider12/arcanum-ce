@@ -2393,11 +2393,11 @@ void object_set_light(int64_t obj, unsigned int flags, tig_art_id_t aid, tig_col
 {
     Light* light;
 
-    if (aid == TIG_ART_ID_INVALID) {
-        light = (Light*)obj_field_ptr_get(obj, OBJ_F_LIGHT_HANDLE);
-        if (light != NULL) {
-            light_stop_animating(light);
-        }
+    light = (Light*)obj_field_ptr_get(obj, OBJ_F_LIGHT_HANDLE);
+    if (light != NULL
+        && (aid == TIG_ART_ID_INVALID
+            || (tig_art_id_t)obj_field_int32_get(obj, OBJ_F_LIGHT_AID) != aid)) {
+        light_stop_animating(light);
     }
 
     obj_field_int32_set(obj, OBJ_F_LIGHT_FLAGS, flags);
@@ -2466,11 +2466,11 @@ void object_set_overlay_light(int64_t obj, int index, unsigned int flags, tig_ar
 {
     Light* light;
 
-    if (aid == TIG_ART_ID_INVALID) {
-        light = (Light*)obj_arrayfield_ptr_get(obj, OBJ_F_OVERLAY_LIGHT_HANDLES, index);
-        if (light != NULL) {
-            light_stop_animating(light);
-        }
+    light = (Light*)obj_arrayfield_ptr_get(obj, OBJ_F_OVERLAY_LIGHT_HANDLES, index);
+    if (light != NULL
+        && (aid == TIG_ART_ID_INVALID
+            || (tig_art_id_t)obj_arrayfield_uint32_get(obj, OBJ_F_OVERLAY_LIGHT_AID, index) != aid)) {
+        light_stop_animating(light);
     }
 
     obj_arrayfield_uint32_set(obj, OBJ_F_OVERLAY_LIGHT_FLAGS, index, flags);
