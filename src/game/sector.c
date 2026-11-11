@@ -1734,16 +1734,16 @@ bool sector_load_game(int64_t id, Sector* sector)
                 tig_debug_printf("Error loading objects with differences from files %s and %s\n", sec_path, dif_path);
                 tig_file_fclose(sec_stream);
                 tig_file_fclose(dif_stream);
-                /* PT30: a co-op client with a truncated .dif retried this
-                   load every frame (hundreds of failed locks, leaked
-                   half-loaded objects, "ran out of animation slots": the
-                   FPS collapse). The host owns the world: drop the bad
-                   .dif so the next lock loads the clean sector. */
-                if (tig_net_is_active() && !tig_net_is_host() && tig_net_is_coop_enabled()) {
-                    tig_debug_printf("CoopLite: bad sector .dif %s removed (sector reloads from the map)\n", dif_path);
-                    tig_file_remove(dif_path);
-                    sector_coop_dif_removed = true;
-                }
+                /* PT30: a truncated .dif retried this load every frame
+                   (hundreds of failed locks, leaked half-loaded objects,
+                   "ran out of animation slots": the FPS collapse). Drop
+                   the unreadable .dif so the next lock loads the clean
+                   .sec. The previous coop-client-only guard was skipped
+                   on some in-session client loads (22 failed locks in
+                   one Tarant revisit, no removal). */
+                tig_debug_printf("CoopLite: bad sector .dif %s removed (sector reloads from the map)\n", dif_path);
+                tig_file_remove(dif_path);
+                sector_coop_dif_removed = true;
                 return false;
             }
         } else {
