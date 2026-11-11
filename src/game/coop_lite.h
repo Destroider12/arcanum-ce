@@ -1654,6 +1654,8 @@ bool coop_lite_follow_delta(int64_t dx, int64_t dy, int64_t zone_x, int64_t zone
 #define COOP_STORY_GQUESTS 1000 /* global quest states, index == number - 1000 */
 #define COOP_STORY_RUMORS 2000 /* rumor index == number - 1000 */
 #define COOP_STORY_REPS 512
+#define COOP_STORY_GFLAGS 100 /* script global flags; must match MAX_GLOBAL_FLAGS */
+#define COOP_STORY_GVARS 2000 /* script global vars; must match MAX_GLOBAL_VARS */
 #define COOP_STORY_GQUEST_DEFAULT 2 /* QUEST_STATE_ACCEPTED: nothing to send */
 #define COOP_STORY_CHUNK 2048
 #define COOP_STORY_MAX_CHUNKS 32
@@ -1668,6 +1670,8 @@ typedef struct CoopStory {
     int n_rep;
     unsigned int rep[COOP_STORY_REPS];
     uint64_t rep_ts[COOP_STORY_REPS];
+    unsigned char gflag[COOP_STORY_GFLAGS]; /* PT77y: sparse-encoded 0/1 */
+    int gvar[COOP_STORY_GVARS]; /* PT77y: sparse non-zero */
 } CoopStory;
 
 typedef struct PacketCoopStorySync {

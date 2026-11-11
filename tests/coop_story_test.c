@@ -53,6 +53,10 @@ static void fill_some(CoopStory* s)
     s->rep_ts[0] = 111;
     s->rep[1] = 9;
     s->rep_ts[1] = 222;
+    s->gflag[3] = 1;
+    s->gflag[99] = 1;
+    s->gvar[0] = 42;
+    s->gvar[1999] = -7;
 }
 
 static void fill_max(CoopStory* s)
@@ -87,15 +91,21 @@ static int test_roundtrip(void)
     CHECK(n > 0 && n < 400, "small snapshot is small");
     CHECK(coop_story_decode(g_blob, n, &g_b), "decode");
     CHECK(memcmp(&g_a, &g_b, sizeof(g_a)) == 0, "round trip identical");
+    CHECK(g_b.gflag[3] == 1 && g_b.gflag[99] == 1 && g_b.gflag[0] == 0, "sparse flags");
+    CHECK(g_b.gvar[0] == 42 && g_b.gvar[1999] == -7 && g_b.gvar[1] == 0, "sparse vars");
     CHECK(coop_story_encode(&g_a, g_blob2, n - 1) == 0, "cap too small -> 0");
     CHECK(coop_story_encode(&g_a, g_blob2, sizeof(g_blob2)) == n
             && memcmp(g_blob, g_blob2, n) == 0,
         "deterministic");
     coop_story_clear(&g_a);
     n = coop_story_encode(&g_a, g_blob, sizeof(g_blob));
-    CHECK(n == 4 + 2 * 4, "empty story = header + 4 counts");
+    CHECK(n == 4 + 2 * 6, "empty story = header + 6 counts");
     CHECK(coop_story_decode(g_blob, n, &g_b) && memcmp(&g_a, &g_b, sizeof(g_a)) == 0, "empty round trip");
     CHECK(g_b.gquest[0] == COOP_STORY_GQUEST_DEFAULT, "global quests default to accepted");
+    /* PT77y: a pre-47 blob (no trailing gf/gv counts) still decodes. */
+    CHECK(n >= 4 && coop_story_decode(g_blob, n - 4, &g_b)
+            && g_b.gflag[0] == 0 && g_b.gvar[0] == 0,
+        "legacy blob without gf/gv");
     return 0;
 }
 
@@ -166,6 +176,7 @@ static int test_merge(void)
     CHECK(g_a.rumor_ts[0] == 500 && g_a.rumor_ts[3] == 42 && g_a.rumor_ts[1999] == 1, "rumors unioned, earliest");
     CHECK(g_a.n_rep == 3 && g_a.rep[2] == 4 && g_a.rep_ts[1] == 222, "reputations unioned");
     CHECK(g_a.gquest[5] == 4 && g_a.rumor_quelled[7] == 1, "globals untouched");
+    CHECK(g_a.gflag[3] == 1 && g_a.gvar[0] == 42, "gf/gv not merged (host copy kept)");
     /* a botched src wins a tie */
     coop_story_clear(&g_b);
     coop_story_clear(&g_c);

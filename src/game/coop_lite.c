@@ -2725,6 +2725,12 @@ bool coop_lite_story_write_blocked(void)
     return tig_net_is_active() && !tig_net_is_host() && coop_story_applying == 0;
 }
 
+#if defined(MAX_GLOBAL_FLAGS) && defined(MAX_GLOBAL_VARS)
+#if MAX_GLOBAL_FLAGS != COOP_STORY_GFLAGS || MAX_GLOBAL_VARS != COOP_STORY_GVARS
+#error "COOP_STORY_GFLAGS / GVARS must match script.h"
+#endif
+#endif
+
 void coop_story_clear(CoopStory* s)
 {
     memset(s, 0, sizeof(*s));
@@ -2778,12 +2784,29 @@ static uint64_t coop_story_get64(const unsigned char** p)
     return x;
 }
 
+static void coop_story_put_i32(unsigned char** p, int v)
+{
+    memcpy(*p, &v, 4);
+    *p += 4;
+}
+
+static int coop_story_get_i32(const unsigned char** p)
+{
+    int x;
+
+    memcpy(&x, *p, 4);
+    *p += 4;
+    return x;
+}
+
 size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap)
 {
     unsigned char* p = out;
     unsigned int nq = 0;
     unsigned int ng = 0;
     unsigned int nr = 0;
+    unsigned int ngf;
+    unsigned int ngv;
     unsigned int n;
     int i;
     int nrep;
@@ -2799,8 +2822,17 @@ size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap)
         nr += s->rumor_ts[i] != 0 || s->rumor_quelled[i] != 0;
     }
     nrep = s->n_rep < 0 ? 0 : (s->n_rep > COOP_STORY_REPS ? COOP_STORY_REPS : s->n_rep);
+    ngf = 0;
+    ngv = 0;
+    for (i = 0; i < COOP_STORY_GFLAGS; i++) {
+        ngf += s->gflag[i] != 0;
+    }
+    for (i = 0; i < COOP_STORY_GVARS; i++) {
+        ngv += s->gvar[i] != 0;
+    }
     need = 4 + 2 + (size_t)nq * COOP_STORY_REC + 2 + (size_t)ng * 4 + 2 + (size_t)nr * COOP_STORY_REC
-        + 2 + (size_t)nrep * COOP_STORY_REC;
+        + 2 + (size_t)nrep * COOP_STORY_REC
+        + 2 + (size_t)ngf * 2 + 2 + (size_t)ngv * 6;
     if (need > cap) {
         return 0;
     }
@@ -2833,6 +2865,19 @@ size_t coop_story_encode(const CoopStory* s, unsigned char* out, size_t cap)
     for (i = 0; i < nrep; i++) {
         coop_story_put32(&p, s->rep[i]);
         coop_story_put64(&p, s->rep_ts[i]);
+    }
+    coop_story_put16(&p, ngf);
+    for (i = 0; i < COOP_STORY_GFLAGS; i++) {
+        if (s->gflag[i] != 0) {
+            coop_story_put16(&p, (unsigned int)i);
+        }
+    }
+    coop_story_put16(&p, ngv);
+    for (i = 0; i < COOP_STORY_GVARS; i++) {
+        if (s->gvar[i] != 0) {
+            coop_story_put16(&p, (unsigned int)i);
+            coop_story_put_i32(&p, s->gvar[i]);
+        }
     }
     return (size_t)(p - out);
 }
@@ -2905,15 +2950,50 @@ bool coop_story_decode(const unsigned char* blob, size_t size, CoopStory* s)
         return false;
     }
     n = coop_story_get16(&p);
-    if (n > COOP_STORY_REPS || (size_t)(end - p) != (size_t)n * COOP_STORY_REC) {
-        return false; /* also: no trailing bytes */
+    if (n > COOP_STORY_REPS || (size_t)(end - p) < (size_t)n * COOP_STORY_REC) {
+        return false;
     }
     for (i = 0; i < n; i++) {
         s->rep[i] = coop_story_get32(&p);
         s->rep_ts[i] = coop_story_get64(&p);
     }
     s->n_rep = (int)n;
-    return true;
+    /* PT77y: pre-47 blobs end here; new blobs append sparse gf / gv. */
+    if (p == end) {
+        return true;
+    }
+    if (end - p < 2) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_GFLAGS || (size_t)(end - p) < (size_t)n * 2) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int idx = coop_story_get16(&p);
+
+        if (idx >= COOP_STORY_GFLAGS) {
+            return false;
+        }
+        s->gflag[idx] = 1;
+    }
+    if (end - p < 2) {
+        return false;
+    }
+    n = coop_story_get16(&p);
+    if (n > COOP_STORY_GVARS || (size_t)(end - p) < (size_t)n * 6) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int idx = coop_story_get16(&p);
+        int val = coop_story_get_i32(&p);
+
+        if (idx >= COOP_STORY_GVARS) {
+            return false;
+        }
+        s->gvar[idx] = val;
+    }
+    return p == end;
 }
 
 unsigned int coop_story_blob_sig(const unsigned char* blob, size_t size)
@@ -9599,6 +9679,12 @@ static void coop_story_read_globals(CoopStory* s)
     for (i = 0; i < COOP_STORY_RUMORS; i++) {
         s->rumor_quelled[i] = rumor_qstate_raw_get(i) ? 1 : 0;
     }
+    for (i = 0; i < COOP_STORY_GFLAGS; i++) {
+        s->gflag[i] = script_global_flag_get(i) ? 1 : 0;
+    }
+    for (i = 0; i < COOP_STORY_GVARS; i++) {
+        s->gvar[i] = script_global_var_get(i);
+    }
 }
 
 static void coop_story_send_to(int slot, const unsigned char* blob, size_t size)
@@ -9743,6 +9829,21 @@ static bool coop_story_apply_local(const CoopStory* s)
             obj_arrayfield_int64_set(pc, OBJ_F_PC_REPUTATION_TS_IDX, i, (int64_t)s->rep_ts[i]);
             changed++;
             added += i >= cur;
+        }
+    }
+    /* PT77y: raw flag/var writes only; script_global_* does not run scripts. */
+    for (i = 0; i < COOP_STORY_GFLAGS; i++) {
+        int want = s->gflag[i] != 0;
+
+        if (script_global_flag_get(i) != want) {
+            script_global_flag_set(i, want);
+            changed++;
+        }
+    }
+    for (i = 0; i < COOP_STORY_GVARS; i++) {
+        if (script_global_var_get(i) != s->gvar[i]) {
+            script_global_var_set(i, s->gvar[i]);
+            changed++;
         }
     }
 
