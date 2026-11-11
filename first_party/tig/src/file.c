@@ -2248,6 +2248,10 @@ static bool tig_file_overlay_hides(const TigFileRepository* repo, const char* pa
         || (repo->type & TIG_FILE_REPOSITORY_DIRECTORY) == 0 || path == NULL) {
         return false;
     }
+    /* PT77q: ".\Save\..." / "./Players\..." must not bypass the overlay. */
+    while (path[0] == '.' && (path[1] == '/' || path[1] == '\\')) {
+        path += 2;
+    }
     for (index = 0; index < tig_file_overlay_prefix_count; index++) {
         len = strlen(tig_file_overlay_prefixes[index]);
         if (SDL_strncasecmp(path, tig_file_overlay_prefixes[index], len) == 0

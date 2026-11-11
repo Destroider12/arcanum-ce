@@ -73,6 +73,8 @@ int main(void)
     /* single-player saves are invisible to the role */
     check("sp save hidden (exists)", !tig_file_exists("Save\\Slot0001.gsi", NULL));
     check("sp save hidden (open)", tig_file_fopen("Save\\Slot0001.gsi", "rb") == NULL);
+    check("sp save hidden (./ path)", !tig_file_exists(".\\Save\\Slot0001.gsi", NULL));
+    check("sp save hidden (./ open)", tig_file_fopen(".\\Save\\Slot0001.gsi", "rb") == NULL);
     tig_file_list_create(&list, "Save\\*.gsi");
     check("sp save hidden (list)", list.count == 0);
     tig_file_list_destroy(&list);

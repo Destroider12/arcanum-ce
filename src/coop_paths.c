@@ -97,7 +97,14 @@ bool coop_paths_mount(void)
         return true;
     }
     snprintf(path, sizeof(path), ".\\%s", coop_paths_dir());
-    return tig_file_set_overlay(path, private_prefixes, 2);
+    if (!tig_file_set_overlay(path, private_prefixes, 2)) {
+        return false;
+    }
+    /* PT77q: so tig_file_fopen("Players\\...", "wb") never depends on
+       tig_file_is_directory("Players") seeing the game folder's Players. */
+    tig_file_mkdir("Save");
+    tig_file_mkdir("Players");
+    return true;
 }
 
 static bool coop_paths_copy_file(const char* dst, const char* src)
