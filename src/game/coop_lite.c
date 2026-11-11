@@ -14418,6 +14418,19 @@ static bool coop_world_full_next(int slot, int* cursor, int64_t* obj_ptr)
     return false;
 }
 
+static int64_t* coop_world_scope_dst;
+static int* coop_world_scope_n;
+static int coop_world_scope_cap;
+
+static bool coop_world_scope_cb(Sector* sector)
+{
+    if (sector == NULL || coop_world_scope_dst == NULL || coop_world_scope_n == NULL) {
+        return true;
+    }
+    (void)coop_lite_sector_list_add(coop_world_scope_dst, coop_world_scope_n, coop_world_scope_cap, sector->id);
+    return true;
+}
+
 /* PT51: one WORLD_STATE pass. full = whole loaded map (no radius), paged:
    resumes after *cursor visited objects and stops after max_chunks chunks
    (built at send time, so a page never carries older state than what the
@@ -14456,6 +14469,33 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
     out->map = key;
     if (!full) {
         coop_world_cur_ground_cnt = 0;
+    }
+
+    /* PT77y: first page of a full snapshot lists every host-loaded sector
+       so the client prunes emptied ones that have no object entries. */
+    if (full && first) {
+        int64_t scope_ids[COOP_WORLD_FULL_SECTORS];
+        int scope_n = 0;
+        int si;
+
+        coop_world_scope_dst = scope_ids;
+        coop_world_scope_n = &scope_n;
+        coop_world_scope_cap = COOP_WORLD_FULL_SECTORS;
+        sector_enumerate(coop_world_scope_cb);
+        coop_world_scope_dst = NULL;
+        coop_world_scope_n = NULL;
+        for (si = 0; si < scope_n; si++) {
+            CoopWorldEntry* e = &out->entries[out->count];
+
+            memset(e, 0, sizeof(*e));
+            e->kind = COOP_WORLD_SECTOR_SCOPE;
+            e->loc = LOCATION_MAKE(SECTOR_X(scope_ids[si]) * 64, SECTOR_Y(scope_ids[si]) * 64);
+            if (++out->count == COOP_WORLD_CHUNK) {
+                out->flags = COOP_WORLD_F_FULL;
+                coop_lite_world_flush(out, slot, false, &first);
+                chunks++;
+            }
+        }
     }
 
     if (full ? coop_world_full_next(slot, cursor, &obj) : obj_inst_first(&obj, &iter)) {
@@ -14783,8 +14823,13 @@ static int coop_world_ghosts; /* PT27: unseen pool copies dropped for a refetch 
 
 static void coop_lite_world_apply(const CoopWorldEntry* e)
 {
-    int64_t obj = coop_lite_get_oid_obj(e->oid);
+    int64_t obj;
     int type;
+
+    if (e->kind == COOP_WORLD_SECTOR_SCOPE) {
+        return; /* loc already added to the prune set in handle_world_state */
+    }
+    obj = coop_lite_get_oid_obj(e->oid);
 
     if (e->kind == COOP_WORLD_GROUND_ITEM) {
         obj = coop_lite_client_reclaim_destroyed(obj);

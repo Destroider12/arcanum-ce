@@ -2701,6 +2701,23 @@ int main(int argc, char** argv)
         }
         printf("PT77y keep 3x3 OK\n");
     }
+    {
+        PacketCoopWorldState pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = PACKET_COOP_WORLD_STATE;
+        pkt.count = 1;
+        pkt.entries[0].kind = COOP_WORLD_SECTOR_SCOPE;
+        pkt.entries[0].loc = LOCATION_MAKE(0, 0);
+        if (!coop_lite_world_state_valid(&pkt, coop_lite_world_state_size(1))) {
+            fprintf(stderr, "PT77y SECTOR_SCOPE should be valid\n");
+            return 1;
+        }
+        if (coop_lite_object_state_kind_ok(COOP_WORLD_SECTOR_SCOPE)) {
+            fprintf(stderr, "PT77y SECTOR_SCOPE is not an object-state kind\n");
+            return 1;
+        }
+        printf("PT77y sector scope kind OK\n");
+    }
     return 0;
     }
 }

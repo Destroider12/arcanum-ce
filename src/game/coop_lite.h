@@ -787,8 +787,9 @@ typedef enum CoopWorldKind {
     COOP_WORLD_TRAP = 5, /* PT42: floor trap object; kind_flags = COOP_WORLD_TRAP_ARMED */
     COOP_WORLD_SCENERY = 6, /* PT60b: breakable scenery (engines, machines); kind_flags = OBJ_F_SCENERY_FLAGS */
     COOP_WORLD_WALL = 7, /* PT61: a wall a script changed (destroyed, switched off/on, new art) */
+    COOP_WORLD_SECTOR_SCOPE = 8, /* PT77y: host-loaded sector, prune even if empty */
 } CoopWorldKind;
-#define COOP_WORLD_KIND_MAX COOP_WORLD_WALL
+#define COOP_WORLD_KIND_MAX COOP_WORLD_SECTOR_SCOPE
 /* PT61: wall flags the host shares (script hide/show, passability). */
 #define COOP_WORLD_WALL_OF_MASK (OF_OFF_BIT | 0x00000100u | OF_SEE_THROUGH_BIT | OF_SHOOT_THROUGH_BIT | OF_NO_BLOCK_BIT)
 #define COOP_WALL_CHANGED_MAX 256 /* PT61: host per-session list of changed walls */
