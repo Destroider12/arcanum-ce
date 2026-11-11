@@ -18788,6 +18788,15 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
     if (critter_is_dead(td->obj) || combat_critter_is_combat_mode_active(td->obj)) {
         return false;
     }
+    /* PT77q: a world-map stop / arrival / random encounter (wmap_ui_teleport)
+       must not start a ready check: that used the old-map coords and left
+       the host stuck. The party already travels with the host on the map.
+       Town-exit teleports that only open the world map afterwards still
+       go through the gate (the map UI is not open yet). The town map is
+       not a world-map trip. */
+    if (wmap_ui_is_created() && !wmap_ui_is_town_mode()) {
+        return false;
+    }
     /* PT52: start from what the clients reported (BUSY/IDLE); everyone near
        and free -> no panel, travel right away. */
     for (slot = 0; slot < 8; slot++) {
