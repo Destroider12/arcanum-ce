@@ -552,6 +552,11 @@ bool coop_lite_can_use_worldmap(void)
     return tig_net_is_host();
 }
 
+bool coop_lite_worldmap_client_open_ok(bool can_use, bool spectating, bool client_may_propose)
+{
+    return spectating || can_use || client_may_propose;
+}
+
 bool coop_lite_can_advance_game_time(void)
 {
     if (!tig_net_is_active()) {
@@ -19631,6 +19636,46 @@ bool coop_lite_client_travel_intercept(const TeleportData* td)
     return true; /* never alone */
 }
 
+bool coop_lite_client_may_open_worldmap(void)
+{
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled() || tig_net_is_host()
+        || !coop_lite_client_in_session) {
+        return false;
+    }
+    /* Host already travelling: PT73 spectator view owns the map. */
+    if (coop_client_wmap_dimmed || wmap_ui_is_spectating()) {
+        return false;
+    }
+    return true;
+}
+
+bool coop_lite_client_worldmap_propose(int64_t loc)
+{
+    unsigned int now;
+    int map;
+
+    if (!tig_net_is_coop_enabled() || !tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_client_in_session || coop_client_tp_auth > 0) {
+        return false;
+    }
+    map = map_by_type(MAP_TYPE_START_MAP);
+    /* No destination / no overworld map: still do not walk the route alone. */
+    if (loc == 0 || map <= 0) {
+        return true;
+    }
+    now = coop_obj_now_ms;
+    if (coop_treq_sent_ms == 0 || coop_lite_interval_elapsed(coop_treq_sent_ms, now, 3000u)) {
+        coop_treq_sent_ms = now != 0 ? now : 1u;
+        coop_treq_send(COOP_TREQ_ASK, map, loc, -1);
+        coop_lite_show_notice(coop_lite_lang_ru()
+            ? "Запрос на переход отправлен хосту."
+            : "Travel request sent to the host - waiting for Y / N.", TF_TYPE_WHITE);
+        tig_debug_printf("CoopLite: PT57 world-map travel request to %d,%d (map %d) sent to the host\n",
+            (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), map);
+    }
+    return true;
+}
+
 bool coop_lite_travel_refuse_key(void)
 {
     if (!tig_net_is_active() || !tig_net_is_host() || !coop_treq_active) {
@@ -19674,12 +19719,13 @@ static bool coop_treq_accept(void)
 static void coop_treq_host_ask(int slot, int map, int64_t loc, const char* via)
 {
     int64_t pc;
-    char* map_nm = NULL;
     char name[128];
     char text[512];
 
     pc = sub_4A2B60(slot);
-    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !map_get_name(map, &map_nm)) {
+    /* A missing map name still shows the Y/N prompt ("another area"); only a
+       missing or dead asker is auto-refused. */
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
         coop_treq_send(COOP_TREQ_REFUSED, map, loc, slot);
         return;
     }
@@ -19772,6 +19818,8 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt) { (void)pkt; }
 bool coop_lite_client_spell_end(int mt_id) { (void)mt_id; return false; }
 bool coop_lite_client_travel_intercept(const TeleportData* td) { (void)td; return false; }
 bool coop_lite_host_remote_travel_intercept(const TeleportData* td) { (void)td; return false; }
+bool coop_lite_client_may_open_worldmap(void) { return false; }
+bool coop_lite_client_worldmap_propose(int64_t loc) { (void)loc; return false; }
 bool coop_lite_travel_refuse_key(void) { return false; }
 void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt) { (void)pkt; }
 static void coop_travel_tick(unsigned int now_ms) { (void)now_ms; }

@@ -1248,6 +1248,13 @@ static int test_packet_hardening(void)
             fprintf(stderr, "town map gate wrong\n");
             return 1;
         }
+        if (!coop_lite_worldmap_client_open_ok(true, false, false)
+            || !coop_lite_worldmap_client_open_ok(false, true, false)
+            || !coop_lite_worldmap_client_open_ok(false, false, true)
+            || coop_lite_worldmap_client_open_ok(false, false, false)) {
+            fprintf(stderr, "client worldmap propose open gate wrong\n");
+            return 1;
+        }
         {
             PacketCoopSkillUse u;
 

@@ -740,6 +740,10 @@ struct TeleportData;
 /* teleport_do hook (client): true = turned into a request, do not teleport. */
 bool coop_lite_client_travel_intercept(const struct TeleportData* td);
 bool coop_lite_host_remote_travel_intercept(const struct TeleportData* td);
+/* Coop client: open the world map to pick a destination (not to walk it). */
+bool coop_lite_client_may_open_worldmap(void);
+/* Coop client: send a Y/N travel request for a world-map destination; never walk alone. */
+bool coop_lite_client_worldmap_propose(int64_t loc);
 /* N key: host refuses a pending client travel request. True if consumed. */
 bool coop_lite_travel_refuse_key(void);
 
@@ -1057,8 +1061,11 @@ typedef enum CoopTalkPolicy {
     COOP_TALK_BARK_FOLLOWER = 4,
 } CoopTalkPolicy;
 
-/* True when world map may be opened/used: always in SP; host-only in coop. */
+/* True when the world map may actually be travelled: always in SP; host-only in coop.
+   Clients may still open it to propose a destination (coop_lite_client_may_open_worldmap). */
 bool coop_lite_can_use_worldmap(void);
+/* Spectator, host travel, or a client proposing a destination. */
+bool coop_lite_worldmap_client_open_ok(bool can_use, bool spectating, bool client_may_propose);
 
 /* True when the local peer may drive game-time (SP or coop host). */
 bool coop_lite_can_advance_game_time(void);

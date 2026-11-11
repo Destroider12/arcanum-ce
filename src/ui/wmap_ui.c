@@ -212,11 +212,14 @@ static bool wmap_ui_teleport(int64_t loc);
 static bool wmap_ui_message_filter(TigMessage* msg);
 static bool wmap_ui_spectating; /* PT73 */
 
-/* PT73: the spectator view may show the world map on a coop client. */
+/* PT73: spectator view of the host's trip. Clients may also open the world
+   map to propose a destination (they cannot walk the route alone). */
 static bool wmap_ui_world_allowed(void)
 {
-    return wmap_ui_spectating || coop_lite_can_use_worldmap();
+    return coop_lite_worldmap_client_open_ok(
+        coop_lite_can_use_worldmap(), wmap_ui_spectating, coop_lite_client_may_open_worldmap());
 }
+static int64_t wmap_ui_world_route_dest_loc(void);
 static bool sub_5627B0(WmapCoords* coords);
 static bool sub_5627F0(int64_t loc);
 static void sub_562800(int id);
@@ -1161,8 +1164,9 @@ void wmap_ui_open_internal(void)
         return;
     }
 
-    /* PT44: a coop client may still open its own town map (same button);
-       world/continent modes stay host-only (see wmap_ui_mode_set). */
+    /* PT44: a coop client may still open its own town map (same button).
+       World/continent modes are host-travel or a client proposing a
+       destination (see wmap_ui_mode_set / wmap_ui_world_allowed). */
     if (!coop_lite_worldmap_open_allowed(wmap_ui_world_allowed(), wmap_ui_selecting,
             player_get_local_pc_obj() != OBJ_HANDLE_NULL
                 ? townmap_get(sector_id_from_loc(obj_field_int64_get(player_get_local_pc_obj(), OBJ_F_LOCATION)))
@@ -1740,6 +1744,12 @@ bool wmap_ui_state_set(WmapUiState state)
             if (!sub_565140()) {
                 return false;
             }
+            /* Coop client: ask the host instead of walking the route alone
+               (time / encounters would run locally). Town-map walking is fine. */
+            if (wmap_ui_mode != WMAP_UI_MODE_TOWN
+                && coop_lite_client_worldmap_propose(wmap_ui_world_route_dest_loc())) {
+                return false;
+            }
 
             intgame_pc_lens_do(PC_LENS_MODE_BLACKOUT, &wmap_ui_pc_lens);
             ambient_lighting_disable();
@@ -1821,6 +1831,27 @@ void sub_561800(WmapCoords* coords, int64_t* loc_ptr)
     *loc_ptr = location_make(x, y);
 }
 
+static int64_t wmap_ui_world_route_dest_loc(void)
+{
+    WmapRoute* route = &(wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD]);
+    int64_t loc = 0;
+    int area;
+
+    if (route->length > 0) {
+        loc = route->waypoints[route->length - 1].loc;
+        if (loc == 0) {
+            sub_561800(&(route->waypoints[route->length - 1].coords), &loc);
+        }
+    }
+    if (loc != 0) {
+        area = area_get_nearest_area_in_range(loc, true);
+        if (area > 0) {
+            loc = area_get_location(area);
+        }
+    }
+    return loc;
+}
+
 // 0x561860
 bool wmap_ui_teleport(int64_t loc)
 {
@@ -1832,6 +1863,11 @@ bool wmap_ui_teleport(int64_t loc)
     teleport_data.obj = player_get_local_pc_obj();
     teleport_data.loc = loc;
     teleport_data.map = map_by_type(MAP_TYPE_START_MAP);
+    /* Backstop: a client must not land from the world map alone, including
+       same-map wilderness hops that client_travel_intercept does not catch. */
+    if (coop_lite_client_worldmap_propose(loc)) {
+        return false;
+    }
     return teleport_do(&teleport_data);
 }
 
@@ -2594,7 +2630,7 @@ void wmap_ui_mode_set(WmapUiMode mode)
     }
 
     if (mode != WMAP_UI_MODE_TOWN && !wmap_ui_world_allowed()) {
-        return; /* PT44: coop client — town map only, no world travel */
+        return; /* PT44: town map only unless the client may propose travel */
     }
 
     switch (mode) {

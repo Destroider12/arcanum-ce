@@ -2661,7 +2661,7 @@ spot until the check finishes or the stop is repeated (repeat forces travel). Pr
 - **Gold, ammo and arrow grid cells.** The host now lists critter stackables as E_STACK entries carrying their cell. The client maps each one to its local stack object by prototype (gold field / OBJ_F_AMMO_TYPE field) and moves it to the host's cell, or the nearest free cell. Totals still ride in the per-owner header. The client's own stacks are left alone while its layout hold is active.
 - **Host loss.** The client peer timeout is now 4–10 s (it was ENet's ~30 s). `coop_lite_client_host_left` also fires outside an active session. After 2.5 s the client goes back to the main menu with "Lost connection to the host… press R there to reconnect."
 - **Reconnect.** In the main menu with coop and join configured, "R - Reconnect" is shown. Pressing R starts the pregen/rejoin flow to the last ARCANUM_COOP_JOIN address, port and token, and the rejoin token restores the parked PC.
-- **Travel requests.** On the client, `teleport_do` for the local PC to a different valid map is intercepted. It sends PACKET_COOP_TRAVEL_REQ (155) ASK instead, rate-limited to one every 3 s. The host sees "<name> wants to travel to <map>. Y = go, N = refuse." Y sends ACCEPTED and runs the host's own teleport through the PT50 ready check, so the whole party moves. N sends REFUSED, nobody moves, and the client sees a message. Teleports that coop itself applies are allowed through by an auth counter. World-map travel by clients stays blocked as before. Same-map teleports are not intercepted.
+- **Travel requests.** On the client, `teleport_do` for the local PC to a different valid map is intercepted. It sends PACKET_COOP_TRAVEL_REQ (155) ASK instead, rate-limited to one every 3 s. The host sees "<name> wants to travel to <map>. Y = go, N = refuse." Y sends ACCEPTED and runs the host's own teleport through the PT50 ready check, so the whole party moves. N sends REFUSED, nobody moves, and the client sees a message. Teleports that coop itself applies are allowed through by an auth counter. Same-map teleports are not intercepted. World-map walking by clients stays blocked; since PT77z a client may open the world map (when the host is not already travelling) and propose a destination as a Y/N travel request.
 
 ## PT58: launcher + transport abstraction + Steam transport
 
@@ -3020,4 +3020,32 @@ as normal chat (late join unchanged).
 
 Keys: **Enter** opens the vanilla broadcast field (same as before); lobby
 **Send** / Enter sends into the same chat from the launcher.
+
+
+## PT77z: restore client-initiated travel votes
+
+The Y/N travel-request feature (PT57 packet, PT64 host-side intercept) was
+never deleted, but from a client's point of view it had disappeared.
+
+**Cause.** Jump points, portal/stairs scripts and other map exits still go
+through `coop_lite_host_remote_travel_intercept` / `PACKET_COOP_TRAVEL_REQ`
+and were not removed by later work (PT77r only skips the host's own PT50
+ready check while the world-map UI is open). Most overland travel, though,
+is the world map: `coop_lite_can_use_worldmap` has been host-only since
+before PT57, PT44 locked clients to the town map, and PT73 only lets a
+client *spectate* the host's trip. A client pressing W, or leaving a town
+onto the world map, saw "The World Map is not available" and could not
+propose a destination. Same-map wilderness landings also slipped past
+`client_travel_intercept` (it ignores same-map teleports).
+
+**Fix.** A coop client may open the world/continent map when the host is
+not already travelling (PT73 spectator view still takes over then). Starting
+a world-map route, or landing via `wmap_ui_teleport`, sends a TRAVEL_REQ ASK
+with the destination and `MAP_TYPE_START_MAP` instead of walking the route
+alone (no local time/encounters). The host still sees Y/N; refusal means
+nobody moves; acceptance runs the host's own teleport (ready check + party
+carry). Map exits and teleport doors keep using the existing PT64 host-side
+intercept; a missing map name no longer auto-refuses (the prompt uses
+"another area"). `coop_lite_can_use_worldmap` stays host-only, so the client
+still cannot actually drive the world map. No protocol change (stays 47).
 
