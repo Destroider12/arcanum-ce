@@ -91,6 +91,7 @@ typedef struct TeleportData {
 #define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
 #define LOCATION_GET_X(l) ((int64_t)((l) & 0xFFFFFFFF))
 #define LOCATION_GET_Y(l) ((int64_t)(((l) >> 32) & 0xFFFFFFFF))
+#define SECTOR_MAKE(a, b) ((a) | ((b) << 26))
 
 int64_t player_get_local_pc_obj(void);
 bool teleport_do(TeleportData* teleport_data);
@@ -4775,65 +4776,30 @@ static bool coop_client_fallen;
 
 /*
  * Remote PCs must survive distance (PT9: >~17 tiles apart and the other PC
- * vanished). The sector cache holds 16 sectors and evicts the least recently
- * used unlocked one; a remote PC's sector is never drawn locally, so it was
- * the first to go, taking the PC with it. Keep each remote PC's sector
+ * vanished). The sector cache holds 16 sectors (64 in co-op) and evicts the
+ * least recently used unlocked one; a remote PC's sector is never drawn
+ * locally, so it was the first to go, taking the PC with it. Keep each remote
+ * PC's sector
  * locked (one sector per PC, to leave the cache to the view).
  */
 typedef struct CoopSectorKeep {
     bool valid;
     int map;
     int count;
-    int64_t ids[4];
+    int64_t ids[9]; /* PT77y: 3x3 around the PC */
 } CoopSectorKeep;
 static CoopSectorKeep coop_sector_keep[8];
 
-/*
- * PT23: one sector was not enough. A PC near a sector edge sees (and its
- * NPCs live in) the neighbour sector too; on the host that neighbour was
- * evicted, so NPCs there were never simulated or replicated: alive on the
- * client although dead on the host, no NPC_POS for them, no AI. Keep the
- * PC's sector plus the neighbours within COOP_KEEP_EDGE tiles (max 2x2).
- */
-#define COOP_KEEP_EDGE 24
 static int coop_lite_keep_set(int64_t loc, int64_t* ids)
 {
-    int64_t x = LOCATION_GET_X(loc);
-    int64_t y = LOCATION_GET_Y(loc);
-    int64_t sx = x >> 6;
-    int64_t sy = y >> 6;
-    int64_t nx = sx;
-    int64_t ny = sy;
-    int n = 0;
-
-    if ((x & 63) < COOP_KEEP_EDGE && sx > 0) {
-        nx = sx - 1;
-    } else if ((x & 63) >= 64 - COOP_KEEP_EDGE) {
-        nx = sx + 1;
-    }
-    if ((y & 63) < COOP_KEEP_EDGE && sy > 0) {
-        ny = sy - 1;
-    } else if ((y & 63) >= 64 - COOP_KEEP_EDGE) {
-        ny = sy + 1;
-    }
-    ids[n++] = SECTOR_MAKE(sx, sy);
-    if (nx != sx) {
-        ids[n++] = SECTOR_MAKE(nx, sy);
-    }
-    if (ny != sy) {
-        ids[n++] = SECTOR_MAKE(sx, ny);
-    }
-    if (nx != sx && ny != sy) {
-        ids[n++] = SECTOR_MAKE(nx, ny);
-    }
-    return n;
+    return coop_lite_keep_ids(loc, ids, 9);
 }
 
 static void coop_lite_keep_sector(int slot, int64_t loc)
 {
     CoopSectorKeep* k;
-    int64_t ids[4];
-    int64_t kept[4];
+    int64_t ids[9];
+    int64_t kept[9];
     int n;
     int kn = 0;
     int i;
@@ -15749,6 +15715,39 @@ int coop_lite_inven_broken_fix(unsigned int state_flags, bool locally_broken)
         return -1;
     }
     return host_broken ? 1 : 0;
+}
+
+/*
+ * PT23/PT77y: NPC_POS looks 40 tiles out, so a PC in the middle of a 64-
+ * tile sector still needs the eight neighbours. Keep the 3x3 around every
+ * active PC (skipping negative ids). The cache is 64 sectors in co-op.
+ */
+int coop_lite_keep_ids(int64_t loc, int64_t* ids, int max)
+{
+    int64_t sx = LOCATION_GET_X(loc) >> 6;
+    int64_t sy = LOCATION_GET_Y(loc) >> 6;
+    int dx;
+    int dy;
+    int n = 0;
+
+    if (ids == NULL || max <= 0) {
+        return 0;
+    }
+    for (dy = -1; dy <= 1; dy++) {
+        for (dx = -1; dx <= 1; dx++) {
+            int64_t x = sx + dx;
+            int64_t y = sy + dy;
+
+            if (x < 0 || y < 0) {
+                continue;
+            }
+            if (n >= max) {
+                return n;
+            }
+            ids[n++] = SECTOR_MAKE(x, y);
+        }
+    }
+    return n;
 }
 
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)

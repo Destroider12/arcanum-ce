@@ -1885,6 +1885,8 @@ bool coop_lite_corpse_keep(bool is_pc, bool leads_to_pc, bool no_decay_flag); /*
 bool coop_lite_sync_retry_allowed(int tries); /* PT72 */
 bool coop_lite_dialog_ui_orphaned(bool filter_installed, bool entry_active, bool mode_is_main); /* PT67 */
 bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
+/* PT77y: 3x3 sector ids around loc (skips negative). */
+int coop_lite_keep_ids(int64_t loc, int64_t* ids, int max);
 
 int coop_lite_inv_sanitize(int64_t owner); /* PT53b */
 

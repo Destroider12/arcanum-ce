@@ -34,6 +34,7 @@ static int coop_lite_party_death_tests(void);
 #define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
 #define LOCATION_GET_X(l) ((int64_t)((l) & 0xFFFFFFFF))
 #define LOCATION_GET_Y(l) ((int64_t)(((l) >> 32) & 0xFFFFFFFF))
+#define SECTOR_MAKE(a, b) ((a) | ((b) << 26))
 
 static int g_applied_map = -1;
 static int64_t g_applied_loc = 0;
@@ -2663,6 +2664,42 @@ int main(int argc, char** argv)
             return 1;
         }
         printf("PT52 travel gate state OK\n");
+    }
+    /* PT77y: always keep the 3x3 around a PC (origin clips negatives). */
+    {
+        int64_t ids[9];
+        int n;
+        int i;
+        int saw;
+
+        n = coop_lite_keep_ids(LOCATION_MAKE(96, 96), ids, 9);
+        if (n != 9) {
+            fprintf(stderr, "PT77y keep mid-map: %d not 9\n", n);
+            return 1;
+        }
+        saw = 0;
+        for (i = 0; i < n; i++) {
+            int x = (int)(ids[i] & 0x3FFFFFF);
+            int y = (int)((ids[i] >> 26) & 0x3FFFFFF);
+            if (x >= 0 && x <= 2 && y >= 0 && y <= 2) {
+                saw++;
+            }
+        }
+        if (saw != 9) {
+            fprintf(stderr, "PT77y keep mid-map missing neighbours\n");
+            return 1;
+        }
+        n = coop_lite_keep_ids(LOCATION_MAKE(10, 10), ids, 9);
+        if (n != 4) {
+            fprintf(stderr, "PT77y keep origin: %d not 4\n", n);
+            return 1;
+        }
+        n = coop_lite_keep_ids(LOCATION_MAKE(96, 96), ids, 3);
+        if (n != 3) {
+            fprintf(stderr, "PT77y keep max cap\n");
+            return 1;
+        }
+        printf("PT77y keep 3x3 OK\n");
     }
     return 0;
     }
