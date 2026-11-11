@@ -4836,6 +4836,7 @@ typedef struct CoopNpcCacheEntry {
     int64_t obj;
     PacketCoopNpcPosEntry last;
     unsigned int sent_ms;
+    uint8_t seen_by_slot; /* PT77y: slots that already got this last state */
 } CoopNpcCacheEntry;
 static CoopNpcCacheEntry coop_npc_cache[COOP_NPC_CACHE];
 static unsigned int coop_npc_pos_ms;
@@ -6015,6 +6016,26 @@ static void coop_lite_npc_list_around(int64_t pc, ObjectList* objects)
     object_list_rect(&rect, OBJ_TM_NPC, objects);
 }
 
+static unsigned int coop_lite_npc_slots_in_range(int64_t npc)
+{
+    unsigned int mask = 0;
+    int slot;
+    int64_t loc;
+
+    if (npc == OBJ_HANDLE_NULL) {
+        return 0;
+    }
+    loc = obj_field_int64_get(npc, OBJ_F_LOCATION);
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && location_dist(loc, obj_field_int64_get(pc, OBJ_F_LOCATION)) <= COOP_NPC_POS_RADIUS) {
+            mask |= 1u << slot;
+        }
+    }
+    return mask;
+}
+
 /* Host: NPCs around every PC — position, art (animation frame) and death. */
 static void coop_lite_host_send_npc_pos(unsigned int now_ms)
 {
@@ -6077,21 +6098,33 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
             }
             coop_lite_fill_npc_entry(&e, node->obj);
             c = coop_lite_npc_cache_slot(node->obj);
-            if (c->obj == node->obj && memcmp(&c->last, &e, sizeof(e)) == 0) {
-                /* Unchanged: only a slow keyframe, queued behind the changed ones. */
-                unsigned int keyframe = anim_is_idle(node->obj) ? COOP_NPC_KEYFRAME_IDLE_MS
-                                                                 : COOP_NPC_KEYFRAME_MS;
+            {
+                unsigned int in_range = coop_lite_npc_slots_in_range(node->obj) | (1u << slot);
+                bool unchanged;
 
-                if (coop_lite_interval_elapsed(c->sent_ms, now_ms, keyframe)
-                    && kf_cnt < COOP_NPC_KEYFRAME_QUEUE) {
-                    kf_cache[kf_cnt] = c;
-                    kf_entry[kf_cnt++] = e;
+                if (c->obj != node->obj) {
+                    c->obj = node->obj;
+                    c->seen_by_slot = 0;
+                    memset(&c->last, 0, sizeof(c->last));
                 }
-                continue;
+                c->seen_by_slot &= (uint8_t)in_range;
+                unchanged = memcmp(&c->last, &e, sizeof(e)) == 0;
+                if (!coop_lite_npc_pos_force(c->seen_by_slot, in_range, unchanged)) {
+                    /* All in-range slots already have this state: slow keyframe. */
+                    unsigned int keyframe = anim_is_idle(node->obj) ? COOP_NPC_KEYFRAME_IDLE_MS
+                                                                     : COOP_NPC_KEYFRAME_MS;
+
+                    if (coop_lite_interval_elapsed(c->sent_ms, now_ms, keyframe)
+                        && kf_cnt < COOP_NPC_KEYFRAME_QUEUE) {
+                        kf_cache[kf_cnt] = c;
+                        kf_entry[kf_cnt++] = e;
+                    }
+                    continue;
+                }
+                c->last = e;
+                c->sent_ms = now_ms;
+                c->seen_by_slot = (uint8_t)in_range;
             }
-            c->obj = node->obj;
-            c->last = e;
-            c->sent_ms = now_ms;
             pkt.entries[pkt.count++] = e;
             coop_diag.npc_tx++;
             if (pkt.count == COOP_NPC_POS_MAX) {
@@ -15894,6 +15927,13 @@ int coop_lite_keep_ids(int64_t loc, int64_t* ids, int max)
         }
     }
     return n;
+}
+
+/* Unchanged idle NPCs are keyframed every 5 s. A slot that just entered
+   range has not seen that last state even if the global cache matches. */
+bool coop_lite_npc_pos_force(unsigned int seen_mask, unsigned int in_range, bool unchanged)
+{
+    return !unchanged || ((seen_mask & in_range) != in_range);
 }
 
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)

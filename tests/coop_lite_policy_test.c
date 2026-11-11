@@ -2718,6 +2718,16 @@ int main(int argc, char** argv)
         }
         printf("PT77y sector scope kind OK\n");
     }
+    {
+        if (coop_lite_npc_pos_force(0x01, 0x01, true)
+            || !coop_lite_npc_pos_force(0x01, 0x81, true)
+            || !coop_lite_npc_pos_force(0x81, 0x81, false)
+            || coop_lite_npc_pos_force(0x81, 0x81, true)) {
+            fprintf(stderr, "PT77y npc_pos_force wrong\n");
+            return 1;
+        }
+        printf("PT77y npc seen-by-slot force OK\n");
+    }
     return 0;
     }
 }

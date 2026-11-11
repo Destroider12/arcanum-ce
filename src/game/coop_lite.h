@@ -1892,6 +1892,8 @@ bool coop_lite_dialog_ui_orphaned(bool filter_installed, bool entry_active, bool
 bool coop_lite_sector_list_has(const int64_t* list, int cnt, int64_t id);
 /* PT77y: 3x3 sector ids around loc (skips negative). */
 int coop_lite_keep_ids(int64_t loc, int64_t* ids, int max);
+/* PT77y: true when an in-range slot has not yet been sent this NPC state. */
+bool coop_lite_npc_pos_force(unsigned int seen_mask, unsigned int in_range, bool unchanged);
 
 int coop_lite_inv_sanitize(int64_t owner); /* PT53b */
 
