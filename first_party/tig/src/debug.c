@@ -86,6 +86,7 @@ static void tig_debug_log_write(const char* str)
     }
     if (SDL_strstr(str, "CoopLite") != NULL || SDL_strstr(str, "WMap") != NULL
         || SDL_strstr(str, "tig_net:") != NULL || SDL_strstr(str, "MP:") != NULL
+        || SDL_strstr(str, "[NETSTAT]") != NULL
         || SDL_strstr(str, "map_open") != NULL || SDL_strstr(str, "teleport") != NULL) {
         tig_debug_crumb_add(str);
     }
@@ -117,7 +118,8 @@ static void tig_debug_log_write(const char* str)
         if (str[0] != '\n' || str[1] != '\0') {
             /* PT77q: identical consecutive [CHAT] lines must all reach the
                launcher (a player sending "+" / "ok" twice). */
-            if (SDL_strstr(str, "[CHAT]") == NULL && SDL_strcmp(str, last) == 0) {
+            if (SDL_strstr(str, "[CHAT]") == NULL && SDL_strstr(str, "[NETSTAT]") == NULL
+                && SDL_strcmp(str, last) == 0) {
                 repeats++;
                 return;
             }
@@ -138,7 +140,7 @@ static void tig_debug_log_write(const char* str)
             }
             if (written >= 40ULL * 1024 * 1024
                 || (SDL_strstr(str, "CoopLite") == NULL && SDL_strstr(str, "tig_net") == NULL
-                    && SDL_strstr(str, "[CHAT]") == NULL)) {
+                    && SDL_strstr(str, "[CHAT]") == NULL && SDL_strstr(str, "[NETSTAT]") == NULL)) {
                 return;
             }
         }

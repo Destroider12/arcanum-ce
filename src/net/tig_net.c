@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "net/tig_net_transport.h"
 #ifdef ARCANUM_UPNP
@@ -109,21 +110,186 @@ bool tig_net_local_join_id(char* buf, size_t size)
 
 #define enet_host_open() (tp != NULL && tp->is_open())
 
-/* Per-type app packet counters (diagnose spam / lag). Logged every ~10 s. */
-static unsigned int tig_net_stat_sent[256];
-static unsigned int tig_net_stat_recv[256];
+/* Per-type app packet + byte counters (diagnose spam / lag). One compact
+   [NETSTAT] line every ~10 s. ARCANUM_COOP_NETSTAT=0 disables the line. */
+#define TIG_NET_STAT_TYPES 256
+static unsigned int tig_net_stat_tx_pk[TIG_NET_STAT_TYPES];
+static unsigned int tig_net_stat_rx_pk[TIG_NET_STAT_TYPES];
+static uint64_t tig_net_stat_tx_bytes[TIG_NET_STAT_TYPES];
+static uint64_t tig_net_stat_rx_bytes[TIG_NET_STAT_TYPES];
 static unsigned int tig_net_stat_window_start;
+static int tig_net_stat_enabled = -1; /* -1 unknown, 0 off, 1 on */
 static bool tig_net_send_pending_flush;
 
-static void tig_net_stat_count(unsigned int* table, const void* data, size_t size)
+static bool tig_net_stat_on(void)
+{
+    const char* v;
+
+    if (tig_net_stat_enabled < 0) {
+        v = getenv("ARCANUM_COOP_NETSTAT");
+        tig_net_stat_enabled = (v != NULL && v[0] == '0' && v[1] == '\0') ? 0 : 1;
+    }
+    return tig_net_stat_enabled != 0;
+}
+
+static void tig_net_stat_add(unsigned int* pk, uint64_t* bytes, const void* data, size_t size, int copies)
 {
     int type;
 
-    if (data == NULL || size < sizeof(int)) {
+    if (!tig_net_stat_on() || data == NULL || size < sizeof(int) || copies <= 0) {
         return;
     }
     memcpy(&type, data, sizeof(type));
-    table[(unsigned int)type & 0xFFu]++;
+    type = (int)((unsigned int)type & 0xFFu);
+    pk[type] += (unsigned int)copies;
+    bytes[type] += (uint64_t)size * (uint64_t)copies;
+}
+
+/* Short names for coop app types 128..164 (PACKET_COOP_*). Vanilla stays "P<n>". */
+static const char* const tig_net_stat_coop_names[] = {
+    "ATTACK_INTENT",
+    "FOLLOW_HOST",
+    "CHAR_OFFER",
+    "SESSION_SYNC",
+    "PC_POS",
+    "FOLLOWERS",
+    "NPC_POS",
+    "PARTY_STATE",
+    "BARTER",
+    "INVEN_SYNC",
+    "ROSTER",
+    "OBJ_REQ",
+    "OBJ_BLOB",
+    "CHAR_BUNDLE",
+    "WORLD_REQ",
+    "WORLD_STATE",
+    "PC_STATS",
+    "SWING",
+    "NPC_REQ",
+    "STORY_SYNC",
+    "DIALOG_STATE",
+    "DOOR_USE",
+    "SKILL_USE",
+    "CRAFT",
+    "PARTY_CTRL",
+    "INVEN_LAYOUT",
+    "DOOR_STATE",
+    "TRAVEL_REQ",
+    "SAVE_REQ",
+    "TRAP_FX",
+    "HOTBAR",
+    "WMAP_POS",
+    "CHAT",
+    "BODY_DRAG",
+    "CRITTER_EFFECTS",
+    "THROW_INTENT",
+    "PROJECTILE_FX",
+};
+
+static const char* tig_net_stat_type_name(int type, char* scratch, size_t scratch_n)
+{
+    if (type >= 128 && type <= 164) {
+        return tig_net_stat_coop_names[type - 128];
+    }
+    snprintf(scratch, scratch_n, "P%d", type);
+    return scratch;
+}
+
+static int tig_net_stat_fmt_bytes(char* dst, size_t cap, uint64_t bytes)
+{
+    unsigned int tenths;
+
+    if (bytes >= 1000000ull) {
+        tenths = (unsigned int)((bytes * 10ull) / 1000000ull);
+        return snprintf(dst, cap, "%u.%uMB", tenths / 10u, tenths % 10u);
+    }
+    if (bytes >= 1000ull) {
+        tenths = (unsigned int)((bytes * 10ull) / 1000ull);
+        return snprintf(dst, cap, "%u.%uKB", tenths / 10u, tenths % 10u);
+    }
+    return snprintf(dst, cap, "%uB", (unsigned int)bytes);
+}
+
+static size_t tig_net_stat_cat(char* line, size_t len, size_t cap, const char* fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (len >= cap) {
+        return cap - 1;
+    }
+    va_start(ap, fmt);
+    n = vsnprintf(line + len, cap - len, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return len;
+    }
+    len += (size_t)n;
+    if (len >= cap) {
+        len = cap - 1;
+    }
+    return len;
+}
+
+/* Indices of non-zero types, sorted by bytes descending. Returns count. */
+static int tig_net_stat_pick_top(const uint64_t* bytes, int* out, int max)
+{
+    int n = 0;
+    int i;
+    int j;
+
+    for (i = 0; i < TIG_NET_STAT_TYPES; i++) {
+        if (bytes[i] == 0) {
+            continue;
+        }
+        if (n < max) {
+            j = n++;
+        } else if (bytes[i] > bytes[out[n - 1]]) {
+            j = n - 1;
+        } else {
+            continue;
+        }
+        while (j > 0 && bytes[i] > bytes[out[j - 1]]) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = i;
+    }
+    return n;
+}
+
+static size_t tig_net_stat_append_dir(char* line, size_t len, size_t cap,
+    const char* tag, const unsigned int* pk, const uint64_t* bytes, unsigned int elapsed_ms)
+{
+    uint64_t total_b = 0;
+    unsigned int total_pk = 0;
+    unsigned int i;
+    int top[TIG_NET_STAT_TYPES];
+    int n;
+    int t;
+    char bbuf[16];
+    char nbuf[16];
+    const char* name;
+
+    for (i = 0; i < TIG_NET_STAT_TYPES; i++) {
+        total_b += bytes[i];
+        total_pk += pk[i];
+    }
+    tig_net_stat_fmt_bytes(bbuf, sizeof(bbuf), total_b * 1000ull / elapsed_ms);
+    len = tig_net_stat_cat(line, len, cap, "%s %s/s %upk/s",
+        tag, bbuf, (unsigned int)((unsigned long long)total_pk * 1000ull / elapsed_ms));
+    n = tig_net_stat_pick_top(bytes, top, TIG_NET_STAT_TYPES);
+    for (t = 0; t < n && len + 40 < cap; t++) {
+        i = (unsigned int)top[t];
+        tig_net_stat_fmt_bytes(bbuf, sizeof(bbuf), bytes[i] * 1000ull / elapsed_ms);
+        name = tig_net_stat_type_name((int)i, nbuf, sizeof(nbuf));
+        len = tig_net_stat_cat(line, len, cap, "%s%s %s %upk",
+            t == 0 ? ": " : ", ",
+            name,
+            bbuf,
+            (unsigned int)((unsigned long long)pk[i] * 1000ull / elapsed_ms));
+    }
+    return len;
 }
 
 static bool tig_net_stat_logged;
@@ -131,10 +297,10 @@ static bool tig_net_stat_logged;
 static void tig_net_stat_maybe_log(void)
 {
     unsigned int now;
-    unsigned int total_s = 0;
-    unsigned int total_r = 0;
+    unsigned int elapsed;
+    unsigned int total_pk = 0;
     int i;
-    char line[512];
+    char line[1000];
     size_t len;
 
     now = tig_net_tp()->now_ms();
@@ -142,28 +308,35 @@ static void tig_net_stat_maybe_log(void)
         tig_net_stat_window_start = now;
         return;
     }
-    if (now - tig_net_stat_window_start < 10000u) {
+    elapsed = now - tig_net_stat_window_start;
+    if (elapsed < 10000u) {
         return;
     }
 
-    for (i = 0; i < 256; i++) {
-        total_s += tig_net_stat_sent[i];
-        total_r += tig_net_stat_recv[i];
-    }
-    if (total_s + total_r > 0) {
-        len = (size_t)snprintf(line, sizeof(line), "tig_net: 10s stats sent=%u recv=%u top:",
-            total_s, total_r);
-        for (i = 0; i < 256 && len < sizeof(line) - 24; i++) {
-            if (tig_net_stat_sent[i] + tig_net_stat_recv[i] >= 50) {
-                len += (size_t)snprintf(line + len, sizeof(line) - len, " %d:%u/%u",
-                    i, tig_net_stat_sent[i], tig_net_stat_recv[i]);
-            }
+    if (tig_net_stat_on()) {
+        for (i = 0; i < TIG_NET_STAT_TYPES; i++) {
+            total_pk += tig_net_stat_tx_pk[i];
+            total_pk += tig_net_stat_rx_pk[i];
         }
-        tig_debug_printf("%s\n", line);
+        if (total_pk > 0) {
+            len = (size_t)snprintf(line, sizeof(line), "[NETSTAT %s] ",
+                is_host ? "host" : "client");
+            if (len >= sizeof(line)) {
+                len = sizeof(line) - 1;
+            }
+            len = tig_net_stat_append_dir(line, len, sizeof(line),
+                "tx", tig_net_stat_tx_pk, tig_net_stat_tx_bytes, elapsed);
+            len = tig_net_stat_cat(line, len, sizeof(line), " | ");
+            (void)tig_net_stat_append_dir(line, len, sizeof(line),
+                "rx", tig_net_stat_rx_pk, tig_net_stat_rx_bytes, elapsed);
+            tig_debug_printf("%s\n", line);
+        }
     }
     tig_net_stat_logged = true;
-    memset(tig_net_stat_sent, 0, sizeof(tig_net_stat_sent));
-    memset(tig_net_stat_recv, 0, sizeof(tig_net_stat_recv));
+    memset(tig_net_stat_tx_pk, 0, sizeof(tig_net_stat_tx_pk));
+    memset(tig_net_stat_rx_pk, 0, sizeof(tig_net_stat_rx_pk));
+    memset(tig_net_stat_tx_bytes, 0, sizeof(tig_net_stat_tx_bytes));
+    memset(tig_net_stat_rx_bytes, 0, sizeof(tig_net_stat_rx_bytes));
     tig_net_stat_window_start = now;
 }
 static TigNetClient clients[TIG_NET_MAX_PLAYERS];
@@ -807,7 +980,7 @@ void tig_net_pump(void)
                 } else if (is_host && from == 0) {
                     /* Host never receives from itself over the wire. */
                 } else {
-                    tig_net_stat_count(tig_net_stat_recv, event.data, event.size);
+                    tig_net_stat_add(tig_net_stat_rx_pk, tig_net_stat_rx_bytes, event.data, event.size, 1);
                     tig_net_dispatch_app(event.data, event.size, from);
                 }
             }
@@ -980,7 +1153,7 @@ static void tig_net_send_raw_ex(void* data, int size, int client_id, bool all, b
     if (sent > 0) {
         /* Batched: flushed once per frame in tig_net_pump (was per packet). */
         tig_net_send_pending_flush = true;
-        tig_net_stat_count(tig_net_stat_sent, data, (size_t)size);
+        tig_net_stat_add(tig_net_stat_tx_pk, tig_net_stat_tx_bytes, data, (size_t)size, sent);
     }
 }
 
