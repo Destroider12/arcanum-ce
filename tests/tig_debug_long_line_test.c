@@ -31,6 +31,8 @@ int main(void)
     tig_debug_printf("%s", chunk); /* overflows the 1024-byte buffer */
     tig_debug_printf("%s", chunk);
     tig_debug_printf("after-overflow marker\n");
+    tig_debug_printf("[CHAT] ok\n");
+    tig_debug_printf("[CHAT] ok\n");
     tig_debug_set_log_file(NULL); /* closes the file */
 
     f = fopen(path, "r");
@@ -40,13 +42,20 @@ int main(void)
     }
     while (fgets(line, sizeof(line), f) != NULL) {
         if (strstr(line, "after-overflow marker") != NULL) {
-            found = 1;
+            found++;
+        }
+        if (strstr(line, "[CHAT] ok") != NULL) {
+            found++;
         }
     }
     fclose(f);
     unlink(path);
-    if (!found) {
+    if (found < 1) {
         fprintf(stderr, "logging stalled after an overflowing partial line\n");
+        return 1;
+    }
+    if (found < 3) {
+        fprintf(stderr, "identical [CHAT] lines were collapsed or dropped\n");
         return 1;
     }
     printf("tig_debug long partial line OK\n");

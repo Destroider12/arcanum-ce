@@ -115,7 +115,9 @@ static void tig_debug_log_write(const char* str)
             return; /* tail of a collapsed over-long line */
         }
         if (str[0] != '\n' || str[1] != '\0') {
-            if (SDL_strcmp(str, last) == 0) {
+            /* PT77q: identical consecutive [CHAT] lines must all reach the
+               launcher (a player sending "+" / "ok" twice). */
+            if (SDL_strstr(str, "[CHAT]") == NULL && SDL_strcmp(str, last) == 0) {
                 repeats++;
                 return;
             }
@@ -135,7 +137,8 @@ static void tig_debug_log_write(const char* str)
                 fflush(tig_debug_log_file);
             }
             if (written >= 40ULL * 1024 * 1024
-                || (SDL_strstr(str, "CoopLite") == NULL && SDL_strstr(str, "tig_net") == NULL)) {
+                || (SDL_strstr(str, "CoopLite") == NULL && SDL_strstr(str, "tig_net") == NULL
+                    && SDL_strstr(str, "[CHAT]") == NULL)) {
                 return;
             }
         }
