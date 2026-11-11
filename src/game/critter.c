@@ -739,11 +739,20 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
         }
 
         // Remove victim from the group.
+        // PT77q: mark a kept companion corpse first, while its leader
+        // chain still reaches a PC, and do not restore NPC_LEADER after
+        // disband (the body is no longer in the PC's follower list, and
+        // leaving the leader set made coop_lite_npc_follows_other_player
+        // treat the corpse as an active follower). OCF2_NO_DECAY is what
+        // stops the body vanishing, including after a map change.
+        if (critter_corpse_is_kept(victim_obj)) {
+            obj_field_int32_set(victim_obj, OBJ_F_CRITTER_FLAGS2,
+                obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) | OCF2_NO_DECAY);
+        }
         leader_obj = critter_leader_get(victim_obj);
         if (leader_obj != OBJ_HANDLE_NULL) {
             critter_disband(victim_obj, true);
         }
-        critter_leader_set(victim_obj, leader_obj);
 
         // Notify monstergen system of kill.
         monstergen_notify_killed(victim_obj);
@@ -1595,8 +1604,8 @@ bool critter_decay_timeevent_process(TimeEvent* timeevent)
     return true;
 }
 
-/* PT66: a PC, an NPC whose leader chain (OBJ_F_NPC_LEADER is kept after
-   death) reaches a PC, or a body already marked OCF2_NO_DECAY. */
+/* PT66/PT77q: a PC, an NPC whose leader chain still reaches a PC (checked
+   before disband), or a body already marked OCF2_NO_DECAY. */
 static bool critter_corpse_is_kept(int64_t obj)
 {
     int type = obj_field_int32_get(obj, OBJ_F_TYPE);
