@@ -155,7 +155,7 @@ The full engineering log (every PT step, protocol changes and reviews) is in [do
 
 ## Credits
 
-- **Coop Lite code:** written by **Grok Build 4.7 (Grok Bot)**.
+- **Coop Lite code:** written with **Grok Bot**.
 - **Code review:** with the help of **Gemini Argon**, **DeepSeek 4.1** and **Qwen 3.8 Max**.
 - **Project author, lead and playtesting:** **Destroider12**.
 - **Base engine:** [arcanum-ce](https://github.com/alexbatalov/arcanum-ce) by **Alexander Batalov (alexbatalov)** and its contributors.

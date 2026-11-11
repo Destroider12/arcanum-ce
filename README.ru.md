@@ -153,7 +153,7 @@
 
 ## Авторы
 
-- **Код Coop Lite:** написан **Grok Build 4.7 (Grok Bot)**.
+- **Код Coop Lite:** написан с помощью **Grok Bot**.
 - **Ревью кода:** при помощи **Gemini Argon**, **DeepSeek 4.1** и **Qwen 3.8 Max**.
 - **Автор проекта, руководство и плейтесты:** **Destroider12**.
 - **Базовый движок:** [arcanum-ce](https://github.com/alexbatalov/arcanum-ce), автор **Александр Баталов (alexbatalov)**, и участники проекта.
