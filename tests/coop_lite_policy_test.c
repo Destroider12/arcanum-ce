@@ -2728,6 +2728,55 @@ int main(int argc, char** argv)
         }
         printf("PT77y npc seen-by-slot force OK\n");
     }
+    /* PT77z: compact critter-effects packet + signature. */
+    {
+        PacketCoopCritterEffects pkt;
+        unsigned int effects[3] = { 1, 2, 3 };
+        unsigned int causes[3] = { 4, 5, 6 };
+        unsigned int sig;
+        int sz;
+
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = PACKET_COOP_CRITTER_EFFECTS;
+        pkt.count = 3;
+        memcpy(pkt.data, effects, sizeof(effects));
+        memcpy(pkt.data + 3, causes, sizeof(causes));
+        sz = coop_lite_critter_effects_size(3);
+        if (sz <= (int)offsetof(PacketCoopCritterEffects, data) || !coop_lite_critter_effects_valid(&pkt, sz)) {
+            fprintf(stderr, "PT77z effects valid packet rejected\n");
+            return 1;
+        }
+        if (coop_lite_critter_effects_valid(&pkt, sz - 1)
+            || coop_lite_critter_effects_valid(&pkt, sz + 1)
+            || coop_lite_critter_effects_size(-1) != 0
+            || coop_lite_critter_effects_size(COOP_CRITTER_EFFECTS_MAX + 1) != 0) {
+            fprintf(stderr, "PT77z effects size checks failed\n");
+            return 1;
+        }
+        pkt.count = COOP_CRITTER_EFFECTS_MAX + 1;
+        if (coop_lite_critter_effects_valid(&pkt, coop_lite_critter_effects_size(3))) {
+            fprintf(stderr, "PT77z oversize count accepted\n");
+            return 1;
+        }
+        pkt.count = 3;
+        pkt.type = PACKET_COOP_CHAT;
+        if (coop_lite_critter_effects_valid(&pkt, sz)) {
+            fprintf(stderr, "PT77z wrong type accepted\n");
+            return 1;
+        }
+        sig = coop_lite_critter_effects_sig(3, effects, causes, 1, 2, 3);
+        if (sig == 0
+            || sig == coop_lite_critter_effects_sig(3, effects, causes, 1, 2, 4)
+            || sig != coop_lite_critter_effects_sig(3, effects, causes, 1, 2, 3)) {
+            fprintf(stderr, "PT77z effects sig unstable\n");
+            return 1;
+        }
+        if (coop_lite_mp_packet_role(PACKET_COOP_CRITTER_EFFECTS) != COOP_MP_PKT_CLIENT_APPLY) {
+            fprintf(stderr, "PT77z effects role wrong\n");
+            return 1;
+        }
+        printf("PT77z critter effects packet OK\n");
+    }
     return 0;
     }
 }

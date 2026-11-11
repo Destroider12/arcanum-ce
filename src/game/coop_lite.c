@@ -1185,6 +1185,7 @@ static void coop_lite_barter_reset(void);
 static void coop_lite_barter_end(int slot, const char* why);
 static void coop_lite_host_victim_watch(unsigned int now_ms);
 static void coop_lite_host_pc_stats_tick(unsigned int now_ms);
+static void coop_lite_host_critter_effects_tick(unsigned int now_ms);
 static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
@@ -2249,6 +2250,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_DOOR_STATE: /* PT53e host door state → clients */
     case PACKET_COOP_TRAP_FX: /* PT61 host trap visuals → clients */
     case PACKET_COOP_WMAP_POS: /* PT73 host world-map marker → clients */
+    case PACKET_COOP_CRITTER_EFFECTS: /* PT77z host effects + light → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3452,6 +3454,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopChat);
     case PACKET_COOP_BODY_DRAG:
         return sizeof(PacketCoopBodyDrag);
+    case PACKET_COOP_CRITTER_EFFECTS:
+        return offsetof(PacketCoopCritterEffects, data);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -7930,6 +7934,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_barter_watch(now_ms);
     coop_lite_host_victim_watch(now_ms);
     coop_lite_host_pc_stats_tick(now_ms);
+    coop_lite_host_critter_effects_tick(now_ms);
     coop_lite_host_story_tick(now_ms);
     coop_lite_host_dialog_tick(now_ms);
     coop_lite_party_ui_tick(now_ms);
@@ -9588,6 +9593,164 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
             slot, b.stats[STAT_LEVEL], b.stats[STAT_EXPERIENCE_POINTS], b.stats[STAT_UNSPENT_POINTS],
             object_hp_max(pc), sig);
     }
+}
+
+#define COOP_FX_CACHE 512
+#define COOP_FX_KEYFRAME_MS 5000u
+typedef struct CoopFxCacheEntry {
+    int64_t obj;
+    unsigned int sig;
+    unsigned int sent_ms;
+} CoopFxCacheEntry;
+static CoopFxCacheEntry coop_fx_cache[COOP_FX_CACHE];
+static unsigned int coop_fx_ms;
+static int coop_fx_map;
+
+static CoopFxCacheEntry* coop_lite_fx_cache_slot(int64_t obj)
+{
+    unsigned int h = (unsigned int)((uint64_t)obj * 2654435761u) % COOP_FX_CACHE;
+    unsigned int i;
+    CoopFxCacheEntry* oldest = NULL;
+
+    for (i = 0; i < 8; i++) {
+        CoopFxCacheEntry* c = &coop_fx_cache[(h + i) % COOP_FX_CACHE];
+
+        if (c->obj == obj || c->obj == OBJ_HANDLE_NULL) {
+            return c;
+        }
+        if (oldest == NULL || (int)(oldest->sent_ms - c->sent_ms) > 0) {
+            oldest = c;
+        }
+    }
+    return oldest;
+}
+
+static void coop_lite_host_critter_effects_send(int64_t obj)
+{
+    PacketCoopCritterEffects pkt;
+    ObjectID oid;
+    int n;
+    int nc;
+    int i;
+    unsigned int effects[COOP_CRITTER_EFFECTS_MAX];
+    unsigned int causes[COOP_CRITTER_EFFECTS_MAX];
+    unsigned int light_flags;
+    unsigned int light_aid;
+    unsigned int light_color;
+    unsigned int sig;
+    CoopFxCacheEntry* c;
+
+    if (obj == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE))) {
+        return;
+    }
+    n = obj_arrayfield_length_get(obj, OBJ_F_CRITTER_EFFECTS_IDX);
+    nc = obj_arrayfield_length_get(obj, OBJ_F_CRITTER_EFFECT_CAUSE_IDX);
+    if (nc < n) {
+        n = nc;
+    }
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > COOP_CRITTER_EFFECTS_MAX) {
+        n = COOP_CRITTER_EFFECTS_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        effects[i] = obj_arrayfield_uint32_get(obj, OBJ_F_CRITTER_EFFECTS_IDX, i);
+        causes[i] = obj_arrayfield_uint32_get(obj, OBJ_F_CRITTER_EFFECT_CAUSE_IDX, i);
+    }
+    light_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_LIGHT_FLAGS);
+    light_aid = (unsigned int)obj_field_int32_get(obj, OBJ_F_LIGHT_AID);
+    light_color = (unsigned int)obj_field_int32_get(obj, OBJ_F_LIGHT_COLOR);
+    sig = coop_lite_critter_effects_sig(n, effects, causes, light_flags, light_aid, light_color);
+    c = coop_lite_fx_cache_slot(obj);
+    if (c->obj == obj && c->sig == sig
+        && !coop_lite_interval_elapsed(c->sent_ms, coop_obj_now_ms, COOP_FX_KEYFRAME_MS)) {
+        return;
+    }
+    memset(&pkt, 0, offsetof(PacketCoopCritterEffects, data));
+    pkt.type = PACKET_COOP_CRITTER_EFFECTS;
+    pkt.count = n;
+    oid = obj_get_id(obj);
+    memcpy(pkt.oid, &oid, sizeof(oid));
+    pkt.light_flags = light_flags;
+    pkt.light_aid = light_aid;
+    pkt.light_color = light_color;
+    if (n > 0) {
+        memcpy(pkt.data, effects, (size_t)n * sizeof(unsigned int));
+        memcpy(pkt.data + n, causes, (size_t)n * sizeof(unsigned int));
+    }
+    tig_net_send_app_all(&pkt, coop_lite_critter_effects_size(n));
+    c->obj = obj;
+    c->sig = sig;
+    c->sent_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+}
+
+static void coop_lite_host_critter_effects_tick(unsigned int now_ms)
+{
+    int slot;
+
+    if (!tig_net_is_active() || !tig_net_is_host()) {
+        return;
+    }
+    if (!coop_lite_interval_elapsed(coop_fx_ms, now_ms, 500u)) {
+        return;
+    }
+    coop_fx_ms = now_ms;
+    if (coop_fx_map != map_current_map()) {
+        coop_fx_map = map_current_map();
+        memset(coop_fx_cache, 0, sizeof(coop_fx_cache));
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        ObjectList objects;
+        ObjectNode* node;
+
+        if (pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        coop_lite_host_critter_effects_send(pc);
+        coop_lite_npc_list_around(pc, &objects);
+        for (node = objects.head; node != NULL; node = node->next) {
+            coop_lite_host_critter_effects_send(node->obj);
+        }
+        object_list_destroy(&objects);
+    }
+}
+
+void coop_lite_handle_critter_effects(PacketCoopCritterEffects* pkt)
+{
+    int64_t obj;
+    int i;
+    int n;
+    const unsigned int* effects;
+    const unsigned int* causes;
+
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_critter_effects_valid(pkt, tig_net_last_message_size())
+        || map_is_clearing_objects()) {
+        return;
+    }
+    obj = coop_lite_get_oid_obj(pkt->oid);
+    if (obj == OBJ_HANDLE_NULL || !obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE))) {
+        return;
+    }
+    n = pkt->count;
+    effects = pkt->data;
+    causes = pkt->data + n;
+    multiplayer_lock();
+    coop_lite_apply_begin();
+    obj_arrayfield_length_set(obj, OBJ_F_CRITTER_EFFECTS_IDX, 0);
+    obj_arrayfield_length_set(obj, OBJ_F_CRITTER_EFFECT_CAUSE_IDX, 0);
+    for (i = 0; i < n; i++) {
+        obj_arrayfield_uint32_set(obj, OBJ_F_CRITTER_EFFECTS_IDX, i, effects[i]);
+        obj_arrayfield_uint32_set(obj, OBJ_F_CRITTER_EFFECT_CAUSE_IDX, i, causes[i]);
+    }
+    object_set_light(obj, pkt->light_flags, (tig_art_id_t)pkt->light_aid, (tig_color_t)pkt->light_color);
+    anim_speed_recalc(obj);
+    ui_refresh_health_bar(obj);
+    ui_refresh_fatigue_bar(obj);
+    coop_lite_apply_end();
+    multiplayer_unlock();
 }
 
 static unsigned int coop_client_pcs_sig;
@@ -15934,6 +16097,54 @@ int coop_lite_keep_ids(int64_t loc, int64_t* ids, int max)
 bool coop_lite_npc_pos_force(unsigned int seen_mask, unsigned int in_range, bool unchanged)
 {
     return !unchanged || ((seen_mask & in_range) != in_range);
+}
+
+int coop_lite_critter_effects_size(int count)
+{
+    if (count < 0 || count > COOP_CRITTER_EFFECTS_MAX) {
+        return 0;
+    }
+    return (int)(offsetof(PacketCoopCritterEffects, data) + (size_t)count * 2u * sizeof(unsigned int));
+}
+
+bool coop_lite_critter_effects_valid(const PacketCoopCritterEffects* pkt, int size)
+{
+    if (pkt == NULL || pkt->type != PACKET_COOP_CRITTER_EFFECTS) {
+        return false;
+    }
+    if (pkt->count < 0 || pkt->count > COOP_CRITTER_EFFECTS_MAX) {
+        return false;
+    }
+    return size == coop_lite_critter_effects_size(pkt->count);
+}
+
+unsigned int coop_lite_critter_effects_sig(int count, const unsigned int* effects, const unsigned int* causes,
+    unsigned int light_flags, unsigned int light_aid, unsigned int light_color)
+{
+    unsigned int h = 2166136261u;
+    int i;
+
+    if (count < 0 || (count > 0 && (effects == NULL || causes == NULL))) {
+        return 1;
+    }
+    h ^= (unsigned int)count;
+    h *= 16777619u;
+    for (i = 0; i < count; i++) {
+        h ^= effects[i];
+        h *= 16777619u;
+        h ^= causes[i];
+        h *= 16777619u;
+    }
+    h ^= light_flags;
+    h *= 16777619u;
+    h ^= light_aid;
+    h *= 16777619u;
+    h ^= light_color;
+    h *= 16777619u;
+    if (h == 0) {
+        h = 1;
+    }
+    return h;
 }
 
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)

@@ -48,6 +48,7 @@ extern "C" {
 #define PACKET_COOP_WMAP_POS 159 /* PT73: host -> clients: party marker on the world map */
 #define PACKET_COOP_CHAT 160 /* PT77: player chat text (client->host->all) */
 #define PACKET_COOP_BODY_DRAG 161 /* PT77h: client -> host: Alt-drag this corpse/item to me */
+#define PACKET_COOP_CRITTER_EFFECTS 162 /* PT77z: host effect arrays + light -> clients */
 #define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
@@ -624,6 +625,26 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopBodyDrag) == 0x20, "PacketCoopBodyDrag size"
 bool coop_lite_body_drag_valid(const PacketCoopBodyDrag* pkt, int size);
 bool coop_lite_client_body_drag_intent(int64_t pc_obj, int64_t target_obj);
 void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt);
+
+/* PT77z: host copies of OBJ_F_CRITTER_EFFECTS_IDX / EFFECT_CAUSE_IDX plus
+   the object's main light (flags/aid/color). Variable payload: effects[0..n)
+   then causes[0..n) packed in data[]. */
+#define COOP_CRITTER_EFFECTS_MAX 128
+typedef struct PacketCoopCritterEffects {
+    /* 0000 */ int type;
+    /* 0004 */ int count;
+    /* 0008 */ uint8_t oid[24];
+    /* 0020 */ unsigned int light_flags;
+    /* 0024 */ unsigned int light_aid;
+    /* 0028 */ unsigned int light_color;
+    /* 002C */ unsigned int reserved;
+    /* 0030 */ unsigned int data[COOP_CRITTER_EFFECTS_MAX * 2];
+} PacketCoopCritterEffects;
+int coop_lite_critter_effects_size(int count);
+bool coop_lite_critter_effects_valid(const PacketCoopCritterEffects* pkt, int size);
+unsigned int coop_lite_critter_effects_sig(int count, const unsigned int* effects, const unsigned int* causes,
+    unsigned int light_flags, unsigned int light_aid, unsigned int light_color);
+void coop_lite_handle_critter_effects(PacketCoopCritterEffects* pkt);
 
 typedef struct PacketCoopChat {
     /* 0000 */ int type;
