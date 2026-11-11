@@ -124,6 +124,11 @@ static SectorLoadFunc sector_load_func;
 /* PT39: set when a co-op client's bad .dif was just removed by a failed load. */
 static bool sector_coop_dif_removed;
 
+/* Set while sector_cache_reset walks every cached sector. sector_lock must
+   not mutate or evict lists mid-walk (heap corruption in
+   sector_light_list_reset on F8 / return-to-menu). */
+static bool sector_cache_resetting;
+
 // 0x6017B8
 static IsoInvalidateRectFunc* sector_iso_window_invalidate_rect;
 
@@ -880,6 +885,10 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
         return false;
     }
 
+    if (sector_cache_resetting) {
+        return false;
+    }
+
     if (!map_is_valid()) {
         tig_debug_printf("ERROR: Attempt to lock a sector when the map is not valid!!!\n");
     }
@@ -967,6 +976,11 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
             load_ok = sector_load_func(id, &(cache_entry->sector));
         }
         if (!load_ok) {
+            /* A failed load can leave lights/objects on this unused cache
+               slot; the next lock reuses it and sector_light_list_load
+               appends onto the leftover list. Evict so F8 / map_close is
+               not freeing stale static lights. */
+            sector_cache_evict(&(cache_entry->sector));
             tig_debug_printf("Error: attempt to lock sector %I64u in cache failed due to error in load.  This is bad.  Help.\n", id);
             in_sector_lock = false;
             return false;
@@ -1012,12 +1026,14 @@ void sector_cache_reset(void)
 {
     unsigned int index;
 
+    sector_cache_resetting = true;
     for (index = 0; index < sector_cache_size; index++) {
         sector_cache_evict(&(sector_cache_entries[sector_cache_indexes[index]].sector));
         sector_cache_entries[sector_cache_indexes[index]].used = false;
     }
 
     sector_cache_size = 0;
+    sector_cache_resetting = false;
 }
 
 // 0x4D0BC0

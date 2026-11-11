@@ -30,7 +30,22 @@ bool sector_light_list_reset(SectorLightList* list)
         next = node->next;
 
         if (sub_4DD110(node->data)) {
-            sub_4D9570(node->data);
+            Light* light = node->data;
+            SectorBlockListNode** pp;
+            /* Duplicate nodes for the same static light (list_add without
+               a prior remove) would double-free here and trip heap
+               corruption on F8 / return-to-menu. */
+            pp = &next;
+            while (*pp != NULL) {
+                if ((*pp)->data == light) {
+                    SectorBlockListNode* dup = *pp;
+                    *pp = dup->next;
+                    sector_block_list_node_destroy(dup);
+                } else {
+                    pp = &((*pp)->next);
+                }
+            }
+            sub_4D9570(light);
         } else {
             light_stop_animating(node->data);
         }
@@ -55,6 +70,13 @@ bool sector_light_list_exit(SectorLightList* list)
 bool sector_light_list_add(SectorLightList* list, Light* light)
 {
     SectorBlockListNode* node;
+
+    /* Already on this list: a second node would be freed twice in reset. */
+    for (node = list->head; node != NULL; node = node->next) {
+        if (node->data == light) {
+            return true;
+        }
+    }
 
     node = sector_block_list_node_create();
     node->data = light;
