@@ -14440,7 +14440,10 @@ bool anim_goal_throw_item(int64_t obj, int64_t item_obj, int64_t target_loc)
     ASSERT(item_obj != OBJ_HANDLE_NULL); // itemObj != OBJ_HANDLE_NULL
 
     if (coop_lite_client_throw_denied()) {
-        tig_debug_printf("CoopLite: client throw refused (host-authoritative throw not implemented)\n");
+        if (coop_lite_client_throw_intent(item_obj, target_loc)) {
+            return true;
+        }
+        tig_debug_printf("CoopLite: client throw refused (host did not take the intent)\n");
         return false;
     }
 
@@ -14795,7 +14798,36 @@ bool anim_goal_projectile(int64_t source_obj, int64_t missile_obj, tig_art_id_t 
         return false;
     }
 
+    /* Visual-only client missiles must not echo; the host already sent FX. */
+    if ((obj_field_int32_get(missile_obj, OBJ_F_PROJECTILE_FLAGS_COMBAT) & COOP_PROJECTILE_VISUAL) == 0
+        && source_obj != OBJ_HANDLE_NULL) {
+        coop_lite_host_projectile_fx(obj_field_int64_get(source_obj, OBJ_F_LOCATION),
+            target_loc, (unsigned int)missile_art_id, projectile_speed);
+    }
+
     return true;
+}
+
+bool anim_goal_projectile_visual(int64_t missile_obj, int64_t src_loc, int64_t dst_loc, tig_art_id_t missile_art_id, int speed)
+{
+    AnimGoalData goal_data;
+    int rotation;
+
+    if (missile_obj == OBJ_HANDLE_NULL || src_loc == 0 || dst_loc == 0) {
+        return false;
+    }
+    if (!sub_424070(missile_obj, 4, false, true)) {
+        return false;
+    }
+    if (!sub_44D4E0(&goal_data, missile_obj, AG_PROJECTILE)) {
+        return false;
+    }
+    rotation = combat_projectile_rot(src_loc, dst_loc);
+    sub_4EDCE0(missile_obj, combat_projectile_art_id_rotation_set(missile_art_id, rotation));
+    goal_data.params[AGDATA_TARGET_TILE].loc = dst_loc;
+    goal_data.params[AGDATA_SCRATCH_VAL4].data = missile_art_id;
+    goal_data.params[AGDATA_SCRATCH_VAL5].data = speed;
+    return anim_goal_add(&goal_data, &stru_5A1908);
 }
 
 // 0x435A00

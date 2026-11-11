@@ -2214,6 +2214,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_DOOR_USE: /* PT37 client door use → host */
     case PACKET_COOP_SKILL_USE: /* PT40 pick lock / disarm intent */
     case PACKET_COOP_BODY_DRAG: /* PT77h corpse drag intent */
+    case PACKET_COOP_THROW_INTENT: /* PT77z client throw -> host */
     case PACKET_COOP_CRAFT: /* PT40 schematic combine intent */
     case PACKET_COOP_INVEN_LAYOUT: /* PT53 own-pack layout intent */
     case PACKET_COOP_CHAR_BUNDLE: /* v2 character offer */
@@ -2251,6 +2252,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_TRAP_FX: /* PT61 host trap visuals → clients */
     case PACKET_COOP_WMAP_POS: /* PT73 host world-map marker → clients */
     case PACKET_COOP_CRITTER_EFFECTS: /* PT77z host effects + light → clients */
+    case PACKET_COOP_PROJECTILE_FX: /* PT77z host missile visual → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3456,6 +3458,10 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopBodyDrag);
     case PACKET_COOP_CRITTER_EFFECTS:
         return offsetof(PacketCoopCritterEffects, data);
+    case PACKET_COOP_THROW_INTENT:
+        return sizeof(PacketCoopThrowIntent);
+    case PACKET_COOP_PROJECTILE_FX:
+        return sizeof(PacketCoopProjectileFx);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -16147,6 +16153,40 @@ unsigned int coop_lite_critter_effects_sig(int count, const unsigned int* effect
     return h;
 }
 
+bool coop_lite_throw_intent_valid(const PacketCoopThrowIntent* pkt, int size)
+{
+    int i;
+    bool any = false;
+
+    if (pkt == NULL || pkt->type != PACKET_COOP_THROW_INTENT || size != (int)sizeof(PacketCoopThrowIntent)
+        || pkt->target_loc == 0) {
+        return false;
+    }
+    for (i = 0; i < 24; i++) {
+        if (pkt->item_oid[i] != 0) {
+            any = true;
+            break;
+        }
+    }
+    return any;
+}
+
+bool coop_lite_throw_in_range(int dist, int throw_range)
+{
+    if (dist < 0 || throw_range < 1) {
+        return false;
+    }
+    return dist <= throw_range + COOP_THROW_RANGE_SLACK;
+}
+
+bool coop_lite_projectile_fx_valid(const PacketCoopProjectileFx* pkt, int size)
+{
+    return pkt != NULL && pkt->type == PACKET_COOP_PROJECTILE_FX
+        && size == (int)sizeof(PacketCoopProjectileFx)
+        && pkt->src_loc != 0 && pkt->dst_loc != 0
+        && pkt->missile_art_id != 0;
+}
+
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target)
 {
     return source_is_pc && target_is_pc && !from_target;
@@ -16962,6 +17002,110 @@ void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt)
     tig_debug_printf("CoopLite: slot %d dragged a corpse (host)\n", slot);
 }
 
+/* PT77z: client throws an item — host performs it authoritatively. */
+bool coop_lite_client_throw_intent(int64_t item_obj, int64_t target_loc)
+{
+    PacketCoopThrowIntent pkt;
+    int64_t pc = player_get_local_pc_obj();
+    int64_t parent = OBJ_HANDLE_NULL;
+    int depth;
+    static unsigned int last_ms;
+
+    if (!tig_net_is_coop_client() || !coop_lite_client_in_session
+        || pc == OBJ_HANDLE_NULL || item_obj == OBJ_HANDLE_NULL || target_loc == 0
+        || !item_parent(item_obj, &parent) || parent != pc) {
+        return false;
+    }
+    if (last_ms != 0 && !coop_lite_interval_elapsed(last_ms, coop_obj_now_ms, 400u)) {
+        return false;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_THROW_INTENT;
+    coop_lite_put_oid(pkt.item_oid, item_obj);
+    pkt.target_loc = target_loc;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    last_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    tig_debug_printf("CoopLite: throw intent sent to host\n");
+    return true;
+}
+
+void coop_lite_handle_throw_intent(PacketCoopThrowIntent* pkt)
+{
+    int slot;
+    int64_t pc;
+    int64_t item;
+    int64_t parent = OBJ_HANDLE_NULL;
+    int dist;
+    int range;
+
+    if (!tig_net_is_active() || !tig_net_is_host()
+        || !coop_lite_throw_intent_valid(pkt, tig_net_last_message_size())
+        || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    slot = sub_52A530();
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    item = coop_lite_get_oid_obj(pkt->item_oid);
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || item == OBJ_HANDLE_NULL
+        || !item_parent(item, &parent) || parent != pc) {
+        tig_debug_printf("CoopLite: slot %d throw refused (ownership)\n", slot);
+        return;
+    }
+    dist = (int)location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), pkt->target_loc);
+    range = item_throwing_distance(item, pc);
+    if (!coop_lite_throw_in_range(dist, range)) {
+        tig_debug_printf("CoopLite: slot %d throw refused: %d tiles (range %d)\n", slot, dist, range);
+        return;
+    }
+    if (!anim_goal_throw_item(pc, item, pkt->target_loc)) {
+        tig_debug_printf("CoopLite: slot %d throw: host anim_goal_throw_item failed\n", slot);
+        return;
+    }
+    tig_debug_printf("CoopLite: slot %d throw started on host\n", slot);
+}
+
+void coop_lite_host_projectile_fx(int64_t src_loc, int64_t dst_loc, unsigned int missile_art_id, int speed)
+{
+    PacketCoopProjectileFx pkt;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || !tig_net_is_coop_enabled()
+        || src_loc == 0 || dst_loc == 0 || missile_art_id == 0) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PROJECTILE_FX;
+    pkt.speed = speed;
+    pkt.missile_art_id = missile_art_id;
+    pkt.src_loc = src_loc;
+    pkt.dst_loc = dst_loc;
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+void coop_lite_handle_projectile_fx(PacketCoopProjectileFx* pkt)
+{
+    int64_t proto;
+    int64_t missile;
+
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_projectile_fx_valid(pkt, tig_net_last_message_size())
+        || !map_is_valid() || map_is_clearing_objects()) {
+        return;
+    }
+    proto = sub_4685A0(BP_PROJECTILE);
+    if (proto == OBJ_HANDLE_NULL || !object_create(proto, pkt->src_loc, &missile)) {
+        return;
+    }
+    obj_field_int32_set(missile, OBJ_F_PROJECTILE_FLAGS_COMBAT, (int)COOP_PROJECTILE_VISUAL);
+    if (!anim_goal_projectile_visual(missile, pkt->src_loc, pkt->dst_loc, (tig_art_id_t)pkt->missile_art_id, pkt->speed)) {
+        object_destroy(missile);
+    }
+}
+
 /* PT77g: client trap device on a tile (item_use_on_loc). */
 bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc)
 {
@@ -17228,6 +17372,13 @@ bool coop_lite_client_use_item_intent(int64_t source_obj, int64_t item_obj, int6
 bool coop_lite_client_use_item_loc_intent(int64_t source_obj, int64_t item_obj, int64_t target_loc) { (void)source_obj; (void)item_obj; (void)target_loc; return false; }
 bool coop_lite_client_body_drag_intent(int64_t pc_obj, int64_t target_obj) { (void)pc_obj; (void)target_obj; return false; }
 void coop_lite_handle_body_drag(PacketCoopBodyDrag* pkt) { (void)pkt; }
+bool coop_lite_client_throw_intent(int64_t item_obj, int64_t target_loc) { (void)item_obj; (void)target_loc; return false; }
+void coop_lite_handle_throw_intent(PacketCoopThrowIntent* pkt) { (void)pkt; }
+void coop_lite_host_projectile_fx(int64_t src_loc, int64_t dst_loc, unsigned int missile_art_id, int speed)
+{
+    (void)src_loc; (void)dst_loc; (void)missile_art_id; (void)speed;
+}
+void coop_lite_handle_projectile_fx(PacketCoopProjectileFx* pkt) { (void)pkt; }
 bool coop_lite_client_craft_intent(int schematic) { (void)schematic; return false; }
 void coop_lite_handle_craft(PacketCoopCraft* pkt) { (void)pkt; }
 void coop_lite_host_party_fate_point(int64_t earner) { (void)earner; }

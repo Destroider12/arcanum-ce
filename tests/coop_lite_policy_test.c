@@ -2777,6 +2777,64 @@ int main(int argc, char** argv)
         }
         printf("PT77z critter effects packet OK\n");
     }
+    /* PT77z: throw intent + projectile FX policy. */
+    {
+        PacketCoopThrowIntent th;
+        PacketCoopProjectileFx fx;
+
+        memset(&th, 0, sizeof(th));
+        th.type = PACKET_COOP_THROW_INTENT;
+        th.item_oid[0] = 1;
+        th.target_loc = LOCATION_MAKE(10, 10);
+        if (!coop_lite_throw_intent_valid(&th, (int)sizeof(th))) {
+            fprintf(stderr, "PT77z throw intent valid packet rejected\n");
+            return 1;
+        }
+        th.target_loc = 0;
+        if (coop_lite_throw_intent_valid(&th, (int)sizeof(th))) {
+            fprintf(stderr, "PT77z throw intent loc 0 accepted\n");
+            return 1;
+        }
+        th.target_loc = LOCATION_MAKE(10, 10);
+        memset(th.item_oid, 0, sizeof(th.item_oid));
+        if (coop_lite_throw_intent_valid(&th, (int)sizeof(th))) {
+            fprintf(stderr, "PT77z throw intent empty oid accepted\n");
+            return 1;
+        }
+        if (!coop_lite_throw_in_range(5, 4)
+            || !coop_lite_throw_in_range(7, 4)
+            || coop_lite_throw_in_range(8, 4)
+            || coop_lite_throw_in_range(-1, 10)
+            || coop_lite_throw_in_range(1, 0)) {
+            fprintf(stderr, "PT77z throw range slack wrong\n");
+            return 1;
+        }
+        memset(&fx, 0, sizeof(fx));
+        fx.type = PACKET_COOP_PROJECTILE_FX;
+        fx.missile_art_id = 7;
+        fx.src_loc = LOCATION_MAKE(1, 1);
+        fx.dst_loc = LOCATION_MAKE(2, 2);
+        if (!coop_lite_projectile_fx_valid(&fx, (int)sizeof(fx))
+            || coop_lite_projectile_fx_valid(&fx, (int)sizeof(fx) - 1)) {
+            fprintf(stderr, "PT77z projectile fx valid failed\n");
+            return 1;
+        }
+        fx.dst_loc = 0;
+        if (coop_lite_projectile_fx_valid(&fx, (int)sizeof(fx))) {
+            fprintf(stderr, "PT77z projectile fx zero dest accepted\n");
+            return 1;
+        }
+        if (coop_lite_mp_packet_role(PACKET_COOP_THROW_INTENT) != COOP_MP_PKT_HOST_RESOLVE
+            || coop_lite_mp_packet_role(PACKET_COOP_PROJECTILE_FX) != COOP_MP_PKT_CLIENT_APPLY) {
+            fprintf(stderr, "PT77z throw/fx roles wrong\n");
+            return 1;
+        }
+        if (coop_lite_throw_allowed(true, false, true)) {
+            fprintf(stderr, "PT77z client must still not throw locally\n");
+            return 1;
+        }
+        printf("PT77z throw intent + projectile fx OK\n");
+    }
     return 0;
     }
 }

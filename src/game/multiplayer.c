@@ -1209,6 +1209,12 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_CRITTER_EFFECTS:
         coop_lite_handle_critter_effects((PacketCoopCritterEffects*)msg);
         break;
+    case PACKET_COOP_THROW_INTENT:
+        coop_lite_handle_throw_intent((PacketCoopThrowIntent*)msg);
+        break;
+    case PACKET_COOP_PROJECTILE_FX:
+        coop_lite_handle_projectile_fx((PacketCoopProjectileFx*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

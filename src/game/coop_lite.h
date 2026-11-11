@@ -49,6 +49,8 @@ extern "C" {
 #define PACKET_COOP_CHAT 160 /* PT77: player chat text (client->host->all) */
 #define PACKET_COOP_BODY_DRAG 161 /* PT77h: client -> host: Alt-drag this corpse/item to me */
 #define PACKET_COOP_CRITTER_EFFECTS 162 /* PT77z: host effect arrays + light -> clients */
+#define PACKET_COOP_THROW_INTENT 163 /* PT77z: client -> host throw item */
+#define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
 #define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
@@ -645,6 +647,33 @@ bool coop_lite_critter_effects_valid(const PacketCoopCritterEffects* pkt, int si
 unsigned int coop_lite_critter_effects_sig(int count, const unsigned int* effects, const unsigned int* causes,
     unsigned int light_flags, unsigned int light_aid, unsigned int light_color);
 void coop_lite_handle_critter_effects(PacketCoopCritterEffects* pkt);
+
+#define COOP_THROW_RANGE_SLACK 3
+#define COOP_PROJECTILE_VISUAL 0x80000000u /* client-only missile: destroy, no combat */
+typedef struct PacketCoopThrowIntent {
+    /* 0000 */ int type;
+    /* 0004 */ int reserved;
+    /* 0008 */ uint8_t item_oid[24];
+    /* 0020 */ int64_t target_loc;
+} PacketCoopThrowIntent;
+COOP_STATIC_ASSERT(sizeof(PacketCoopThrowIntent) == 0x28, "PacketCoopThrowIntent size");
+bool coop_lite_throw_intent_valid(const PacketCoopThrowIntent* pkt, int size);
+bool coop_lite_throw_in_range(int dist, int throw_range);
+bool coop_lite_client_throw_intent(int64_t item_obj, int64_t target_loc);
+void coop_lite_handle_throw_intent(PacketCoopThrowIntent* pkt);
+
+typedef struct PacketCoopProjectileFx {
+    /* 0000 */ int type;
+    /* 0004 */ int speed;
+    /* 0008 */ unsigned int missile_art_id;
+    /* 000C */ int reserved;
+    /* 0010 */ int64_t src_loc;
+    /* 0018 */ int64_t dst_loc;
+} PacketCoopProjectileFx;
+COOP_STATIC_ASSERT(sizeof(PacketCoopProjectileFx) == 0x20, "PacketCoopProjectileFx size");
+bool coop_lite_projectile_fx_valid(const PacketCoopProjectileFx* pkt, int size);
+void coop_lite_host_projectile_fx(int64_t src_loc, int64_t dst_loc, unsigned int missile_art_id, int speed);
+void coop_lite_handle_projectile_fx(PacketCoopProjectileFx* pkt);
 
 typedef struct PacketCoopChat {
     /* 0000 */ int type;

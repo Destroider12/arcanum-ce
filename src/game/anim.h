@@ -124,6 +124,8 @@ bool anim_goal_pickup_item(int64_t obj, int64_t item_obj);
 bool anim_goal_pickup_item_as_click(int64_t obj, int64_t item_obj);
 bool anim_goal_animate_stunned(int64_t obj);
 bool anim_goal_projectile(int64_t source_obj, int64_t missile_obj, tig_art_id_t missile_art_id, int a4, int a5, int64_t target_obj, int64_t target_loc, int64_t weapon_obj);
+/* PT77z: client-only visual missile (no parent/weapon, no host FX echo). */
+bool anim_goal_projectile_visual(int64_t missile_obj, int64_t src_loc, int64_t dst_loc, tig_art_id_t missile_art_id, int speed);
 bool sub_435A00(int64_t proj_obj, int64_t a2, int64_t a3);
 bool anim_goal_knockdown(int64_t obj);
 bool anim_goal_make_knockdown(int64_t obj);

@@ -493,6 +493,10 @@ void sub_4B2690(int64_t proj_obj, int64_t a2, int64_t a3, CombatContext* combat,
     unsigned int critter_flags2;
 
     proj_flags = obj_field_int32_get(proj_obj, OBJ_F_PROJECTILE_FLAGS_COMBAT);
+    if ((proj_flags & COOP_PROJECTILE_VISUAL) != 0) {
+        object_destroy(proj_obj);
+        return;
+    }
     if ((proj_flags & 0x40) != 0) {
         weapon_obj = obj_field_handle_get(proj_obj, OBJ_F_PROJECTILE_PARENT_WEAPON);
         loc = obj_field_int64_get(proj_obj, OBJ_F_LOCATION);
