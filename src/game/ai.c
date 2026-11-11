@@ -3495,6 +3495,7 @@ static int ai_check_kos_party(int64_t source_obj, int64_t target_obj)
         int other;
 
         if (pc == OBJ_HANDLE_NULL || pc == target_obj || critter_is_dead(pc)
+            || (obj_field_int32_get(pc, OBJ_F_FLAGS) & OF_OFF) != 0
             || object_dist(source_obj, pc) > 120) {
             continue;
         }

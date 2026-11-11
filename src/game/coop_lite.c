@@ -1149,7 +1149,6 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
     coop_follow_carry_pending = true;
     coop_follow_host_loc = pkt->loc;
     coop_lite_applying_follow = true;
-    coop_map_gen = (uint16_t)pkt->map_gen;
     if (!coop_lite_auth_teleport(&teleport_data)) {
         /* PT23: refused (another local teleport pending) — never leave the
            carry wait armed: it stops our PC_POS until the next travel. */
@@ -1164,6 +1163,9 @@ void coop_lite_handle_follow_packet(PacketCoopFollowHost* pkt)
         tig_debug_printf("CoopLite: client follow teleport refused (busy) - %s\n",
             coop_lite_pending_follow_valid ? "queued" : "dropped");
     } else {
+        /* PT77q: only after a successful teleport, so a refused follow
+           does not leave us on the old map with the new generation. */
+        coop_map_gen = (uint16_t)pkt->map_gen;
         coop_follow_busy_retries = 0;
     }
     coop_lite_applying_follow = false;
