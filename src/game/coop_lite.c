@@ -7758,7 +7758,12 @@ void coop_lite_world_hooks_refresh(void)
 {
     int depth = tig_net_local_suspend_pause();
 
+#ifdef COOP_LITE_TEST_STUBS
     coop_lite_world_hooks_on = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled();
+#else
+    coop_lite_world_hooks_on = tig_net_is_active() && tig_net_is_host() && tig_net_is_coop_enabled()
+        && !gamelib_in_load() && !map_is_clearing_objects();
+#endif
     tig_net_local_suspend_resume(depth);
 }
 
@@ -16389,6 +16394,8 @@ static void coop_lite_wall_send(const uint8_t* oid, int slot, bool to_all)
 void coop_lite_walls_reset(void)
 {
     coop_wall_changed_cnt = 0;
+    coop_door_pend_cnt = 0;
+    memset(coop_fx_cache, 0, sizeof(coop_fx_cache));
 }
 
 void coop_lite_host_wall_touch(int64_t obj, bool destroyed)
