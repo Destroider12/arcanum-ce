@@ -1500,6 +1500,10 @@ bool coop_lite_follow_toggle(void);
 void coop_lite_follow_cancel(void);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
+/* Coop (not vanilla SP): merchant store / live merchant items cannot be dropped. */
+bool coop_lite_merchant_drop_blocked(bool coop_active, bool parent_is_store, bool parent_is_live_merchant);
+/* Host/local path: true = do not drop this item (merchant stock or equipped). */
+bool coop_lite_refuse_merchant_stock_drop(int64_t item);
 bool coop_lite_use_item_valid(const PacketCoopSkillUse* pkt, int size);
 /* PT56: host range for a client's item used on another critter (was 4;
    the item cursor now reaches the host, clicks come from farther). */

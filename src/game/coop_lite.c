@@ -10813,13 +10813,14 @@ static bool coop_lite_container_is_store(int64_t container, int64_t pc)
     if (container == OBJ_HANDLE_NULL || obj_field_int32_get(container, OBJ_F_TYPE) != OBJ_TYPE_CONTAINER) {
         return false;
     }
-    for (slot = 1; slot < 8; slot++) {
+    for (slot = 0; slot < 8; slot++) {
         if (coop_barter[slot].valid
             && coop_lite_store_of(obj_pool_perm_lookup(coop_barter[slot].npc)) == container) {
             return true;
         }
     }
-    object_list_vicinity(pc, OBJ_TM_NPC, &npcs);
+    /* Prefer the chest itself: the store can be up to 20 tiles from the NPC. */
+    object_list_vicinity(container, OBJ_TM_NPC, &npcs);
     for (node = npcs.head; node != NULL; node = node->next) {
         if (coop_lite_store_of(node->obj) == container) {
             store = true;
@@ -10827,7 +10828,62 @@ static bool coop_lite_container_is_store(int64_t container, int64_t pc)
         }
     }
     object_list_destroy(&npcs);
+    if (!store && pc != OBJ_HANDLE_NULL && pc != container) {
+        object_list_vicinity(pc, OBJ_TM_NPC, &npcs);
+        for (node = npcs.head; node != NULL; node = node->next) {
+            if (coop_lite_store_of(node->obj) == container) {
+                store = true;
+                break;
+            }
+        }
+        object_list_destroy(&npcs);
+    }
     return store;
+}
+
+static bool coop_lite_parent_holds_merchant_stock(int64_t parent, int64_t near_obj)
+{
+    int typ;
+
+    if (parent == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    typ = obj_field_int32_get(parent, OBJ_F_TYPE);
+    if (typ == OBJ_TYPE_CONTAINER) {
+        return coop_lite_container_is_store(parent, near_obj);
+    }
+    /* Equipped / carried by a living merchant, not a companion. */
+    if (typ == OBJ_TYPE_NPC
+        && !critter_is_dead(parent)
+        && critter_pc_leader_get(parent) == OBJ_HANDLE_NULL
+        && coop_lite_npc_is_merchant(parent)) {
+        return true;
+    }
+    return false;
+}
+
+bool coop_lite_refuse_merchant_stock_drop(int64_t item)
+{
+    int64_t parent = OBJ_HANDLE_NULL;
+    int64_t near_obj;
+
+    if (item == OBJ_HANDLE_NULL
+        || !tig_net_is_active()
+        || !tig_net_is_coop_enabled()) {
+        return false;
+    }
+    if (!item_parent(item, &parent) || parent == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    near_obj = player_get_local_pc_obj();
+    if (near_obj == OBJ_HANDLE_NULL) {
+        near_obj = parent;
+    }
+    if (!coop_lite_parent_holds_merchant_stock(parent, near_obj)) {
+        return false;
+    }
+    tig_debug_printf("CoopLite: refused drop of a merchant's item (barter drop-slot)\n");
+    return true;
 }
 
 void coop_lite_host_handle_item_op(int type, void* msg)
@@ -10978,6 +11034,12 @@ void coop_lite_host_handle_item_op(int type, void* msg)
             tig_net_send_app_except(&gone, sizeof(gone), slot);
         }
     }
+}
+#else
+bool coop_lite_refuse_merchant_stock_drop(int64_t item)
+{
+    (void)item;
+    return false;
 }
 #endif
 
@@ -16234,6 +16296,11 @@ bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj)
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap)
 {
     return can_use_worldmap || (!selecting && townmap != 0);
+}
+
+bool coop_lite_merchant_drop_blocked(bool coop_active, bool parent_is_store, bool parent_is_live_merchant)
+{
+    return coop_active && (parent_is_store || parent_is_live_merchant);
 }
 
 /* PT77g: what a client's item may target on the host: critters (potions,

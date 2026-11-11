@@ -3049,3 +3049,19 @@ intercept; a missing map name no longer auto-refuses (the prompt uses
 "another area"). `coop_lite_can_use_worldmap` stays host-only, so the client
 still cannot actually drive the world map. No protocol change (stays 47).
 
+
+## PT77z: host cannot drop a merchant's items for free
+
+PT77m refused a *client* Packet28 pickup of store-chest stock after the
+barter drop-slot trick. The host (and any local coop inventory path) still
+ran `item_drop` when a merchant's item was dragged to the "throw away"
+slot, so equipped gear, ammo and store stock landed on the ground for
+free pickup.
+
+**Fix.** In coop, `coop_lite_refuse_merchant_stock_drop` blocks a drop when
+the item's parent is a merchant's substitute-inventory chest or a living
+merchant who is not a companion. The inven UI drop slot (`sub_578EA0`
+flags 0x02) refuses before any gold/ammo transfer, and `item_drop_ex` on
+the host is the backstop. Vanilla single-player is unchanged. Own-item
+drops, companion inventory, loot and steal still work. No protocol change.
+

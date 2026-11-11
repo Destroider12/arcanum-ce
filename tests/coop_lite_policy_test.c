@@ -1255,6 +1255,14 @@ static int test_packet_hardening(void)
             fprintf(stderr, "client worldmap propose open gate wrong\n");
             return 1;
         }
+        if (coop_lite_merchant_drop_blocked(false, true, true)
+            || coop_lite_merchant_drop_blocked(true, false, false)
+            || !coop_lite_merchant_drop_blocked(true, true, false)
+            || !coop_lite_merchant_drop_blocked(true, false, true)
+            || coop_lite_refuse_merchant_stock_drop(0)) {
+            fprintf(stderr, "merchant drop-slot rule wrong\n");
+            return 1;
+        }
         {
             PacketCoopSkillUse u;
 

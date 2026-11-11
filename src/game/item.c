@@ -724,6 +724,13 @@ bool item_drop_ex(int64_t item_obj, int distance)
 
     item_parent(item_obj, &parent_obj);
 
+    /* PT77z: host / local coop path — merchant stock can only be bought.
+       Clients already cannot drop another parent via Packet26; this closes
+       the barter drop-slot on the host (and any local drop). */
+    if (coop_lite_refuse_merchant_stock_drop(item_obj)) {
+        return false;
+    }
+
     if (object_script_execute(parent_obj, item_obj, OBJ_HANDLE_NULL, SAP_DROP, 0) == 0) {
         return false;
     }

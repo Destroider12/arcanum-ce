@@ -4277,6 +4277,16 @@ bool sub_578EA0(Packet81* pkt)
     error = false;
     item_type = obj_field_int32_get(v2, OBJ_F_TYPE);
 
+    /* PT77z: refuse dropping a merchant's stock / equipped items from the
+       barter drop slot before any gold/ammo transfer or item_drop. */
+    if ((flags & 0x02) != 0 && v2 != OBJ_HANDLE_NULL
+        && coop_lite_refuse_merchant_stock_drop(v2)) {
+        if (inven_ui_created && v6 != OBJ_HANDLE_NULL && player_is_local_pc_obj(v6)) {
+            redraw_inven(false);
+        }
+        return false;
+    }
+
     if ((flags & 0x10) == 0) {
         if (item_type == OBJ_TYPE_GOLD) {
             if (!tig_net_is_active() || tig_net_is_host()) {
