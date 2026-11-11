@@ -3087,3 +3087,16 @@ teleport writes the carried objects to `Save\\Current\\coop_lite_carry.mdy`
 `dest\\mobile.mdy` and the local PC is loaded as usual. `finish_sync` can
 then apply SESSION_SYNC and, when `COOP_SYNC_F_REJOINED` is set, request the
 host's parked copy of the PC. No protocol change (stays 47).
+
+
+## PT77ab: stop dumping every animation on a repeated assertion
+
+`ASSERT` in the anim code always called `anim_stats()`, which prints every
+active animation slot (goal stack, path, object names). In a client log from
+build dd68d994 this fired 269 times at `anim.c:4480` (`parent_obj !=
+OBJ_HANDLE_NULL` in `sub_424BC0`, already handled by returning false) and
+wrote 6.4 MB of a 9.1 MB log — mostly looping torch/fire candy. The one-line
+`ASSERTION:` is still logged every time; a full dump is written only on the
+first failure at that file:line, and at most once a minute after that, with
+a short "repeated N times" reminder. No protocol change.
+

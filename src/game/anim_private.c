@@ -1,5 +1,7 @@
 #include "game/anim_private.h"
 
+#include <string.h>
+
 #include "game/anim.h"
 #include "game/critter.h"
 #include "game/gamelib.h"
@@ -1590,3 +1592,64 @@ void anim_stats(void)
     tig_debug_printf("Done.\n");
     tig_debug_printf("------------------------------------------------\n");
 }
+
+/* PT77ab: rate-limit the full animation dump that ASSERT used to print
+   on every failure (client log dd68d994: 269 dumps of parent_obj != NULL,
+   6.4 MB of a 9.1 MB log). */
+void anim_assert_fail(const char* file, int line, const char* expr)
+{
+    static struct {
+        const char* file;
+        int line;
+        int count;
+        unsigned int last_dump_ms;
+    } seen[8];
+    unsigned int now;
+    int i;
+    int slot = -1;
+    int empty = -1;
+    int oldest = 0;
+
+    tig_debug_printf("ASSERTION: File:%s, Line:%d: %s\n",
+        file != NULL ? file : "?", line, expr != NULL ? expr : "?");
+
+    now = (unsigned int)(SDL_GetTicksNS() / 1000000u);
+    for (i = 0; i < 8; i++) {
+        if (seen[i].file == file && seen[i].line == line) {
+            slot = i;
+            break;
+        }
+        if (empty < 0 && seen[i].file == NULL) {
+            empty = i;
+        }
+        if (seen[i].count < seen[oldest].count) {
+            oldest = i;
+        }
+    }
+    if (slot < 0) {
+        slot = empty >= 0 ? empty : oldest;
+        seen[slot].file = file;
+        seen[slot].line = line;
+        seen[slot].count = 0;
+        seen[slot].last_dump_ms = 0;
+    }
+    seen[slot].count++;
+
+    /* First failure at this site, or another dump after 60 s. */
+    if (seen[slot].count == 1
+        || (now - seen[slot].last_dump_ms) >= 60000u) {
+        if (seen[slot].count > 1) {
+            tig_debug_printf("Anim: assertion at %s:%d repeated %d time(s)\n",
+                file != NULL ? file : "?", line, seen[slot].count);
+        }
+        anim_stats();
+        seen[slot].last_dump_ms = now;
+        return;
+    }
+    /* Occasional one-line reminder, not another multi-KB dump. */
+    if (seen[slot].count == 2 || (seen[slot].count % 50) == 0) {
+        tig_debug_printf("Anim: assertion at %s:%d repeated %d time(s); anim dump skipped\n",
+            file != NULL ? file : "?", line, seen[slot].count);
+    }
+}
+
