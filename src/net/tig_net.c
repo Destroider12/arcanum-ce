@@ -183,6 +183,7 @@ static bool lost_host;
    target is configured again: the automatic rejoin (New Game) sends its
    CHAR_OFFER before WELCOME, so it must not reconnect at all. */
 static bool host_refused;
+static TigNetConnectWaitFn connect_wait_fn;
 
 static TigNetMessageFunc message_func;
 static TigNetMessageValidationFunc validation_func;
@@ -580,6 +581,11 @@ void tig_net_start_server(void)
     tig_net_fire_event(TIG_NET_EVENT_CONNECT, 0, NULL, 0);
 }
 
+void tig_net_set_connect_wait(TigNetConnectWaitFn fn)
+{
+    connect_wait_fn = fn;
+}
+
 int tig_net_connect_configured(void)
 {
     TigNetTPeer* peer;
@@ -624,31 +630,44 @@ int tig_net_connect_configured(void)
     is_host = false;
     active = false;
 
-    /* PT58: Steam relays may need several seconds to route the first packet. */
-    for (waits = 0; waits < (tp == tig_net_transport_enet() ? 50 : 200); waits++) {
-        if (tp->service(&event, 100) <= 0) {
-            continue;
-        }
-        if (event.type == TIG_NET_TEV_RECEIVE) {
-            /* Not expected before CONNECT; never leak the packet. */
-            tp->event_done(&event);
-            continue;
-        }
-        if (event.type == TIG_NET_TEV_DISCONNECT) {
-            break; /* refused / unreachable */
-        }
-        if (event.type == TIG_NET_TEV_CONNECT) {
-            clients[0].peer = peer;
-            clients[0].active = true;
-            tig_net_peer_set_slot(peer, 0);
-            active = true;
-            /* PT57: a crashed / frozen host is noticed in ~10 s (ENet's
-               default is up to 30 s of a frozen client screen). */
-            tp->set_timeout(peer, 4000, 10000);
-            tig_debug_printf("tig_net: connected to %s:%d (%s)\n", target, join_port, tp->name);
-            tig_net_send_hello(peer);
-            /* Slot assignment arrives via WELCOME ctrl packet. */
-            return TIG_OK;
+    /* PT58: Steam relays may need several seconds to route the first packet.
+       PT77q: 20 ms slices (same 5 s / 20 s budget) so the game can pump
+       SDL events and abort on Esc; a 100 ms block made the window
+       "Not Responding". */
+    {
+        int max_waits = (tp == tig_net_transport_enet() ? 50 : 200) * 5;
+
+        for (waits = 0; waits < max_waits; waits++) {
+            if (connect_wait_fn != NULL && connect_wait_fn()) {
+                tig_debug_printf("tig_net: connect cancelled\n");
+                tp->reset_peer(peer);
+                tp->close();
+                return TIG_ERR_GENERIC;
+            }
+            if (tp->service(&event, 20) <= 0) {
+                continue;
+            }
+            if (event.type == TIG_NET_TEV_RECEIVE) {
+                /* Not expected before CONNECT; never leak the packet. */
+                tp->event_done(&event);
+                continue;
+            }
+            if (event.type == TIG_NET_TEV_DISCONNECT) {
+                break; /* refused / unreachable */
+            }
+            if (event.type == TIG_NET_TEV_CONNECT) {
+                clients[0].peer = peer;
+                clients[0].active = true;
+                tig_net_peer_set_slot(peer, 0);
+                active = true;
+                /* PT57: a crashed / frozen host is noticed in ~10 s (ENet's
+                   default is up to 30 s of a frozen client screen). */
+                tp->set_timeout(peer, 4000, 10000);
+                tig_debug_printf("tig_net: connected to %s:%d (%s)\n", target, join_port, tp->name);
+                tig_net_send_hello(peer);
+                /* Slot assignment arrives via WELCOME ctrl packet. */
+                return TIG_OK;
+            }
         }
     }
 

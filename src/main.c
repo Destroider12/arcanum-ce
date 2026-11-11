@@ -97,6 +97,17 @@ static bool coop_arg_find(int argc, char** argv, const char* name, const char** 
     return false;
 }
 
+/* PT77q: keep the window alive during a blocking connect, and let Esc
+   abort the current attempt immediately (the menu then cancels wait). */
+static bool coop_connect_wait_pump(void)
+{
+    const bool* keys;
+
+    SDL_PumpEvents();
+    keys = SDL_GetKeyboardState(NULL);
+    return keys != NULL && keys[SDL_SCANCODE_ESCAPE];
+}
+
 // 0x59A040
 static float gamma = 1.0f;
 
@@ -253,6 +264,7 @@ int main(int argc, char** argv)
         const char* val = NULL;
 
         tig_net_set_coop_enabled(true);
+        tig_net_set_connect_wait(coop_connect_wait_pump);
         if (coop_arg_find(argc, argv, "-host", &val)) {
             int port = TIG_NET_DEFAULT_PORT;
 

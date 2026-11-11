@@ -57,6 +57,11 @@ bool tig_net_host_refused(void);
 int tig_net_start_client(void);
 void tig_net_start_server(void);
 int tig_net_connect_configured(void);
+/* Called during a blocking connect wait. Return true to abort.
+   The game pumps SDL events so the window stays responsive and Esc can
+   cancel immediately. Tests leave this NULL. */
+typedef bool (*TigNetConnectWaitFn)(void);
+void tig_net_set_connect_wait(TigNetConnectWaitFn fn);
 void tig_net_reset_connection(void);
 int sub_5280F0(void);
 
