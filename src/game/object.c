@@ -3707,11 +3707,20 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
     ObjectNode* tmp_node;
     ObjectNode* new_node;
 
+    /* PT77af: a leader cycle (A follows B follows A) must not recurse
+       forever. */
+    static int depth;
+
     objects->num_sectors = 0;
     objects->head = NULL;
     parent_ptr = &(objects->head);
 
     object_list_followers(obj, objects);
+
+    if (depth >= 8) {
+        return;
+    }
+    depth++;
 
     cnt = 0;
     node = objects->head;
@@ -3733,6 +3742,10 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
 
             *parent_ptr = new_node;
             parent_ptr = &((*parent_ptr)->next);
+            /* PT77af: never advanced: a follower with followers of its own
+               (Virgil's summoned elemental) looped here allocating until
+               the host ran out of memory (Bates estate hangs). */
+            tmp_node = tmp_node->next;
         }
 
         object_list_destroy(&tmp_list);
@@ -3740,6 +3753,7 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
         node = node->next;
         cnt--;
     }
+    depth--;
 }
 
 // 0x441310

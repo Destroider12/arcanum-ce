@@ -3324,3 +3324,17 @@ dead and lootable. When the host lists it alive, the client caps the
 damage at local max - 1. FORCE log lines now name the host copy's
 current goal type (to find what moved a client PC after the Bates
 teleport, point 6 of the review).
+
+## PT77af: the Bates estate hang - follower list loop
+
+The watchdog caught it on 7d9c354a: the host's memory passed 6144 MB
+and the main-thread stack was
+`object_node_create <- object_list_all_followers <- ai_process <-
+ai_timeevent_process <- timeevent_ping <- gamelib_ping`.
+
+`object_list_all_followers` (decompiled engine code) copied each
+follower's own followers but never advanced `tmp_node`. A follower with a
+follower of its own (Virgil's summoned elemental) looped forever,
+allocating list nodes until the PC froze. It now advances, and a depth
+cap of 8 stops a leader cycle. Both Bates logs end right after a summon
+in combat.
