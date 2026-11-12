@@ -1169,6 +1169,46 @@ static int test_packet_hardening(void)
             fprintf(stderr, "fate recipients wrong\n");
             return 1;
         }
+        /* PT78: known areas - union merge and packet checks. */
+        {
+            uint8_t dst[COOP_AREA_KNOWN_MAX / 8];
+            uint8_t src[COOP_AREA_KNOWN_MAX / 8];
+            PacketCoopAreaKnown ak;
+
+            memset(dst, 0, sizeof(dst));
+            memset(src, 0, sizeof(src));
+            dst[0] = 0x06; /* areas 1, 2 */
+            src[0] = 0x0C; /* areas 2, 3 */
+            src[2] = 0x01; /* area 16 */
+            src[255] = 0x80; /* area 2047 */
+            if (coop_lite_area_bits_merge(dst, src, 17) != 2 || dst[0] != 0x0E || dst[2] != 0x01
+                || dst[255] != 0 /* beyond count */
+                || coop_lite_area_bits_merge(dst, src, 17) != 0
+                || coop_lite_area_bits_merge(dst, src, 99999) != 1 || dst[255] != 0x80) {
+                fprintf(stderr, "PT78 area merge wrong\n");
+                return 1;
+            }
+            memset(&ak, 0, sizeof(ak));
+            ak.type = PACKET_COOP_AREA_KNOWN;
+            ak.count = 500;
+            if (!coop_lite_area_known_valid(&ak, (int)sizeof(ak))
+                || coop_lite_area_known_valid(&ak, (int)sizeof(ak) - 1)) {
+                fprintf(stderr, "PT78 area packet size check wrong\n");
+                return 1;
+            }
+            ak.count = COOP_AREA_KNOWN_MAX + 1;
+            if (coop_lite_area_known_valid(&ak, (int)sizeof(ak))) {
+                fprintf(stderr, "PT78 area packet count check wrong\n");
+                return 1;
+            }
+            if (coop_lite_mp_packet_role(PACKET_COOP_AREA_KNOWN) != COOP_MP_PKT_BOTH || TIG_NET_PROTOCOL < 50
+                || !coop_lite_packet_allowed(PACKET_COOP_AREA_KNOWN, true, 2)
+                || !coop_lite_packet_allowed(PACKET_COOP_AREA_KNOWN, false, 0)
+                || coop_lite_packet_allowed(PACKET_COOP_AREA_KNOWN, false, 2)) {
+                fprintf(stderr, "PT78 area packet role wrong\n");
+                return 1;
+            }
+        }
         /* PT77af: an NPC alive on the host never dies here from its damage. */
         if (coop_lite_npc_rx_hp_damage(120, false, 90) != 89
             || coop_lite_npc_rx_hp_damage(40, false, 90) != 40

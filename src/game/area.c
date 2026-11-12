@@ -1,5 +1,7 @@
 #include "game/area.h"
 
+#include "game/coop_lite.h"
+
 #include "game/location.h"
 #include "game/map.h"
 #include "game/mes.h"
@@ -402,7 +404,8 @@ bool area_is_known(int64_t pc_obj, int area)
         return false;
     }
 
-    if (pc_obj == player_get_local_pc_obj()) {
+    /* Coop Lite PT78: every co-op PC shares the one known set. */
+    if (pc_obj == player_get_local_pc_obj() || coop_lite_area_pc_shared(pc_obj)) {
         return (area_flags[area] & AREA_KNOWN) != 0;
     }
 
@@ -427,7 +430,7 @@ bool area_set_known(int64_t pc_obj, int area)
         return false;
     }
 
-    if (pc_obj == player_get_local_pc_obj()) {
+    if (pc_obj == player_get_local_pc_obj() || coop_lite_area_pc_shared(pc_obj)) {
         area_flags[area] |= AREA_KNOWN;
         area_last_known_area = area;
         ui_toggle_primary_button(UI_PRIMARY_BUTTON_WORLDMAP, true);
@@ -435,6 +438,43 @@ bool area_set_known(int64_t pc_obj, int area)
     }
 
     return false;
+}
+
+/* Coop Lite PT78: the known set as a bitmap (bit = area index); returns
+   how many areas it covers. */
+int area_known_bits_get(uint8_t* bits, int max_areas)
+{
+    int count = num_areas < max_areas ? num_areas : max_areas;
+    int area;
+
+    memset(bits, 0, (size_t)((max_areas + 7) / 8));
+    for (area = 1; area < count; area++) {
+        if ((area_flags[area] & AREA_KNOWN) != 0) {
+            bits[area >> 3] |= (uint8_t)(1u << (area & 7));
+        }
+    }
+    return count < 0 ? 0 : count;
+}
+
+/* Coop Lite PT78: adds the set bits as known; returns how many were new. */
+int area_known_bits_merge(const uint8_t* bits, int count)
+{
+    int added = 0;
+    int area;
+
+    if (count > num_areas) {
+        count = num_areas;
+    }
+    for (area = 1; area < count; area++) {
+        if ((bits[area >> 3] & (1u << (area & 7))) != 0 && (area_flags[area] & AREA_KNOWN) == 0) {
+            area_flags[area] |= AREA_KNOWN;
+            added++;
+        }
+    }
+    if (added > 0) {
+        ui_toggle_primary_button(UI_PRIMARY_BUTTON_WORLDMAP, true);
+    }
+    return added;
 }
 
 /**

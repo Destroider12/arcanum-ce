@@ -3358,3 +3358,29 @@ followers of a PC.
   companion, and logs the target's name for every accepted intent.
 
 No wire change (protocol 49).
+
+## PT78: known world-map locations are shared by everybody (protocol 50)
+
+Engine storage: `area.c` keeps ONE known-area array (`area_flags[]`,
+bit `AREA_KNOWN`), and it belongs to the local PC: `area_is_known` /
+`area_set_known` answered false for any other PC. It is saved in the game
+save (the per-player arrays next to it are saved but unused). So the host
+knew only the host's locations, a client only its own, and a script that
+taught a client's PC a location on the host did nothing.
+
+- In a session every co-op PC uses that one array (`coop_lite_area_pc_shared`):
+  a dialogue or script on the host that asks about or teaches a client's
+  PC uses the shared set.
+- New packet `PACKET_COOP_AREA_KNOWN` (165, two-way, 264 bytes): a bitmap
+  of up to 2048 areas. Client -> host: its whole known set. Host -> all:
+  the union. A merge only adds (OR), never removes.
+- Both sides check the set every second and send it on change, and again
+  every 10 s anyway. That covers a joiner, a rejoin, a host load (the
+  clients' sets come back in) and a client reset, without extra hooks.
+- The host keeps the union in its save. A client keeps whatever it got in
+  its own state.
+- Log: "areas: N new known location(s) from slot X" (host) / "from the
+  party" (client). No on-screen message.
+
+Not covered: the town map's revealed tiles (kept per map in the save) and
+the "last known area" marker (stays per machine).

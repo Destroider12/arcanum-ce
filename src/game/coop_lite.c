@@ -1,5 +1,9 @@
 #include "game/coop_lite.h"
 
+#ifndef COOP_LITE_TEST_STUBS
+#include "game/area.h" /* PT78 */
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1201,6 +1205,7 @@ static void coop_lite_host_critter_effects_tick(unsigned int now_ms);
 static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
+static void coop_lite_area_tick(unsigned int now_ms); /* PT78 */
 static void coop_lite_story_reset(void);
 static void coop_lite_host_dialog_tick(unsigned int now_ms);
 static void coop_lite_party_ui_tick(unsigned int now_ms);
@@ -2302,6 +2307,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_SAVE_REQ: /* PT61: client save/load ask -> host, result -> client (kind-checked) */
     case PACKET_COOP_HOTBAR: /* PT63: client layout -> host, kept layout -> client */
     case PACKET_COOP_CHAT: /* PT77: client text -> host, host relay -> all */
+    case PACKET_COOP_AREA_KNOWN: /* PT78: client set -> host, union -> all */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3490,6 +3496,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopThrowIntent);
     case PACKET_COOP_PROJECTILE_FX:
         return sizeof(PacketCoopProjectileFx);
+    case PACKET_COOP_AREA_KNOWN:
+        return sizeof(PacketCoopAreaKnown);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -7962,6 +7970,7 @@ void coop_lite_ping(unsigned int now_ms)
         if (coop_lite_client_in_session) {
             coop_lite_client_pc_stats_tick(now_ms);
             coop_lite_client_story_tick(now_ms);
+            coop_lite_area_tick(now_ms); /* PT78 */
         }
         if (coop_lite_client_in_session
             && coop_lite_interval_elapsed(coop_roster_reconcile_ms, now_ms, 1000u)) {
@@ -8067,6 +8076,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_lite_host_pc_stats_tick(now_ms);
     coop_lite_host_critter_effects_tick(now_ms);
     coop_lite_host_story_tick(now_ms);
+    coop_lite_area_tick(now_ms); /* PT78 */
     coop_lite_host_dialog_tick(now_ms);
     coop_lite_party_ui_tick(now_ms);
 
@@ -16409,6 +16419,36 @@ bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size)
 
 /* PT44: death writes hp damage 32000 (critter_kill / death path); floats
    showed that marker as "-31988"-style hits. Clamp to the hp pool. */
+bool coop_lite_area_known_valid(const PacketCoopAreaKnown* pkt, int size)
+{
+    return pkt != NULL && size == (int)sizeof(PacketCoopAreaKnown) && pkt->type == PACKET_COOP_AREA_KNOWN
+        && pkt->count >= 0 && pkt->count <= COOP_AREA_KNOWN_MAX;
+}
+
+/* PT78 (pure; tests): ORs the first count bits of src into dst; returns
+   how many were new. */
+int coop_lite_area_bits_merge(uint8_t* dst, const uint8_t* src, int count)
+{
+    int added = 0;
+    int i;
+
+    if (dst == NULL || src == NULL) {
+        return 0;
+    }
+    if (count > COOP_AREA_KNOWN_MAX) {
+        count = COOP_AREA_KNOWN_MAX;
+    }
+    for (i = 0; i < count; i++) {
+        uint8_t m = (uint8_t)(1u << (i & 7));
+
+        if ((src[i >> 3] & m) != 0 && (dst[i >> 3] & m) == 0) {
+            dst[i >> 3] |= m;
+            added++;
+        }
+    }
+    return added;
+}
+
 int coop_lite_npc_rx_hp_damage(int host_damage, bool host_dead, int local_max)
 {
     if (!host_dead && local_max > 0 && host_damage >= local_max) {
@@ -16721,6 +16761,67 @@ void coop_lite_host_portal_changed(void)
 }
 
 #ifndef COOP_LITE_TEST_STUBS
+/* ---- PT78: known world-map areas, shared by everybody (union) ---- */
+static uint8_t coop_area_sent[COOP_AREA_KNOWN_MAX / 8];
+static int coop_area_sent_count = -1;
+static unsigned int coop_area_tick_ms;
+static unsigned int coop_area_key_ms;
+
+/* area.c: the engine keeps one known-area set (the local PC's). In a
+   session every co-op PC uses it, so a script asking about (or teaching)
+   a client's PC on the host reaches the shared set. */
+bool coop_lite_area_pc_shared(int64_t pc_obj)
+{
+    return pc_obj != OBJ_HANDLE_NULL && tig_net_is_active() && tig_net_is_coop_enabled()
+        && coop_lite_slot_of_obj(pc_obj) >= 0;
+}
+
+static void coop_lite_area_tick(unsigned int now_ms)
+{
+    PacketCoopAreaKnown pkt;
+
+    if (!coop_lite_interval_elapsed(coop_area_tick_ms, now_ms, 1000u)) {
+        return;
+    }
+    coop_area_tick_ms = now_ms != 0 ? now_ms : 1;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_AREA_KNOWN;
+    pkt.count = area_known_bits_get(pkt.bits, COOP_AREA_KNOWN_MAX);
+    /* On change at once; otherwise every 10 s (a joiner, a host load or a
+       client reset gets the full set back). */
+    if (pkt.count == coop_area_sent_count && memcmp(pkt.bits, coop_area_sent, sizeof(pkt.bits)) == 0
+        && !coop_lite_interval_elapsed(coop_area_key_ms, now_ms, 10000u)) {
+        return;
+    }
+    coop_area_key_ms = coop_area_tick_ms;
+    coop_area_sent_count = pkt.count;
+    memcpy(coop_area_sent, pkt.bits, sizeof(pkt.bits));
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt)
+{
+    int added;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()
+        || !coop_lite_area_known_valid(pkt, tig_net_last_message_size())) {
+        return;
+    }
+    if (!tig_net_is_host() && !coop_lite_client_in_session) {
+        return;
+    }
+    added = area_known_bits_merge(pkt->bits, pkt->count);
+    if (added > 0) {
+        if (tig_net_is_host()) {
+            tig_debug_printf("CoopLite: areas: %d new known location(s) from slot %d - shared with everybody\n",
+                added, sub_52A530());
+            coop_area_tick_ms = 0; /* broadcast the union on the next tick */
+        } else {
+            tig_debug_printf("CoopLite: areas: %d new known location(s) from the party\n", added);
+        }
+    }
+}
+
 /* Client, own PC (packets are suspended inside its local goal): the walk to
    the door ran here; the use itself is the host's. */
 void coop_lite_client_queue_door_use(int64_t portal)
@@ -17851,6 +17952,9 @@ void coop_lite_host_pc_changed(int64_t pc, bool stats)
 #else
 void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
+bool coop_lite_area_pc_shared(int64_t pc_obj) { (void)pc_obj; return false; }
+void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt) { (void)pkt; }
+static void coop_lite_area_tick(unsigned int now_ms) { (void)now_ms; }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
 void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
 void coop_lite_host_object_destroyed(int64_t obj) { (void)obj; }

@@ -51,6 +51,7 @@ extern "C" {
 #define PACKET_COOP_CRITTER_EFFECTS 162 /* PT77z: host effect arrays + light -> clients */
 #define PACKET_COOP_THROW_INTENT 163 /* PT77z: client -> host throw item */
 #define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
+#define PACKET_COOP_AREA_KNOWN 165 /* PT78: known world-map areas, both ways (union) */
 #define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
@@ -679,6 +680,20 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopProjectileFx) == 0x20, "PacketCoopProjectile
 bool coop_lite_projectile_fx_valid(const PacketCoopProjectileFx* pkt, int size);
 void coop_lite_host_projectile_fx(int64_t src_loc, int64_t dst_loc, unsigned int missile_art_id, int speed);
 void coop_lite_handle_projectile_fx(PacketCoopProjectileFx* pkt);
+
+/* PT78: known world-map areas as a bitmap (area index = bit). Client ->
+   host: its whole set; host -> all: the union. Merges only add. */
+#define COOP_AREA_KNOWN_MAX 2048
+typedef struct PacketCoopAreaKnown {
+    /* 0000 */ int type;
+    /* 0004 */ int count; /* areas covered by bits, 0..COOP_AREA_KNOWN_MAX */
+    /* 0008 */ uint8_t bits[COOP_AREA_KNOWN_MAX / 8];
+} PacketCoopAreaKnown;
+COOP_STATIC_ASSERT(sizeof(PacketCoopAreaKnown) == 0x108, "PacketCoopAreaKnown size");
+bool coop_lite_area_known_valid(const PacketCoopAreaKnown* pkt, int size);
+int coop_lite_area_bits_merge(uint8_t* dst, const uint8_t* src, int count);
+bool coop_lite_area_pc_shared(int64_t pc_obj);
+void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt);
 
 typedef struct PacketCoopChat {
     /* 0000 */ int type;

@@ -184,11 +184,12 @@ static const char* const tig_net_stat_coop_names[] = {
     "CRITTER_EFFECTS",
     "THROW_INTENT",
     "PROJECTILE_FX",
+    "AREA_KNOWN",
 };
 
 static const char* tig_net_stat_type_name(int type, char* scratch, size_t scratch_n)
 {
-    if (type >= 128 && type <= 164) {
+    if (type >= 128 && type <= 165) {
         return tig_net_stat_coop_names[type - 128];
     }
     snprintf(scratch, scratch_n, "P%d", type);
