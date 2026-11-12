@@ -1289,6 +1289,7 @@ static void coop_lite_host_hotbar_tick(void); /* PT63 */
 static void coop_lite_hotbar_after_load(void); /* PT63 */
 static void coop_lite_host_vitals_force(void); /* PT54 */
 static void coop_lite_host_pcs_force(void); /* PT54a */
+static void coop_lite_show_notice(const char* str, int tf_type); /* PT77ad */
 #endif
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
@@ -4727,8 +4728,17 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
             coop_sync_nopc_wait = true;
             return;
         } else {
-            tig_debug_printf("CoopLite: finish sync: no local PC (gave up)\n");
+            /* PT77ad (review 2): giving up left the client connected but
+               PC-less until the player quit by hand. Take the proven way
+               back instead: to the main menu (the reset leaves the session,
+               the host parks our PC) and the wait-host loop rejoins, which
+               restores the parked PC from the host. No in-world PC rebuild. */
+            tig_debug_printf("CoopLite: finish sync: no local PC (gave up) - back to the menu to rejoin\n");
             coop_sync_nopc_tries = 0;
+            coop_lite_show_notice("Не удалось восстановить персонажа после загрузки хоста. Возврат в меню и автоматический перезаход. / Could not restore your character after the host's load. Returning to the menu to rejoin automatically.", TF_TYPE_RED);
+            coop_host_left_menu_armed = true;
+            coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+            coop_wait_host = coop_lite_wait_host_enabled(coop_lite_env("ARCANUM_COOP_WAIT_HOST"));
             return;
         }
     }

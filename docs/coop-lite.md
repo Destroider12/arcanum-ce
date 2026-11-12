@@ -3149,3 +3149,23 @@ before and after, and `coop_lite_inv_list_repair` returns at once on a
 clean list (the in-loop call is only the rare orphan re-list).
 
 Protocol 47 → 48: an old host would refuse a layout over 64 entries.
+
+## PT77ad: a client whose PC does not come back after a host load rejoins
+
+Review (Argon) 2. When the PT72 retries (40 × 250 ms) found no local PC
+after a host reload, the client logged "no local PC (gave up)" and stayed
+connected with no character until the player quit to the menu and joined
+again. That manual quit-and-rejoin is the path that always worked (the
+host parks the PC on leave, the rejoin-only offer brings it back). It is
+now automatic: on give-up the client shows a notice, arms the existing
+host-left return to the main menu (the game reset leaves the session) and
+switches on the wait-host loop, which rejoins within ~3 s. Nothing new is
+built in the world (no PC rebuilt from a proto in place).
+
+Checked and not changed: a busy sync teleport is retried every 250 ms
+until it queues (`coop_lite_client_request_sync_teleport`); a teleport
+that cannot be scheduled never closes the map, so it cannot lose the PC.
+The PC-loss case in the load-vanish log was the PT63 wipe (PT77aa). If the
+Esc menu is open when the give-up fires, the return is skipped (the menu
+is already up) but the wait-host loop still rejoins after the player
+quits. No protocol change.
