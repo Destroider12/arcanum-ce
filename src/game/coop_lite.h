@@ -1347,6 +1347,7 @@ int coop_lite_take_dev_autostart_rearm(void);
 const char* coop_lite_env(const char* name);
 /* PT25: both on the co-op party side (PCs + their followers): no hostility. */
 bool coop_lite_party_friendly(int64_t a, int64_t b);
+bool coop_lite_party_no_fight(int64_t a, int64_t b); /* PT77af */
 /* Host: obj is a co-op client's PC (slot 1-7), i.e. owner-driven. */
 bool coop_lite_is_remote_slot_pc(int64_t obj);
 /* PT26: obj is any co-op player's PC (host or client), host side. */

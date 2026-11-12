@@ -3338,3 +3338,23 @@ follower of its own (Virgil's summoned elemental) looped forever,
 allocating list nodes until the PC froze. It now advances, and a depth
 cap of 8 stops a leader cycle. Both Bates logs end right after a summon
 in combat.
+
+## PT77af: the co-op party never picks itself as a target
+
+The second Bates session: the client attacked an NPC in combat mode,
+companions reacted, and the PT25 guard in `ai_attack` fired once
+("coop party members never fight") just before the hang. That guard
+only covers one entry point, and its party only reached direct
+followers of a PC.
+
+- The co-op side now also includes followers of followers (up to 4
+  leaders up: a companion's summons).
+- `coop_lite_party_no_fight(a, b)`: both on the co-op side. The AI then
+  never takes such a target: the target check `sub_4AB990` (used for the
+  combat focus and `ai_find_target`) refuses it, and `sub_4AABE0` never
+  makes it the combat focus. Own followers are included: a companion
+  never turns on any co-op player.
+- The host refuses a client's attack intent on a co-op PC or a party
+  companion, and logs the target's name for every accepted intent.
+
+No wire change (protocol 49).

@@ -1792,6 +1792,19 @@ void coop_lite_handle_attack_intent(PacketCoopAttackIntent* pkt)
         tig_debug_printf("CoopLite: attack intent dropped (slot %d does not own attacker)\n", sub_52A530());
         return;
     }
+    if (coop_lite_party_no_fight(attacker, target)) {
+        /* PT77af: a client PC never starts a fight with a co-op player or
+           any party companion (the hit made the companions retaliate). */
+        tig_debug_printf("CoopLite: slot %d attack intent refused: target is in the co-op party\n", sub_52A530());
+        return;
+    }
+    {
+        char tname[128];
+
+        tname[0] = '\0';
+        object_examine(target, attacker, tname);
+        tig_debug_printf("CoopLite: slot %d attack intent on '%s'\n", sub_52A530(), tname);
+    }
     (void)pkt->attack_kind;
     /* PT25: the owner sends the intent once in reach on ITS screen; our
        copy of its pose may still lag a step behind. Starting AG_ATTACK now
@@ -3852,8 +3865,22 @@ static bool coop_lite_party_side(int64_t obj)
     if (obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
         return false;
     }
-    leader = critter_leader_get(obj);
-    return leader != OBJ_HANDLE_NULL && coop_lite_slot_of_obj(leader) >= 0;
+    /* PT77af: followers of followers too (Virgil's summoned elemental). */
+    {
+        int depth;
+
+        leader = critter_leader_get(obj);
+        for (depth = 0; depth < 4 && leader != OBJ_HANDLE_NULL; depth++) {
+            if (coop_lite_slot_of_obj(leader) >= 0) {
+                return true;
+            }
+            if (obj_field_int32_get(leader, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+                return false;
+            }
+            leader = critter_leader_get(leader);
+        }
+    }
+    return false;
 }
 
 /* PT27 item 6: vanilla ai_heal() only looks at the healer itself, its
@@ -3928,6 +3955,18 @@ bool coop_lite_party_friendly(int64_t a, int64_t b)
         return false; /* own follower: vanilla "watch it!" / jilt logic */
     }
     return true;
+}
+
+/* PT77af: AI target selection: nobody on the co-op side (PCs, their
+   followers, followers' summons) ever picks another one as a target - own
+   followers included (a follower never turns on any co-op player). */
+bool coop_lite_party_no_fight(int64_t a, int64_t b)
+{
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled() || a == OBJ_HANDLE_NULL || b == OBJ_HANDLE_NULL
+        || a == b) {
+        return false;
+    }
+    return coop_lite_party_side(a) && coop_lite_party_side(b);
 }
 
 static void coop_lite_fill_pc_pos(PacketCoopPcPos* pkt, int slot, int64_t obj)

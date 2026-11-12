@@ -1684,7 +1684,8 @@ int sub_4AABE0(int64_t source_obj, int danger_type, int64_t target_obj, int* sou
 
     if (danger_type == AI_DANGER_SOURCE_TYPE_COMBAT_FOCUS) {
         if (!ai_npc_fighting_enabled
-            || (obj_field_int32_get(source_obj, OBJ_F_NPC_FLAGS) & ONF_NO_ATTACK) != 0) {
+            || (obj_field_int32_get(source_obj, OBJ_F_NPC_FLAGS) & ONF_NO_ATTACK) != 0
+            || coop_lite_party_no_fight(source_obj, target_obj)) { /* Coop Lite PT77af */
             danger_type = AI_DANGER_SOURCE_TYPE_NONE;
         }
     }
@@ -2083,6 +2084,11 @@ bool sub_4AB990(int64_t source_obj, int64_t target_obj)
     int64_t v1;
 
     if (target_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+
+    /* Coop Lite PT77af: never a target inside the co-op party. */
+    if (coop_lite_party_no_fight(source_obj, target_obj)) {
         return false;
     }
 
