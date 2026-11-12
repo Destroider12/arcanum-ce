@@ -2653,7 +2653,12 @@ int main(int argc, char** argv)
         }
         /* PT72: no-local-PC sync is retried, bounded */
         if (coop_lite_sync_retry_allowed(0) || !coop_lite_sync_retry_allowed(1)
-            || !coop_lite_sync_retry_allowed(40) || coop_lite_sync_retry_allowed(41)) {
+            || !coop_lite_sync_retry_allowed(40) || coop_lite_sync_retry_allowed(41)
+            /* PT77ae: in-world restore asked from ~1 s on, every ~1 s */
+            || coop_lite_sync_restore_due(1) || coop_lite_sync_restore_due(3)
+            || !coop_lite_sync_restore_due(4) || coop_lite_sync_restore_due(5)
+            || !coop_lite_sync_restore_due(8) || !coop_lite_sync_restore_due(40)
+            || coop_lite_sync_restore_due(44)) {
             fprintf(stderr, "PT72 sync retry\n");
             return 1;
         }

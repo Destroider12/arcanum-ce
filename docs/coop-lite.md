@@ -3241,3 +3241,39 @@ Packet70. Packet70 / WORLD_DIRTY stay; they become no-ops for clients
 that already have the item. Several items = one push each.
 
 Protocol 48 → 49: an old client drops the unasked blob.
+
+## PT77ae: restore our PC in the world after a host load
+
+Review (Argon) 2, reconsidered. When SESSION_SYNC finds no local PC after
+the host's save load (neither `player_get_local_pc_obj` nor the sync's
+`client_pc_oid` resolves), the client now restores the PC in place and
+does not wait out 40 retries before going to the menu:
+
+- from the 4th PT72 retry (~1 s), and again every 4th retry, it asks the
+  host for the blob of the PC the host keeps for its slot. This is the
+  existing rejoin request (`coop_lite_client_request_own_pc` → OBJ_REQ;
+  the host answers its slot PC as a blob);
+- the blob is taken before the world-ready check (that check needs a
+  local PC). It is loaded at the sync's `client_loc` and set up like the
+  rejoin adopt: empty pack until the next INVEN_SYNC, OF_OFF cleared, set
+  as the local PC, slot bound, view refreshed, pack sync requested. The
+  next PT72 retry then runs the normal finish-sync binding;
+- if the place is not loaded or the blob is refused, the next ask
+  retries. The PT77ad menu rejoin (cbbef416) runs only after retry 40
+  (~10 s) as the last resort;
+- if the PC turns up by OID meanwhile, the blob request is dropped.
+
+Review 2a/2b, preemptive measures:
+- done: before the sync teleport the client closes the world-map
+  spectate and inventory / loot / barter / dialog / character view. It
+  reuses the forced-follow closer (PT52f / PT73).
+- not done: force-clearing `teleport_pending`. It cannot get stuck:
+  `teleport_ping` clears it on every call. A reset by hand would drop a
+  scheduled teleport that has already taken the render lock (frozen
+  screen).
+- not done: closing the Esc menu / death screen from game code. They are
+  the main-menu window with its own input loop; the retries keep running
+  under them, and the menu-return fallback already skips when the menu
+  is up.
+
+No protocol change (49).

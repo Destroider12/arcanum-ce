@@ -519,6 +519,10 @@ static bool coop_pending_sync_valid;
 static PacketCoopSessionSync coop_pending_sync;
 static int coop_sync_nopc_tries; /* PT72 */
 static bool coop_sync_nopc_wait; /* PT72 */
+/* PT77ae: in-world restore of our PC after a host load (asked the host for
+   our PC's blob; it is loaded at the sync's client_loc). */
+static bool coop_sync_restore_asked;
+static int64_t coop_sync_restore_loc;
 static bool coop_pending_sync_teleport_queued;
 static unsigned int coop_pending_sync_retry_ms;
 
@@ -1290,6 +1294,7 @@ static void coop_lite_hotbar_after_load(void); /* PT63 */
 static void coop_lite_host_vitals_force(void); /* PT54 */
 static void coop_lite_host_pcs_force(void); /* PT54a */
 static void coop_lite_show_notice(const char* str, int tf_type); /* PT77ad */
+static void coop_lite_client_restore_pc_ask(const PacketCoopSessionSync* pkt); /* PT77ae */
 #endif
 static void coop_lite_client_interp_tick(unsigned int now_ms);
 static void coop_lite_client_world_req_tick(unsigned int now_ms);
@@ -1462,6 +1467,7 @@ void coop_lite_session_reset(void)
     coop_pending_sync_retry_ms = 0;
     coop_sync_nopc_wait = false;
     coop_sync_nopc_tries = 0;
+    coop_sync_restore_asked = false;
     coop_last_pc_pos_ms = 0;
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_world_reset();
@@ -4722,6 +4728,11 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
             sub_40DAF0(local_pc);
         } else if (coop_lite_sync_retry_allowed(++coop_sync_nopc_tries)) {
             tig_debug_printf("CoopLite: PT72 finish sync: no local PC yet - retry %d\n", coop_sync_nopc_tries);
+            if (coop_lite_sync_restore_due(coop_sync_nopc_tries)) {
+                /* PT77ae (review 2): ask the host for our PC and load it
+                   here, in the world (no trip to the menu). */
+                coop_lite_client_restore_pc_ask(pkt);
+            }
             coop_pending_sync = *pkt;
             coop_pending_sync_valid = true;
             coop_pending_sync_teleport_queued = true; /* no re-teleport */
@@ -4735,6 +4746,8 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
                restores the parked PC from the host. No in-world PC rebuild. */
             tig_debug_printf("CoopLite: finish sync: no local PC (gave up) - back to the menu to rejoin\n");
             coop_sync_nopc_tries = 0;
+            coop_sync_restore_asked = false; /* PT77ae: last resort */
+            coop_rejoin_pc_wanted = false;
             coop_lite_show_notice("Не удалось восстановить персонажа после загрузки хоста. Возврат в меню и автоматический перезаход. / Could not restore your character after the host's load. Returning to the menu to rejoin automatically.", TF_TYPE_RED);
             coop_host_left_menu_armed = true;
             coop_host_left_menu_ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
@@ -4743,6 +4756,12 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
         }
     }
     coop_sync_nopc_tries = 0;
+    if (coop_sync_restore_asked) {
+        /* PT77ae: the PC turned up another way (adopted by OID): drop the
+           blob request, it would block door use / pickups meanwhile. */
+        coop_sync_restore_asked = false;
+        coop_rejoin_pc_wanted = false;
+    }
     local_oid = obj_get_id(local_pc);
     if (!coop_lite_oid_raw_equal(&local_oid, pkt->client_pc_oid)) {
         if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
@@ -7432,6 +7451,17 @@ static bool coop_lite_client_request_sync_teleport(void)
        of the old session stay as ghosts. */
     teleport_data.flags = TELEPORT_RENDER_LOCK | TELEPORT_FORCE_RELOAD;
     teleport_data.obj = player_get_local_pc_obj();
+    /* PT77ae (review 2a): as a forced follow (PT52f / PT73) - close the
+       world-map spectate and inventory / loot / barter / dialog / char view
+       before the map reload; they hold handles of the old map. */
+#ifndef COOP_LITE_TEST_STUBS
+    if (wmap_ui_is_spectating()) {
+        wmap_ui_spectate_close();
+    }
+#endif
+    if (teleport_data.obj != OBJ_HANDLE_NULL && coop_travel_close_hook != NULL) {
+        coop_travel_close_hook();
+    }
     teleport_data.loc = coop_pending_sync.client_loc;
     teleport_data.map = coop_pending_sync.map;
     coop_lite_client_clear_stuck_flags(teleport_data.obj, "sync");
@@ -12195,6 +12225,74 @@ static void coop_lite_client_request_own_pc(const unsigned char oid[24])
     tig_debug_printf("CoopLite: rejoin: asking the host for our parked PC\n");
 }
 
+/* PT77ae: SESSION_SYNC found no local PC: ask the host for the blob of the
+   PC it keeps for our slot (the existing rejoin request), to be loaded at
+   the sync's client_loc by coop_lite_client_restore_pc_in_world. */
+static void coop_lite_client_restore_pc_ask(const PacketCoopSessionSync* pkt)
+{
+    CoopObjPending* p = coop_lite_obj_pending_find(pkt->client_pc_oid);
+
+    if (p != NULL && coop_lite_interval_elapsed(p->asked_ms, coop_obj_now_ms, 900u)) {
+        p->used = false; /* unanswered: ask again */
+    }
+    if (!coop_sync_restore_asked) {
+        tig_debug_printf("CoopLite: PT77ae no local PC after the host load - restoring it in the world\n");
+    }
+    coop_sync_restore_asked = true;
+    coop_sync_restore_loc = pkt->client_loc;
+    coop_lite_client_request_own_pc(pkt->client_pc_oid);
+}
+
+static void coop_lite_client_restore_pc_in_world(PacketCoopObjBlob* pkt)
+{
+    int64_t pc = OBJ_HANDLE_NULL;
+    int64_t loc = coop_sync_restore_loc;
+    int slot = sub_529520();
+    int t;
+
+    if (slot <= 0 || slot >= 8 || !map_is_valid() || map_is_clearing_objects() || loc == 0
+        || !coop_lite_client_ground_loc_live(loc) || !coop_lite_obj_blob_bounded(pkt->data, pkt->size)) {
+        tig_debug_printf("CoopLite: PT77ae restore: map or place not ready - asking again\n");
+        return;
+    }
+    if (coop_lite_get_oid_obj(pkt->oid) != OBJ_HANDLE_NULL) {
+        return; /* it is here after all: finish sync adopts it by OID */
+    }
+    multiplayer_lock();
+    coop_lite_apply_begin();
+    if (!sub_4420D0(pkt->data, &pc, loc) || pc == OBJ_HANDLE_NULL
+        || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        if (pc != OBJ_HANDLE_NULL) {
+            object_destroy(pc);
+        }
+        coop_lite_apply_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: PT77ae restore: PC blob rejected\n");
+        return;
+    }
+    /* As the rejoin adopt: item handles do not resolve here, the pack
+       comes with the next INVEN_SYNC. */
+    obj_field_int32_set(pc, OBJ_F_CRITTER_INVENTORY_NUM, 0);
+    coop_lite_inv_list_clear(pc);
+    obj_field_handle_set(pc, OBJ_F_CRITTER_GOLD, OBJ_HANDLE_NULL);
+    for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
+        obj_field_handle_set(pc, coop_ammo_fld[t], OBJ_HANDLE_NULL);
+    }
+    object_flags_unset(pc, OF_OFF);
+    sub_40DAF0(pc);
+    multiplayer_bind_slot_pc(slot, pc);
+    coop_lite_apply_end();
+    multiplayer_unlock();
+
+    coop_sync_restore_asked = false;
+    coop_client_pos_valid = false;
+    coop_lite_client_refresh_own_view(pc);
+    tig_debug_printf("CoopLite: PT77ae restore: our PC is back in the world (level %d, %d bytes)\n",
+        stat_level_get(pc, STAT_LEVEL), pkt->size);
+    coop_lite_client_request_barter(pc, OBJ_HANDLE_NULL, COOP_BARTER_SYNC);
+    /* The pending SESSION_SYNC's next PT72 retry binds the party as usual. */
+}
+
 /* PT54: a held item the last sync destroyed or replaced is dropped. */
 void coop_lite_client_drag_tick(void)
 {
@@ -12377,6 +12475,15 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
     if ((pkt->flags & COOP_OBJ_BLOB_F_GONE) != 0) {
         /* An inventory item is asked for again by the next sync that
            lists it; a ground item just isn't there any more. */
+        return;
+    }
+    if (coop_sync_restore_asked && coop_rejoin_pc_wanted
+        && coop_lite_oid_raw_equal(pkt->oid, coop_rejoin_pc_oid)
+        && player_get_local_pc_obj() == OBJ_HANDLE_NULL) {
+        /* PT77ae: before world_ready (that needs a local PC). On failure
+           the next PT72 retry asks again. */
+        coop_rejoin_pc_wanted = false;
+        coop_lite_client_restore_pc_in_world(pkt);
         return;
     }
     if (!coop_lite_client_world_ready()) {
@@ -20409,6 +20516,14 @@ void coop_lite_test_set_map_wipe_path(const char* path)
 bool coop_lite_sync_retry_allowed(int tries)
 {
     return tries > 0 && tries <= 40;
+}
+
+/* PT77ae (pure; tests): from the 4th retry (~1 s) on, ask the host for our
+   PC's blob, again every 4th retry; the menu rejoin stays the last resort
+   after retry 40. */
+bool coop_lite_sync_restore_due(int tries)
+{
+    return tries >= 4 && tries <= 40 && tries % 4 == 0;
 }
 
 /* PT67 (pure; tests): the dialog text window / input filter is still
