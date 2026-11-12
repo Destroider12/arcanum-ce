@@ -3169,3 +3169,47 @@ The PC-loss case in the load-vanish log was the PT63 wipe (PT77aa). If the
 Esc menu is open when the give-up fires, the return is skipped (the menu
 is already up) but the wait-host loop still rejoins after the player
 quits. No protocol change.
+
+## PT77ad: world state - faster corpses, lighter pages
+
+Review (Argon) 3 and 5. A client applies a dead NPC only to an NPC it has
+loaded when the entry arrives. A sector it loads later from its own map
+files shows the host's dead NPCs alive until the next radius reply (every
+30 s), so revisits showed living corpses.
+
+- **3c.** The client now sends a WORLD_REQ as soon as its PC enters another
+  sector of the same map, at most once per 3 s (the host's per-slot reply
+  limit, so no request is wasted). The radius reply lists dead NPCs within
+  `COOP_WORLD_DEAD_RADIUS` (72 tiles) and costs the host about 2.5 ms
+  (median of 547 radius replies in review logs; max 3.7 ms).
+- **3a.** The first request after a map load waits 500 ms instead of
+  1500 ms (entries for sectors not loaded yet are skipped and come again
+  with the sector request). Full-snapshot pages go every 50 ms instead of
+  100 ms: one 4 KB page = ~80 KB/s per joining slot, only while its
+  snapshot runs. 25 ms was not taken: 160 KB/s per slot, ~1.1 MB/s host
+  upload with 7 joining clients.
+- **3b.** The full snapshot lists NPCs and portals first, then the rest in
+  walk order (sector-scope entries stay on the first page).
+- **5a.** WORLD_STATE sends container contents (one reliable INVEN_SYNC
+  batch each) only for containers within 6 tiles of the client PC, in both
+  the full and the radius reply. Opening any container sends its contents
+  (`COOP_BARTER_OPEN_LOOT` → `coop_lite_host_sync_slot_inven` includes the
+  loot target). The 8-containers-per-page cap now counts only those.
+
+Not changed:
+- 3c "reset coop_npc_cache": the NPC_POS cache is host-side and shared by
+  all slots; the radius reply already carries dead state.
+- 4: the drop path is not WORLD_DIRTY-bound. The host answers a client
+  drop with the owner's INVEN_SYNC, then a Packet70 to everyone; a client
+  that lacks the item asks for its blob at once (`want_ground_blob` →
+  OBJ_REQ flush), and only if the tile's sector is loaded. Pushing the blob
+  to every client would send it to clients far away too.
+- 5b: the 3x3 keep is PT77y (081eefc6). The radius reply looks 24 tiles out,
+  dead NPCs 72, and NPC_POS 40, so a 1..4-sector window with a 20-tile
+  margin would unload sectors those scans need (the reason PT77y dropped the
+  old 2x2-near-edge keep).
+- 5c: the co-op sector cache has been 64 since PT77y (engine cap 128). The
+  radius reply walk is cheap (above), and the dead-NPC window spans
+  several sectors, so an `object_list_rect` rewrite gains little.
+
+No protocol change.

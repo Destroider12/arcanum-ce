@@ -836,7 +836,13 @@ void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
 #define COOP_WORLD_F_FIRST 0x1
 #define COOP_WORLD_F_LAST 0x2
 #define COOP_WORLD_F_FULL 0x4 /* PT51: whole-map snapshot page (client prunes by host-listed sectors) */
-#define COOP_WORLD_FULL_PAGE_MS 100u /* PT51: one 64-entry page per slot per 100 ms */
+/* PT51: one 64-entry page (4 KB) per slot per tick. PT77ad: 100 -> 50 ms
+   (~80 KB/s per joining slot, only while its full snapshot runs); pages
+   no longer carry every container's contents (COOP_WORLD_CONTENTS_RADIUS). */
+#define COOP_WORLD_FULL_PAGE_MS 50u
+/* PT77ad: WORLD_STATE sends container contents only this close to the
+   client PC; opening a container (COOP_BARTER_OPEN_LOOT) syncs it anyway. */
+#define COOP_WORLD_CONTENTS_RADIUS 6
 
 typedef enum CoopWorldKind {
     COOP_WORLD_PORTAL = 1,
@@ -995,6 +1001,11 @@ int coop_lite_world_state_size(int count);
 /* Client: ask again after a map load (key change, once settled) and every
    30 s for sectors loaded since. */
 bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
+    unsigned int last_req_ms, unsigned int now_ms);
+/* PT77ad: our PC entered another sector: ask now (a sector the client just
+   loaded from disk shows the host's dead NPCs alive until the next reply);
+   at most once per 3 s, the host's per-slot reply limit. */
+bool coop_lite_world_req_sector_due(int64_t last_sector, int64_t sector,
     unsigned int last_req_ms, unsigned int now_ms);
 
 /* Set of OIDs listed by the snapshot (client prune). */

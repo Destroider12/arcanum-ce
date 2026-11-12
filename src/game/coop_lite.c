@@ -8647,10 +8647,18 @@ bool coop_lite_world_req_due(int last_key, int key, unsigned int ready_ms,
     unsigned int last_req_ms, unsigned int now_ms)
 {
     if (key != last_key) {
-        /* Let the new map's sectors settle first. */
-        return coop_lite_interval_elapsed(ready_ms, now_ms, 1500u);
+        /* Let the new map's sectors settle first. PT77ad: 1500 -> 500 ms;
+           entries for sectors not loaded yet are skipped by the apply and
+           come again with the sector-change request. */
+        return coop_lite_interval_elapsed(ready_ms, now_ms, 500u);
     }
     return coop_lite_interval_elapsed(last_req_ms, now_ms, 30000u);
+}
+
+bool coop_lite_world_req_sector_due(int64_t last_sector, int64_t sector,
+    unsigned int last_req_ms, unsigned int now_ms)
+{
+    return sector != last_sector && coop_lite_interval_elapsed(last_req_ms, now_ms, 3000u);
 }
 
 bool coop_lite_rate_take(CoopRateBucket* b, unsigned int now_ms, int cost, int cap, int per_sec)
@@ -14794,11 +14802,20 @@ static int* coop_world_scope_n;
 static int coop_world_scope_cap;
 static bool coop_world_scope_cb(Sector* sector);
 
+/* PT77ad: full snapshot order - NPCs and portals first (dead NPCs and
+   doors before ground items / containers). */
+static bool coop_lite_world_full_early_type(int type)
+{
+    return type == OBJ_TYPE_NPC || type == OBJ_TYPE_PORTAL;
+}
+
 static bool coop_world_full_snapshot(int slot)
 {
     int64_t obj;
     int iter;
     int n = 0;
+    int n_late = 0;
+    ObjectID* late;
 
     coop_world_full_free(slot);
     coop_world_full_first[slot] = true;
@@ -14825,6 +14842,11 @@ static bool coop_world_full_snapshot(int slot)
     if (coop_world_full_oids[slot] == NULL) {
         return false; /* PT52d: caller falls back to the radius reply */
     }
+    /* PT77ad (review 3b): NPCs and portals first, so dead NPCs and door
+       states land in the first pages, not after every ground item. The
+       rest goes to a scratch list and is appended (stable); without the
+       scratch memory everything stays in walk order. */
+    late = (ObjectID*)MALLOC(sizeof(ObjectID) * COOP_WORLD_FULL_MAX_OIDS);
     if (obj_inst_first(&obj, &iter)) {
         do {
             int type;
@@ -14837,11 +14859,20 @@ static bool coop_world_full_snapshot(int slot)
                 && type != OBJ_TYPE_TRAP && !coop_world_scenery_listed(obj, type) && (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC)) {
                 continue;
             }
-            if (n >= COOP_WORLD_FULL_MAX_OIDS) {
+            if (n + n_late >= COOP_WORLD_FULL_MAX_OIDS) {
                 break; /* client seen-set overflows long before: prune is off anyway */
             }
-            coop_world_full_oids[slot][n++] = obj_get_id(obj);
+            if (late != NULL && !coop_lite_world_full_early_type(type)) {
+                late[n_late++] = obj_get_id(obj);
+            } else {
+                coop_world_full_oids[slot][n++] = obj_get_id(obj);
+            }
         } while (obj_inst_next(&obj, &iter));
+    }
+    if (late != NULL) {
+        memcpy(&coop_world_full_oids[slot][n], late, sizeof(ObjectID) * (size_t)n_late);
+        n += n_late;
+        FREE(late);
     }
     coop_world_full_oid_cnt[slot] = n;
     return true;
@@ -14989,7 +15020,10 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
                 e->of_flags = flags & COOP_WORLD_PORTAL_OF_MASK;
                 e->kind_flags = (unsigned int)obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS);
                 e->reserved[0] = trap_type(obj) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
-                if (num_containers < COOP_WORLD_MAX_CONTAINERS) {
+                /* PT77ad (review 5a): contents only near the PC; opening
+                   any container syncs it (COOP_BARTER_OPEN_LOOT). */
+                if (num_containers < COOP_WORLD_MAX_CONTAINERS
+                    && location_dist(loc, center) <= COOP_WORLD_CONTENTS_RADIUS) {
                     containers[num_containers++] = obj;
                 }
                 n_container++;
@@ -15226,6 +15260,7 @@ static bool coop_world_rx_sector_overflow;
 static int coop_world_stats[6]; /* per kind: applied changes */
 static int coop_world_req_key = -1;
 static unsigned int coop_world_req_ms;
+static int64_t coop_world_req_sector = -1; /* PT77ad */
 static unsigned int coop_world_ready_ms;
 static bool coop_world_was_ready;
 static int coop_world_ready_key = -1;
@@ -15695,6 +15730,7 @@ static void coop_lite_world_state_reset(void)
     }
     coop_world_rx_active = false;
     coop_world_req_key = -1;
+    coop_world_req_sector = -1;
     coop_world_was_ready = false;
     coop_world_ready_key = -1;
 }
@@ -15722,6 +15758,22 @@ static void coop_lite_client_world_req_tick(unsigned int now_ms)
         coop_world_was_ready = true;
         coop_world_ready_key = key;
         coop_world_ready_ms = now_ms;
+    }
+    {
+        /* PT77ad (review 3c): a new sector of the same map asks at once
+           (radius reply: dead NPCs within COOP_WORLD_DEAD_RADIUS). */
+        int64_t lpc = player_get_local_pc_obj();
+        int64_t sec = lpc != OBJ_HANDLE_NULL ? sector_id_from_loc(obj_field_int64_get(lpc, OBJ_F_LOCATION)) : -1;
+
+        if (key == coop_world_req_key && sec != -1
+            && coop_lite_world_req_sector_due(coop_world_req_sector, sec, coop_world_req_ms, now_ms)) {
+            if (coop_world_req_sector != -1) {
+                coop_world_req_ms = now_ms - 30000u; /* due below */
+            }
+            coop_world_req_sector = sec;
+        } else if (key != coop_world_req_key) {
+            coop_world_req_sector = sec;
+        }
     }
     if (!coop_lite_world_req_due(coop_world_req_key, key, coop_world_ready_ms, coop_world_req_ms, now_ms)) {
         return;

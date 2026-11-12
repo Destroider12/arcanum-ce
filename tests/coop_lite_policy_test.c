@@ -2014,13 +2014,21 @@ static int test_world_state(void)
         return 1;
     }
 
-    /* Request timing: new map waits 1.5 s settled, same map every 30 s. */
-    if (coop_lite_world_req_due(5, 6, 1000, 0, 2499)
-        || !coop_lite_world_req_due(5, 6, 1000, 0, 2500)
+    /* Request timing: new map waits 0.5 s settled (PT77ad), same map every 30 s. */
+    if (coop_lite_world_req_due(5, 6, 1000, 0, 1499)
+        || !coop_lite_world_req_due(5, 6, 1000, 0, 1500)
         || !coop_lite_world_req_due(-1, 6, 0xFFFFFF00u, 0, 1300)
         || coop_lite_world_req_due(6, 6, 0, 1000, 30999)
         || !coop_lite_world_req_due(6, 6, 0, 1000, 31000)) {
         fprintf(stderr, "world: request timing wrong\n");
+        return 1;
+    }
+    /* PT77ad: a sector change asks again, at most every 3 s. */
+    if (coop_lite_world_req_sector_due(7, 7, 0, 99999)
+        || coop_lite_world_req_sector_due(7, 8, 1000, 3999)
+        || !coop_lite_world_req_sector_due(7, 8, 1000, 4000)
+        || COOP_WORLD_CONTENTS_RADIUS > COOP_WORLD_RADIUS || COOP_WORLD_FULL_PAGE_MS < 50u) {
+        fprintf(stderr, "world: PT77ad sector request wrong\n");
         return 1;
     }
 
