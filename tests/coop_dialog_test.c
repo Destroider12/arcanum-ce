@@ -420,6 +420,13 @@ static int test_pt53(void)
     lay.count = 2;
     CHECK(coop_lite_inven_layout_valid(&lay, hdr + 2 * 32), "layout valid");
     CHECK(!coop_lite_inven_layout_valid(&lay, hdr + 32), "layout short");
+    /* PT77ad: a full pack (>= 140 items) fits one layout packet. */
+    CHECK(COOP_INVEN_LAYOUT_MAX >= 140, "layout holds a full pack");
+    CHECK(sizeof(lay) <= TIG_NET_MAX_PACKET, "full layout fits a net packet");
+    CHECK(TIG_NET_PROTOCOL >= 48, "protocol bumped for the layout cap");
+    lay.count = COOP_INVEN_LAYOUT_MAX;
+    CHECK(coop_lite_inven_layout_valid(&lay, hdr + COOP_INVEN_LAYOUT_MAX * 32), "full layout valid");
+    CHECK(!coop_lite_inven_layout_valid(&lay, hdr + (COOP_INVEN_LAYOUT_MAX - 1) * 32), "full layout short");
     lay.count = COOP_INVEN_LAYOUT_MAX + 1;
     CHECK(!coop_lite_inven_layout_valid(&lay, (int)sizeof(lay)), "layout count cap");
     lay.count = -1;

@@ -3129,3 +3129,23 @@ unattached, so evict frees it instead of writing through it. Flag/art/color
 writers, `light_read`, and `light_write` use the same check. No protocol
 change (stays 47).
 
+
+## PT77ad: full pack in one INVEN_LAYOUT (protocol 48)
+
+Review (Argon) 1b. The client's layout hash covers every item it carries,
+but `coop_lite_local_layout_hash` filled only the first 64 entries
+(`COOP_INVEN_LAYOUT_MAX 64`). With more than 64 items the host applied a
+truncated list: items past #64 kept their old cells (holes / overlaps on
+the client after the echo) and the hashes never matched. The cap is now
+256 entries (0x28 + 256·0x20 = 8232 bytes, still sent with its real
+length; TIG_NET_MAX_PACKET is 16384). A pack over 256 items logs once.
+The host's planner arrays are sized by the same constant.
+
+Review 1a/1c were checked and not changed: the host apply is already
+two-phase (remove every moved item, then insert at the wanted or nearest
+cell) with one repair/self-check before and one after; the client's own
+grid moves are deferred and applied remove-all/insert-all, repair runs
+before and after, and `coop_lite_inv_list_repair` returns at once on a
+clean list (the in-loop call is only the rare orphan re-list).
+
+Protocol 47 → 48: an old host would refuse a layout over 64 entries.

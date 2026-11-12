@@ -20421,6 +20421,13 @@ static unsigned int coop_lite_local_layout_hash(int64_t pc, PacketCoopInvenLayou
             out->entries[out->count].inventory_location = loc;
             out->entries[out->count].reserved = 0;
             out->count++;
+        } else if (out != NULL) {
+            static bool warned;
+
+            if (!warned) {
+                warned = true;
+                tig_debug_printf("CoopLite: inven: layout over %d items - the rest is not sent\n", COOP_INVEN_LAYOUT_MAX);
+            }
         }
     }
     return h;

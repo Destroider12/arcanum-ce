@@ -386,7 +386,12 @@ COOP_STATIC_ASSERT(sizeof(PacketCoopInvenSync) <= 4096, "PacketCoopInvenSync fit
  * an INVEN_SYNC. Host-authoritative: the host only moves items the sender's
  * PC already carries, and only to legal places.
  */
-#define COOP_INVEN_LAYOUT_MAX 64
+/* PT77ad: was 64, but the client hashes its whole pack: a pack of more
+   than 64 items sent a truncated list, the host never matched the hash and
+   items past #64 kept their stale cells (holes / overlaps). A full pack is
+   ~120 grid items + wear + hotkeys; 256 entries = 8232 bytes, sent with its
+   real length (protocol 48). */
+#define COOP_INVEN_LAYOUT_MAX 256
 typedef struct PacketCoopInvenLayoutEntry {
     /* 0000 */ uint8_t oid[24];
     /* 0018 */ int inventory_location;
@@ -410,7 +415,7 @@ unsigned int coop_lite_inven_echo_seq(int flags);
 /* True when echo_seq (16 bit) is at or past sent_seq; sent_seq 0 = none in flight. */
 bool coop_lite_inven_echo_reached(unsigned int sent_seq, unsigned int echo_seq);
 COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayoutEntry) == 0x20, "PacketCoopInvenLayoutEntry size");
-COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayout) <= 4096, "PacketCoopInvenLayout fits a net packet");
+COOP_STATIC_ASSERT(sizeof(PacketCoopInvenLayout) <= 12288, "PacketCoopInvenLayout fits a net packet (TIG_NET_MAX_PACKET 16384)");
 bool coop_lite_inven_layout_valid(const PacketCoopInvenLayout* pkt, int size);
 /* A location a critter's own item may be asked to sit at (grid, wear, hotkey). */
 bool coop_lite_inven_layout_loc_ok(int loc);
