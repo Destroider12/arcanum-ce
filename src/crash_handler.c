@@ -470,7 +470,10 @@ static DWORD WINAPI crash_watch_thread(LPVOID param)
 
         Sleep(1000);
         beat = InterlockedCompareExchange(&crash_heartbeat_tick, 0, 0);
-        if (beat != 0 && (DWORD)(GetTickCount() - (DWORD)beat) >= COOP_WATCH_HANG_MS) {
+        /* PT78a: signed age. The beat is GetTickCount()|1, so read in the
+           same tick it can be 1 ms "ahead": the unsigned age wrapped to ~4e9
+           and fired false HANG reports while the game ran fine. */
+        if (beat != 0 && (LONG)(GetTickCount() - (DWORD)beat) >= (LONG)COOP_WATCH_HANG_MS) {
             if (!hang_reported) {
                 hang_reported = true;
                 crash_watch_report("main thread silent for 15 s", false);

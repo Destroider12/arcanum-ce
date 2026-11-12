@@ -3384,3 +3384,26 @@ taught a client's PC a location on the host did nothing.
 
 Not covered: the town map's revealed tiles (kept per map in the save) and
 the "last known area" marker (stays per machine).
+
+## PT78a: client crash leaving a map; false HANG reports
+
+Crash report (dc98351f, client, 0xC0000374 heap corruption): leaving
+Crematorium Lev 2 for Lev 1. The stack was `map_open -> map_clear_objects
+-> sector_cache_reset -> sector_cache_evict -> sector_object_list_reset ->
+obj_deallocate -> free`. Before it the log shows 720 "Attempt to lock a
+sector when the map is not valid" lines, two sectors of the OLD map loaded
+from disk (with .dif recovery), and "Node already reassigned ... in
+obj_find_remove". While the map closes, `map_clear_objects` deletes every
+object. Deleting one whose sector was not cached (the two PCs were 34
+tiles apart) made `sector_lock` load that sector in the middle of the
+delete loop: new objects, a double removal, a corrupted heap.
+
+- `sector_lock` with an invalid map now hands out only a sector that is
+  already cached and never loads one (it returns false, like the other
+  refusals). In the host's 3.8 MB log that error never appeared, so normal
+  map loads never lock with an invalid map.
+
+Watchdog: the heartbeat is `GetTickCount()|1`, so read in the same tick
+it could be 1 ms "ahead". The unsigned age wrapped to about 4e9 and fired
+false "HANG" reports while the game ran (5 on the client, 288 on the
+host in this report). The age is now signed.

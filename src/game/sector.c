@@ -890,7 +890,19 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
     }
 
     if (!map_is_valid()) {
+        int cached_idx;
+
         tig_debug_printf("ERROR: Attempt to lock a sector when the map is not valid!!!\n");
+        /* Coop Lite PT78a: never LOAD a sector while the map is closing.
+           map_clear_objects deletes every object; deleting one whose sector
+           was not cached loaded that sector of the old map in the middle of
+           the delete loop - fresh objects, "Node already reassigned" in
+           obj_find_remove and heap corruption in sector_cache_reset
+           (client crash 0xC0000374 leaving Crematorium Lev 2). A cached
+           sector is still handed out as before. */
+        if (!sector_cache_find_by_id(id, &cached_idx)) {
+            return false;
+        }
     }
 
     if (SECTOR_X(id) < 0
