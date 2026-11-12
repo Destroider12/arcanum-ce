@@ -6386,8 +6386,14 @@ void coop_lite_handle_npc_pos(PacketCoopNpcPos* pkt)
         }
         /* Review P1-2: the host's HP is the truth (health bars, the
            locally-dead check, and a revive on the host shows up here). */
-        if (e->hp_damage >= 0 && obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != e->hp_damage) {
-            obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, e->hp_damage);
+        if (e->hp_damage >= 0) {
+            /* PT77af: alive on the host stays alive here (Magnus). */
+            int dmg = coop_lite_npc_rx_hp_damage(e->hp_damage, (e->flags & COOP_NPC_POS_DEAD) != 0,
+                object_hp_max(obj));
+
+            if (obj_field_int32_get(obj, OBJ_F_HP_DAMAGE) != dmg) {
+                obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, dmg);
+            }
         }
         /* PT37: so does fatigue (client-side spell cost / lost regen events
            left companions exhausted here only). Host value wins. */
@@ -8095,12 +8101,13 @@ void coop_lite_ping(unsigned int now_ms)
             coop_diag.force_tx++;
             if (!coop_pose_force_active[slot]) {
                 /* PT25 diagnostics: why the owner gets corrected. */
-                tig_debug_printf("CoopLite: FORCE slot %d: host %d,%d off %d,%d vs owner %d,%d off %d,%d%s%s\n", slot,
+                tig_debug_printf("CoopLite: FORCE slot %d: host %d,%d off %d,%d vs owner %d,%d off %d,%d goal %d%s%s\n", slot,
                     (int)LOCATION_GET_X(pkt.loc), (int)LOCATION_GET_Y(pkt.loc), pkt.offset_x, pkt.offset_y,
                     coop_client_applied_valid[slot] ? (int)LOCATION_GET_X(coop_client_applied[slot].loc) : -1,
                     coop_client_applied_valid[slot] ? (int)LOCATION_GET_Y(coop_client_applied[slot].loc) : -1,
                     coop_client_applied_valid[slot] ? coop_client_applied[slot].offset_x : 0,
                     coop_client_applied_valid[slot] ? coop_client_applied[slot].offset_y : 0,
+                    anim_primary_goal_type(obj), /* PT77af: what moves the host copy */
                     anim_is_current_goal_type(obj, AG_ATTACK, NULL) ? " [AG_ATTACK]" : "",
                     coop_client_applied_valid[slot] ? "" : " [no owner pose]");
                 /* One epoch per correction, not per resend: repeated FORCEs
@@ -16363,6 +16370,14 @@ bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size)
 
 /* PT44: death writes hp damage 32000 (critter_kill / death path); floats
    showed that marker as "-31988"-style hits. Clamp to the hp pool. */
+int coop_lite_npc_rx_hp_damage(int host_damage, bool host_dead, int local_max)
+{
+    if (!host_dead && local_max > 0 && host_damage >= local_max) {
+        return local_max - 1;
+    }
+    return host_damage;
+}
+
 int coop_lite_float_delta(int prev, int now, int hp_max)
 {
     if (hp_max <= 0 || prev < 0 || prev >= hp_max || now <= prev) {

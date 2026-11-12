@@ -1169,6 +1169,14 @@ static int test_packet_hardening(void)
             fprintf(stderr, "fate recipients wrong\n");
             return 1;
         }
+        /* PT77af: an NPC alive on the host never dies here from its damage. */
+        if (coop_lite_npc_rx_hp_damage(120, false, 90) != 89
+            || coop_lite_npc_rx_hp_damage(40, false, 90) != 40
+            || coop_lite_npc_rx_hp_damage(32000, true, 90) != 32000
+            || coop_lite_npc_rx_hp_damage(5, false, 0) != 5) {
+            fprintf(stderr, "npc rx hp damage wrong\n");
+            return 1;
+        }
         /* PT44: death marker 32000 must not float as a 31988 hit. */
         if (coop_lite_float_delta(12, 32000, 40) != 28
             || coop_lite_float_delta(0, 3999, 51) != 51

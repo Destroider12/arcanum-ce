@@ -3490,6 +3490,18 @@ bool sub_423300(int64_t obj, AnimID* anim_id)
     return false;
 }
 
+/* PT77af diagnostics: goal type of the object's first primary animation
+   (-1 when none). */
+int anim_primary_goal_type(int64_t obj)
+{
+    AnimID anim_id;
+
+    if (!sub_423300(obj, &anim_id) || anim_id.slot_num < 0) {
+        return -1;
+    }
+    return anim_run_info[anim_id.slot_num].goals[0].type;
+}
+
 // 0x4233D0
 int sub_4233D0(int64_t obj)
 {

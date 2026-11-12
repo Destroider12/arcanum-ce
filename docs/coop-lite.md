@@ -3314,3 +3314,13 @@ exit at 1015.7 went through the same kind of object.
   vote).
 
 No wire change: an older host simply ignores the scenery.
+
+## PT77af: an NPC alive on the host is never dead here (Magnus)
+
+NPC_POS carries the host's HP damage, and the client's "dead" is
+`max HP - damage <= 0` with its own max HP. A companion that has levelled
+on the host has more max HP there, so the client's copy could show it
+dead and lootable. When the host lists it alive, the client caps the
+damage at local max - 1. FORCE log lines now name the host copy's
+current goal type (to find what moved a client PC after the Bates
+teleport, point 6 of the review).

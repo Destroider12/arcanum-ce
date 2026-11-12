@@ -1530,6 +1530,10 @@ unsigned int coop_lite_pcs_portrait_pack(unsigned int flags, int portrait);
 int coop_lite_pcs_portrait_unpack(unsigned int flags);
 bool coop_lite_follow_toggle(void);
 void coop_lite_follow_cancel(void);
+/* PT77af (pure; tests): local hp damage for an NPC the host lists alive.
+   A companion that levelled on the host has more max HP there; its host
+   damage could reach this copy's lower max and show it dead and lootable. */
+int coop_lite_npc_rx_hp_damage(int host_damage, bool host_dead, int local_max);
 int coop_lite_float_delta(int prev, int now, int hp_max);
 bool coop_lite_worldmap_open_allowed(bool can_use_worldmap, bool selecting, int townmap);
 /* Coop (not vanilla SP): merchant store / live merchant items cannot be dropped. */
