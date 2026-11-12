@@ -3213,3 +3213,31 @@ Not changed:
   several sectors, so an `object_list_rect` rewrite gains little.
 
 No protocol change.
+
+## PT77ae: host drops reach nearby clients at once (protocol 49)
+
+User playtest: items the host drops show up on clients late. The client
+drop path was already immediate (INVEN_SYNC, Packet70, OBJ_REQ → OBJ_BLOB:
+one extra round trip). The host's own drops were not:
+
+- dragging an item to the ground in the host's inventory
+  (`inven_ui.c` → `sub_466E50`) and gold/ammo splits announced nothing
+  and did not raise WORLD_DIRTY. Clients saw the item at their next
+  WORLD_STATE (30 s refresh, or sooner only if something else made the
+  world dirty);
+- `item_drop_ex` (drop slot, hotkeys) raised WORLD_DIRTY: the client asks
+  ~3.5 s later, then fetches the blob (another round trip).
+
+**Fix.** `sub_466E50` on the host (every drop: host UI, splits, NPC
+drops, client drops) calls `coop_lite_host_item_landed`. It serialises
+the item once and pushes it as OBJ_BLOB with `COOP_OBJ_BLOB_F_GROUND` in
+the same tick, only to clients whose PC is within
+`COOP_DROP_PUSH_RADIUS` (72 tiles). A ground item has no owner, so the
+first 8 bytes of `owner_oid` carry its location. The client loads it
+when the tile's sector is loaded here (else WORLD_STATE lists it later).
+If the client already has that object in an inventory (its copy of the
+dropper's pack), it moves it to the ground keeping its state, like a
+Packet70. Packet70 / WORLD_DIRTY stay; they become no-ops for clients
+that already have the item. Several items = one push each.
+
+Protocol 48 → 49: an old client drops the unasked blob.

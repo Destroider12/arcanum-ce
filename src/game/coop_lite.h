@@ -775,6 +775,15 @@ COOP_STATIC_ASSERT(offsetof(PacketCoopObjBlob, data) == 0x40, "PacketCoopObjBlob
 /* "Not available" (picked up, destroyed, or not yours): size 0, no data.
    The client forgets the request and does not fall back to the proto. */
 #define COOP_OBJ_BLOB_F_GONE 0x1
+/* PT77ae: unasked push of an item that just landed on the ground at the
+   host (any drop: host UI, splits, NPCs, client drops). owner_oid is not
+   used for a ground item, so its first 8 bytes carry the int64 location.
+   Sent only to clients whose PC is within COOP_DROP_PUSH_RADIUS. */
+#define COOP_OBJ_BLOB_F_GROUND 0x2
+#define COOP_DROP_PUSH_RADIUS (COOP_WORLD_RADIUS * 3)
+void coop_lite_obj_blob_ground_loc_put(PacketCoopObjBlob* pkt, int64_t loc);
+int64_t coop_lite_obj_blob_ground_loc_get(const PacketCoopObjBlob* pkt);
+void coop_lite_host_item_landed(int64_t item);
 
 /* Structure check before obj_read_mem: sizes, and the instance OID inside
    the blob ([u32 version][proto oid][oid]...) is the one announced. */

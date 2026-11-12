@@ -8869,6 +8869,20 @@ bool coop_lite_obj_blob_valid(const PacketCoopObjBlob* pkt, int size)
     return coop_lite_oid_raw_equal(pkt->data + 4 + 24, pkt->oid);
 }
 
+void coop_lite_obj_blob_ground_loc_put(PacketCoopObjBlob* pkt, int64_t loc)
+{
+    memset(pkt->owner_oid, 0, sizeof(pkt->owner_oid));
+    memcpy(pkt->owner_oid, &loc, sizeof(loc));
+}
+
+int64_t coop_lite_obj_blob_ground_loc_get(const PacketCoopObjBlob* pkt)
+{
+    int64_t loc;
+
+    memcpy(&loc, pkt->owner_oid, sizeof(loc));
+    return loc;
+}
+
 bool coop_lite_inven_sync_valid(const PacketCoopInvenSync* pkt, int size)
 {
     if (pkt == NULL || pkt->type != PACKET_COOP_INVEN_SYNC) {
@@ -12024,6 +12038,73 @@ static void coop_lite_obj_ground_fallback_tick(unsigned int now_ms)
     }
 }
 
+/* PT77ae: an item just landed on the ground at the host. Clients near it
+   get its blob in this tick (was: a host-UI drop announced nothing - the
+   clients saw it at the next WORLD_STATE, 3.5..30 s later; item_drop_ex
+   only raised WORLD_DIRTY). Far clients learn it from WORLD_STATE. */
+void coop_lite_host_item_landed(int64_t item)
+{
+#ifndef COOP_LITE_TEST_STUBS
+    PacketCoopObjBlob* out;
+    uint8_t* data = NULL;
+    int size = 0;
+    int64_t loc;
+    int slot;
+    int sent = 0;
+
+    if (item == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled() || !tig_net_is_active() || !tig_net_is_host()
+        || !item_is_item(item)
+        || (obj_field_int32_get(item, OBJ_F_FLAGS) & (OF_INVENTORY | OF_DESTROYED)) != 0) {
+        return;
+    }
+    loc = obj_field_int64_get(item, OBJ_F_LOCATION);
+    for (slot = 1; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), loc) <= COOP_DROP_PUSH_RADIUS) {
+            break;
+        }
+    }
+    if (slot >= 8) {
+        return;
+    }
+    sub_442050(&data, &size, item);
+    if (data == NULL || size <= 0 || size > COOP_OBJ_BLOB_MAX) {
+        if (data != NULL) {
+            FREE(data);
+        }
+        return;
+    }
+    out = (PacketCoopObjBlob*)MALLOC(sizeof(*out));
+    if (out != NULL) {
+        memset(out, 0, offsetof(PacketCoopObjBlob, data));
+        out->type = PACKET_COOP_OBJ_BLOB;
+        out->size = size;
+        out->flags = COOP_OBJ_BLOB_F_GROUND;
+        coop_lite_put_oid(out->oid, item);
+        coop_lite_obj_blob_ground_loc_put(out, loc);
+        memcpy(out->data, data, (size_t)size);
+        for (; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+
+            if (pc == OBJ_HANDLE_NULL
+                || location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), loc) > COOP_DROP_PUSH_RADIUS) {
+                continue;
+            }
+            tig_net_send_app(out, (int)(offsetof(PacketCoopObjBlob, data) + (size_t)size), slot);
+            sent++;
+        }
+        FREE(out);
+    }
+    FREE(data);
+    if (sent > 0) {
+        tig_debug_printf("CoopLite: obj blob: dropped item pushed to %d client(s) (%d bytes)\n", sent, size);
+    }
+#else
+    (void)item;
+#endif
+}
+
 void coop_lite_handle_obj_req(PacketCoopObjReq* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -12236,6 +12317,51 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         return;
     }
     p = coop_lite_obj_pending_find(pkt->oid);
+    if ((pkt->flags & COOP_OBJ_BLOB_F_GROUND) != 0) {
+        /* PT77ae: pushed ground drop (asked or not). */
+        int64_t gloc = coop_lite_obj_blob_ground_loc_get(pkt);
+        int64_t have;
+
+        if (p != NULL) {
+            p->used = false;
+        }
+        if (!coop_lite_client_world_ready() || gloc == 0) {
+            return;
+        }
+        have = coop_lite_get_oid_obj(pkt->oid);
+        if (have != OBJ_HANDLE_NULL) {
+            /* Our copy (e.g. still in the dropper's pack here): to the
+               ground, keeping its state - as a Packet70 does. */
+            unsigned int hf = (unsigned int)obj_field_int32_get(have, OBJ_F_FLAGS);
+
+            if (item_is_item(have) && (hf & OF_INVENTORY) != 0 && (hf & OF_DESTROYED) == 0
+                && have != inven_ui_drag_item_obj_get()) {
+                multiplayer_lock();
+                tig_net_local_suspend_begin();
+                item_remove(have);
+                object_drop(have, gloc);
+                tig_net_local_suspend_end();
+                multiplayer_unlock();
+            }
+            return;
+        }
+        if (!coop_lite_client_ground_loc_live(gloc) || !coop_lite_obj_blob_bounded(pkt->data, pkt->size)) {
+            return;
+        }
+        multiplayer_lock();
+        coop_lite_apply_begin();
+        if (!sub_4420D0(pkt->data, &item, gloc) || item == OBJ_HANDLE_NULL || !item_is_item(item)) {
+            if (item != OBJ_HANDLE_NULL) {
+                object_destroy(item);
+            }
+            item = OBJ_HANDLE_NULL;
+        }
+        coop_lite_apply_end();
+        multiplayer_unlock();
+        tig_debug_printf("CoopLite: obj blob: pushed ground drop %s (%d bytes)\n",
+            item != OBJ_HANDLE_NULL ? "loaded" : "rejected", pkt->size);
+        return;
+    }
     if (p == NULL) {
         /* Unasked (or already timed out and created from the proto). */
         return;

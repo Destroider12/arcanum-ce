@@ -3956,6 +3956,9 @@ void sub_466E50(int64_t obj, int64_t loc)
     }
 
     item_decay(obj, 172800000);
+
+    /* PT77ae: co-op host - nearby clients get the item now. */
+    coop_lite_host_item_landed(obj);
 }
 
 // 0x466EF0

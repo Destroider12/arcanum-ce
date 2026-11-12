@@ -1558,6 +1558,18 @@ static int test_obj_blob(void)
         return 1;
     }
     blob.data[4 + 24] ^= 1;
+    /* PT77ae: a pushed ground drop carries its location in owner_oid. */
+    blob.flags = COOP_OBJ_BLOB_F_GROUND;
+    coop_lite_obj_blob_ground_loc_put(&blob, 0x0000123400005678LL);
+    if (!coop_lite_obj_blob_valid(&blob, hdr + 200)
+        || coop_lite_obj_blob_ground_loc_get(&blob) != 0x0000123400005678LL
+        || blob.owner_oid[8] != 0 || blob.owner_oid[23] != 0
+        || TIG_NET_PROTOCOL < 49 || COOP_DROP_PUSH_RADIUS < COOP_WORLD_RADIUS) {
+        fprintf(stderr, "obj blob: ground push wrong\n");
+        return 1;
+    }
+    blob.flags = 0;
+    memset(blob.owner_oid, 0, sizeof(blob.owner_oid));
     blob.size = COOP_OBJ_BLOB_MAX + 1;
     if (coop_lite_obj_blob_valid(&blob, (int)sizeof(blob))) {
         fprintf(stderr, "obj blob: oversize accepted\n");
