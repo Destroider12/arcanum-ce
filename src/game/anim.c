@@ -3887,8 +3887,11 @@ static bool anim_goal_is_portal_use(const AnimRunInfo* run_info)
 {
     int64_t target = run_info->goals[0].params[AGDATA_TARGET_OBJ].obj;
 
+    /* PT77af: also scenery (scripted entrances such as Bates' mansion door:
+       the client's use never reached the host, nothing happened). */
     return run_info->goals[0].type == AG_USE_OBJECT && target != OBJ_HANDLE_NULL
-        && obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_PORTAL;
+        && (obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
+            || obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_SCENERY);
 }
 
 bool anim_timeevent_process(TimeEvent* timeevent)
@@ -6761,6 +6764,12 @@ bool sub_428A10(AnimRunInfo* run_info)
         if (tig_art_scenery_id_type_get(obj_field_int32_get(target_obj, OBJ_F_CURRENT_AID)) == TIG_ART_SCENERY_TYPE_BEDS) {
             ui_sleep_toggle(target_obj);
             return true;
+        }
+        /* PT77af: a coop client's own PC: the host runs the scenery's use
+           script (a scripted entrance teleports the PC from there). */
+        if (coop_lite_client_local_goal_obj(source_obj)) {
+            coop_lite_client_queue_door_use(target_obj);
+            return false;
         }
         if (!object_script_execute(source_obj, target_obj, source_obj, SAP_USE, 0)) {
             return false;

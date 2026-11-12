@@ -17238,7 +17238,8 @@ void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
     pc = sub_4A2B60(slot);
     portal = coop_lite_get_oid_obj(pkt->oid);
     if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || portal == OBJ_HANDLE_NULL
-        || obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL
+        || (obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_PORTAL
+            && obj_field_int32_get(portal, OBJ_F_TYPE) != OBJ_TYPE_SCENERY)
         || (obj_field_int32_get(portal, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) != 0) {
         return;
     }
@@ -17247,6 +17248,16 @@ void coop_lite_handle_door_use(PacketCoopDoorUse* pkt)
     if (object_dist(pc, portal) > 8) {
         tig_debug_printf("CoopLite: door: %s use from slot %d refused: %d tiles away\n", oid_str, slot,
             (int)object_dist(pc, portal));
+        return;
+    }
+    if (obj_field_int32_get(portal, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        /* PT77af: scripted scenery (an entrance that teleports): its use
+           script runs here with the client's PC; a teleport of that PC goes
+           through the PT64 remote travel path. */
+        coop_door_actor_slot = slot;
+        (void)object_script_execute(pc, portal, pc, SAP_USE, 0);
+        coop_door_actor_slot = -1;
+        tig_debug_printf("CoopLite: slot %d used scenery %s\n", slot, oid_str);
         return;
     }
     coop_door_actor_slot = slot;

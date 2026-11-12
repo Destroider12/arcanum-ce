@@ -3298,3 +3298,19 @@ on exceptions, so it never wrote anything.
   system freezes. The launcher restarts the host as for a crash.
 - The limit is `ARCANUM_COOP_MEM_LIMIT_MB` (0 = off). By default it is
   half of the physical RAM, kept between 2048 and 6144 MB.
+
+## PT77af: client use of scripted scenery (Bates mansion entrance)
+
+The client clicked the mansion entrance (a scenery object, AG_USE_OBJECT)
+20+ times and nothing happened. Only doors (PT37) were forwarded; a
+scenery use was neither run locally nor sent to the host. The host's own
+exit at 1015.7 went through the same kind of object.
+
+- The client walks to the scenery locally (as for doors) and sends
+  DOOR_USE with its OID. Beds stay local (the rest rules apply).
+- The host accepts DOOR_USE for scenery (8 tiles, not destroyed or off)
+  and runs its SAP_USE script with the client's PC. A teleport to
+  another map goes through the PT64 host-side transition (the travel
+  vote).
+
+No wire change: an older host simply ignores the scenery.
