@@ -1,4 +1,6 @@
 #include "game/gamelib.h"
+
+#include "crash_handler.h"
 #include "game/coop_lite.h"
 #include "coop_paths.h"
 
@@ -499,6 +501,7 @@ void gamelib_ping(void)
     int index;
 
     tig_timer_now(&gamelib_ping_time);
+    crash_handler_heartbeat(); /* PT77af */
 
     for (index = 0; index < MODULE_COUNT; index++) {
         if (gamelib_modules[index].ping_func != NULL) {

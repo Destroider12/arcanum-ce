@@ -3277,3 +3277,24 @@ Review 2a/2b, preemptive measures:
   is up.
 
 No protocol change (49).
+
+## PT77af: hang watchdog and memory cap (Bates estate session)
+
+The Bates estate log (9cd45a37) ends at host 1037.3 with no crash
+report: the host main thread stopped (no 10 s frame line, no NETSTAT,
+no acks, client inflight 56) during a combat start (guards, a spell,
+a summon). After the restart the PC froze 3.5 s into loading. That
+pattern fits a runaway loop that eats memory until Windows thrashes,
+but without a stack the loop is unknown. The crash handler only fires
+on exceptions, so it never wrote anything.
+
+- `gamelib_ping` calls `crash_handler_heartbeat()` every frame.
+- A watchdog thread (Windows) checks it every second. If the heartbeat
+  is 15 s stale, it writes one `crash-<time>.txt` per stall ("HANG"),
+  with the main thread's stack (suspend, unwind, resume), the last coop
+  event and the breadcrumbs. The game is not killed.
+- If the private bytes pass the limit, it writes a fatal report and a
+  minidump, then ends the process (exit code 0xC0000017) before the
+  system freezes. The launcher restarts the host as for a crash.
+- The limit is `ARCANUM_COOP_MEM_LIMIT_MB` (0 = off). By default it is
+  half of the physical RAM, kept between 2048 and 6144 MB.

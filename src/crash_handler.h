@@ -6,5 +6,7 @@
 void crash_handler_install(const char* build_id);
 /* PT68: crash files go to <exe dir>\<subdir>\ (e.g. coop\host). */
 void crash_handler_set_subdir(const char* subdir);
+/* PT77af: the main loop is alive (gamelib_ping). Feeds the hang watchdog. */
+void crash_handler_heartbeat(void);
 
 #endif
