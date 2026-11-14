@@ -1,6 +1,8 @@
 #ifndef ARCANUM_CRASH_HANDLER_H_
 #define ARCANUM_CRASH_HANDLER_H_
 
+#include <stdbool.h>
+
 /* PT56a: Windows crash reports (log + crash-<time>.txt + .dmp next to the
    exe). No-op elsewhere. Install once, early in main. */
 void crash_handler_install(const char* build_id);
@@ -11,5 +13,8 @@ void crash_handler_heartbeat(void);
 /* PT79: a blocking loop that never reaches gamelib_ping (movie, slide
    show, modal prompt) is starting: no HANG until the next heartbeat. */
 void crash_handler_heartbeat_pause(void);
+/* PT80: armed = an exit() from now on is a fatal error (report + exit
+   code 3); disarm right before a normal shutdown. */
+void crash_handler_exit_guard(bool armed);
 
 #endif

@@ -1,5 +1,7 @@
 #include "ui/mainmenu_ui.h"
 
+#include "crash_handler.h"
+
 #include <stdio.h>
 
 #include "game/area.h"
@@ -6516,6 +6518,7 @@ void mainmenu_ui_textedit_on_change(TextEdit* textedit)
 void mainmenu_ui_exit_game(void)
 {
     tig_debug_printf("mainmenu_ui_exit_game: Exiting Game!\n");
+    crash_handler_exit_guard(false); /* PT80: the normal Exit */
     gameuilib_mod_unload();
     gamelib_mod_unload();
     gameuilib_exit();

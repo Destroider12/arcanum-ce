@@ -488,7 +488,9 @@ int main(int argc, char** argv)
         (int)LOCATION_GET_Y(pc_starting_location));
     tig_debug_printf("%s\n", msg);
 
+    crash_handler_exit_guard(true); /* PT80: exit() in play = fatal */
     main_loop();
+    crash_handler_exit_guard(false);
 
     gameuilib_mod_unload();
     gamelib_mod_unload();

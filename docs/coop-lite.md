@@ -3526,3 +3526,76 @@ empty ship.
   conditions are per PC (the host's PC holds them). Not changed: a
   client-side option would need those per-PC states. If a client does
   get the option, the voyage now takes the whole party.
+
+## PT80 — Tarant playtest (build 2d0aeb8b): silent host exit, client follower inventory
+
+**A. "Crash" = vanilla `exit(0)` from the script cache.** The host log ends with
+`cache_find: Error: failed to find cache item!` followed only by the UPnP
+atexit cleanup (`CoopUPnP: removed UDP 7777 mapping`): no exception, so no
+crash-*.txt/.dmp, and exit code 0, so the launcher took it for a normal close
+(no restart, no popup). Root cause in `script.c`: `script_unlock()` had its
+editor check inverted (`if (!script_editor) return;`, the original was
+`dword_5E2FDC != 1` → decrement), so in the game a script was never
+unlocked. Every script ever run stayed pinned in the 100-entry cache; the
+101st distinct script since the last load made `cache_find()` call
+`exit(EXIT_SUCCESS)`. Long co-op sessions in Tarant (the host runs every
+NPC's scripts) reach that quickly; single player can hit it too.
+Fix:
+- `script_unlock` decrements again (only the entry that holds that script,
+  never below 0, never through `cache_find`);
+- `script_execute` unlocks the number it locked (`SF_AUTO_REMOVING` zeroes
+  `invocation->script->num` before the unlock);
+- a full cache no longer exits: `cache_find` returns -1, `script_lock`
+  returns NULL (the script is skipped, the default runs) and logs
+  `cache_find: Error: failed to find cache item! (script N skipped)`.
+
+**Crash handler / launcher.** The existing filters (unhandled filter, vectored
+handler for 0xC0000374/0xC0000409/0xC0000602, SIGABRT) never see an `exit()`.
+New `crash_handler_exit_guard(bool)`: armed around `main_loop`, disarmed by the
+normal shutdown (main menu Exit, window close/return from `main_loop`). An
+`exit()` while armed (the many vanilla fatal `exit()` sites) writes
+`crash-<time>.txt/.dmp` ("exit() called outside the normal shutdown", stack of
+the calling thread) and ends with exit code 3. The launcher also treats exit
+code 0 *without* the game's own shutdown lines (`Exiting Game!` /
+`[Exiting Game]`) in the role log tail as an unexpected close (host: keep the
+log as `.crash.log`, auto-restart), and its status line names the exit code.
+Not covered: a real `__fastfail` (int 29h) still bypasses every handler; for
+that only WER LocalDumps would help (not added, needs registry/admin).
+
+**B. Client's follower (Sogg) inventory.** A client talks to non-merchants,
+its own followers included, through the host's party dialog. The follower's
+"let's trade" node (`b:`, `field_17E8 == 3`) only opens `inven_ui` for a
+local PC; on the host the speaker is remote, so the dialog simply closed and
+no window opened anywhere. Even an exchange window would have been refused:
+the host's barter check accepted merchants only and priced every move.
+Fix (wire change → protocol 52):
+- host: `dialog_ui_party_choose` → `coop_lite_party_dialog_exchange` when the
+  NPC follows the speaker; the dialog's CLOSE goes out as
+  `COOP_DIALOG_ACT_EXCHANGE` (header only, votes[7] = speaker slot);
+- client (speaker only): closes the viewer and, from the client tick, opens
+  the barter window with the NPC it asked to talk to (vanilla follower mode
+  when the local copy knows the leader);
+- host barter: `coop_lite_barter_partner_ok` accepts the PC's own follower
+  (`critter_leader_get(npc) == pc`); such moves cost 0 (inven_ui follower
+  mode is free); identify service stays merchant-only.
+The host cannot open the client's follower's inventory: vanilla only lets the
+leader trade with a follower (by design). Log lines: `party dialog: slot N
+opens the exchange window with its follower`, `exchange: opening the exchange
+window with '...' (leader here: me|not me)`, `barter: slot N opened the
+exchange window with its follower`, `exchange with its follower (free)`.
+Limits: moving items between two slots of the follower itself (npc → npc)
+is still refused (resync).
+
+**C. Client can't move after dialogs / while the host talks: not found.**
+The host log shows no FORCE/snap of slot 1, no refused PC_POS and no Packet9
+for the client's PC around the dialogs; the client log sent was from a later
+session (reconnect only). Checked: the vote viewer filter swallows clicks only
+inside its panel; Packet9 for the client's own PC is ignored on the client;
+the host's party-dialog `sub_424070(pc, 3, 0, true)` sends nothing. Observed:
+a Tarant noble (script 1581) tried to start a dialog with the client's PC 9
+times in 15 s (`remote PC dialog skipped on host`) — NPC-initiated dialogs
+with a client never open anywhere. Needs the client log of a session where
+it happens.
+
+Protocol 52 (host and clients must update). Verified by unit tests and builds
+only; not tested in play.

@@ -1214,6 +1214,7 @@ static void coop_lite_dialog_reset(void);
 static void coop_lite_host_barter_watch(unsigned int now_ms);
 void coop_lite_client_dev_barter_tick(unsigned int now_ms);
 void coop_lite_client_dev_loot_tick(unsigned int now_ms);
+static void coop_lite_client_exchange_tick(void);
 void coop_lite_client_layout_tick(unsigned int now_ms);
 static void coop_lite_host_announce_roster(int new_slot);
 static void coop_lite_host_roster_tick(unsigned int now_ms);
@@ -3314,6 +3315,10 @@ bool coop_dialog_packet_valid(const PacketCoopDialogState* pkt, int size, bool f
     }
     if (pkt->action == COOP_DIALOG_ACT_CLOSE) {
         return size == COOP_DIALOG_HDR_SIZE && pkt->num_options == 0;
+    }
+    if (pkt->action == COOP_DIALOG_ACT_EXCHANGE) {
+        return size == COOP_DIALOG_HDR_SIZE && pkt->num_options == 0
+            && pkt->votes[COOP_DIALOG_SPEAKER_AT] >= 1 && pkt->votes[COOP_DIALOG_SPEAKER_AT] <= 7;
     }
     if (pkt->action != COOP_DIALOG_ACT_OPEN || size != (int)sizeof(*pkt)
         || pkt->num_options > COOP_DIALOG_MAX_OPTIONS) {
@@ -8084,6 +8089,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_client_dev_gold_pile_tick(now_ms);
             coop_lite_dev_inven_dump_tick(now_ms);
             coop_lite_client_dev_loot_tick(now_ms);
+            coop_lite_client_exchange_tick(); /* PT80 */
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
             coop_lite_client_layout_tick(now_ms); /* PT53 */
@@ -10396,6 +10402,33 @@ int64_t coop_lite_party_dialog_pc(void)
     return coop_party_slot > 0 ? coop_party_pc : OBJ_HANDLE_NULL;
 }
 
+/* PT80: Sogg (a follower recruited by a client) - the client talks to its
+   followers through the host's party dialog, and the follower's "let's
+   trade" node (field_17E8 == 3) only opens inven_ui for a LOCAL pc; on the
+   host the speaker is remote, so the dialog just closed and no window ever
+   opened. The host now ends the dialog with ACT_EXCHANGE and the speaker
+   opens the exchange window itself (host-validated as a follower barter). */
+static int coop_party_exchange_pending; /* speaker slot, 0 = none */
+/* client: the NPC of the last party talk request, and a pending exchange */
+static uint8_t coop_party_talk_oid[24];
+static bool coop_party_exchange_open;
+
+void coop_lite_party_dialog_exchange(int64_t pc_obj, int64_t npc_obj)
+{
+    if (!tig_net_is_active() || !tig_net_is_host() || coop_party_slot <= 0 || pc_obj != coop_party_pc) {
+        return;
+    }
+#ifndef COOP_LITE_TEST_STUBS
+    if (!coop_lite_follower_exchange(pc_obj, npc_obj)) {
+        return;
+    }
+#else
+    (void)npc_obj;
+#endif
+    coop_party_exchange_pending = coop_party_slot;
+    tig_debug_printf("CoopLite: party dialog: slot %d opens the exchange window with its follower\n", coop_party_slot);
+}
+
 static bool coop_dialog_is_speaker(void)
 {
     return coop_dialog_view.open && coop_dialog_view.votes[COOP_DIALOG_SPEAKER_AT] != 0
@@ -10429,6 +10462,8 @@ static void coop_lite_dialog_reset(void)
     coop_party_choose_ms = 0;
     memset(coop_party_start_ms, 0, sizeof(coop_party_start_ms));
     coop_party_talk_sent = false;
+    coop_party_exchange_pending = 0;
+    coop_party_exchange_open = false;
 }
 
 static void coop_dialog_votes_ensure(void)
@@ -10477,6 +10512,11 @@ void coop_lite_host_dialog_closed(void)
     }
     coop_dialog_votes.open = false;
     coop_dialog_fill_close(&coop_dialog_tx, ++coop_dialog_seq, coop_dialog_line);
+    if (coop_party_exchange_pending >= 1 && coop_party_exchange_pending <= 7) {
+        coop_dialog_tx.action = COOP_DIALOG_ACT_EXCHANGE;
+        coop_dialog_tx.votes[COOP_DIALOG_SPEAKER_AT] = (unsigned char)coop_party_exchange_pending;
+    }
+    coop_party_exchange_pending = 0;
     if (coop_dialog_view.open && coop_dialog_close_hook != NULL) {
         coop_dialog_close_hook();
     }
@@ -10598,6 +10638,7 @@ bool coop_lite_client_party_talk(int64_t npc_obj, int64_t pc_obj)
     coop_party_talk_sent = true;
     coop_party_talk_ms = now_ms;
     coop_lite_put_oid(oid, npc_obj);
+    memcpy(coop_party_talk_oid, oid, sizeof(coop_party_talk_oid));
     coop_dialog_fill_start(&pkt, oid);
     depth = tig_net_local_suspend_pause();
     tig_net_send_app(&pkt, COOP_DIALOG_HDR_SIZE + 24, 0);
@@ -10730,11 +10771,14 @@ void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt)
     }
     coop_dialog_rx_seen = true;
     coop_dialog_rx_seq = pkt->seq;
-    if (pkt->action == COOP_DIALOG_ACT_CLOSE) {
+    if (pkt->action == COOP_DIALOG_ACT_CLOSE || pkt->action == COOP_DIALOG_ACT_EXCHANGE) {
         if (coop_dialog_view.open && coop_dialog_close_hook != NULL) {
             coop_dialog_close_hook();
         }
         memset(&coop_dialog_view, 0, sizeof(coop_dialog_view));
+        if (pkt->action == COOP_DIALOG_ACT_EXCHANGE && pkt->votes[COOP_DIALOG_SPEAKER_AT] == sub_529520()) {
+            coop_party_exchange_open = true; /* opened from the client tick */
+        }
         return;
     }
     {
@@ -10958,12 +11002,21 @@ static bool coop_lite_barter_partner_ok(int64_t pc, int64_t npc)
     if (critter_is_dead(pc) || critter_is_dead(npc)) {
         return false;
     }
-    if (!coop_lite_npc_is_merchant(npc)) {
+    /* PT80: or the PC's own follower (exchange window, free). */
+    if (!coop_lite_npc_is_merchant(npc) && critter_leader_get(npc) != pc) {
         return false;
     }
     return location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION),
                obj_field_int64_get(npc, OBJ_F_LOCATION))
         <= 12;
+}
+
+bool coop_lite_follower_exchange(int64_t pc_obj, int64_t npc_obj)
+{
+    return pc_obj != OBJ_HANDLE_NULL && npc_obj != OBJ_HANDLE_NULL
+        && obj_field_int32_get(npc_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC
+        && !critter_is_dead(npc_obj)
+        && critter_leader_get(npc_obj) == pc_obj;
 }
 
 /* ---- P1-3: host handlers for the client item ops 26/27/28/125 ---- */
@@ -11231,7 +11284,7 @@ void coop_lite_host_handle_item_op(int type, void* msg)
         if (item != OBJ_HANDLE_NULL && obj_pool_perm_lookup(pkt->pc_oid) == pc
             && item_parent(item, &parent) && parent == pc
             && !item_is_identified(item)
-            && coop_lite_barter_partner_ok(pc, npc)
+            && coop_lite_barter_partner_ok(pc, npc) && coop_lite_npc_is_merchant(npc)
             && price > 0 && price <= item_gold_get(pc)) {
             item_perform_identify_service(item, npc, pc, price);
             ok = true;
@@ -11398,8 +11451,9 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
             item_identify_all(store);
         }
     }
-    tig_debug_printf("CoopLite: barter: slot %d opened barter with a merchant (gold %d)\n",
-        slot, item_gold_get(npc));
+    tig_debug_printf("CoopLite: barter: slot %d opened %s (gold %d)\n", slot,
+        coop_lite_follower_exchange(pc, npc) ? "the exchange window with its follower" : "barter with a merchant",
+        item_gold_get(npc));
     coop_lite_host_sync_slot_inven(slot);
 #else
     (void)pkt;
@@ -11707,7 +11761,10 @@ void coop_lite_host_handle_inven_transfer(struct Packet81* pkt)
 
     /* Price: never the client's number. Seller first (item_cost). */
     cost = 0;
-    if (npc != OBJ_HANDLE_NULL && from != to) {
+    if (npc != OBJ_HANDLE_NULL && from != to && coop_lite_follower_exchange(pc, npc)) {
+        /* PT80: the PC's own follower - inven_ui's follower mode is free */
+        tig_debug_printf("CoopLite: barter: slot %d exchange with its follower (free)\n", slot);
+    } else if (npc != OBJ_HANDLE_NULL && from != to) {
         cost = from == pc
             ? item_cost(item, pc, npc, false)
             : item_cost(item, npc, pc, false);
@@ -19491,6 +19548,32 @@ static void coop_lite_dev_trigger_tick(unsigned int now_ms)
     } else {
         tig_debug_printf("CoopLite: dev trigger: unknown or not for this side\n");
     }
+}
+
+/* PT80: the host ended our party dialog with "let's trade" on our own
+   follower: open the exchange (follower barter) window here. */
+static void coop_lite_client_exchange_tick(void)
+{
+    int64_t pc;
+    int64_t npc;
+    char name[128];
+
+    if (!coop_party_exchange_open) {
+        return;
+    }
+    coop_party_exchange_open = false;
+    pc = player_get_local_pc_obj();
+    npc = coop_lite_get_oid_obj(coop_party_talk_oid);
+    if (pc == OBJ_HANDLE_NULL || npc == OBJ_HANDLE_NULL || coop_inven_open_hook == NULL
+        || critter_is_dead(npc) || critter_is_dead(pc)) {
+        tig_debug_printf("CoopLite: exchange: follower not found here - not opened\n");
+        return;
+    }
+    name[0] = '\0';
+    object_examine(npc, pc, name);
+    tig_debug_printf("CoopLite: exchange: opening the exchange window with '%s' (leader here: %s)\n", name,
+        critter_leader_get(npc) == pc ? "me" : "not me");
+    coop_inven_open_hook(pc, npc, 1 /* INVEN_UI_MODE_BARTER */);
 }
 
 void coop_lite_client_dev_loot_tick(unsigned int now_ms)

@@ -1241,6 +1241,31 @@ static int test_packet_hardening(void)
                 return 1;
             }
         }
+        /* PT80: follower exchange close action (host -> client only). */
+        {
+            PacketCoopDialogState d;
+
+            coop_dialog_fill_close(&d, 9, 3);
+            d.action = COOP_DIALOG_ACT_EXCHANGE;
+            d.votes[COOP_DIALOG_SPEAKER_AT] = 1;
+            if (TIG_NET_PROTOCOL < 52 || coop_dialog_wire_size(&d) != COOP_DIALOG_HDR_SIZE
+                || !coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, true)
+                || coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, false)
+                || coop_dialog_packet_valid(&d, (int)sizeof(d), true)) {
+                fprintf(stderr, "PT80 exchange action check wrong\n");
+                return 1;
+            }
+            d.votes[COOP_DIALOG_SPEAKER_AT] = 0;
+            if (coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, true)) {
+                fprintf(stderr, "PT80 exchange without speaker accepted\n");
+                return 1;
+            }
+            d.votes[COOP_DIALOG_SPEAKER_AT] = 8;
+            if (coop_dialog_packet_valid(&d, COOP_DIALOG_HDR_SIZE, true)) {
+                fprintf(stderr, "PT80 exchange bad speaker accepted\n");
+                return 1;
+            }
+        }
         /* PT77af: an NPC alive on the host never dies here from its damage. */
         if (coop_lite_npc_rx_hp_damage(120, false, 90) != 89
             || coop_lite_npc_rx_hp_damage(40, false, 90) != 40

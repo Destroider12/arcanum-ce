@@ -320,6 +320,31 @@ static DWORD WINAPI crash_heap_watch(LPVOID param)
     }
 }
 
+/* PT80: vanilla code ends the game with exit() on some internal errors
+   (script cache full, missing tables, ...) - no exception, so neither
+   filter fires, the exit code is 0 and the launcher took it for a normal
+   close (Tarant playtest: "cache_find: Error" and the host was gone).
+   Between crash_handler_exit_guard(true) and (false) an exit() writes a
+   report with the caller's stack and ends the process with code 3, so the
+   launcher reports / restarts it. Registered first = runs last (after the
+   UPnP cleanup). */
+static volatile LONG crash_exit_armed;
+
+static void crash_atexit(void)
+{
+    if (InterlockedExchange(&crash_exit_armed, 0) == 0) {
+        return;
+    }
+    tig_debug_printf("Crash handler: exit() outside the normal shutdown - writing a report\n");
+    crash_report("exit() called outside the normal shutdown (vanilla fatal error, see the log line before)", NULL);
+    _exit(3);
+}
+
+void crash_handler_exit_guard(bool armed)
+{
+    InterlockedExchange(&crash_exit_armed, armed ? 1 : 0);
+}
+
 static void crash_sigabrt(int sig)
 {
     (void)sig;
@@ -562,6 +587,7 @@ void crash_handler_install(const char* build_id)
             limit >> 20);
     }
     signal(SIGABRT, crash_sigabrt);
+    atexit(crash_atexit); /* PT80 */
 #if defined(_MSC_VER)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
@@ -591,6 +617,11 @@ void crash_handler_install(const char* build_id)
 void crash_handler_set_subdir(const char* subdir)
 {
     (void)subdir;
+}
+
+void crash_handler_exit_guard(bool armed)
+{
+    (void)armed;
 }
 
 #endif

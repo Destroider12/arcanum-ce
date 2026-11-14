@@ -1177,6 +1177,11 @@ static bool dialog_ui_party_choose(int option)
         return false;
     }
     dialog_ui_process_option(entry, option);
+    if (entry->field_1850 && entry->state.field_17E8 == 3) {
+        /* PT80: "let's trade" with the speaker's own follower: the speaker
+           opens the exchange window when this dialog closes. */
+        coop_lite_party_dialog_exchange(entry->state.pc_obj, entry->state.npc_obj);
+    }
     if (entry->field_1850 && entry->state.field_17E8 >= 3 && entry->state.field_17E8 != 4) {
         /* barter / charedit / map / schematic windows are the speaker's own
            UI: close the party dialog (merchants are talked to locally). */

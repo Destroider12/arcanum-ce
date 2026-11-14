@@ -305,6 +305,7 @@ static bool script_execute_impl(ScriptInvocation* invocation)
     int attachee_type;
     bool script_num_changed;
     int saved_script_num;
+    int locked_num;
     ScriptState state;
     ScriptFile* script_file;
     int iter;
@@ -368,7 +369,10 @@ static bool script_execute_impl(ScriptInvocation* invocation)
     memset(state.lc_vars, 0, sizeof(state.lc_vars));
     memset(state.lc_objs, 0, sizeof(state.lc_objs));
 
-    script_file = script_lock(invocation->script->num);
+    /* PT80: unlock what was locked - SF_AUTO_REMOVING zeroes the number
+       before the unlock below. */
+    locked_num = invocation->script->num;
+    script_file = script_lock(locked_num);
     if (script_file != NULL) {
         line = invocation->line;
 
@@ -404,7 +408,7 @@ static bool script_execute_impl(ScriptInvocation* invocation)
             }
         }
 
-        script_unlock(invocation->script->num);
+        script_unlock(locked_num);
     } else {
         run_default = true;
     }
@@ -3527,6 +3531,9 @@ ScriptFile* script_lock(int script_id)
     }
 
     cache_entry_id = cache_find(script_id);
+    if (cache_entry_id < 0) {
+        return NULL; /* PT80: cache full of locked scripts */
+    }
     if (script_cache_entries[cache_entry_id].script_id == script_id) {
         script_cache_entries[cache_entry_id].ref_count++;
         script_cache_entries[cache_entry_id].datetime = sub_45A7C0();
@@ -3549,14 +3556,26 @@ ScriptFile* script_lock(int script_id)
 // 0x44C450
 void script_unlock(int script_id)
 {
-    int cache_entry_id;
+    int idx;
 
-    if (!script_editor) {
+    /* PT80: was `if (!script_editor) return;` (inverted when the original
+       `dword_5E2FDC != 1` was renamed): in the game nothing was ever
+       unlocked, so every script stayed pinned in the 100-entry cache and
+       the 101st distinct script made cache_find() exit the game silently
+       ("cache_find: Error: failed to find cache item!"). Only an entry
+       that really holds this script is released, never below 0. */
+    if (script_editor || script_id == 0) {
         return;
     }
 
-    cache_entry_id = cache_find(script_id);
-    script_cache_entries[cache_entry_id].ref_count--;
+    for (idx = 0; idx < MAX_CACHE_ENTRIES; idx++) {
+        if (script_cache_entries[idx].script_id == script_id) {
+            if (script_cache_entries[idx].ref_count > 0) {
+                script_cache_entries[idx].ref_count--;
+            }
+            return;
+        }
+    }
 }
 
 // 0x44C480
@@ -3677,8 +3696,10 @@ int cache_find(int script_id)
         return candidate;
     }
 
-    tig_debug_printf("cache_find: Error: failed to find cache item!\n");
-    exit(EXIT_SUCCESS); // FIXME: Should be `EXIT_FAILURE`.
+    /* PT80: was exit(EXIT_SUCCESS) - the game just closed. The script is
+       skipped instead (script_lock returns NULL). */
+    tig_debug_printf("cache_find: Error: failed to find cache item! (script %d skipped)\n", script_id);
+    return -1;
 }
 
 // 0x44C710

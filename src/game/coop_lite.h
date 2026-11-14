@@ -1882,6 +1882,7 @@ void coop_lite_handle_story_sync(PacketCoopStorySync* pkt);
 #define COOP_PARTY_TALK_INTERVAL_MS 1000u
 #define COOP_DIALOG_ACT_CLOSE 0
 #define COOP_DIALOG_ACT_OPEN 1
+#define COOP_DIALOG_ACT_EXCHANGE 2 /* PT80: CLOSE + the speaker (votes[7]) opens the exchange window with its follower */
 #define COOP_DIALOG_MAX_VOTES 7 /* client slots 1..7 */
 #define COOP_DIALOG_VOTE_INTERVAL_MS 250u /* per-slot vote rate limit */
 
@@ -1947,6 +1948,10 @@ bool coop_lite_party_choose_ok(int speaker, int slot, unsigned int line, unsigne
 bool coop_lite_client_party_talk(int64_t npc_obj, int64_t pc_obj);
 /* Host: the client PC running a party dialog, OBJ_HANDLE_NULL when none. */
 int64_t coop_lite_party_dialog_pc(void);
+/* PT80 host: the party dialog speaker picked "let's trade" with its own follower. */
+void coop_lite_party_dialog_exchange(int64_t pc_obj, int64_t npc_obj);
+/* PT80: a follower barter (exchange) is free; true when npc follows pc. */
+bool coop_lite_follower_exchange(int64_t pc_obj, int64_t npc_obj);
 void coop_lite_party_dialog_ended(int64_t pc_obj);
 void coop_lite_set_party_choose_hook(bool (*choose)(int option));
 /* Client viewer: leave the party dialog (speaker only). */

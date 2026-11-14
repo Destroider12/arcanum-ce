@@ -1099,6 +1099,39 @@ static bool host_restart_allowed(void)
     return true;
 }
 
+/* The last tail_size-1 bytes of the role log; returns the byte count. */
+static size_t read_log_tail(char* log, size_t log_size, char* tail, size_t tail_size)
+{
+    FILE* f;
+    long size;
+    size_t n = 0;
+
+    if (g_game_legacy) {
+        snprintf(log, log_size, "%s%s", g_game_dir_now, g_game_log);
+    } else {
+        snprintf(log, log_size, "%s%s", g_game_data_dir, g_game_log);
+    }
+    tail[0] = '\0';
+    f = fopen(log, "rb");
+    if (f != NULL) {
+        fseek(f, 0, SEEK_END);
+        size = ftell(f);
+        fseek(f, size > (long)tail_size - 1 ? size - (long)(tail_size - 1) : 0, SEEK_SET);
+        n = fread(tail, 1, tail_size - 1, f);
+        tail[n] = '\0';
+        fclose(f);
+    }
+    return n;
+}
+
+/* PT80: the game's own shutdown lines ("mainmenu_ui_exit_game: Exiting
+   Game!" from the menu, "[Exiting Game]" from gameuilib_exit). A vanilla
+   fatal error calls exit(0) and writes neither. */
+static bool log_shows_normal_exit(const char* tail)
+{
+    return strstr(tail, "Exiting Game!") != NULL || strstr(tail, "[Exiting Game]") != NULL;
+}
+
 /* PT70: the game closed within seconds: show its exit code and the end of
    the role log (the game writes "Error initializing ..." there). */
 static void show_early_exit(DWORD code)
@@ -1107,25 +1140,9 @@ static void show_early_exit(DWORD code)
     char text[2600];
     char tail[2048];
     char status[200];
-    FILE* f;
-    long size;
-    size_t n = 0;
+    size_t n;
 
-    if (g_game_legacy) {
-        snprintf(log, sizeof(log), "%s%s", g_game_dir_now, g_game_log);
-    } else {
-        snprintf(log, sizeof(log), "%s%s", g_game_data_dir, g_game_log);
-    }
-    tail[0] = '\0';
-    f = fopen(log, "rb");
-    if (f != NULL) {
-        fseek(f, 0, SEEK_END);
-        size = ftell(f);
-        fseek(f, size > (long)sizeof(tail) - 1 ? size - (long)(sizeof(tail) - 1) : 0, SEEK_SET);
-        n = fread(tail, 1, sizeof(tail) - 1, f);
-        tail[n] = '\0';
-        fclose(f);
-    }
+    n = read_log_tail(log, sizeof(log), tail, sizeof(tail));
     /* PT79c: a normal Exit from the main menu (exit 0, the game logged
        "Exiting Game!", no crash dump) is not a failed start: no popup. */
     if (code == 0 && !new_crash_file() && strstr(tail, "Exiting Game!") != NULL) {
@@ -1157,6 +1174,18 @@ static void on_game_exit(DWORD code, HANDLE proc)
     EnableWindow(item(IDC_UPD_CHECK), TRUE);
     EnableWindow(item(IDC_UPD_GO), TRUE);
     crashed = code != 0 || new_crash_file();
+    if (!crashed) {
+        /* PT80: exit code 0 without the game's shutdown lines in its log is
+           a vanilla fatal exit(0) (Tarant: "cache_find: Error" - the host
+           vanished, no report, no restart). */
+        char log[MAX_PATH];
+        char tail[4096];
+
+        read_log_tail(log, sizeof(log), tail, sizeof(tail));
+        if (!log_shows_normal_exit(tail)) {
+            crashed = true;
+        }
+    }
     if (GetTickCount() - g_game_start_tick < 15000) {
         /* PT70: closed right after the start: show why, never auto-restart. */
         show_early_exit(code);
@@ -1164,7 +1193,7 @@ static void on_game_exit(DWORD code, HANDLE proc)
         return;
     }
     if (!crashed) {
-        set_status("Game closed.");
+        set_status("Game closed (exit code 0).");
         return;
     }
     show_panel(true);
