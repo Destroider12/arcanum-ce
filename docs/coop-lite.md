@@ -3407,3 +3407,62 @@ Watchdog: the heartbeat is `GetTickCount()|1`, so read in the same tick
 it could be 1 ms "ahead". The unsigned age wrapped to about 4e9 and fired
 false "HANG" reports while the game ran (5 on the client, 288 on the
 host in this report). The age is now signed.
+
+## PT79: code review fixes (protocol 51)
+
+An outside full-code review of PT78a was checked point by point against
+the code.
+
+Fixed:
+
+- **Full snapshot cut at 16384 objects (1.1).** The host stops the full
+  WORLD_STATE list at `COOP_WORLD_FULL_MAX_OIDS` (16384). The client's
+  seen-set also holds 16384, so it never overflowed, and the full prune
+  destroyed every object of the listed sectors past the cut. The host now
+  marks such pages `COOP_WORLD_F_TRUNCATED` (0x8), and the client skips
+  the prune for that snapshot. Dropping F_FULL instead would have let the
+  radius prune delete nearby objects the list left out.
+- **Stale location knowledge after a host load (1.2).** A client sends its
+  known-location set only after the host's set for this session or load
+  has arrived. That first host set replaces the client's own: its old
+  bits may come from a later save or another game. The state resets with
+  the session, which includes the resync after a host load. Discoveries
+  made after that are shared as before.
+- **Ground drop vs. an older INVEN_SYNC (1.3).** The client remembers the
+  last 32 items the host's ground push put on the floor for 3 s. A batch
+  applied in that window does not pick them back into the dropper's pack,
+  and the next batch no longer destroys them. If the host really took the
+  item back, the 10 s inventory keyframe corrects it.
+- **NPC followers' build (1.4).** Followers level up on the host only.
+  The new `PACKET_COOP_NPC_STATS` (166) carries their base stats (level,
+  STR, ...) and hp/fatigue points and adjustments. It is sent with the
+  follower table on change, and again every 10 s. Clients apply it only
+  to NPCs that follow a party PC. Skills and spells are not synced.
+- **Watchdog (1.5).** The main menu loop does call `gamelib_ping`, so the
+  menu itself is not a false HANG: the menu reports were the unsigned-age
+  bug fixed in PT78a. Movies, the slide show and the `name.c` modal
+  prompt never reach `gamelib_ping`, so they pause the watch
+  (`crash_handler_heartbeat_pause`) until the next heartbeat.
+- **Sector cache (2.1).** In co-op the cache grows from 64 to 96 sectors.
+  With 8 players, 7 remote PCs lock 63 sectors (3x3 each), plus the view's
+  own. The 3x3 window stays: 2x2 broke the corpse fixes before.
+- **NPC pose scan (2.3a).** PCs within 16 tiles of each other share one
+  `object_list_rect` over the union of their squares. An NPC is still
+  taken only when it is inside some member's own 81x81 square, so the
+  result is the same as before.
+
+Not changed:
+
+- 2.2 (prune cost): a prune runs once per world request, on a sector
+  change or every 30 s, not every frame. The obj_inst walk costs
+  milliseconds. Mass destroys happen once after a join or load, while
+  the client is loading anyway. Spreading them over frames would leave
+  stale objects visible, and needs handles revalidated between frames.
+- 2.3b (INVEN_SYNC only equipment for others): INVEN_SYNC is already sent
+  on change plus a 10 s keyframe. Filtering it per viewer would starve
+  two-way pickpocketing, loot and portrait views of data at the moment
+  they open.
+- 2.4 (overlay dropped by `tig_file_repository_remove_all`): that call
+  runs only in `tig_file_exit` at shutdown. `tig_file_repository_remove`
+  clears the overlay only when the overlay folder itself is removed, and
+  nothing does that.
