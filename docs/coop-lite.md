@@ -3466,3 +3466,26 @@ Not changed:
   runs only in `tig_file_exit` at shutdown. `tig_file_repository_remove`
   clears the overlay only when the overlay folder itself is removed, and
   nothing does that.
+
+## PT79a: client merchants said "I cannot pay more than 0"
+
+On a client, every merchant answered a sale with the vanilla "no money"
+line ("You might get 8 elsewhere. I cannot pay more than 0."). The host
+priced and paid correctly, because it prices every sale itself.
+
+Cause: a client never rolls an NPC's gold. INVEN_SYNC brings a critter's
+gold as a total, and the client added the difference with
+`item_gold_transfer`. When the critter had no gold stack yet, that call
+creates one and hands it to `item_transfer`, which checks carry weight,
+free grid cells and the SAP_GET script. A merchant with heavy, full stock
+fails those checks, so its gold stayed 0 on the client and the stack was
+left lying at its feet (client only).
+
+- When the critter has no stack yet, the client now makes the gold / ammo
+  stack and inserts it directly (`coop_lite_client_force_stack`), with no
+  weight, room or script check. If the grid is full it goes to cell 0, and
+  the PT57 pass moves it to the host's cell. Adding to an existing stack
+  is unchanged.
+- No wire change (protocol stays 51).
+- Gold piles left on the ground by the old path are client-only; the
+  world prune removes them near the PC.

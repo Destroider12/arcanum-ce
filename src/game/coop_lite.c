@@ -13312,6 +13312,24 @@ static int64_t coop_lite_local_stack_for(int64_t owner, int proto)
 
 static int coop_lite_layout_nearest_cell(int64_t pc, int64_t item, int want);
 
+/* PT79a: puts a freshly made gold / ammo stack into a critter mirroring
+   the host: no weight / room / script checks (the host already holds it).
+   A full grid gets cell 0; the PT57 pass below moves it to the host's. */
+static void coop_lite_client_force_stack(int64_t owner, int64_t stack)
+{
+    int loc;
+
+    if (owner == OBJ_HANDLE_NULL || stack == OBJ_HANDLE_NULL) {
+        return;
+    }
+    loc = item_find_free_inv_loc_for_insertion(stack, owner);
+    if (loc < 0) {
+        loc = 0;
+    }
+    object_pickup(stack, owner);
+    item_insert(stack, owner, loc);
+}
+
 static void coop_lite_client_apply_inven_batch(void)
 {
     int64_t rings[16];
@@ -13698,7 +13716,14 @@ static void coop_lite_client_apply_inven_batch(void)
             continue; /* PT26: containers' stacks came as listed items */
         }
         d = coop_inv_owner[o].head.gold - item_gold_get(owner);
-        if (d > 0) {
+        if (d > 0 && obj_field_handle_get(owner, OBJ_F_CRITTER_GOLD) == OBJ_HANDLE_NULL) {
+            /* PT79a: a NEW stack must not go through item_transfer: it
+               checks carry weight and free cells, so a merchant (heavy,
+               full grid) refused it - its gold read 0 here and every sale
+               said "I cannot pay more than 0". */
+            coop_lite_client_force_stack(owner,
+                item_gold_create(d, obj_field_int64_get(owner, OBJ_F_LOCATION)));
+        } else if (d > 0) {
             item_gold_transfer(OBJ_HANDLE_NULL, owner, d, OBJ_HANDLE_NULL);
         } else if (d < 0) {
             item_gold_transfer(owner, OBJ_HANDLE_NULL, -d, OBJ_HANDLE_NULL);
@@ -13715,7 +13740,10 @@ static void coop_lite_client_apply_inven_batch(void)
         }
         for (t = 0; t < COOP_INVEN_AMMO_TYPES; t++) {
             d = coop_inv_owner[o].head.ammo[t] - item_ammo_quantity_get(owner, t);
-            if (d > 0) {
+            if (d > 0 && obj_field_handle_get(owner, coop_ammo_fld[t]) == OBJ_HANDLE_NULL) {
+                coop_lite_client_force_stack(owner,
+                    item_ammo_create(d, t, obj_field_int64_get(owner, OBJ_F_LOCATION))); /* PT79a */
+            } else if (d > 0) {
                 item_ammo_transfer(OBJ_HANDLE_NULL, owner, d, t, OBJ_HANDLE_NULL);
             } else if (d < 0) {
                 item_ammo_transfer(owner, OBJ_HANDLE_NULL, -d, t, OBJ_HANDLE_NULL);
