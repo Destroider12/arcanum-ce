@@ -467,6 +467,10 @@ void scroll_by(int64_t dx, int64_t dy)
     // Scroll the window content.
     tig_window_scroll(scroll_init_info.iso_window_handle, (int)dx, (int)dy);
 
+    // PT77k2: fixed-position overlays (co-op chat) were shifted with the map
+    // pixels and left trails; let them invalidate both copies.
+    gamelib_overlay_scrolled((int)dx, (int)dy);
+
     // Invalidate newly revealed areas (horizontal scroll).
     if (dx > 0) {
         rect = scroll_iso_content_rect;
@@ -509,6 +513,17 @@ void scroll_by(int64_t dx, int64_t dy)
             gsound_listener_set(loc);
             scroll_origin = loc;
         }
+    }
+}
+
+/**
+ * Scrolls the view by a pixel delta (same path as edge scrolling). Used by
+ * coop clients to keep their own PC in view while it walks.
+ */
+void scroll_view_by(int64_t dx, int64_t dy)
+{
+    if (dx != 0 || dy != 0) {
+        scroll_by(dx, dy);
     }
 }
 

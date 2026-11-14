@@ -116,6 +116,7 @@ void intgame_text_edit_refresh_color(const char* str, tig_font_handle_t font, ti
 bool intgame_clock_process_callback(TimeEvent* timeevent);
 bool intgame_dialog_begin(bool (*func)(TigMessage* msg));
 void intgame_dialog_end(void);
+bool intgame_dialog_is_active(void);
 void intgame_dialog_clear(void);
 void intgame_dialog_set_option(int index, const char* str);
 int intgame_dialog_get_option(TigMessage* msg);

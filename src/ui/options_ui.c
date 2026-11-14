@@ -2,6 +2,7 @@
 
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/gamelib.h"
 #include "game/location.h"
 #include "game/mes.h"
@@ -412,7 +413,8 @@ void options_ui_combat_mode_get(int* value_ptr, bool* enabled_ptr)
     } else {
         *value_ptr = 0;
     }
-    *enabled_ptr = true;
+    /* Coop Lite forces real-time — disable the TB option. */
+    *enabled_ptr = coop_lite_can_use_turn_based();
 }
 
 /**
@@ -422,6 +424,9 @@ void options_ui_combat_mode_get(int* value_ptr, bool* enabled_ptr)
  */
 void options_ui_combat_mode_set(int value)
 {
+    if (!coop_lite_can_use_turn_based()) {
+        value = 0; /* real-time only */
+    }
     switch (value) {
     case 0:
         settings_set_value(&settings, TURN_BASED_KEY, 0);

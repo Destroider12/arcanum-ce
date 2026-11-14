@@ -818,9 +818,11 @@ void animfx_remove(AnimFxList* list, int64_t obj, int fx_id, int mt_id)
 
     if ((list->entries[fx_id].flags & ANIMFX_LIST_ENTRY_ANIMATES) != 0) {
         anim_eye_candy_interrupt(obj, list->entries[fx_id].eye_candy_art_id, mt_id);
-    } else {
-        sub_4CD9C0(&(list->entries[fx_id]), obj);
     }
+    /* Always strip leftover overlays/lights. Interrupt only finds AG_EYE_CANDY
+       and may no-op if the goal already ended or was a sibling type; without
+       this a one-shot heal sphere (overlay light) stays on coop clients. */
+    sub_4CD9C0(&(list->entries[fx_id]), obj);
 }
 
 // 0x4CD9C0
@@ -888,17 +890,18 @@ bool sub_4CD9C0(AnimFxListEntry* entry, int64_t obj)
 
     if (entry->light_art_id != TIG_ART_ID_INVALID) {
         for (index = 0; index < 4; index++) {
-            // FIXME: Original code looks odd. Apparently it does not assign
-            // light art id to a variable and the check below refer to the
-            // `art_id` from earlier loops. In some circumstances that value
-            // is set to memory address of `entry`, which is obviously wrong.
             art_id = obj_arrayfield_uint32_get(obj, OBJ_F_OVERLAY_LIGHT_AID, index);
             if (art_id == TIG_ART_ID_INVALID) {
                 continue;
             }
 
-            if (tig_art_num_get(art_id) == num) {
-                return true;
+            /* Match the overlay light art itself (not only the eye-candy art
+               num). The original path found a slot and returned without
+               clearing it, so a heal sphere could stay on forever. */
+            if (tig_art_num_get(art_id) == num
+                || tig_art_num_get(art_id) == tig_art_num_get(entry->light_art_id)) {
+                object_set_overlay_light(obj, index, 0, TIG_ART_ID_INVALID, 0);
+                break;
             }
         }
     }

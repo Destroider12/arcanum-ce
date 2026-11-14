@@ -86,6 +86,7 @@ bool critter_is_facing_to(int64_t a, int64_t b);
 bool critter_check_stat(int64_t obj, int stat, int mod);
 int critter_xp_worth(int64_t obj);
 void critter_give_xp(int64_t obj, int a2);
+void critter_award_xp(int64_t obj, int xp_gain);
 bool critter_enter_bed(int64_t obj, int64_t bed);
 void critter_leave_bed(int64_t obj, int64_t bed);
 bool critter_has_bad_associates(int64_t obj);

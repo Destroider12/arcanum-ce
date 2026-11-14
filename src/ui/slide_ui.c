@@ -1,5 +1,7 @@
 #include "ui/slide_ui.h"
 
+#include "crash_handler.h"
+
 #include <stdio.h>
 
 #include "game/gamelib.h"
@@ -261,6 +263,7 @@ bool slide_ui_do_slide(tig_window_handle_t window_handle, int slide)
             tig_timer_now(&start);
 
             stop = false;
+            crash_handler_heartbeat_pause(); /* PT79: a slide waits for a key */
             do {
                 elapsed = tig_timer_elapsed(start);
 

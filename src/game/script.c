@@ -29,6 +29,7 @@
 #include "game/reaction.h"
 #include "game/reputation.h"
 #include "game/rumor.h"
+#include "game/coop_lite.h"
 #include "game/script_name.h"
 #include "game/scroll.h"
 #include "game/sector.h"
@@ -82,6 +83,9 @@ static void script_print_line(ScriptAction* action, ScriptState* state);
 static int script_resolve_focus_obj(ScriptFocusObject type, int index, ScriptState* state, int64_t* objs, ObjectList* l);
 static void sub_44B8F0(ScriptFocusObject type, ObjectList* l);
 static int64_t script_get_obj(ScriptFocusObject type, int index, ScriptState* state);
+static bool script_coop_party_player(int focus);
+static bool script_coop_party_quest_match(int64_t host_pc, int quest, int quest_state);
+static void script_coop_party_quest_set(int quest, int quest_state, int64_t npc_obj);
 static void script_set_obj(ScriptFocusObject type, int index, ScriptState* state, int64_t obj);
 static int script_get_value(ScriptValueType type, int index, ScriptState* state);
 static void script_set_value(ScriptValueType type, int index, ScriptState* state, int value);
@@ -275,7 +279,27 @@ void script_set_callbacks(ScriptStartDialogFunc start_dialog_func, ScriptFloatLi
 }
 
 // 0x4449B0
+/* PT61: >0 while a script runs (co-op syncs only script-driven wall changes). */
+static int script_running_depth;
+
+static bool script_execute_impl(ScriptInvocation* invocation);
+
+bool script_is_running(void)
+{
+    return script_running_depth > 0;
+}
+
 bool script_execute(ScriptInvocation* invocation)
+{
+    bool rc;
+
+    script_running_depth++;
+    rc = script_execute_impl(invocation);
+    script_running_depth--;
+    return rc;
+}
+
+static bool script_execute_impl(ScriptInvocation* invocation)
 {
     ScriptFlags flags;
     int attachee_type;
@@ -661,6 +685,10 @@ int script_execute_condition(ScriptCondition* condition, int line, ScriptState* 
             if (quest_state_get(objs[index], quest) == quest_state) {
                 matched++;
             }
+        }
+        if (matched == 0 && cnt == 1 && script_coop_party_player(condition->op_type[0])
+            && script_coop_party_quest_match(objs[0], quest, quest_state)) {
+            matched = 1; /* PT79b: another player of the party has it */
         }
         sub_44B8F0(condition->op_type[0], &objects);
         if (matched != 0
@@ -1603,11 +1631,18 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         int quest_num = script_get_value(action->op_type[1], action->op_value[1], state);
         int quest_state = script_get_value(action->op_type[2], action->op_value[2], state);
 
-        for (int idx = 0; idx < cnt; idx++) {
-            quest_state_set(handles[idx],
-                quest_num,
-                quest_state,
-                state->invocation->attachee_obj);
+        if (script_coop_party_player(action->op_type[0]) && quest_state > QUEST_STATE_ACCEPTED) {
+            /* PT79b: "the player" of a story script (a kill counter, a
+               found item) is the whole co-op party: every player who has
+               the quest in progress gets the step, not only the host. */
+            script_coop_party_quest_set(quest_num, quest_state, state->invocation->attachee_obj);
+        } else {
+            for (int idx = 0; idx < cnt; idx++) {
+                quest_state_set(handles[idx],
+                    quest_num,
+                    quest_state,
+                    state->invocation->attachee_obj);
+            }
         }
 
         sub_44B8F0(action->op_type[0], &objects);
@@ -1943,7 +1978,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
     case SAT_QUELL_RUMOR: {
         int rumor = script_get_value(action->op_type[0], action->op_value[0], state);
         int64_t obj = script_get_obj(action->op_type[1], action->op_value[1], state);
-        if (obj == player_get_local_pc_obj()) {
+        if (obj == coop_lite_story_pc_obj()) {
             rumor_qstate_set(rumor);
         }
         return NEXT;
@@ -2284,7 +2319,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
             str[len] = '\0';
         }
         int speech_id;
-        dialog_copy_npc_newspaper_msg(npc_obj, player_get_local_pc_obj(), &(str[len]), &speech_id);
+        dialog_copy_npc_newspaper_msg(npc_obj, coop_lite_story_pc_obj(), &(str[len]), &speech_id);
         script_float_line_func(npc_obj, state->invocation->triggerer_obj, str, speech_id);
         return NEXT;
     }
@@ -2403,7 +2438,14 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         return NEXT;
     }
     case SAT_FADE_AND_TELEPORT: {
-        if (!tig_net_is_active()) {
+        /* Coop Lite PT79b: vanilla multiplayer skipped this action, so on
+           the co-op host a scripted voyage (Captain Teach's ship) moved only
+           the NPC. The host runs it; a party PC as the target means the
+           whole party goes - the host PC travels (ready check, party carry,
+           clients follow). Clients never run it. */
+        bool coop_host = tig_net_is_coop_enabled() && tig_net_is_host();
+
+        if (!tig_net_is_active() || coop_host) {
             TeleportData teleport_data;
             teleport_data.flags = TELEPORT_FADE_IN | TELEPORT_FADE_OUT;
             teleport_data.fade_out.flags = 0;
@@ -2430,6 +2472,10 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
             }
 
             teleport_data.obj = script_get_obj(action->op_type[3], action->op_value[3], state);
+            if (coop_host && coop_lite_is_party_pc(teleport_data.obj)) {
+                tig_debug_printf("Script: PT79b fade-and-teleport of a party PC - the party travels with the host\n");
+                teleport_data.obj = player_get_local_pc_obj();
+            }
 
             int map = script_get_value(action->op_type[4], action->op_value[4], state);
             int x = script_get_value(action->op_type[5], action->op_value[5], state);
@@ -2599,6 +2645,7 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
             int fate_points = stat_base_get(obj, STAT_FATE_POINTS);
             stat_base_set(obj, STAT_FATE_POINTS, fate_points + 1);
+            coop_lite_host_party_fate_point(obj); /* PT40 */
         }
         return NEXT;
     }
@@ -3122,7 +3169,8 @@ int script_resolve_focus_obj(ScriptFocusObject type, int index, ScriptState* sta
         }
         break;
     case SFO_PLAYER:
-        objs[cnt++] = player_get_local_pc_obj();
+        /* Coop Lite: companions are not "the PC" for story scripts — use host. */
+        objs[cnt++] = coop_lite_story_pc_obj();
         break;
     case SFO_EVERY_ITEM_IN_VICINITY:
     case SFO_ANY_ITEM_IN_VICINITY:
@@ -3187,6 +3235,47 @@ int64_t script_get_obj(ScriptFocusObject type, int index, ScriptState* state)
     sub_44B8F0(type, &l);
 
     return objs[0];
+}
+
+/* Coop Lite PT79b: on the co-op host SFO_PLAYER resolves to the host PC
+   (coop_lite_story_pc_obj). For quest steps the party counts as one. */
+static bool script_coop_party_player(int focus)
+{
+    return focus == SFO_PLAYER && tig_net_is_coop_enabled() && tig_net_is_active() && tig_net_is_host();
+}
+
+static bool script_coop_party_quest_match(int64_t host_pc, int quest, int quest_state)
+{
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && pc != host_pc && coop_lite_is_party_pc(pc)
+            && quest_state_get(pc, quest) == quest_state) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void script_coop_party_quest_set(int quest, int quest_state, int64_t npc_obj)
+{
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int cur;
+
+        if (pc == OBJ_HANDLE_NULL || !coop_lite_is_party_pc(pc)) {
+            continue;
+        }
+        cur = quest_state_get(pc, quest);
+        if (cur >= QUEST_STATE_ACCEPTED && cur < quest_state) {
+            quest_state_set(pc, quest, quest_state, npc_obj);
+            tig_debug_printf("Script: PT79b party quest %d -> %d for slot %d\n", quest, quest_state, slot);
+        }
+    }
 }
 
 // 0x44B9B0
@@ -3354,6 +3443,78 @@ bool script_flags(Script* scr, ScriptFlags* flags_ptr)
 
     return false;
 }
+
+// Coop Lite: detect dialog/scripts that mutate campaign-global state.
+static bool script_action_has_global_side_effects(const ScriptAction* action)
+{
+    if (action == NULL) {
+        return false;
+    }
+    switch (action->type) {
+    case SAT_SET_PC_QUEST_STATE:
+    case SAT_SET_QUEST_GLOBAL_STATE:
+    case SAT_SET_STORY_STATE:
+    case SAT_SET_GLOBAL_FLAG:
+    case SAT_CLEAR_GLOBAL_FLAG:
+    case SAT_ADD_REPUTATION:
+    case SAT_REMOVE_REPUTATION:
+    case SAT_GIVE_QUEST_XP:
+    case SAT_SET_PC_QUEST_UNBOTCHED:
+    case SAT_MARK_MAP_LOCATION:
+    case SAT_SET_RUMOR:
+    case SAT_QUELL_RUMOR:
+    case SAT_TELEPORT:
+    case SAT_FADE_AND_TELEPORT:
+    case SAT_CREATE_OBJECT:
+    case SAT_KILL:
+    case SAT_DESTROY:
+    case SAT_TRANSFORM_ATTACHEE_INTO_BASIC_PROTOTYPE:
+    case SAT_CRITTER_FOLLOW:
+    case SAT_CRITTER_DISBAND:
+    case SAT_TOGGLE_SECTOR_BLOCKED:
+    case SAT_UNFOG_TOWNMAP:
+    case SAT_QUEUE_NEWSPAPER:
+    case SAT_GRANT_ONE_FATE_POINT:
+    case SAT_QUEUE_SLIDE:
+    case SAT_END_GAME_AND_PLAY_SLIDES:
+    case SAT_TOGGLE_MONSTER_GENERATOR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool script_has_global_side_effects(int script_num)
+{
+    ScriptFile* script_file;
+    int index;
+    ScriptCondition entry;
+
+    if (script_num == 0) {
+        return false;
+    }
+
+    script_file = script_lock(script_num);
+    if (script_file == NULL) {
+        return false;
+    }
+
+    for (index = 0; index < script_file->num_entries; index++) {
+        if (!sub_44C1B0(script_file, (unsigned int)index, &entry)) {
+            continue;
+        }
+        if (script_action_has_global_side_effects(&entry.action)
+            || script_action_has_global_side_effects(&entry.els)) {
+            script_unlock(script_num);
+            return true;
+        }
+    }
+
+    script_unlock(script_num);
+    return false;
+}
+
+
 
 // 0x44C390
 ScriptFile* script_lock(int script_id)

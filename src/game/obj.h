@@ -393,6 +393,16 @@ bool obj_write(TigFile* stream, int64_t obj);
 bool obj_read(TigFile* stream, int64_t* obj_ptr);
 void obj_write_mem(uint8_t** data_ptr, int* size_ptr, int64_t obj);
 bool obj_read_mem(uint8_t* data, int64_t* obj_ptr);
+
+/* Coop: encodings of serialized fields (see obj_mem_layout). */
+#ifndef OBJ_MEM_K_I32
+#define OBJ_MEM_K_I32 1
+#define OBJ_MEM_K_I64 2 /* presence byte [+ 8] */
+#define OBJ_MEM_K_HANDLE 3 /* presence byte [+ 24] */
+#define OBJ_MEM_K_STRING 4 /* presence byte [+ int len + len + 1] */
+#define OBJ_MEM_K_ARRAY 5 /* presence byte [+ sa header + data + bitset] */
+#endif
+int obj_mem_layout(const uint8_t* data, int size, uint8_t* kinds, int* elem, int max, int* count_out);
 int obj_is_modified(int64_t obj);
 bool obj_dif_write(TigFile* stream, int64_t obj);
 bool obj_dif_read(TigFile* stream, int64_t obj);

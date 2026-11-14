@@ -1,5 +1,7 @@
 #include "game/trap.h"
 
+#include "game/coop_lite.h"
+
 #include "game/ai.h"
 #include "game/animfx.h"
 #include "game/combat.h"
@@ -310,6 +312,12 @@ void trap_remove_internal(int64_t trap_obj)
     }
 }
 
+/* Coop Lite (PT41): a client drops a trap the host disarmed. */
+void trap_remove(int64_t trap_obj)
+{
+    trap_remove_internal(trap_obj);
+}
+
 // 0x4BC2E0
 bool trap_use_on_obj(int64_t pc_obj, int64_t item_obj, int64_t target_obj)
 {
@@ -584,6 +592,8 @@ bool trap_script_execute(ScriptInvocation* invocation)
     ObjectNode* node;
     AnimFxNode animfx;
     int base;
+    int64_t coop_victims[COOP_TRAP_FX_VICTIMS]; /* PT61 */
+    int coop_victim_cnt = 0;
 
     if (trap_type_from_scr(invocation->script) == TRAP_TYPE_INVALID) {
         return false;
@@ -640,6 +650,9 @@ bool trap_script_execute(ScriptInvocation* invocation)
         node = critters.head;
         while (node != NULL) {
             trigger_trap(node->obj, invocation);
+            if (coop_victim_cnt < COOP_TRAP_FX_VICTIMS) {
+                coop_victims[coop_victim_cnt++] = node->obj;
+            }
             if (base != -1) {
                 sub_4CCD20(&trap_eye_candies,
                     &animfx,
@@ -661,6 +674,7 @@ bool trap_script_execute(ScriptInvocation* invocation)
     } else {
         if (invocation->triggerer_obj != OBJ_HANDLE_NULL) {
             trigger_trap(invocation->triggerer_obj, invocation);
+            coop_victims[coop_victim_cnt++] = invocation->triggerer_obj;
             if (base != -1) {
                 sub_4CCD20(&trap_eye_candies,
                     &animfx,
@@ -677,7 +691,39 @@ bool trap_script_execute(ScriptInvocation* invocation)
         }
     }
 
+    if (base != -1) {
+        /* PT61: clients only saw the damage; send them the eye candy. */
+        coop_lite_host_trap_fx(invocation->attachee_obj, invocation->triggerer_obj, base, coop_victims,
+            coop_victim_cnt);
+    }
+
     return true;
+}
+
+/* PT61 client: the host's trap trigger visuals (no damage, no script). */
+void trap_coop_play_fx(int64_t trap, int64_t triggerer, int base, const int64_t* victims, int count)
+{
+    AnimFxNode animfx;
+    int i;
+
+    if (base < 0 || base % TRAP_EYE_CANDY_TYPE_COUNT != 0) {
+        return;
+    }
+    if (triggerer != OBJ_HANDLE_NULL) {
+        sub_4CCD20(&trap_eye_candies, &animfx, triggerer, -1, base + TRAP_EYE_CANDY_TYPE_TRIGGER_EFFECT);
+        animfx.animate = true;
+        animfx_add(&animfx);
+    }
+    if (trap != OBJ_HANDLE_NULL) {
+        animfx_remove(&trap_eye_candies, trap, base + TRAP_EYE_CANDY_TYPE_SPOTTED, -1);
+    }
+    for (i = 0; i < count; i++) {
+        if (victims[i] != OBJ_HANDLE_NULL) {
+            sub_4CCD20(&trap_eye_candies, &animfx, victims[i], -1, base + TRAP_EYE_CANDY_TYPE_VICTIM_EFFECT);
+            animfx.animate = true;
+            animfx_add(&animfx);
+        }
+    }
 }
 
 // 0x4BCDC0

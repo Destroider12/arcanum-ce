@@ -5,10 +5,15 @@
 #include "game/object.h"
 #include "game/timeevent.h"
 
-#define ASSERT(x)                                                                      \
-    if (!(x)) {                                                                        \
-        tig_debug_printf("ASSERTION: File:%s, Line:%d: %s\n", __FILE__, __LINE__, #x); \
-        anim_stats();                                                                  \
+/* One-line ASSERTION is always logged. A full anim_stats() dump is only
+   written the first time a given file:line fails (and at most once more
+   after a long gap). A null parent on a projectile is a common, already-
+   handled case that used to dump every active animation ~270 times per
+   session and bloat the client log by several MB. */
+void anim_assert_fail(const char* file, int line, const char* expr);
+#define ASSERT(x)                                \
+    if (!(x)) {                                  \
+        anim_assert_fail(__FILE__, __LINE__, #x); \
     }
 
 typedef enum AnimGoal {

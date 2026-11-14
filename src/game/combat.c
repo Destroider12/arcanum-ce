@@ -1,4 +1,5 @@
 #include "game/combat.h"
+#include "game/coop_lite.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -21,6 +22,8 @@
 #include "game/map.h"
 #include "game/material.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/mt_item.h"
 #include "game/obj.h"
 #include "game/obj_private.h"
@@ -490,6 +493,10 @@ void sub_4B2690(int64_t proj_obj, int64_t a2, int64_t a3, CombatContext* combat,
     unsigned int critter_flags2;
 
     proj_flags = obj_field_int32_get(proj_obj, OBJ_F_PROJECTILE_FLAGS_COMBAT);
+    if ((proj_flags & COOP_PROJECTILE_VISUAL) != 0) {
+        object_destroy(proj_obj);
+        return;
+    }
     if ((proj_flags & 0x40) != 0) {
         weapon_obj = obj_field_handle_get(proj_obj, OBJ_F_PROJECTILE_PARENT_WEAPON);
         loc = obj_field_int64_get(proj_obj, OBJ_F_LOCATION);
@@ -756,16 +763,20 @@ void sub_4B2F60(CombatContext* combat)
         if ((combat->flags & CF_CRITICAL) != 0) {
             sound_id = sfx_critter_sound(combat->target_obj, CRITTER_SOUND_CRITICALLY_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->target_obj);
+            coop_lite_host_npc_sound(sound_id, combat->target_obj); /* PT28 */
 
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_CRITICAL_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         } else {
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         }
     } else {
         sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_MISS);
         gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+        coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
 
         if (combat->target_obj != OBJ_HANDLE_NULL
             && obj_field_int32_get(combat->target_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
@@ -947,6 +958,7 @@ int sub_4B3170(CombatContext* combat)
                     mes_file_entry.num = 11; // "Dodge!"
                     mes_get_msg(combat_mes_file, &mes_file_entry);
                     tf_add(combat->target_obj, 0, mes_file_entry.str);
+                    coop_lite_host_combat_text(combat->target_obj, 0, 11); /* PT75 */
 
                     combat->flags &= ~(CF_HIT | CF_CRITICAL);
 
@@ -1021,12 +1033,15 @@ void combat_process_melee_attack(CombatContext* combat)
         if ((combat->flags & CF_CRITICAL) != 0) {
             sound_id = sfx_critter_sound(combat->target_obj, CRITTER_SOUND_CRITICALLY_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->target_obj);
+            coop_lite_host_npc_sound(sound_id, combat->target_obj); /* PT28 */
 
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_CRITICAL_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         } else {
             sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_HIT);
             gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+            coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
         }
 
         if ((obj_field_int32_get(combat->attacker_obj, OBJ_F_SPELL_FLAGS) & OSF_BODY_OF_FIRE) == 0
@@ -1038,6 +1053,7 @@ void combat_process_melee_attack(CombatContext* combat)
     } else {
         sound_id = sfx_item_sound(combat->weapon_obj, combat->attacker_obj, combat->target_obj, WEAPON_SOUND_MISS);
         gsound_play_sfx_on_obj(sound_id, 1, combat->attacker_obj);
+        coop_lite_host_npc_sound(sound_id, combat->attacker_obj); /* PT28 */
 
         if (obj_field_int32_get(combat->target_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
             ai_process(combat->target_obj);
@@ -1372,6 +1388,35 @@ void combat_critter_toggle_combat_mode(int64_t obj)
     if ((critter_flags2 & OCF2_COMBAT_TOGGLE_FX) != 0) {
         magictech_fx_add(obj, MAGICTECH_FX_COMBAT_TOGGLE);
     }
+
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        PacketCombatModeSet pkt;
+        pkt.type = 11;
+        pkt.padding_4 = 0;
+        pkt.oid = obj_get_id(obj);
+        pkt.active = combat_critter_is_combat_mode_active(obj);
+        pkt.padding_24 = 0;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    } else if (tig_net_is_coop_enabled()
+        && !multiplayer_is_locked()
+        && player_is_local_pc_obj(obj)) {
+        /* Coop client (PT12): the toggle used to stay local, so the host
+           copy of this PC kept its combat mode and re-sent it (client stuck
+           in combat mode). Tell the host; it applies and re-broadcasts. */
+        int depth = tig_net_local_suspend_pause();
+
+        if (tig_net_is_active() && !tig_net_is_host()) {
+            PacketCombatModeSet pkt;
+
+            pkt.type = 11;
+            pkt.padding_4 = 0;
+            pkt.oid = obj_get_id(obj);
+            pkt.active = combat_critter_is_combat_mode_active(obj);
+            pkt.padding_24 = 0;
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        }
+        tig_net_local_suspend_resume(depth);
+    }
 }
 
 // 0x4B4320
@@ -1533,10 +1578,12 @@ void combat_dmg(CombatContext* combat)
             mes_file_entry.num = 2; // "Critical miss"
             mes_get_msg(combat_mes_file, &mes_file_entry);
             tf_add(combat->attacker_obj, tf_type, mes_file_entry.str);
+            coop_lite_host_combat_text(combat->attacker_obj, tf_type, 2); /* PT75 */
         } else if ((combat->flags & CF_CRITICAL) != 0) {
             mes_file_entry.num = 12; // "Critical hit"
             mes_get_msg(combat_mes_file, &mes_file_entry);
             tf_add(combat->target_obj, tf_type, mes_file_entry.str);
+            coop_lite_host_combat_text(combat->target_obj, tf_type, 12); /* PT75 */
         }
 
         if ((dam_flags & CDF_BONUS_DAM_200) != 0) {
@@ -2858,6 +2905,10 @@ bool sub_4B6C90(bool turn_based)
 {
     int64_t pc;
 
+    if (!coop_lite_can_use_turn_based() && turn_based) {
+        turn_based = false;
+    }
+
     if (combat_turn_based == turn_based) {
         return true;
     }
@@ -2892,6 +2943,14 @@ bool sub_4B6C90(bool turn_based)
 // 0x4B6D20
 void combat_turn_based_toggle(void)
 {
+    if (!coop_lite_can_use_turn_based()) {
+        /* Force real-time while coop is active. */
+        if (combat_is_turn_based()) {
+            settings_set_value(&settings, TURN_BASED_KEY, 0);
+        }
+        return;
+    }
+
     if (combat_is_turn_based()) {
         settings_set_value(&settings, TURN_BASED_KEY, 0);
     } else {
@@ -3846,6 +3905,15 @@ bool combat_auto_attack_get(int64_t obj)
         return false;
     }
 
+    // PT25 co-op: the host runs a client PC's AG_ATTACK; it used the
+    // host's own setting. A peer's PC keeps swinging until the target dies.
+    if (tig_net_is_active() && tig_net_is_coop_enabled()
+        && obj != OBJ_HANDLE_NULL
+        && !player_is_local_pc_obj(obj)
+        && multiplayer_find_slot_from_obj(obj) != -1) {
+        return true;
+    }
+
     return settings_get_value(&settings, AUTO_ATTACK_KEY);
 }
 
@@ -3887,4 +3955,16 @@ void pc_switch_weapon(int64_t pc_obj, int64_t target_obj)
         && combat_auto_switch_weapons_get(pc_obj)) {
         item_wield_best(pc_obj, ITEM_INV_LOC_WEAPON, target_obj);
     }
+}
+
+/* PT75: one combat.mes line (co-op client floats host combat text). */
+const char* combat_mes_text(int num)
+{
+    MesFileEntry mes_file_entry;
+
+    mes_file_entry.num = num;
+    if (!mes_search(combat_mes_file, &mes_file_entry)) {
+        return NULL;
+    }
+    return mes_file_entry.str;
 }

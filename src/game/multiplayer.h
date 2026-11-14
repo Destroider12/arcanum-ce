@@ -29,6 +29,7 @@ bool multiplayer_map_open_by_name(const char* name);
 void sub_4A2B00(Func5F0E08 func);
 int multiplayer_find_slot_from_obj(int64_t obj);
 int64_t sub_4A2B60(int player);
+void multiplayer_bind_slot_pc(int slot, int64_t obj);
 bool multiplayer_is_locked(void);
 void multiplayer_lock(void);
 void multiplayer_unlock(void);
@@ -67,5 +68,8 @@ void sub_4A5600(int a1);
 void sub_4A5610(void);
 bool sub_4A6190(int64_t a1, int64_t a2, int64_t a3, int64_t a4);
 bool sub_4A6470(int64_t pc_obj);
+
+/* Put the SP turn-based preference back (coop forces real-time). */
+void multiplayer_restore_sp_settings(void);
 
 #endif /* ARCANUM_GAME_MULTIPLAYER_H_ */

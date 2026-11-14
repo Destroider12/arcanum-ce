@@ -559,6 +559,21 @@ bool logbook_ui_is_created(void)
     return logbook_ui_created;
 }
 
+// Co-op: the host's story arrived while the journal is open. Reload the tab's
+// entries and redraw; fall back to the first page if the old one is gone.
+void logbook_ui_coop_reload(void)
+{
+    if (!logbook_ui_created) {
+        return;
+    }
+    logbook_ui_load_data();
+    if (logbook_ui_page_spread_starts[(logbook_ui_current_page - 1) / 2] >= logbook_ui_entry_count) {
+        logbook_ui_switch_tab(logbook_ui_tab, false);
+        return;
+    }
+    logbook_ui_refresh();
+}
+
 /**
  * Creates the logbook UI window.
  *

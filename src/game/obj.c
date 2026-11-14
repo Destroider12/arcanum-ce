@@ -3,6 +3,8 @@
 #include <inttypes.h>
 
 #include "game/item.h"
+#include "net/tig_net.h"
+#include "game/coop_lite.h"
 #include "game/obj_file.h"
 #include "game/obj_find.h"
 #include "game/obj_private.h"
@@ -63,6 +65,8 @@ static bool obj_proto_write_file(TigFile* stream, int64_t obj);
 static bool obj_proto_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid);
 static bool obj_inst_write_file(TigFile* stream, int64_t obj);
 static bool obj_inst_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid);
+static void obj_dup_oid_remember(ObjectID oid, int64_t copy);
+static void obj_dup_oid_restore(ObjectID oid, int64_t copy);
 static void obj_proto_write_mem(WriteBuffer* wb, int64_t obj);
 static bool obj_proto_read_mem(uint8_t* data, int64_t* obj_ptr);
 static void obj_inst_write_mem(WriteBuffer* wb, int64_t obj);
@@ -700,6 +704,11 @@ bool obj_validate_system(unsigned int flags)
                     if (cnt != obj_arrayfield_length_get(obj, inventory_list_fld)) {
                         tig_debug_println("!VS  obj_f_critter_inventory_num doesn't match count for obj_f_critter_inventory_list_idx.");
 
+                        if (tig_net_is_coop_enabled()) {
+                            /* PT39: really repair it (the list is the truth;
+                               walkers trust NUM and would read past it). */
+                            cnt = obj_arrayfield_length_get(obj, inventory_list_fld);
+                        }
                         object = obj_lock(obj);
                         obj_field_store(object, inventory_num_fld, &cnt);
                         obj_unlock(obj);
@@ -720,7 +729,38 @@ bool obj_validate_system(unsigned int flags)
                             if (oid.type == OID_TYPE_HANDLE) {
                                 item_obj = oid.d.h;
                                 if (!obj_handle_is_valid(item_obj)) {
-                                    tig_debug_printf("!VS  Inventory entry is an invalid handle.  handle: %" PRIx64 "\n", oid.d.h);
+                                    {
+                                        char owner_str[40];
+
+                                        objid_id_to_str(owner_str, obj_get_id(obj));
+                                        tig_debug_printf("!VS  Inventory entry is an invalid handle.  handle: %" PRIx64 "  owner: %s type %d entry %d/%d\n",
+                                            oid.d.h, owner_str, obj_type, idx, cnt);
+                                    }
+                                    if (tig_net_is_coop_enabled()) {
+                                        /* PT54a: a co-op sync destroyed an item another
+                                           object still listed; the vanilla answer is
+                                           "validate failed" -> quit the game (the client
+                                           froze in the quit prompt, the host dropped it).
+                                           Drop the dead entry and keep going. */
+                                        int k;
+                                        ObjectID next_oid;
+
+                                        object = obj_lock(obj);
+                                        for (k = idx; k + 1 < cnt; k++) {
+                                            obj_arrayfield_fetch(object, inventory_list_fld, k + 1, &next_oid);
+                                            obj_arrayfield_store(object, inventory_list_fld, k, &next_oid);
+                                        }
+                                        obj_unlock(obj);
+                                        cnt--;
+                                        obj_arrayfield_length_set(obj, inventory_list_fld, cnt);
+                                        object = obj_lock(obj);
+                                        obj_field_store(object, inventory_num_fld, &cnt);
+                                        obj_unlock(obj);
+                                        tig_debug_printf("CoopLite: validate: dead inventory entry dropped (owner type %d, %d left)\n",
+                                            obj_type, cnt);
+                                        idx--;
+                                        continue;
+                                    }
                                     return false;
                                 }
 
@@ -935,7 +975,15 @@ void obj_deallocate(int64_t obj)
     }
 
     if (object->oid.type != OID_TYPE_NULL) {
-        obj_pool_perm_oid_remove(object->oid);
+        /* PT44b: only drop the OID mapping if it is ours; a duplicate copy
+           (coop client reloading a sector whose items were looted into a
+           PC) must not unmap the live original. */
+        int64_t mapped = obj_pool_perm_lookup(object->oid);
+
+        if (coop_lite_oid_unmap_ok(mapped, obj)) {
+            obj_pool_perm_oid_remove(object->oid);
+            obj_dup_oid_restore(object->oid, obj);
+        }
     }
 
     if (object->prototype_oid.type != OID_TYPE_BLOCKED) {
@@ -1295,6 +1343,120 @@ bool obj_read_mem(uint8_t* data, int64_t* obj_ptr)
     }
 
     return ret;
+}
+
+/*
+ * Coop (review P1-4): the layout of an instance blob from the network,
+ * parsed with bounds and without allocating: header bytes, and per
+ * overridden field its encoding (OBJ_MEM_K_*) and, for arrays, the element
+ * size the game would use. -1 when the header is out of range.
+ */
+static uint8_t* obj_mem_layout_kinds;
+static int* obj_mem_layout_elem;
+static int obj_mem_layout_max;
+static int obj_mem_layout_n;
+static int obj_mem_layout_num_fields;
+
+static bool obj_mem_layout_field(Object* object, int idx, ObjectFieldInfo* info)
+{
+    uint8_t kind;
+    int elem = 0;
+
+    (void)object;
+    if (idx < 0 || idx >= obj_mem_layout_num_fields || obj_mem_layout_n >= obj_mem_layout_max) {
+        return false;
+    }
+    switch (info->type) {
+    case OD_TYPE_INT32:
+        kind = OBJ_MEM_K_I32;
+        break;
+    case OD_TYPE_INT64:
+        kind = OBJ_MEM_K_I64;
+        break;
+    case OD_TYPE_HANDLE:
+        kind = OBJ_MEM_K_HANDLE;
+        break;
+    case OD_TYPE_STRING:
+        kind = OBJ_MEM_K_STRING;
+        break;
+    case OD_TYPE_INT32_ARRAY:
+    case OD_TYPE_UINT32_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(int);
+        break;
+    case OD_TYPE_INT64_ARRAY:
+    case OD_TYPE_UINT64_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(int64_t);
+        break;
+    case OD_TYPE_SCRIPT_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(Script);
+        break;
+    case OD_TYPE_QUEST_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(PcQuestState);
+        break;
+    case OD_TYPE_HANDLE_ARRAY:
+        kind = OBJ_MEM_K_ARRAY;
+        elem = (int)sizeof(ObjectID);
+        break;
+    default:
+        return false; /* PTR / PTR_ARRAY are never serialized */
+    }
+    obj_mem_layout_kinds[obj_mem_layout_n] = kind;
+    obj_mem_layout_elem[obj_mem_layout_n] = elem;
+    obj_mem_layout_n++;
+    return true;
+}
+
+int obj_mem_layout(const uint8_t* data, int size, uint8_t* kinds, int* elem, int max, int* count_out)
+{
+    Object tmp;
+    ObjectID oid;
+    int type;
+    int16_t num_fields;
+    int bitmap[64];
+    int cnt;
+    int at;
+
+    *count_out = 0;
+    if (data == NULL || size < 4 + 24 + 24 + 4 + 2) {
+        return -1;
+    }
+    memcpy(&oid, data + 4 + 24, sizeof(oid));
+    if (oid.type == OID_TYPE_BLOCKED) {
+        return -1; /* prototypes never travel */
+    }
+    memcpy(&type, data + 4 + 24 + 24, sizeof(type));
+    if (type < 0 || type >= OBJ_TYPE_COUNT) {
+        return -1;
+    }
+    memcpy(&num_fields, data + 4 + 24 + 24 + 4, sizeof(num_fields));
+    if (num_fields < 0 || num_fields > object_fields_count_per_type[type]) {
+        return -1;
+    }
+    at = 4 + 24 + 24 + 4 + (int)sizeof(num_fields);
+    cnt = sub_40C030(type);
+    if (cnt <= 0 || cnt > 64 || size - at < 4 * cnt) {
+        return -1;
+    }
+    memcpy(bitmap, data + at, (size_t)(4 * cnt));
+    at += 4 * cnt;
+
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.type = type;
+    tmp.field_48 = bitmap;
+    obj_mem_layout_kinds = kinds;
+    obj_mem_layout_elem = elem;
+    obj_mem_layout_max = max;
+    obj_mem_layout_n = 0;
+    obj_mem_layout_num_fields = num_fields;
+    if (!object_inst_enumerate_overridden_fields(&tmp, obj_mem_layout_field)) {
+        return -1;
+    }
+    *count_out = obj_mem_layout_n;
+    return at;
 }
 
 // 0x4067C0
@@ -2291,6 +2453,72 @@ void obj_debug_aid(tig_art_id_t aid)
     tig_debug_printf("\n");
 }
 
+/* PT44b: a coop client loads a sector copy of an item that already lives
+   elsewhere under the same OID (looted into a PC on the host, never saved
+   in the client's .dif). The load re-points the OID at the copy; when the
+   host's sync destroys the copy, the mapping must return to the original. */
+#define OBJ_DUP_OID_MAX 1024 /* PT52d: was a 64 ring; free entries are reused */
+static struct {
+    ObjectID oid;
+    int64_t copy;
+    int64_t orig;
+} obj_dup_oids[OBJ_DUP_OID_MAX];
+static int obj_dup_oid_next;
+
+static void obj_dup_oid_remember(ObjectID oid, int64_t copy)
+{
+    int64_t orig;
+
+    if (!tig_net_is_coop_client()) {
+        return;
+    }
+    orig = obj_pool_perm_lookup(oid);
+    if (orig == OBJ_HANDLE_NULL || orig == copy || !obj_handle_is_valid(orig)) {
+        return;
+    }
+    {
+        int i;
+        int slot = -1;
+
+        for (i = 0; i < OBJ_DUP_OID_MAX; i++) {
+            int j = (obj_dup_oid_next + i) % OBJ_DUP_OID_MAX;
+
+            if (obj_dup_oids[j].copy == OBJ_HANDLE_NULL || !obj_handle_is_valid(obj_dup_oids[j].copy)) {
+                slot = j;
+                break;
+            }
+        }
+        if (slot < 0) {
+            /* all live: overwrite the oldest (its copy then keeps the OID
+               when destroyed; the next host sync re-sends the original) */
+            slot = obj_dup_oid_next;
+            tig_debug_printf("CoopLite: duplicate OID table full, oldest record dropped\n");
+        }
+        obj_dup_oids[slot].oid = oid;
+        obj_dup_oids[slot].copy = copy;
+        obj_dup_oids[slot].orig = orig;
+        obj_dup_oid_next = (slot + 1) % OBJ_DUP_OID_MAX;
+    }
+    tig_debug_printf("CoopLite: duplicate OID loaded (copy of a live object)\n");
+}
+
+static void obj_dup_oid_restore(ObjectID oid, int64_t copy)
+{
+    int i;
+
+    for (i = 0; i < OBJ_DUP_OID_MAX; i++) {
+        if (obj_dup_oids[i].copy == copy && copy != OBJ_HANDLE_NULL
+            && objid_is_equal(obj_dup_oids[i].oid, oid)) {
+            int64_t orig = obj_dup_oids[i].orig;
+
+            obj_dup_oids[i].copy = OBJ_HANDLE_NULL;
+            if (orig != copy && obj_handle_is_valid(orig)) {
+                obj_pool_perm_oid_set(oid, orig);
+            }
+        }
+    }
+}
+
 // 0x408710
 Object* obj_allocate(int64_t* obj_ptr)
 {
@@ -3078,6 +3306,7 @@ bool obj_inst_read_file(TigFile* stream, int64_t* obj_ptr, ObjectID oid)
     memset(object->transient_properties, 0, sizeof(object->transient_properties));
 
     if (object->oid.type != OID_TYPE_NULL) {
+        obj_dup_oid_remember(object->oid, obj);
         obj_pool_perm_oid_set(object->oid, obj);
     }
 

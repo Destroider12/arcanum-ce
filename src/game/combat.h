@@ -150,4 +150,6 @@ void combat_taunts_set(bool value);
 bool combat_auto_switch_weapons_get(int64_t obj);
 void combat_auto_switch_weapons_set(bool value);
 
+const char* combat_mes_text(int num);
+
 #endif /* ARCANUM_GAME_COMBAT_H_ */

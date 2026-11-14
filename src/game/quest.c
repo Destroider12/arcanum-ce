@@ -1,6 +1,7 @@
 #include "game/quest.h"
 
 #include "game/critter.h"
+#include "game/coop_lite.h"
 #include "game/mes.h"
 #include "game/object.h"
 #include "game/party.h"
@@ -370,6 +371,11 @@ int quest_state_set(int64_t pc_obj, int num, int state, int64_t npc_obj)
     // Obtain the current quest state.
     old_state = quest_state_get(pc_obj, num);
 
+    // Co-op: a client's quest log is the host's; it never writes its own.
+    if (coop_lite_story_write_blocked()) {
+        return old_state;
+    }
+
     // Prevent changes if the quest is already completed or botched.
     if (old_state == QUEST_STATE_COMPLETED
         || old_state == QUEST_STATE_OTHER_COMPLETED
@@ -407,6 +413,10 @@ int quest_state_set_internal(int64_t pc_obj, int num, int state, int64_t npc_obj
     }
 
     old_state = quest_state_get(pc_obj, num);
+
+    if (coop_lite_story_write_blocked()) {
+        return old_state;
+    }
 
     if (quest_gstate[quest_num_to_idx(num)] == QUEST_STATE_ACCEPTED) {
         // Update global quest state based on current state.
@@ -480,6 +490,10 @@ int quest_unbotch(int64_t obj, int num)
     int state;
     PcQuestState pc_quest_state;
 
+    if (coop_lite_story_write_blocked()) {
+        return quest_global_state_get(num);
+    }
+
     // Check if the quest is botched globally.
     state = quest_global_state_get(num);
     if (state != QUEST_STATE_BOTCHED) {
@@ -525,6 +539,19 @@ int quest_global_state_get(int num)
     return quest_gstate[quest_num_to_idx(num)];
 }
 
+// Co-op story sync (host -> client): raw access by index (quest num - 1000).
+int quest_global_state_raw_get(int idx)
+{
+    return idx >= 0 && idx < MAX_QUEST ? quest_gstate[idx] : QUEST_STATE_ACCEPTED;
+}
+
+void quest_global_state_raw_set(int idx, int state)
+{
+    if (idx >= 0 && idx < MAX_QUEST) {
+        quest_gstate[idx] = state;
+    }
+}
+
 /**
  * Sets the global state of a quest.
  *
@@ -535,6 +562,10 @@ int quest_global_state_set(int num, int state)
     int old_state;
 
     old_state = quest_gstate[quest_num_to_idx(num)];
+
+    if (coop_lite_story_write_blocked()) {
+        return old_state;
+    }
 
     // Prevent changes if already completed or botched.
     if (old_state == QUEST_STATE_COMPLETED || old_state == QUEST_STATE_BOTCHED) {

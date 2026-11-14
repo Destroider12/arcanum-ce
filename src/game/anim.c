@@ -1,9 +1,12 @@
 #include "game/anim.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "game/ai.h"
 #include "game/animfx.h"
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/gamelib.h"
@@ -3487,6 +3490,18 @@ bool sub_423300(int64_t obj, AnimID* anim_id)
     return false;
 }
 
+/* PT77af diagnostics: goal type of the object's first primary animation
+   (-1 when none). */
+int anim_primary_goal_type(int64_t obj)
+{
+    AnimID anim_id;
+
+    if (!sub_423300(obj, &anim_id) || anim_id.slot_num < 0) {
+        return -1;
+    }
+    return anim_run_info[anim_id.slot_num].goals[0].type;
+}
+
 // 0x4233D0
 int sub_4233D0(int64_t obj)
 {
@@ -3566,7 +3581,7 @@ void sub_423550(AnimRunInfo* run_info, int a2)
 }
 
 // 0x423560
-bool anim_timeevent_process(TimeEvent* timeevent)
+static bool anim_timeevent_process_impl(TimeEvent* timeevent)
 {
     int run_index;
     AnimRunInfo* run_info;
@@ -3625,6 +3640,14 @@ bool anim_timeevent_process(TimeEvent* timeevent)
         goal_node = anim_goal_nodes[goal_data->type];
 
         ASSERT(goal_node != NULL); // 2035, "pGoalNode != NULL"
+        /* Coop/net desync (and unfinished goals like AG_PICK_WEAPON) can leave a
+           NULL node; ASSERT only logs - bail before calling through NULL. */
+        if (goal_node == NULL) {
+            tig_debug_printf("Anim: ERROR: NULL goal node for type %d - aborting run\n",
+                goal_data->type);
+            run_info->flags |= 0x02;
+            err = true;
+        }
     } else {
         run_info->flags |= 0x02;
         err = true;
@@ -3661,7 +3684,26 @@ bool anim_timeevent_process(TimeEvent* timeevent)
             return true;
         }
 
+        if (goal_node == NULL) {
+            run_info->flags |= 0x02;
+            break;
+        }
+
+        if (run_info->current_state < 0 || run_info->current_state >= 15) {
+            tig_debug_printf("Anim: ERROR: current_state %d out of range - aborting\n",
+                run_info->current_state);
+            run_info->flags |= 0x02;
+            break;
+        }
+
         goal_subnode = &(goal_node->subnodes[run_info->current_state]);
+        if (goal_subnode->func == NULL) {
+            tig_debug_printf("Anim: ERROR: NULL subnode func state=%d type=%d - aborting\n",
+                run_info->current_state, goal_data->type);
+            run_info->flags |= 0x02;
+            break;
+        }
+
         if (!anim_recover_handles(run_info, goal_subnode)) {
             return true;
         }
@@ -3829,6 +3871,71 @@ bool anim_timeevent_process(TimeEvent* timeevent)
     return true;
 }
 
+/* Root goals the owning coop client simulates locally for its own PC. */
+static bool anim_goal_type_is_client_local(int goal_type)
+{
+    switch (goal_type) {
+    case AG_MOVE_TO_TILE:
+    case AG_RUN_TO_TILE:
+    case AG_ATTEMPT_MOVE:
+    case AG_MOVE_TO_PAUSE:
+    case AG_MOVE_NEAR_TILE:
+    case AG_MOVE_NEAR_OBJ:
+    case AG_RUN_NEAR_TILE:
+    case AG_RUN_NEAR_OBJ:
+    case AG_ATTEMPT_MOVE_NEAR:
+    case AG_TALK:
+    case AG_PICKUP_ITEM: /* walk there locally; the pickup itself goes to the host */
+    case AG_USE_CONTAINER: /* PT27: walk to the chest/corpse locally, then the
+                              PT18 local loot window (host-validated) opens */
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* PT37: AG_USE_OBJECT on a door: the client walks there itself and asks the host. */
+static bool anim_goal_is_portal_use(const AnimRunInfo* run_info)
+{
+    int64_t target = run_info->goals[0].params[AGDATA_TARGET_OBJ].obj;
+
+    /* PT77af: also scenery (scripted entrances such as Bates' mansion door:
+       the client's use never reached the host, nothing happened). */
+    return run_info->goals[0].type == AG_USE_OBJECT && target != OBJ_HANDLE_NULL
+        && (obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
+            || obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_SCENERY);
+}
+
+bool anim_timeevent_process(TimeEvent* timeevent)
+{
+    int run_index;
+    AnimRunInfo* run_info;
+    bool rc;
+
+    run_index = timeevent->params[0].integer_value;
+    if (run_index >= 0 && run_index < 216
+        && tig_net_is_active() && !tig_net_is_host()) {
+        run_info = &(anim_run_info[run_index]);
+        if (run_info->id.slot_num == run_index
+            && (run_info->flags & 0x01) != 0
+            && (anim_goal_type_is_client_local(run_info->goals[0].type)
+                || anim_goal_is_portal_use(run_info))
+            && coop_lite_client_drives_obj(run_info->anim_obj)) {
+            /*
+             * Our own PC walking/talking: run exactly the single-player
+             * code (local pathing, camera follow, dialog + its script);
+             * nothing is sent — PC_POS replicates the result.
+             */
+            tig_net_local_suspend_begin();
+            rc = anim_timeevent_process_impl(timeevent);
+            tig_net_local_suspend_end();
+            return rc;
+        }
+    }
+
+    return anim_timeevent_process_impl(timeevent);
+}
+
 // 0x423C80
 bool sub_423C80(AnimRunInfo* run_info, DateTime* a2, int delay)
 {
@@ -3989,12 +4096,44 @@ bool sub_423FF0(int64_t obj)
 }
 
 // 0x424070
+static bool sub_424070_impl(int64_t obj, int priority_level, bool a3, bool a4);
+
+/*
+ * Coop client: interrupting the PC we drive is local. Sending Packet9 made
+ * the host interrupt its proxy (stand art), which came back as a forced
+ * PC_POS and ended our fresh move goal a few tiles in (Playtest 7).
+ */
 bool sub_424070(int64_t obj, int priority_level, bool a3, bool a4)
+{
+    bool rc;
+
+    if (coop_lite_is_remote_slot_pc(obj) && anim_is_current_goal_type(obj, AG_ATTACK, NULL)) {
+        tig_debug_printf("CoopLite: slot PC attack interrupted (priority %d)\n", priority_level);
+    }
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = sub_424070_impl(obj, priority_level, a3, a4);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+    /* PT17b: a coop client interrupts another player's PC here only (e.g.
+       the caster of a spell it applies from Packet58); asking the host to
+       interrupt a PC this client does not own is refused there anyway
+       ("Packet9 ... does not own — dropped"). */
+    if (!a4 && tig_net_is_coop_enabled() && tig_net_is_active() && !tig_net_is_host()
+        && coop_lite_is_client_role()) {
+        a4 = true;
+    }
+    return sub_424070_impl(obj, priority_level, a3, a4);
+}
+
+static bool sub_424070_impl(int64_t obj, int priority_level, bool a3, bool a4)
 {
     int prev = -1;
     int slot;
 
-    ASSERT(priority_level >= PRIORITY_NONE && priority_level < PRIORITY_HIGHEST); // (priorityLevel >= priorityNone)&&(priorityLevel <= priorityHighest)
+    ASSERT(priority_level >= PRIORITY_NONE && priority_level <= PRIORITY_HIGHEST); // PT29: vanilla allows highest (was "<": assert dump on every HIGHEST interrupt) (priorityLevel >= priorityNone)&&(priorityLevel <= priorityHighest)
 
     if (!a4) {
         if (tig_net_is_active() && player_is_pc_obj(obj)) {
@@ -4108,36 +4247,51 @@ bool anim_eye_candy_interrupt(int64_t obj, tig_art_id_t eye_candy_id, int mt_id)
         return true;
     }
 
-    if (!anim_find_first_of_type(obj, AG_EYE_CANDY, &cur_anim_id)) {
-        return true;
+    {
+        static const int goal_types[] = {
+            AG_EYE_CANDY,
+            AG_EYE_CANDY_REVERSE,
+            AG_EYE_CANDY_CALLBACK,
+            AG_EYE_CANDY_REVERSE_CALLBACK,
+            AG_EYE_CANDY_END_CALLBACK,
+            AG_EYE_CANDY_REVERSE_END_CALLBACK,
+            AG_EYE_CANDY_FIRE_DMG,
+            AG_EYE_CANDY_REVERSE_FIRE_DMG,
+        };
+        int gi;
+
+        num = tig_art_num_get(eye_candy_id);
+        for (gi = 0; gi < (int)(sizeof(goal_types) / sizeof(goal_types[0])); gi++) {
+            anim_id_init(&prev_anim_id);
+            if (!anim_find_first_of_type(obj, goal_types[gi], &cur_anim_id)) {
+                continue;
+            }
+            do {
+                if (anim_id_is_equal(&prev_anim_id, &cur_anim_id)) {
+                    break;
+                }
+
+                run_info = &(anim_run_info[cur_anim_id.slot_num]);
+
+                ASSERT(run_info->current_goal > -1); // 2839, "pRunInfo->current_goal > -1"
+                ASSERT(run_info->current_goal < 14); // 2840, "pRunInfo->current_goal < ANIM_GOAL_MAX_SUBNODES"
+
+                if (run_info->current_goal > -1 && run_info->current_goal < 14) {
+                    if (run_info->cur_stack_data == NULL) {
+                        run_info->cur_stack_data = &(run_info->goals[run_info->current_goal]);
+                    }
+
+                    if (run_info->cur_stack_data->params[AGDATA_SPELL_DATA].data == mt_id
+                        && tig_art_num_get(run_info->cur_stack_data->params[AGDATA_ANIM_ID].data) == num
+                        && anim_interrupt(&(run_info->id), PRIORITY_HIGHEST)) {
+                        return true;
+                    }
+                }
+
+                prev_anim_id = cur_anim_id;
+            } while (anim_find_next_of_type(obj, goal_types[gi], &cur_anim_id));
+        }
     }
-
-    num = tig_art_num_get(eye_candy_id);
-
-    do {
-        if (anim_id_is_equal(&prev_anim_id, &cur_anim_id)) {
-            break;
-        }
-
-        run_info = &(anim_run_info[cur_anim_id.slot_num]);
-
-        ASSERT(run_info->current_goal > -1); // 2839, "pRunInfo->current_goal > -1"
-        ASSERT(run_info->current_goal < 14); // 2840, "pRunInfo->current_goal < ANIM_GOAL_MAX_SUBNODES"
-
-        if (run_info->current_goal > -1 && run_info->current_goal < 14) {
-            if (run_info->cur_stack_data == NULL) {
-                run_info->cur_stack_data = &(run_info->goals[run_info->current_goal]);
-            }
-
-            if (run_info->cur_stack_data->params[AGDATA_SPELL_DATA].data == mt_id
-                && tig_art_num_get(run_info->cur_stack_data->params[AGDATA_ANIM_ID].data) == num
-                && anim_interrupt(&(run_info->id), PRIORITY_HIGHEST)) {
-                break;
-            }
-        }
-
-        prev_anim_id = cur_anim_id;
-    } while (anim_find_next_of_type(obj, AG_EYE_CANDY, &cur_anim_id));
 
     return true;
 }
@@ -6368,6 +6522,14 @@ bool sub_428620(AnimRunInfo* run_info)
         return false;
     }
 
+    /* PT53e: a coop client's own PC closing a door asks the host (the
+       close used to stay local, so the host never saw it). */
+    if (run_info->params[1].obj != OBJ_HANDLE_NULL
+        && coop_lite_client_local_goal_obj(run_info->params[1].obj)) {
+        coop_lite_client_queue_door_use(door_obj);
+        return false;
+    }
+
     return true;
 }
 
@@ -6581,6 +6743,14 @@ bool sub_428A10(AnimRunInfo* run_info)
     obj_type = obj_field_int32_get(target_obj, OBJ_F_TYPE);
     switch (obj_type) {
     case OBJ_TYPE_PORTAL:
+        /* PT37: a coop client's own PC: the host runs the door's script. */
+        if (coop_lite_client_local_goal_obj(source_obj)) {
+            /* PT53e: no local open (the host's DOOR_STATE moves it); the
+               goal ends here instead of animating a door the host may
+               refuse. */
+            coop_lite_client_queue_door_use(target_obj);
+            return false;
+        }
         if (!object_script_execute(source_obj, target_obj, source_obj, SAP_USE, 0)) {
             return false;
         }
@@ -6593,6 +6763,9 @@ bool sub_428A10(AnimRunInfo* run_info)
             if (tig_net_is_active()) {
                 sub_424070(source_obj, 2, false, false);
             }
+        } else if (coop_lite_client_local_loot(source_obj)) {
+            /* PT18: a coop client opens its loot window itself. */
+            mp_ui_show_inven_loot(source_obj, target_obj);
         }
         return true;
     case OBJ_TYPE_SCENERY:
@@ -6603,6 +6776,12 @@ bool sub_428A10(AnimRunInfo* run_info)
         if (tig_art_scenery_id_type_get(obj_field_int32_get(target_obj, OBJ_F_CURRENT_AID)) == TIG_ART_SCENERY_TYPE_BEDS) {
             ui_sleep_toggle(target_obj);
             return true;
+        }
+        /* PT77af: a coop client's own PC: the host runs the scenery's use
+           script (a scripted entrance teleports the PC from there). */
+        if (coop_lite_client_local_goal_obj(source_obj)) {
+            coop_lite_client_queue_door_use(target_obj);
+            return false;
         }
         if (!object_script_execute(source_obj, target_obj, source_obj, SAP_USE, 0)) {
             return false;
@@ -6621,6 +6800,8 @@ bool sub_428A10(AnimRunInfo* run_info)
             if (tig_net_is_active()) {
                 sub_424070(source_obj, 2, false, false);
             }
+        } else if (coop_lite_client_local_loot(source_obj)) {
+            mp_ui_show_inven_loot(source_obj, target_obj);
         }
         return true;
     default:
@@ -7003,6 +7184,8 @@ bool sub_4296D0(AnimRunInfo* run_info)
 
     if (run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data != -1) {
         gsound_play_sfx_on_obj(run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data, 1, self_obj);
+        // PT25 co-op: the aggro growl, also for clients near this NPC.
+        coop_lite_host_npc_sound(run_info->cur_stack_data->params[AGDATA_SCRATCH_VAL5].data, self_obj);
         for (goal = 0; goal <= run_info->current_goal; goal++) {
             run_info->goals[goal].params[AGDATA_SCRATCH_VAL5].data = -1;
         }
@@ -7012,7 +7195,21 @@ bool sub_4296D0(AnimRunInfo* run_info)
 }
 
 // 0x429760
+static bool sub_429760_impl(AnimRunInfo* run_info, const char** why);
+
 bool sub_429760(AnimRunInfo* run_info)
+{
+    const char* why = NULL;
+    bool ok = sub_429760_impl(run_info, &why);
+
+    // PT25 co-op diagnostics: why a client PC's attack stopped repeating.
+    if (!ok && coop_lite_is_remote_slot_pc(run_info->params[0].obj)) {
+        tig_debug_printf("CoopLite: slot PC attack stops: %s\n", why != NULL ? why : "target gone/dead");
+    }
+    return ok;
+}
+
+static bool sub_429760_impl(AnimRunInfo* run_info, const char** why)
 {
     int64_t source_obj;
     int64_t target_obj;
@@ -7032,6 +7229,7 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if (!combat_critter_is_combat_mode_active(source_obj)) {
+        *why = "not in combat mode";
         return false;
     }
 
@@ -7040,6 +7238,7 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if (!combat_auto_attack_get(source_obj)) {
+        *why = "auto attack off";
         return false;
     }
 
@@ -7056,18 +7255,29 @@ bool sub_429760(AnimRunInfo* run_info)
     }
 
     if ((run_info->flags & 0x800) != 0) {
+        *why = "goal flag 0x800";
         return false;
     }
 
     if (combat_turn_based_is_active()) {
+        *why = "turn-based";
         return false;
     }
 
     if ((obj_field_int32_get(source_obj, OBJ_F_CRITTER_FLAGS) & OCF_NON_LETHAL_COMBAT) != 0) {
+        *why = "non-lethal";
         return false;
     }
 
     if ((obj_field_int32_get(source_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_USING_BOOMERANG) != 0) {
+        return false;
+    }
+
+    // PT25 co-op: the target moved away from a client PC. Chasing it here
+    // reached the owner only as FORCE snaps (sliding, through walls); the
+    // owner walks after it itself and asks again.
+    if (coop_lite_host_chase_to_owner(source_obj, target_obj)) {
+        *why = "target out of reach - owner re-approaches";
         return false;
     }
 
@@ -7710,6 +7920,8 @@ bool sub_42A630(AnimRunInfo* run_info)
     }
 
     if ((obj_field_int32_get(target_obj, OBJ_F_FLAGS) & (OF_DESTROYED | OF_OFF)) == 0) {
+        // PT25 co-op: a client PC's strike - its owner draws the swing.
+        coop_lite_host_strike(source_obj, target_obj);
         sub_4B3BB0(source_obj, target_obj, hit_loc);
     }
 
@@ -7882,9 +8094,52 @@ bool sub_42AA70(int64_t source_obj, int64_t target_obj)
         gsound_play_sfx_on_obj(sound_id, 1, source_obj);
     }
 
+    /* Coop client, own PC: this goal runs locally with packets suspended,
+       so tig_net_is_active() is false here and the code below would pick
+       the item up locally only (PT16: host and client then disagree). The
+       host does the pickup; the request goes out from the coop tick. */
+    if (coop_lite_client_local_goal_obj(source_obj)) {
+        coop_lite_client_queue_pickup(target_obj);
+        return true;
+    }
+
     if (!tig_net_is_active()
         || tig_net_is_host()) {
-        return item_transfer(target_obj, source_obj);
+        bool from_ground = tig_net_is_coop_enabled()
+            && (obj_field_int32_get(target_obj, OBJ_F_FLAGS) & OF_INVENTORY) == 0;
+        bool npc_from_ground = from_ground
+            && obj_field_int32_get(source_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC;
+        int item_type = obj_field_int32_get(target_obj, OBJ_F_TYPE);
+        int item_proto = sub_49B290(target_obj);
+        ObjectID item_oid = obj_get_id(target_obj);
+
+        if (!item_transfer(target_obj, source_obj)) {
+            return false;
+        }
+        if (from_ground) {
+            /* PT17b: clients drop their copy now (not at the next world
+               state); a PC's pickup makes the item NPC-takeable again. */
+            coop_lite_host_ground_item_taken(source_obj, &item_oid,
+                item_type == OBJ_TYPE_GOLD || item_type == OBJ_TYPE_AMMO);
+            if (!npc_from_ground && item_type != OBJ_TYPE_GOLD && item_type != OBJ_TYPE_AMMO) {
+                coop_lite_clear_player_drop(target_obj); /* stacks merge away */
+            }
+        }
+        if (npc_from_ground) {
+            /* PT17b: vanilla AI (ai_look_for_item_func) lets NPCs take
+               items lying around — say so, a player's drop can vanish. */
+            char npc_str[80];
+            char item_str[80];
+
+            objid_id_to_str(npc_str, obj_get_id(source_obj));
+            objid_id_to_str(item_str, item_oid);
+            tig_debug_printf("Anim: coop: NPC %s picked up ground item %s (proto %d)\n",
+                npc_str, item_str, item_proto);
+        }
+        /* Coop: a goal run for a client's PC must tell that client
+           (PT16: the item went into the host's copy only). */
+        coop_lite_host_item_gained(source_obj);
+        return true;
     }
 
     return true;
@@ -8526,6 +8781,9 @@ bool sub_42B9C0(AnimRunInfo* run_info)
     }
 
     if (!combat_critter_is_combat_mode_active(source_obj)) {
+        if (coop_lite_is_remote_slot_pc(source_obj)) {
+            tig_debug_printf("CoopLite: slot PC attack stops: combat mode off on the host\n");
+        }
         return false;
     }
 
@@ -9173,6 +9431,15 @@ bool sub_42CB10(AnimRunInfo* run_info)
         run_info->pause_time.milliseconds = 100;
     }
 
+    /* PT76b: on a coop client an attack AG_ANIMATE is the cosmetic copy of
+       a host-resolved swing; the host plays it at the speed-scaled rate
+       (sub_42EE90), so a fast PC looked several times slower here. */
+    if (coop_lite_cosmetic_swing_speed_scaled(tig_net_is_active(), tig_net_is_host(),
+            obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE)),
+            tig_art_id_anim_get(art_id) == TIG_ART_ANIM_ATTACK)) {
+        sub_42EE90(obj, &(run_info->pause_time));
+    }
+
     run_info->flags &= ~0x0C;
     run_info->flags |= 0x10;
 
@@ -9362,6 +9629,7 @@ bool AGbeginAnimOpenDoor(AnimRunInfo* run_info)
     }
 
     art_id = obj_field_int32_get(door_obj, OBJ_F_CURRENT_AID);
+    coop_lite_host_portal_changed(); /* PT37 */
     if (!portal_open(door_obj)) {
         return false;
     }
@@ -9395,6 +9663,7 @@ bool AGupdateAnimOpenDoor(AnimRunInfo* run_info)
         return false;
     }
 
+    coop_lite_host_portal_changed(); /* PT37 */
     if (!portal_open(door_obj)) {
         return false;
     }
@@ -11323,7 +11592,15 @@ bool get_always_run(int64_t obj)
     int client_id;
     bool always_run;
 
-    if (tig_net_is_active()) {
+    if (tig_net_is_active() && tig_net_is_coop_enabled()) {
+        // PT25 co-op: our own PC follows our own setting (+Ctrl), as in
+        // single player. A peer's PC always runs: its owner drives its
+        // movement, and the slot flags table (Packet98) was never reliably
+        // filled for coop slots, so host-driven approaches walked.
+        if (!player_is_local_pc_obj(obj)) {
+            return multiplayer_find_slot_from_obj(obj) != -1;
+        }
+    } else if (tig_net_is_active()) {
         client_id = multiplayer_find_slot_from_obj(obj);
         if (client_id != -1) {
             return (multiplayer_flags_get(client_id) & MULTIPLAYER_ALWAYS_RUN) != 0;
@@ -11414,8 +11691,17 @@ bool sub_4305D0(AnimRunInfo* run_info)
 
     if (tig_net_is_active()
         && tig_net_is_host()) {
+        /*
+         * Desync guard: only when the mover is clearly farther from the path
+         * start than the number of steps taken. The decompiled check was
+         * missing the comparison and interrupted every move after its first
+         * step (host PCs/NPCs stopped short, walked in stutters). One tile of
+         * slack: wandering critters routinely start a new path one tile off
+         * field_E8 (logged as "2 tiles away ... curr(1)" every step).
+         */
         if (run_info->path.field_E8 != 0
-            && run_info->path.curr > 0) {
+            && run_info->path.curr > 0
+            && location_dist(run_info->path.field_E8, loc) > (int64_t)run_info->path.curr + 1) {
             int64_t distance;
             char str[40];
             int64_t x;
@@ -11508,7 +11794,9 @@ bool sub_4305D0(AnimRunInfo* run_info)
                     offset_y = 0;
                 }
 
-                if ((spell_flags & (OSF_FLOATING | OSF_BODY_OF_AIR)) == 0) {
+                /* Coop Lite PT42: a client never springs a floor trap;
+                   the host does it from the PC's pose (host-authoritative). */
+                if ((spell_flags & (OSF_FLOATING | OSF_BODY_OF_AIR)) == 0 && !tig_net_is_coop_client()) {
                     ObjectList traps;
 
                     object_list_location(new_loc, OBJ_TM_TRAP, &traps);
@@ -12762,6 +13050,9 @@ bool AGbeginAnimAttack(AnimRunInfo* run_info)
 
     action_points = combat_attack_cost(source_obj);
     if (!combat_consume_action_points(source_obj, action_points)) {
+        if (coop_lite_is_remote_slot_pc(source_obj)) {
+            tig_debug_printf("CoopLite: slot PC attack stops: no action points\n");
+        }
         anim_interrupt(&(run_info->id), PRIORITY_HIGHEST);
         return false;
     }
@@ -12804,6 +13095,7 @@ bool AGbeginAnimAttack(AnimRunInfo* run_info)
     if (obj_type_is_critter(source_obj_type) && random_between(1, 4) == 1) {
         sound_id = sfx_critter_sound(source_obj, CRITTER_SOUND_ATTACKING);
         gsound_play_sfx_on_obj(sound_id, 1, source_obj);
+        coop_lite_host_npc_sound(sound_id, source_obj);
     }
 
     mt_item_notify_parent_attacks_obj(source_obj, target_obj);
@@ -13299,7 +13591,7 @@ bool anim_goal_animate_loop(int64_t obj)
 }
 
 // 0x433640
-bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
+static bool anim_goal_move_to_tile_impl(int64_t obj, int64_t loc)
 {
     AnimID anim_id;
     AnimRunInfo* run_info;
@@ -13309,15 +13601,15 @@ bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
         && !tig_net_is_host()) {
         Packet4 pkt;
 
-        if (!anim_is_current_goal_type(obj, AG_RUN_TO_TILE, &anim_id)) {
-            return false;
-        }
-
-        if (anim_id_to_run_info(&anim_id, &run_info)) {
-            return false;
-        }
-
-        if (run_info->goals[run_info->current_goal].params[AGDATA_TARGET_TILE].loc == loc) {
+        /*
+         * Client: send a move intent to the host (authoritative) unless we're
+         * already running toward this exact tile. The original checks were
+         * inverted (returned early when *not* running), so a client ground
+         * click never reached the host. Mirrors sub_433A00.
+         */
+        if (anim_is_current_goal_type(obj, AG_RUN_TO_TILE, &anim_id)
+            && anim_id_to_run_info(&anim_id, &run_info)
+            && run_info->goals[run_info->current_goal].params[AGDATA_TARGET_TILE].loc == loc) {
             return false;
         }
 
@@ -13401,6 +13693,21 @@ bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_move_to_tile(int64_t obj, int64_t loc)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_move_to_tile_impl(obj, loc);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_move_to_tile_impl(obj, loc);
+}
+
 // 0x4339A0
 bool sub_4339A0(int64_t obj)
 {
@@ -13411,7 +13718,7 @@ bool sub_4339A0(int64_t obj)
 }
 
 // 0x433A00
-bool sub_433A00(int64_t obj, int64_t loc, bool a3)
+static bool sub_433A00_impl(int64_t obj, int64_t loc, bool a3)
 {
     AnimID anim_id;
     AnimGoalData goal_data;
@@ -13476,8 +13783,23 @@ bool sub_433A00(int64_t obj, int64_t loc, bool a3)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool sub_433A00(int64_t obj, int64_t loc, bool a3)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = sub_433A00_impl(obj, loc, a3);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return sub_433A00_impl(obj, loc, a3);
+}
+
 // 0x433C80
-bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
+static bool anim_goal_run_to_tile_impl(int64_t obj, int64_t loc)
 {
     AnimID anim_id;
     AnimRunInfo* run_info;
@@ -13589,6 +13911,21 @@ bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_run_to_tile(int64_t obj, int64_t loc)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_run_to_tile_impl(obj, loc);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_run_to_tile_impl(obj, loc);
+}
+
 // 0x434030
 bool sub_434030(int64_t obj, int64_t loc)
 {
@@ -13629,7 +13966,7 @@ bool sub_434030(int64_t obj, int64_t loc)
 }
 
 // 0x4341C0
-bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
+static bool anim_goal_move_near_tile_impl(int64_t source_obj, int64_t target_loc, int range)
 {
     AnimRunInfo* run_info;
     AnimGoalData goal_data;
@@ -13699,8 +14036,23 @@ bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
     return true;
 }
 
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_move_near_tile(int64_t source_obj, int64_t target_loc, int range)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(source_obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_move_near_tile_impl(source_obj, target_loc, range);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_move_near_tile_impl(source_obj, target_loc, range);
+}
+
 // 0x434400
-bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
+static bool anim_goal_run_near_tile_impl(int64_t source_obj, int64_t target_loc, int range)
 {
     AnimRunInfo* run_info;
     AnimGoalData goal_data;
@@ -13776,6 +14128,21 @@ bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
     run_info->path.flags |= 0x04;
 
     return true;
+}
+
+/* Coop client: own PC moves run locally (SP path) and replicate via PC_POS. */
+bool anim_goal_run_near_tile(int64_t source_obj, int64_t target_loc, int range)
+{
+    bool rc;
+
+    if (coop_lite_client_drives_obj(source_obj)) {
+        tig_net_local_suspend_begin();
+        rc = anim_goal_run_near_tile_impl(source_obj, target_loc, range);
+        tig_net_local_suspend_end();
+        return rc;
+    }
+
+    return anim_goal_run_near_tile_impl(source_obj, target_loc, range);
 }
 
 // 0x4346A0
@@ -13950,6 +14317,21 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
         return false;
     }
 
+    /* Coop Lite: client attack intent → host resolves (DEX timing + ai_attack). */
+    if (tig_net_is_active()
+        && !tig_net_is_host()
+        && !multiplayer_is_locked()
+        && player_is_local_pc_obj(attacker_obj)) {
+        /* PT23: out of reach — walk there ourselves first (we own our
+           movement). Sending the intent now made the host's AG_ATTACK move
+           our PC, which reached us only as FORCE position snaps: the PC
+           floated to the enemy with no walk animation. */
+        if (coop_lite_client_attack_approach(attacker_obj, target_obj)) {
+            return true;
+        }
+        return coop_lite_client_send_attack_intent(attacker_obj, target_obj);
+    }
+
     weapon_obj = item_wield_get(attacker_obj, ITEM_INV_LOC_WEAPON);
     if (weapon_obj != OBJ_HANDLE_NULL
         && obj_field_int32_get(weapon_obj, OBJ_F_TYPE) == OBJ_TYPE_WEAPON
@@ -14009,7 +14391,9 @@ bool anim_goal_attack_ex(int64_t attacker_obj, int64_t target_obj, int sound_id)
     }
 
     if (obj_field_int32_get(attacker_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
-        if (!tig_net_is_active()
+        // PT25 co-op: attacking NPCs ran only in single player, so in a
+        // co-op session they walked at the PCs (the host resolves it).
+        if ((!tig_net_is_active() || tig_net_is_coop_enabled())
             && critter_fatigue_current(attacker_obj) > 8) {
             turn_on_running(stru_5A1908);
         }
@@ -14090,6 +14474,14 @@ bool anim_goal_throw_item(int64_t obj, int64_t item_obj, int64_t target_loc)
     AnimGoalData goal_data;
 
     ASSERT(item_obj != OBJ_HANDLE_NULL); // itemObj != OBJ_HANDLE_NULL
+
+    if (coop_lite_client_throw_denied()) {
+        if (coop_lite_client_throw_intent(item_obj, target_loc)) {
+            return true;
+        }
+        tig_debug_printf("CoopLite: client throw refused (host did not take the intent)\n");
+        return false;
+    }
 
     if (!sub_4348E0(obj, 0)) {
         return false;
@@ -14304,6 +14696,26 @@ bool anim_goal_use_item_on_loc(int64_t obj, int64_t target_loc, int64_t item_obj
     return true;
 }
 
+/* Dev: the pickup exactly as an in-game click adds it (intgame.c:
+   sub_44D500 + anim_goal_add_ex with the MP run flag). */
+bool anim_goal_pickup_item_as_click(int64_t obj, int64_t item_obj)
+{
+    AnimGoalData goal_data;
+    AnimID anim_id;
+
+    if (obj == OBJ_HANDLE_NULL || item_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (!sub_44D500(&goal_data, obj, AG_PICKUP_ITEM)) {
+        return false;
+    }
+    goal_data.params[AGDATA_TARGET_OBJ].obj = item_obj;
+    if (!sub_424070(obj, 3, 0, 0)) {
+        return false;
+    }
+    return anim_goal_add_ex(&goal_data, &anim_id, tig_net_is_active() ? 0x40 : 0);
+}
+
 // 0x4356C0
 bool anim_goal_pickup_item(int64_t obj, int64_t item_obj)
 {
@@ -14422,7 +14834,36 @@ bool anim_goal_projectile(int64_t source_obj, int64_t missile_obj, tig_art_id_t 
         return false;
     }
 
+    /* Visual-only client missiles must not echo; the host already sent FX. */
+    if ((obj_field_int32_get(missile_obj, OBJ_F_PROJECTILE_FLAGS_COMBAT) & COOP_PROJECTILE_VISUAL) == 0
+        && source_obj != OBJ_HANDLE_NULL) {
+        coop_lite_host_projectile_fx(obj_field_int64_get(source_obj, OBJ_F_LOCATION),
+            target_loc, (unsigned int)missile_art_id, projectile_speed);
+    }
+
     return true;
+}
+
+bool anim_goal_projectile_visual(int64_t missile_obj, int64_t src_loc, int64_t dst_loc, tig_art_id_t missile_art_id, int speed)
+{
+    AnimGoalData goal_data;
+    int rotation;
+
+    if (missile_obj == OBJ_HANDLE_NULL || src_loc == 0 || dst_loc == 0) {
+        return false;
+    }
+    if (!sub_424070(missile_obj, 4, false, true)) {
+        return false;
+    }
+    if (!sub_44D4E0(&goal_data, missile_obj, AG_PROJECTILE)) {
+        return false;
+    }
+    rotation = combat_projectile_rot(src_loc, dst_loc);
+    sub_4EDCE0(missile_obj, combat_projectile_art_id_rotation_set(missile_art_id, rotation));
+    goal_data.params[AGDATA_TARGET_TILE].loc = dst_loc;
+    goal_data.params[AGDATA_SCRATCH_VAL4].data = missile_art_id;
+    goal_data.params[AGDATA_SCRATCH_VAL5].data = speed;
+    return anim_goal_add(&goal_data, &stru_5A1908);
 }
 
 // 0x435A00
@@ -15020,7 +15461,37 @@ bool anim_goal_attempt_spread_out(int64_t obj, int64_t target_obj)
 // NOTE: Passes AnimID by value.
 //
 // 0x436AB0
+static void turn_on_running_impl(AnimID anim_id);
+
+/*
+ * Coop client: modifying a goal of the PC we drive locally is a local
+ * (SP-path) change; never send Packet8 for it (the host has no such goal).
+ */
+static bool anim_id_client_drives(AnimID anim_id)
+{
+    AnimRunInfo* run_info;
+
+    if (!tig_net_is_active() || tig_net_is_host()) {
+        return false;
+    }
+    if (!anim_id_to_run_info(&anim_id, &run_info)) {
+        return false;
+    }
+    return coop_lite_client_drives_obj(run_info->goals[0].params[AGDATA_SELF_OBJ].obj);
+}
+
 void turn_on_running(AnimID anim_id)
+{
+    if (anim_id_client_drives(anim_id)) {
+        tig_net_local_suspend_begin();
+        turn_on_running_impl(anim_id);
+        tig_net_local_suspend_end();
+        return;
+    }
+    turn_on_running_impl(anim_id);
+}
+
+static void turn_on_running_impl(AnimID anim_id)
 {
     AnimRunInfo* run_info;
     char str[ANIM_ID_STR_SIZE];
@@ -15110,7 +15581,20 @@ void sub_436D20(unsigned int flags1, unsigned int flags2)
 // NOTE: Passes AnimID by value.
 //
 // 0x436D50
+static void turn_on_flags_impl(AnimID anim_id, unsigned int flags1, unsigned int flags2);
+
 void turn_on_flags(AnimID anim_id, unsigned int flags1, unsigned int flags2)
+{
+    if (anim_id_client_drives(anim_id)) {
+        tig_net_local_suspend_begin();
+        turn_on_flags_impl(anim_id, flags1, flags2);
+        tig_net_local_suspend_end();
+        return;
+    }
+    turn_on_flags_impl(anim_id, flags1, flags2);
+}
+
+static void turn_on_flags_impl(AnimID anim_id, unsigned int flags1, unsigned int flags2)
 {
     AnimRunInfo* run_info;
     char str[ANIM_ID_STR_SIZE];
@@ -15267,9 +15751,63 @@ void sub_437460(AGModifyData* modify_data)
 }
 
 // 0x4374C0
-void mp_anim_modify(void)
+void mp_anim_modify(Packet8* pkt)
 {
-    // TODO: Incomplete.
+    AnimRunInfo* run_info;
+    int64_t obj;
+    char str[ANIM_ID_STR_SIZE];
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+
+    /*
+     * Coop: host anim goals are never replicated (NPC poses arrive via
+     * PACKET_COOP_NPC_POS, PCs via PC_POS), so a host AnimID means nothing
+     * here — or worse, collides with one of our own local goals. PT9 logged
+     * dozens of "unknown AnimID" per minute.
+     */
+    if (tig_net_is_coop_enabled()) {
+        return;
+    }
+
+    if (!anim_id_to_run_info(&pkt->modify_data.id, &run_info)) {
+        anim_id_to_str(&pkt->modify_data.id, str);
+        tig_debug_printf("Anim: mp_anim_modify: unknown AnimID %s\n", str);
+        return;
+    }
+
+    multiplayer_lock();
+
+    run_info->flags = pkt->modify_data.flags;
+    run_info->path.flags = pkt->modify_data.path_flags;
+    if (pkt->modify_data.path_curr >= 0) {
+        run_info->path.curr = pkt->modify_data.path_curr;
+    }
+
+    if (pkt->modify_data.field_14 == 5) {
+        run_info->goals[0].params[AGDATA_TARGET_TILE].loc = pkt->modify_data.loc;
+        sub_44D0C0(run_info);
+    }
+
+    obj = run_info->goals[0].params[AGDATA_SELF_OBJ].obj;
+    if (obj == OBJ_HANDLE_NULL) {
+        obj = run_info->anim_obj;
+    }
+    if (obj != OBJ_HANDLE_NULL) {
+        if (pkt->modify_data.location != 0) {
+            sub_43E770(obj, pkt->modify_data.location, pkt->offset_x, pkt->offset_y);
+        }
+        if (pkt->modify_data.current_aid != TIG_ART_ID_INVALID) {
+            object_set_current_aid(obj, pkt->modify_data.current_aid);
+        }
+    }
+
+    if (pkt->field_40 != 0) {
+        run_info->extra_target_tile = pkt->field_40;
+    }
+
+    multiplayer_unlock();
 }
 
 // 0x4377C0
@@ -15559,4 +16097,18 @@ void sub_437D00(AnimRunInfo* run_info)
     }
 
     run_info->current_state = 0;
+}
+
+/* PT23 diagnostics: anim run slots in use (216 max). */
+int anim_debug_active_runs(void)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; i < 216; i++) {
+        if ((anim_run_info[i].flags & 0x01) != 0) {
+            n++;
+        }
+    }
+    return n;
 }

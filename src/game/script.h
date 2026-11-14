@@ -361,6 +361,7 @@ bool script_load(GameLoadInfo* load_info);
 bool script_save(TigFile* stream);
 void script_set_callbacks(ScriptStartDialogFunc start_dialog_func, ScriptFloatLineFunc float_line_func);
 bool script_execute(ScriptInvocation* invocation);
+bool script_is_running(void); /* PT61 */
 int script_global_var_get(int index);
 void script_global_var_set(int index, int value);
 int script_global_flag_get(int index);
@@ -380,6 +381,13 @@ bool script_timeevent_process(TimeEvent* timeevent);
 bool script_load_hdr(Script* scr);
 bool script_flags(Script* scr, ScriptFlags* flags_ptr);
 void script_play_explosion_fx(int64_t obj);
+
+/**
+ * True if the compiled script contains actions that change quests, story state,
+ * global flags/vars, reputation, world map marks, or other campaign-global state.
+ * Used by Coop Lite to decide whether non-host dialog is safe.
+ */
+bool script_has_global_side_effects(int script_num);
 
 static inline bool sfo_is_any(uint8_t type)
 {

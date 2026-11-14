@@ -1,4 +1,5 @@
 #include "game/object.h"
+#include "game/coop_lite.h"
 
 #include <inttypes.h>
 
@@ -14,6 +15,8 @@
 #include "game/light.h"
 #include "game/magictech.h"
 #include "game/map.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/mes.h"
 #include "game/obj.h"
 #include "game/obj_file.h"
@@ -1287,12 +1290,26 @@ void object_destroy(int64_t obj)
         return;
     }
 
+    if (coop_lite_world_hooks_on) {
+        int t = obj_field_int32_get(obj, OBJ_F_TYPE);
+
+        if (t == OBJ_TYPE_PORTAL || t == OBJ_TYPE_SCENERY || t == OBJ_TYPE_CONTAINER) {
+            coop_lite_host_object_touch(obj); /* PT60/PT60b: destroyed (damage or script) reaches the clients */
+        } else if (t == OBJ_TYPE_WALL && (obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
+            coop_lite_host_wall_touch(obj, true); /* PT61: a script destroyed a wall */
+        }
+    }
+
     if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
         return;
     }
 
     if (!object_script_execute(obj, obj, OBJ_HANDLE_NULL, SAP_DESTROY, 0)) {
         return;
+    }
+
+    if (coop_lite_world_hooks_on) {
+        coop_lite_host_object_destroyed(obj); /* PT63: GONE sent at once, with the location (script did not veto) */
     }
 
     object_get_rect(obj, 0x7, &rect);
@@ -1424,6 +1441,14 @@ void object_flags_set(int64_t obj, unsigned int flags)
     unsigned int cur_flags;
     unsigned int extra_flags = 0;
 
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        coop_lite_host_object_touch(obj); /* PT60b */
+    }
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != (flags & COOP_WORLD_WALL_OF_MASK)) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script hid / changed a wall */
+    }
+
     if ((flags & OF_FLAT) != 0) {
         object_toggle_flat(obj, true);
         flags &= ~OF_FLAT;
@@ -1499,6 +1524,14 @@ void object_flags_unset(int64_t obj, unsigned int flags)
     unsigned int cur_flags;
     unsigned int extra_flags = 0;
     bool visibility_changed = false;
+
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_SCENERY_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY) {
+        coop_lite_host_object_touch(obj); /* PT60b */
+    }
+    if (coop_lite_world_hooks_on && (flags & COOP_WORLD_WALL_OF_MASK) != 0 && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && ((unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS) & flags & COOP_WORLD_WALL_OF_MASK) != 0) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script showed / changed a wall */
+    }
 
     if ((flags & OF_FLAT) != 0) {
         object_toggle_flat(obj, false);
@@ -1615,6 +1648,11 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     obj_field_int32_set(obj, OBJ_F_HP_DAMAGE, value);
+    if (coop_lite_world_hooks_on
+        && (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PORTAL
+            || obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_SCENERY)) {
+        coop_lite_host_object_touch(obj); /* PT60/PT60b: door / scenery HP */
+    }
 
     if (value > 0) {
         obj_type = obj_field_int32_get(obj, OBJ_F_TYPE);
@@ -1624,6 +1662,19 @@ int object_hp_damage_set(int64_t obj, int value)
     }
 
     ui_refresh_health_bar(obj);
+
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        Packet100 pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 100;
+        pkt.subtype = 13;
+        pkt.d.z.field_8 = obj_get_id(obj);
+        pkt.d.z.field_38 = value;
+        if (obj_type_is_critter(obj_field_int32_get(obj, OBJ_F_TYPE))) {
+            pkt.d.z.field_3C = critter_fatigue_damage_get(obj);
+        }
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
 
     return value;
 }
@@ -2320,6 +2371,10 @@ void object_set_current_aid(int64_t obj, tig_art_id_t aid)
     TigRect dirty_rect;
     TigRect update_rect;
 
+    if (obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_WALL
+        && (tig_art_id_t)obj_field_int32_get(obj, OBJ_F_CURRENT_AID) != aid) {
+        coop_lite_host_wall_touch(obj, false); /* PT61: script changed a wall's art */
+    }
     if ((obj_field_int32_get(obj, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
         object_get_rect(obj, 0x7, &dirty_rect);
         obj_field_int32_set(obj, OBJ_F_CURRENT_AID, aid);
@@ -2338,11 +2393,11 @@ void object_set_light(int64_t obj, unsigned int flags, tig_art_id_t aid, tig_col
 {
     Light* light;
 
-    if (aid == TIG_ART_ID_INVALID) {
-        light = (Light*)obj_field_ptr_get(obj, OBJ_F_LIGHT_HANDLE);
-        if (light != NULL) {
-            light_stop_animating(light);
-        }
+    light = (Light*)obj_field_ptr_get(obj, OBJ_F_LIGHT_HANDLE);
+    if (light != NULL
+        && (aid == TIG_ART_ID_INVALID
+            || (tig_art_id_t)obj_field_int32_get(obj, OBJ_F_LIGHT_AID) != aid)) {
+        light_stop_animating(light);
     }
 
     obj_field_int32_set(obj, OBJ_F_LIGHT_FLAGS, flags);
@@ -2411,11 +2466,11 @@ void object_set_overlay_light(int64_t obj, int index, unsigned int flags, tig_ar
 {
     Light* light;
 
-    if (aid == TIG_ART_ID_INVALID) {
-        light = (Light*)obj_arrayfield_ptr_get(obj, OBJ_F_OVERLAY_LIGHT_HANDLES, index);
-        if (light != NULL) {
-            light_stop_animating(light);
-        }
+    light = (Light*)obj_arrayfield_ptr_get(obj, OBJ_F_OVERLAY_LIGHT_HANDLES, index);
+    if (light != NULL
+        && (aid == TIG_ART_ID_INVALID
+            || (tig_art_id_t)obj_arrayfield_uint32_get(obj, OBJ_F_OVERLAY_LIGHT_AID, index) != aid)) {
+        light_stop_animating(light);
     }
 
     obj_arrayfield_uint32_set(obj, OBJ_F_OVERLAY_LIGHT_FLAGS, index, flags);
@@ -3652,11 +3707,20 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
     ObjectNode* tmp_node;
     ObjectNode* new_node;
 
+    /* PT77af: a leader cycle (A follows B follows A) must not recurse
+       forever. */
+    static int depth;
+
     objects->num_sectors = 0;
     objects->head = NULL;
     parent_ptr = &(objects->head);
 
     object_list_followers(obj, objects);
+
+    if (depth >= 8) {
+        return;
+    }
+    depth++;
 
     cnt = 0;
     node = objects->head;
@@ -3678,6 +3742,10 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
 
             *parent_ptr = new_node;
             parent_ptr = &((*parent_ptr)->next);
+            /* PT77af: never advanced: a follower with followers of its own
+               (Virgil's summoned elemental) looped here allocating until
+               the host ran out of memory (Bates estate hangs). */
+            tmp_node = tmp_node->next;
         }
 
         object_list_destroy(&tmp_list);
@@ -3685,6 +3753,7 @@ void object_list_all_followers(int64_t obj, ObjectList* objects)
         node = node->next;
         cnt--;
     }
+    depth--;
 }
 
 // 0x441310
@@ -3871,6 +3940,11 @@ bool object_script_execute(int64_t triggerer_obj, int64_t attachee_obj, int64_t 
     bool rc;
 
     if (object_editor) {
+        return true;
+    }
+
+    /* Coop client applying the host's state: the host ran these. */
+    if (coop_lite_scripts_muted()) {
         return true;
     }
 
@@ -4086,6 +4160,9 @@ bool object_locked_set(int64_t obj, bool locked)
     obj_field_int32_set(obj,
         type == OBJ_TYPE_PORTAL ? OBJ_F_PORTAL_FLAGS : OBJ_F_CONTAINER_FLAGS,
         flags);
+    if (type == OBJ_TYPE_PORTAL) {
+        coop_lite_host_portal_touch(obj); /* PT53e */
+    }
 
     return object_locked_get(obj);
 }
@@ -4307,6 +4384,10 @@ void sub_4423E0(int64_t obj, int offset_x, int offset_y)
     Sector* sector;
 
     object_get_rect(obj, 0x7, &rect);
+    /* PT37: the old rect was read but never invalidated, so an offset-only
+       move (remote PCs / companions between animation frames) left a
+       sprite trail; sub_444270 below only invalidates the new rect. */
+    object_iso_invalidate_rect(&rect);
     loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
     flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
 
@@ -5298,6 +5379,12 @@ void sub_4445A0(int64_t a1, int64_t a2)
 {
     int type;
     int64_t loc;
+
+    /* PT77h: a coop client asks the host to drag (it would snap back). */
+    if (obj_type_is_critter(obj_field_int32_get(a2, OBJ_F_TYPE))
+        && coop_lite_client_body_drag_intent(a1, a2)) {
+        return;
+    }
 
     type = obj_field_int32_get(a2, OBJ_F_TYPE);
     if (obj_type_is_critter(type)

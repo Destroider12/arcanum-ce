@@ -19,6 +19,9 @@ int64_t area_get_location(int area);
 void area_get_wm_offset(int area, int* x, int* y);
 bool area_is_known(int64_t pc_obj, int area);
 bool area_set_known(int64_t pc_obj, int area);
+int area_known_bits_get(uint8_t* bits, int max_areas); /* Coop Lite PT78 */
+int area_known_bits_merge(const uint8_t* bits, int count); /* Coop Lite PT78 */
+void area_known_clear_all(void); /* Coop Lite PT79 */
 int area_get_last_known_area(int64_t pc_obj);
 void area_reset_last_known_area(int64_t pc_obj);
 int area_get_nearest_known_area(int64_t loc, int64_t pc_obj, int64_t range);

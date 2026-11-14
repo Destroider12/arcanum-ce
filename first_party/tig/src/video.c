@@ -418,6 +418,19 @@ int tig_video_fade(tig_color_t color, int steps, float duration, TigFadeFlags fl
     return TIG_OK;
 }
 
+void tig_video_dim(tig_color_t color, int alpha)
+{
+    if (alpha <= 0) {
+        tig_fade_state.enabled = false;
+        return;
+    }
+    tig_fade_state.enabled = true;
+    tig_fade_state.color.r = (Uint8)tig_color_get_red(color);
+    tig_fade_state.color.g = (Uint8)tig_color_get_green(color);
+    tig_fade_state.color.b = (Uint8)tig_color_get_blue(color);
+    tig_fade_state.color.a = (Uint8)(alpha > 255 ? 255 : alpha);
+}
+
 // 0x51FFE0
 int tig_video_set_gamma(float gamma)
 {

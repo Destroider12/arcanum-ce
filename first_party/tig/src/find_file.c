@@ -47,6 +47,7 @@ bool tig_find_first_file(const char* pattern, TigFindFileData* find_file_data)
 
     entries = SDL_GlobDirectory(dir, fname, SDL_GLOB_CASEINSENSITIVE, &count);
     if (count == 0) {
+        SDL_free(entries); /* PT52j: empty result is still an allocation */
         return false;
     }
 

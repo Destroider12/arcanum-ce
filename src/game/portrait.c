@@ -1,5 +1,8 @@
 #include "game/portrait.h"
 
+#include "game/coop_lite.h"
+#include "net/tig_net.h"
+
 #include <stdio.h>
 
 #include "game/mes.h"
@@ -168,8 +171,16 @@ void portrait_draw_func(int64_t obj, int num, tig_window_handle_t window_handle,
         && obj_field_int32_get(obj, OBJ_F_TYPE) == OBJ_TYPE_PC
         && (obj_field_int32_get(obj, OBJ_F_PC_FLAGS) & OPCF_USE_ALT_DATA) != 0) {
         // Attempt to construct path for a multiplayer-specific portrait.
-        if (!multiplayer_portrait_path(obj, width, path)) {
-            return;
+        // PT53e: Players\<oid>.bmp only exists on the machine that made
+        // the PC, so another player's PC drew blank; coop uses the synced
+        // portrait number instead (OBJ_F_CRITTER_PORTRAIT, PC_STATS).
+        bool found = multiplayer_portrait_path(obj, width, path);
+
+        if (coop_lite_portrait_use_number(tig_net_is_coop_enabled(), num, found)) {
+            portrait_path(num, path, sizeof(path), width);
+            if (path[0] == '\0') {
+                return;
+            }
         }
     } else {
         // Build single-player portrait path.
