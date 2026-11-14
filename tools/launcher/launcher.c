@@ -1126,6 +1126,12 @@ static void show_early_exit(DWORD code)
         tail[n] = '\0';
         fclose(f);
     }
+    /* PT79c: a normal Exit from the main menu (exit 0, the game logged
+       "Exiting Game!", no crash dump) is not a failed start: no popup. */
+    if (code == 0 && !new_crash_file() && strstr(tail, "Exiting Game!") != NULL) {
+        set_status("Game closed.");
+        return;
+    }
     snprintf(text, sizeof(text),
         "The game closed right after the start (exit code %lu).\r\n\r\nGame folder: %s\r\nLog: %s\r\n\r\n%s",
         code, g_game_dir_now, log, n > 0 ? tail : "(the log is missing or empty)");
