@@ -361,6 +361,11 @@ void crash_handler_heartbeat(void)
     InterlockedExchange(&crash_heartbeat_tick, (LONG)(GetTickCount() | 1u));
 }
 
+void crash_handler_heartbeat_pause(void)
+{
+    InterlockedExchange(&crash_heartbeat_tick, 0);
+}
+
 /* Main thread's return addresses, taken while it is suspended (printed
    after it runs again: the printing may need locks it holds). */
 static int crash_main_stack(DWORD64* rips, int max)
@@ -571,6 +576,10 @@ void crash_handler_set_subdir(const char* subdir)
 #else
 
 void crash_handler_heartbeat(void)
+{
+}
+
+void crash_handler_heartbeat_pause(void)
 {
 }
 

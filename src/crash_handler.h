@@ -8,5 +8,8 @@ void crash_handler_install(const char* build_id);
 void crash_handler_set_subdir(const char* subdir);
 /* PT77af: the main loop is alive (gamelib_ping). Feeds the hang watchdog. */
 void crash_handler_heartbeat(void);
+/* PT79: a blocking loop that never reaches gamelib_ping (movie, slide
+   show, modal prompt) is starting: no HANG until the next heartbeat. */
+void crash_handler_heartbeat_pause(void);
 
 #endif

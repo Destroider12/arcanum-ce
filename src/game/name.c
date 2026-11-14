@@ -1,5 +1,7 @@
 #include "game/name.h"
 
+#include "crash_handler.h"
+
 #include <stdio.h>
 
 #include "game/a_name.h"
@@ -1449,6 +1451,7 @@ bool sub_41F090(int a1, int* a2, int* a3)
     sub_41F240();
 
     dword_739E4C = 0;
+    crash_handler_heartbeat_pause(); /* PT79: modal prompt, no gamelib_ping */
     while (dword_739E4C == 0) {
         tig_ping();
         tig_window_display();
