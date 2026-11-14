@@ -42,7 +42,7 @@
 #include "game/trap.h"
 #include "game/ui.h"
 
-#define MAX_CACHE_ENTRIES 100
+#define MAX_CACHE_ENTRIES 512 /* PT80a: was 100 (LRU-evicted; headroom for the co-op host running every NPC) */
 #define MAX_GLOBAL_VARS 2000
 #define MAX_GLOBAL_FLAGS 100
 
