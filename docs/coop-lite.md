@@ -3489,3 +3489,40 @@ left lying at its feet (client only).
 - No wire change (protocol stays 51).
 - Gold piles left on the ground by the old path are client-only; the
   world prune removes them near the PC.
+
+## PT79b: Ashbury pig quest for clients; Captain Teach's voyage
+
+Playtest of 1b0540ab in Ashbury (logs checked; game scripts read from the
+game's DAT files).
+
+**Pig quest (quest 1117, Theo Brightstart).** Theo's turn-in line needs
+the talking PC's quest 1117 at state 3 (achieved). The pigs' death script
+(01719 Pig_Death) adds 1 to global var 1033 for each pig. From the 3rd pig
+on it checks "the player's" quest 1117 == 2 (accepted) and sets it to 3.
+"The player" (SFO_PLAYER) is the host's PC on the co-op host, so a client
+who took the quest stayed at "accepted" and could never turn it in.
+
+- Co-op host, focus SFO_PLAYER: a PC quest state condition also matches
+  when any other party PC has that state.
+- Setting a quest above "accepted" for SFO_PLAYER advances every party
+  PC that has the quest in progress (accepted .. lower than the new
+  state). Lower states (mentioned / accepted) still go only to the host,
+  as before.
+- A save where all the pigs are already dead stays stuck for the client
+  (the script only runs on a pig's death).
+
+**Captain Teach.** Agreeing to sail runs Teach's script: SAT_FADE_AND_TELEPORT
+of the triggerer (the PC) to 20691,56027 on the main map (240000 s
+voyage), then a delayed script call that moves Teach himself. Vanilla
+code skips FADE_AND_TELEPORT whenever the net is active (multiplayer), so
+in co-op only Teach's own move happened and the party stayed on the
+empty ship.
+
+- The co-op host now runs FADE_AND_TELEPORT (clients still never do).
+  When the target is a party PC, the host PC travels instead, so the
+  usual host travel applies: ready check, party carry, followers,
+  clients follow.
+- The client's dialog has no "sail" option because the passage
+  conditions are per PC (the host's PC holds them). Not changed: a
+  client-side option would need those per-PC states. If a client does
+  get the option, the voyage now takes the whole party.
