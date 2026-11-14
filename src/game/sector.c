@@ -235,8 +235,11 @@ bool sector_init(GameInitInfo* init_info)
 
     sector_limits_set(0x4000000, 0x4000000);
 
-    /* PT23: coop keeps up to 4 sectors around every remote PC locked. */
-    if (!sector_cache_init(tig_net_is_coop_enabled() ? 64 : 16)) {
+    /* PT23: coop keeps sectors around every remote PC locked. PT79 (review
+       2.1): 3x3 per remote PC is 63 locked sectors with 8 players, plus the
+       view's own - 64 ran out ("lack of unlocked slots"). 96 leaves room
+       without keeping a much larger LRU of resident objects (engine max 128). */
+    if (!sector_cache_init(tig_net_is_coop_enabled() ? 96 : 16)) {
         return false;
     }
 
