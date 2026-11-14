@@ -1218,6 +1218,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_AREA_KNOWN:
         coop_lite_handle_area_known((PacketCoopAreaKnown*)msg);
         break;
+    case PACKET_COOP_NPC_STATS:
+        coop_lite_handle_npc_stats((PacketCoopNpcStats*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

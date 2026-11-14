@@ -52,6 +52,7 @@ extern "C" {
 #define PACKET_COOP_THROW_INTENT 163 /* PT77z: client -> host throw item */
 #define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
 #define PACKET_COOP_AREA_KNOWN 165 /* PT78: known world-map areas, both ways (union) */
+#define PACKET_COOP_NPC_STATS 166 /* PT79: host party-follower build (level, stats, hp/fatigue pts) -> clients */
 #define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
@@ -694,6 +695,24 @@ bool coop_lite_area_known_valid(const PacketCoopAreaKnown* pkt, int size);
 int coop_lite_area_bits_merge(uint8_t* dst, const uint8_t* src, int count);
 bool coop_lite_area_pc_shared(int64_t pc_obj);
 void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt);
+void coop_lite_area_session_reset(void); /* PT79 */
+
+/* PT79 (review 1.4): a party follower's base build as the host has it
+   (levelled NPCs: max hp, carry weight, portrait). Host -> clients. */
+#define COOP_NPC_STATS_COUNT 28 /* STAT_COUNT */
+typedef struct PacketCoopNpcStats {
+    /* 0000 */ int type;
+    /* 0004 */ int reserved;
+    /* 0008 */ unsigned char oid[24];
+    /* 0020 */ int stats[COOP_NPC_STATS_COUNT]; /* OBJ_F_CRITTER_STAT_BASE_IDX */
+    /* 0090 */ int hp_pts;
+    /* 0094 */ int hp_adj;
+    /* 0098 */ int fatigue_pts;
+    /* 009C */ int fatigue_adj;
+} PacketCoopNpcStats;
+COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0xA0, "PacketCoopNpcStats size");
+bool coop_lite_npc_stats_valid(const PacketCoopNpcStats* pkt, int size);
+void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt);
 
 typedef struct PacketCoopChat {
     /* 0000 */ int type;
@@ -860,6 +879,7 @@ void coop_lite_handle_char_chunk(PacketCoopCharChunk* pkt);
 #define COOP_WORLD_F_FIRST 0x1
 #define COOP_WORLD_F_LAST 0x2
 #define COOP_WORLD_F_FULL 0x4 /* PT51: whole-map snapshot page (client prunes by host-listed sectors) */
+#define COOP_WORLD_F_TRUNCATED 0x8 /* PT79: full snapshot hit the host OID cap - client must not prune */
 /* PT51: one 64-entry page (4 KB) per slot per tick. PT77ad: 100 -> 50 ms
    (~80 KB/s per joining slot, only while its full snapshot runs); pages
    no longer carry every container's contents (COOP_WORLD_CONTENTS_RADIUS). */

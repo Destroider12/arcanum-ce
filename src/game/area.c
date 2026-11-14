@@ -456,6 +456,17 @@ int area_known_bits_get(uint8_t* bits, int max_areas)
     return count < 0 ? 0 : count;
 }
 
+/* Coop Lite PT79: drops every known flag (a client adopting the host's
+   set as its baseline after a join or a host load). */
+void area_known_clear_all(void)
+{
+    int area;
+
+    for (area = 0; area < num_areas; area++) {
+        area_flags[area] &= ~AREA_KNOWN;
+    }
+}
+
 /* Coop Lite PT78: adds the set bits as known; returns how many were new. */
 int area_known_bits_merge(const uint8_t* bits, int count)
 {

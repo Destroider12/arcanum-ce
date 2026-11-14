@@ -1209,6 +1209,38 @@ static int test_packet_hardening(void)
                 return 1;
             }
         }
+        /* PT79: truncated full snapshot flag, follower build packet. */
+        {
+            PacketCoopNpcStats ns;
+
+            if ((COOP_WORLD_F_TRUNCATED & (COOP_WORLD_F_FIRST | COOP_WORLD_F_LAST | COOP_WORLD_F_FULL)) != 0
+                || TIG_NET_PROTOCOL < 51 || PACKET_COOP_NPC_STATS >= PACKET_COOP_TYPE_LIMIT
+                || coop_lite_mp_packet_role(PACKET_COOP_NPC_STATS) != COOP_MP_PKT_CLIENT_APPLY
+                || coop_lite_packet_allowed(PACKET_COOP_NPC_STATS, false, 2)) {
+                fprintf(stderr, "PT79 flag / packet role wrong\n");
+                return 1;
+            }
+            memset(&ns, 0, sizeof(ns));
+            ns.type = PACKET_COOP_NPC_STATS;
+            ns.stats[17] = 12;
+            ns.hp_pts = 30;
+            if (!coop_lite_npc_stats_valid(&ns, (int)sizeof(ns))
+                || coop_lite_npc_stats_valid(&ns, (int)sizeof(ns) - 1)) {
+                fprintf(stderr, "PT79 npc stats size check wrong\n");
+                return 1;
+            }
+            ns.stats[17] = 0;
+            if (coop_lite_npc_stats_valid(&ns, (int)sizeof(ns))) {
+                fprintf(stderr, "PT79 npc stats level check wrong\n");
+                return 1;
+            }
+            ns.stats[17] = 12;
+            ns.hp_pts = -1;
+            if (coop_lite_npc_stats_valid(&ns, (int)sizeof(ns))) {
+                fprintf(stderr, "PT79 npc stats hp check wrong\n");
+                return 1;
+            }
+        }
         /* PT77af: an NPC alive on the host never dies here from its damage. */
         if (coop_lite_npc_rx_hp_damage(120, false, 90) != 89
             || coop_lite_npc_rx_hp_damage(40, false, 90) != 40

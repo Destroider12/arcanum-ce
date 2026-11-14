@@ -1206,6 +1206,7 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
 static void coop_lite_area_tick(unsigned int now_ms); /* PT78 */
+static void coop_lite_host_npc_stats(int64_t npc, unsigned int now_ms); /* PT79 */
 static void coop_lite_story_reset(void);
 static void coop_lite_host_dialog_tick(unsigned int now_ms);
 static void coop_lite_party_ui_tick(unsigned int now_ms);
@@ -2286,6 +2287,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_WMAP_POS: /* PT73 host world-map marker → clients */
     case PACKET_COOP_CRITTER_EFFECTS: /* PT77z host effects + light → clients */
     case PACKET_COOP_PROJECTILE_FX: /* PT77z host missile visual → clients */
+    case PACKET_COOP_NPC_STATS: /* PT79 host follower build → clients */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3498,6 +3500,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopProjectileFx);
     case PACKET_COOP_AREA_KNOWN:
         return sizeof(PacketCoopAreaKnown);
+    case PACKET_COOP_NPC_STATS:
+        return sizeof(PacketCoopNpcStats);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -5955,6 +5959,7 @@ static void coop_lite_host_send_followers(unsigned int now_ms)
             memcpy(pkt.entries[pkt.count].npc_oid, &oid, sizeof(oid));
             pkt.entries[pkt.count].leader_slot = slot;
             pkt.count++;
+            coop_lite_host_npc_stats(npc, now_ms); /* PT79 */
         }
     }
 
@@ -6110,6 +6115,91 @@ static void coop_lite_npc_list_around(int64_t pc, ObjectList* objects)
     object_list_rect(&rect, OBJ_TM_NPC, objects);
 }
 
+/* PT79 (review 2.3a): PCs standing together share one object_list_rect
+   (the union of their squares) instead of one 81x81 query each; each NPC
+   is still only taken when inside some member's own square, so the result
+   is exactly the old per-PC union. Returns the member slot mask. */
+#define COOP_NPC_GROUP_TILES 16
+static unsigned int coop_lite_npc_list_group(int lead, bool* scanned, ObjectList* objects)
+{
+    int64_t locs[8] = { 0 };
+    unsigned int members = 0;
+    int64_t lead_loc;
+    int64_t x1 = 0;
+    int64_t y1 = 0;
+    int64_t x2 = 0;
+    int64_t y2 = 0;
+    LocRect rect;
+    int slot;
+
+    lead_loc = obj_field_int64_get(sub_4A2B60(lead), OBJ_F_LOCATION);
+    for (slot = lead; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t x;
+        int64_t y;
+        int64_t dx;
+        int64_t dy;
+
+        if (pc == OBJ_HANDLE_NULL || scanned[slot]) {
+            continue;
+        }
+        locs[slot] = obj_field_int64_get(pc, OBJ_F_LOCATION);
+        x = LOCATION_GET_X(locs[slot]);
+        y = LOCATION_GET_Y(locs[slot]);
+        dx = x - LOCATION_GET_X(lead_loc);
+        dy = y - LOCATION_GET_Y(lead_loc);
+        if (slot != lead && (dx < -COOP_NPC_GROUP_TILES || dx > COOP_NPC_GROUP_TILES
+                                || dy < -COOP_NPC_GROUP_TILES || dy > COOP_NPC_GROUP_TILES)) {
+            continue;
+        }
+        if (members == 0 || x - COOP_NPC_POS_RADIUS < x1) {
+            x1 = x - COOP_NPC_POS_RADIUS;
+        }
+        if (members == 0 || y - COOP_NPC_POS_RADIUS < y1) {
+            y1 = y - COOP_NPC_POS_RADIUS;
+        }
+        if (members == 0 || x + COOP_NPC_POS_RADIUS > x2) {
+            x2 = x + COOP_NPC_POS_RADIUS;
+        }
+        if (members == 0 || y + COOP_NPC_POS_RADIUS > y2) {
+            y2 = y + COOP_NPC_POS_RADIUS;
+        }
+        members |= 1u << slot;
+        scanned[slot] = true;
+    }
+    rect.x1 = x1 > 0 ? x1 : 0;
+    rect.y1 = y1 > 0 ? y1 : 0;
+    rect.x2 = x2;
+    rect.y2 = y2;
+    object_list_rect(&rect, OBJ_TM_NPC, objects);
+    if ((members & (members - 1)) != 0) {
+        /* Several members: keep the per-member squares exact. */
+        ObjectNode* node;
+
+        for (node = objects->head; node != NULL; node = node->next) {
+            int64_t loc = obj_field_int64_get(node->obj, OBJ_F_LOCATION);
+            bool keep = false;
+
+            for (slot = 0; slot < 8 && !keep; slot++) {
+                int64_t dx;
+                int64_t dy;
+
+                if ((members & (1u << slot)) == 0) {
+                    continue;
+                }
+                dx = LOCATION_GET_X(loc) - LOCATION_GET_X(locs[slot]);
+                dy = LOCATION_GET_Y(loc) - LOCATION_GET_Y(locs[slot]);
+                keep = dx >= -COOP_NPC_POS_RADIUS && dx <= COOP_NPC_POS_RADIUS
+                    && dy >= -COOP_NPC_POS_RADIUS && dy <= COOP_NPC_POS_RADIUS;
+            }
+            if (!keep) {
+                node->obj = OBJ_HANDLE_NULL; /* skipped by the caller; freed as is */
+            }
+        }
+    }
+    return members;
+}
+
 static unsigned int coop_lite_npc_slots_in_range(int64_t npc)
 {
     unsigned int mask = 0;
@@ -6147,6 +6237,7 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
     int done_cnt = 0;
     int k;
     bool any_client = false;
+    bool scanned[8] = { false };
 
     if (coop_portal_changed && coop_lite_interval_elapsed(coop_portal_changed_ms, now_ms, 400u)) {
         coop_portal_changed = false;
@@ -6173,12 +6264,17 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_NPC_POS;
     for (slot = 0; slot < 8; slot++) {
+        unsigned int members;
+
         pc = sub_4A2B60(slot);
-        if (pc == OBJ_HANDLE_NULL) {
+        if (pc == OBJ_HANDLE_NULL || scanned[slot]) {
             continue;
         }
-        coop_lite_npc_list_around(pc, &objects);
+        members = coop_lite_npc_list_group(slot, scanned, &objects); /* PT79 */
         for (node = objects.head; node != NULL; node = node->next) {
+            if (node->obj == OBJ_HANDLE_NULL) {
+                continue; /* outside every member's square */
+            }
             for (k = 0; k < done_cnt; k++) {
                 if (done[k] == node->obj) {
                     break;
@@ -6193,7 +6289,7 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
             coop_lite_fill_npc_entry(&e, node->obj);
             c = coop_lite_npc_cache_slot(node->obj);
             {
-                unsigned int in_range = coop_lite_npc_slots_in_range(node->obj) | (1u << slot);
+                unsigned int in_range = coop_lite_npc_slots_in_range(node->obj) | (members & 0xFFu);
                 bool unchanged;
 
                 if (c->obj != node->obj) {
@@ -9493,6 +9589,7 @@ COOP_STATIC_ASSERT(COOP_PCB_STAT_LEVEL == STAT_LEVEL && COOP_PCB_STAT_XP == STAT
         && COOP_PCB_STAT_ALIGNMENT == STAT_ALIGNMENT && COOP_PCB_STAT_FATE == STAT_FATE_POINTS
         && COOP_PCB_STAT_UNSPENT == STAT_UNSPENT_POINTS,
     "PCB stat indices");
+COOP_STATIC_ASSERT(COOP_NPC_STATS_COUNT == STAT_COUNT && STAT_LEVEL == 17, "PT79 NPC_STATS stat layout");
 
 static void coop_lite_pc_build_fill(int64_t pc, CoopPcBuild* b)
 {
@@ -12452,6 +12549,39 @@ static void coop_lite_client_adopt_own_pc_blob(PacketCoopObjBlob* pkt)
 
 static bool coop_lite_oid_bytes_set(const uint8_t* bytes);
 
+
+/* PT79 (review 1.3): OIDs the host's ground push just put on the floor
+   here. An INVEN_SYNC batch built before that drop (still in flight or
+   applied later) would pick the item back up into the dropper's pack, and
+   the next batch then destroyed it. Such a batch leaves them alone ~3 s. */
+#define COOP_GROUNDED_RING 32
+#define COOP_GROUNDED_MS 3000u
+static struct {
+    uint8_t oid[24];
+    unsigned int ms;
+} coop_grounded[COOP_GROUNDED_RING];
+static int coop_grounded_next;
+
+static void coop_lite_grounded_note(const uint8_t oid[24])
+{
+    memcpy(coop_grounded[coop_grounded_next].oid, oid, 24);
+    coop_grounded[coop_grounded_next].ms = coop_obj_now_ms != 0 ? coop_obj_now_ms : 1;
+    coop_grounded_next = (coop_grounded_next + 1) % COOP_GROUNDED_RING;
+}
+
+static bool coop_lite_grounded_recent(const uint8_t oid[24])
+{
+    int i;
+
+    for (i = 0; i < COOP_GROUNDED_RING; i++) {
+        if (coop_grounded[i].ms != 0 && memcmp(coop_grounded[i].oid, oid, 24) == 0
+            && !coop_lite_interval_elapsed(coop_grounded[i].ms, coop_obj_now_ms, COOP_GROUNDED_MS)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
 {
 #ifndef COOP_LITE_TEST_STUBS
@@ -12496,6 +12626,7 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
                 object_drop(have, gloc);
                 tig_net_local_suspend_end();
                 multiplayer_unlock();
+                coop_lite_grounded_note(pkt->oid);
             }
             return;
         }
@@ -12512,6 +12643,9 @@ void coop_lite_handle_obj_blob(PacketCoopObjBlob* pkt)
         }
         coop_lite_apply_end();
         multiplayer_unlock();
+        if (item != OBJ_HANDLE_NULL) {
+            coop_lite_grounded_note(pkt->oid);
+        }
         tig_debug_printf("CoopLite: obj blob: pushed ground drop %s (%d bytes)\n",
             item != OBJ_HANDLE_NULL ? "loaded" : "rejected", pkt->size);
         return;
@@ -13415,6 +13549,10 @@ static void coop_lite_client_apply_inven_batch(void)
                 goto flags;
             }
 
+            if (parent == OBJ_HANDLE_NULL && (obj_field_int32_get(item, OBJ_F_FLAGS) & OF_INVENTORY) == 0
+                && coop_lite_grounded_recent(e->oid)) {
+                continue; /* PT79: the host just dropped it; this batch is older */
+            }
             if (parent != OBJ_HANDLE_NULL) {
                 item_remove(item);
             } else if ((obj_field_int32_get(item, OBJ_F_FLAGS) & OF_INVENTORY) == 0) {
@@ -14919,7 +15057,7 @@ static bool coop_dev_mutate_dagger_valid;
 
 static void coop_lite_world_flush(PacketCoopWorldState* out, int slot, bool last, bool* first)
 {
-    out->flags = (out->flags & COOP_WORLD_F_FULL) | (*first ? COOP_WORLD_F_FIRST : 0u) | (last ? COOP_WORLD_F_LAST : 0u);
+    out->flags = (out->flags & (COOP_WORLD_F_FULL | COOP_WORLD_F_TRUNCATED)) | (*first ? COOP_WORLD_F_FIRST : 0u) | (last ? COOP_WORLD_F_LAST : 0u);
     tig_net_send_app(out, coop_lite_world_state_size(out->count), slot);
     *first = false;
     out->count = 0;
@@ -15059,6 +15197,8 @@ static int coop_world_full_oid_cnt[8];
 static int64_t coop_world_full_sectors[8][COOP_WORLD_FULL_SECTORS];
 static int coop_world_full_sector_cnt[8];
 static bool coop_world_full_first[8]; /* PT52c */
+static bool coop_world_full_trunc[8]; /* PT79: list cut at COOP_WORLD_FULL_MAX_OIDS */
+#define COOP_WORLD_FULL_FLAGS(slot) (COOP_WORLD_F_FULL | (coop_world_full_trunc[slot] ? COOP_WORLD_F_TRUNCATED : 0u))
 
 static void coop_world_full_free(int slot)
 {
@@ -15068,6 +15208,7 @@ static void coop_world_full_free(int slot)
     coop_world_full_oids[slot] = NULL;
     coop_world_full_oid_cnt[slot] = 0;
     coop_world_full_sector_cnt[slot] = 0;
+    coop_world_full_trunc[slot] = false;
 }
 
 /* PT60b: breakable scenery the snapshot lists: anything not invulnerable,
@@ -15149,7 +15290,13 @@ static bool coop_world_full_snapshot(int slot)
                 continue;
             }
             if (n + n_late >= COOP_WORLD_FULL_MAX_OIDS) {
-                break; /* client seen-set overflows long before: prune is off anyway */
+                /* PT79 (review 1.1): the client's seen-set holds exactly this
+                   many, so it never overflowed and its full prune destroyed
+                   every listed-sector object past the cap. Flag the pages. */
+                coop_world_full_trunc[slot] = true;
+                tig_debug_printf("CoopLite: world: full snapshot for slot %d cut at %d objects - client will not prune\n",
+                    slot, COOP_WORLD_FULL_MAX_OIDS);
+                break;
             }
             if (late != NULL && !coop_lite_world_full_early_type(type)) {
                 late[n_late++] = obj_get_id(obj);
@@ -15243,7 +15390,7 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
             e->loc = LOCATION_MAKE(SECTOR_X(coop_world_full_sectors[slot][si]) * 64,
                 SECTOR_Y(coop_world_full_sectors[slot][si]) * 64);
             if (++out->count == COOP_WORLD_CHUNK) {
-                out->flags = COOP_WORLD_F_FULL;
+                out->flags = COOP_WORLD_FULL_FLAGS(slot);
                 coop_lite_world_flush(out, slot, false, &first);
                 chunks++;
             }
@@ -15355,14 +15502,14 @@ static bool coop_world_host_emit(int slot, int key, int64_t pc, bool full, int* 
                 break;
             }
             if (++out->count == COOP_WORLD_CHUNK) {
-                out->flags = full ? COOP_WORLD_F_FULL : 0u;
+                out->flags = full ? COOP_WORLD_FULL_FLAGS(slot) : 0u;
                 coop_lite_world_flush(out, slot, false, &first);
                 chunks++;
             }
         } while (full ? coop_world_full_next(slot, cursor, &obj) : obj_inst_next(&obj, &iter));
     }
     if (done || out->count > 0) {
-        out->flags = full ? COOP_WORLD_F_FULL : 0u;
+        out->flags = full ? COOP_WORLD_FULL_FLAGS(slot) : 0u;
         if (done) {
             coop_lite_world_flush(out, slot, true, &first);
         } else {
@@ -15546,6 +15693,7 @@ static bool coop_world_rx_full; /* PT51: this snapshot is the full-map one */
 static int64_t coop_world_rx_sectors[COOP_WORLD_FULL_SECTORS];
 static int coop_world_rx_sector_cnt;
 static bool coop_world_rx_sector_overflow;
+static bool coop_world_rx_trunc; /* PT79: host cut the full list - no prune */
 static int coop_world_stats[6]; /* per kind: applied changes */
 static int coop_world_req_key = -1;
 static unsigned int coop_world_req_ms;
@@ -15794,7 +15942,7 @@ static int coop_lite_world_prune(void)
         return 0;
     }
     center = coop_world_req_center; /* PT32: not the current position */
-    if (coop_world_rx_full && coop_world_rx_sector_overflow) {
+    if (coop_world_rx_full && (coop_world_rx_sector_overflow || coop_world_rx_trunc)) {
         return 0;
     }
 again:
@@ -15897,8 +16045,12 @@ void coop_lite_handle_world_state(PacketCoopWorldState* pkt)
         coop_world_rx_active = true;
         coop_world_rx_map = pkt->map;
         coop_world_rx_full = (pkt->flags & COOP_WORLD_F_FULL) != 0;
+        coop_world_rx_trunc = false;
         coop_world_rx_sector_cnt = 0;
         coop_world_rx_sector_overflow = false;
+    }
+    if ((pkt->flags & COOP_WORLD_F_TRUNCATED) != 0) {
+        coop_world_rx_trunc = true; /* PT79 */
     }
     if (coop_world_rx_full) {
         for (i = 0; i < pkt->count; i++) {
@@ -16419,6 +16571,16 @@ bool coop_lite_craft_valid(const PacketCoopCraft* pkt, int size)
 
 /* PT44: death writes hp damage 32000 (critter_kill / death path); floats
    showed that marker as "-31988"-style hits. Clamp to the hp pool. */
+/* PT79 (pure; tests): exact size, sane level and pools. */
+bool coop_lite_npc_stats_valid(const PacketCoopNpcStats* pkt, int size)
+{
+    return pkt != NULL && size == (int)sizeof(PacketCoopNpcStats) && pkt->type == PACKET_COOP_NPC_STATS
+        && pkt->stats[17 /* STAT_LEVEL */] >= 1 && pkt->stats[17] <= 100
+        && pkt->hp_pts >= 0 && pkt->hp_pts <= 100000 && pkt->fatigue_pts >= 0 && pkt->fatigue_pts <= 100000
+        && pkt->hp_adj >= -100000 && pkt->hp_adj <= 100000
+        && pkt->fatigue_adj >= -100000 && pkt->fatigue_adj <= 100000;
+}
+
 bool coop_lite_area_known_valid(const PacketCoopAreaKnown* pkt, int size)
 {
     return pkt != NULL && size == (int)sizeof(PacketCoopAreaKnown) && pkt->type == PACKET_COOP_AREA_KNOWN
@@ -16766,6 +16928,18 @@ static uint8_t coop_area_sent[COOP_AREA_KNOWN_MAX / 8];
 static int coop_area_sent_count = -1;
 static unsigned int coop_area_tick_ms;
 static unsigned int coop_area_key_ms;
+/* PT79 (review 1.2): a client sends nothing until the host's set of this
+   session / load arrived; that first set REPLACES the client's (its old
+   bits may be from a later save or another game and would leak into an
+   earlier host save). */
+static bool coop_area_baseline;
+
+void coop_lite_area_session_reset(void)
+{
+    coop_area_baseline = false;
+    coop_area_sent_count = -1;
+    coop_area_key_ms = 0;
+}
 
 /* area.c: the engine keeps one known-area set (the local PC's). In a
    session every co-op PC uses it, so a script asking about (or teaching)
@@ -16784,6 +16958,9 @@ static void coop_lite_area_tick(unsigned int now_ms)
         return;
     }
     coop_area_tick_ms = now_ms != 0 ? now_ms : 1;
+    if (!tig_net_is_host() && !coop_area_baseline) {
+        return; /* PT79: wait for the host's set */
+    }
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_AREA_KNOWN;
     pkt.count = area_known_bits_get(pkt.bits, COOP_AREA_KNOWN_MAX);
@@ -16799,6 +16976,130 @@ static void coop_lite_area_tick(unsigned int now_ms)
     tig_net_send_app_all(&pkt, sizeof(pkt));
 }
 
+/* PT79 (review 1.4): NPC followers level on the host only (xp from the
+   party's kills); clients kept the join-time build, so their portrait hp
+   bar, carry limit (transfers refused as too heavy) and hp clamps were
+   off. Sent per follower on change, re-sent every 10 s. */
+#define COOP_NPC_STATS_SIGS 32
+static struct {
+    ObjectID oid;
+    unsigned int sig;
+    unsigned int ms;
+    bool used;
+} coop_npc_stats_sig[COOP_NPC_STATS_SIGS];
+static int coop_npc_stats_sig_next;
+
+static void coop_lite_npc_stats_fill(PacketCoopNpcStats* pkt, int64_t npc)
+{
+    ObjectID oid = obj_get_id(npc);
+    int i;
+
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = PACKET_COOP_NPC_STATS;
+    memcpy(pkt->oid, &oid, sizeof(oid));
+    for (i = 0; i < COOP_NPC_STATS_COUNT; i++) {
+        pkt->stats[i] = obj_arrayfield_int32_get(npc, OBJ_F_CRITTER_STAT_BASE_IDX, i);
+    }
+    pkt->hp_pts = obj_field_int32_get(npc, OBJ_F_HP_PTS);
+    pkt->hp_adj = obj_field_int32_get(npc, OBJ_F_HP_ADJ);
+    pkt->fatigue_pts = obj_field_int32_get(npc, OBJ_F_CRITTER_FATIGUE_PTS);
+    pkt->fatigue_adj = obj_field_int32_get(npc, OBJ_F_CRITTER_FATIGUE_ADJ);
+}
+
+static void coop_lite_host_npc_stats(int64_t npc, unsigned int now_ms)
+{
+    PacketCoopNpcStats pkt;
+    unsigned int sig = 2166136261u;
+    const unsigned char* b;
+    size_t i;
+    int k;
+    int hit = -1;
+
+    if (npc == OBJ_HANDLE_NULL || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+        return;
+    }
+    coop_lite_npc_stats_fill(&pkt, npc);
+    b = (const unsigned char*)&pkt;
+    for (i = 0; i < sizeof(pkt); i++) {
+        sig = (sig ^ b[i]) * 16777619u;
+    }
+    for (k = 0; k < COOP_NPC_STATS_SIGS; k++) {
+        if (coop_npc_stats_sig[k].used && memcmp(&coop_npc_stats_sig[k].oid, pkt.oid, sizeof(ObjectID)) == 0) {
+            hit = k;
+            break;
+        }
+    }
+    if (hit >= 0 && coop_npc_stats_sig[hit].sig == sig
+        && !coop_lite_interval_elapsed(coop_npc_stats_sig[hit].ms, now_ms, 10000u)) {
+        return;
+    }
+    if (hit < 0) {
+        hit = coop_npc_stats_sig_next;
+        coop_npc_stats_sig_next = (coop_npc_stats_sig_next + 1) % COOP_NPC_STATS_SIGS;
+        memcpy(&coop_npc_stats_sig[hit].oid, pkt.oid, sizeof(ObjectID));
+        coop_npc_stats_sig[hit].used = true;
+    }
+    coop_npc_stats_sig[hit].sig = sig;
+    coop_npc_stats_sig[hit].ms = now_ms != 0 ? now_ms : 1;
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt)
+{
+    ObjectID oid;
+    int64_t npc;
+    int64_t leader;
+    int i;
+    int old_max;
+    bool changed = false;
+
+    if (!tig_net_is_active() || tig_net_is_host()
+        || !coop_lite_npc_stats_valid(pkt, tig_net_last_message_size())
+        || !coop_lite_client_world_ready()) {
+        return;
+    }
+    memcpy(&oid, pkt->oid, sizeof(oid));
+    npc = obj_pool_perm_lookup(oid);
+    if (npc == OBJ_HANDLE_NULL || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+        return;
+    }
+    leader = critter_leader_get(npc);
+    if (leader == OBJ_HANDLE_NULL || coop_lite_slot_of_obj(leader) < 0) {
+        return; /* only party followers (the FOLLOWERS table binds them first) */
+    }
+    old_max = object_hp_max(npc);
+    multiplayer_lock();
+    tig_net_local_suspend_begin();
+    for (i = 0; i < COOP_NPC_STATS_COUNT; i++) {
+        if (obj_arrayfield_int32_get(npc, OBJ_F_CRITTER_STAT_BASE_IDX, i) != pkt->stats[i]) {
+            obj_arrayfield_int32_set(npc, OBJ_F_CRITTER_STAT_BASE_IDX, i, pkt->stats[i]);
+            changed = true;
+        }
+    }
+    if (obj_field_int32_get(npc, OBJ_F_HP_PTS) != pkt->hp_pts) {
+        obj_field_int32_set(npc, OBJ_F_HP_PTS, pkt->hp_pts);
+        changed = true;
+    }
+    if (obj_field_int32_get(npc, OBJ_F_HP_ADJ) != pkt->hp_adj) {
+        obj_field_int32_set(npc, OBJ_F_HP_ADJ, pkt->hp_adj);
+        changed = true;
+    }
+    if (obj_field_int32_get(npc, OBJ_F_CRITTER_FATIGUE_PTS) != pkt->fatigue_pts) {
+        obj_field_int32_set(npc, OBJ_F_CRITTER_FATIGUE_PTS, pkt->fatigue_pts);
+        changed = true;
+    }
+    if (obj_field_int32_get(npc, OBJ_F_CRITTER_FATIGUE_ADJ) != pkt->fatigue_adj) {
+        obj_field_int32_set(npc, OBJ_F_CRITTER_FATIGUE_ADJ, pkt->fatigue_adj);
+        changed = true;
+    }
+    tig_net_local_suspend_end();
+    multiplayer_unlock();
+    if (changed) {
+        tig_debug_printf("CoopLite: follower build synced: level %d, max hp %d -> %d\n",
+            pkt->stats[17], old_max, object_hp_max(npc));
+    }
+}
+
 void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt)
 {
     int added;
@@ -16809,6 +17110,12 @@ void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt)
     }
     if (!tig_net_is_host() && !coop_lite_client_in_session) {
         return;
+    }
+    if (!tig_net_is_host() && !coop_area_baseline) {
+        area_known_clear_all(); /* PT79: the host's set is the baseline */
+        coop_area_baseline = true;
+        coop_area_sent_count = -1;
+        tig_debug_printf("CoopLite: areas: host's known locations adopted as the baseline\n");
     }
     added = area_known_bits_merge(pkt->bits, pkt->count);
     if (added > 0) {
@@ -17954,7 +18261,10 @@ void coop_lite_client_queue_door_use(int64_t portal) { (void)portal; }
 void coop_lite_handle_door_use(PacketCoopDoorUse* pkt) { (void)pkt; }
 bool coop_lite_area_pc_shared(int64_t pc_obj) { (void)pc_obj; return false; }
 void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt) { (void)pkt; }
+void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt) { (void)pkt; }
+static void coop_lite_host_npc_stats(int64_t npc, unsigned int now_ms) { (void)npc; (void)now_ms; }
 static void coop_lite_area_tick(unsigned int now_ms) { (void)now_ms; }
+void coop_lite_area_session_reset(void) { }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
 void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
 void coop_lite_host_object_destroyed(int64_t obj) { (void)obj; }
@@ -19637,6 +19947,7 @@ static void coop_lite_host_dev_auto_resurrect_tick(unsigned int now_ms)
  */
 static void coop_lite_session_reset_extra(void)
 {
+    coop_lite_area_session_reset(); /* PT79 */
     coop_inv_owner_cnt = 0;
     coop_inv_entry_cnt = 0;
     coop_inv_overflow = false;

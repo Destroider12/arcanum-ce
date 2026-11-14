@@ -185,11 +185,12 @@ static const char* const tig_net_stat_coop_names[] = {
     "THROW_INTENT",
     "PROJECTILE_FX",
     "AREA_KNOWN",
+    "NPC_STATS",
 };
 
 static const char* tig_net_stat_type_name(int type, char* scratch, size_t scratch_n)
 {
-    if (type >= 128 && type <= 165) {
+    if (type >= 128 && type <= 166) {
         return tig_net_stat_coop_names[type - 128];
     }
     snprintf(scratch, scratch_n, "P%d", type);
