@@ -3599,3 +3599,26 @@ it happens.
 
 Protocol 52 (host and clients must update). Verified by unit tests and builds
 only; not tested in play.
+
+## PT80b — Arbalah missing from his house (Shrouded Hills)
+
+Vanilla: Arbalah starts hidden (OF_OFF). His heartbeat script 02787
+(`arbalahhb`) does `IF SFO_PLAYER has quest 1158 (Brehgo's "kill Arbalah")
+in state 0 (unknown) -> keep waiting; ELSE toggle OF_OFF (he appears) and
+remove this script`. Quest 1158 is set by Brehgo's ghost dialog (`qu1158 1`
+on the speaking PC).
+
+Co-op: SFO_PLAYER is the host's PC. Before PT79b a client who heard
+Brehgo's ghost got quest 1158 on its own PC only, so the host's "unknown"
+kept Arbalah hidden forever. PT79b (2d0aeb8b) made it worse: a quest-state
+check on SFO_PLAYER also matched when *any* other party PC had that state,
+so "== unknown" stayed true while any one PC lacked the quest, even after the
+host took it.
+
+Fix (`script.c`, SCT_PC_QUEST_STATE, co-op host, SFO_PLAYER): a check for
+QUEST_STATE_UNKNOWN is true only if nobody in the party knows the quest; the
+PT79b any-member match still applies to every other state. Existing saves
+recover: the heartbeat is only removed after it fires, so Arbalah appears
+the next time the party is near his house, as long as some party PC has
+quest 1158. Nobody having heard Brehgo's ghost keeps him hidden (vanilla).
+No wire change; protocol stays 52. Not tested in play.

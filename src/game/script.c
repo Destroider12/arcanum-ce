@@ -85,6 +85,7 @@ static void sub_44B8F0(ScriptFocusObject type, ObjectList* l);
 static int64_t script_get_obj(ScriptFocusObject type, int index, ScriptState* state);
 static bool script_coop_party_player(int focus);
 static bool script_coop_party_quest_match(int64_t host_pc, int quest, int quest_state);
+static bool script_coop_party_quest_known(int64_t host_pc, int quest);
 static void script_coop_party_quest_set(int quest, int quest_state, int64_t npc_obj);
 static void script_set_obj(ScriptFocusObject type, int index, ScriptState* state, int64_t obj);
 static int script_get_value(ScriptValueType type, int index, ScriptState* state);
@@ -690,9 +691,21 @@ int script_execute_condition(ScriptCondition* condition, int line, ScriptState* 
                 matched++;
             }
         }
-        if (matched == 0 && cnt == 1 && script_coop_party_player(condition->op_type[0])
-            && script_coop_party_quest_match(objs[0], quest, quest_state)) {
-            matched = 1; /* PT79b: another player of the party has it */
+        if (cnt == 1 && script_coop_party_player(condition->op_type[0])) {
+            if (quest_state == QUEST_STATE_UNKNOWN) {
+                /* PT80b: "the player has never heard of it" means nobody in
+                   the party has. PT79b's any-member match made this true
+                   whenever one PC lacked the quest, and the host-only
+                   check before it ignored a client that took it: Arbalah's
+                   heartbeat (02787, "SFO_PLAYER quest 1158 == 0 -> stay
+                   hidden") kept him OF_OFF after the party got Brehgo's
+                   quest, so his house stayed empty. */
+                if (matched != 0 && script_coop_party_quest_known(objs[0], quest)) {
+                    matched = 0;
+                }
+            } else if (matched == 0 && script_coop_party_quest_match(objs[0], quest, quest_state)) {
+                matched = 1; /* PT79b: another player of the party has it */
+            }
         }
         sub_44B8F0(condition->op_type[0], &objects);
         if (matched != 0
@@ -3257,6 +3270,22 @@ static bool script_coop_party_quest_match(int64_t host_pc, int quest, int quest_
 
         if (pc != OBJ_HANDLE_NULL && pc != host_pc && coop_lite_is_party_pc(pc)
             && quest_state_get(pc, quest) == quest_state) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* PT80b: another party PC knows the quest (any state but unknown). */
+static bool script_coop_party_quest_known(int64_t host_pc, int quest)
+{
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && pc != host_pc && coop_lite_is_party_pc(pc)
+            && quest_state_get(pc, quest) != QUEST_STATE_UNKNOWN) {
             return true;
         }
     }
