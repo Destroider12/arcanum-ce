@@ -177,6 +177,12 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
        the single dialog entry from the host's own conversation. */
     if (!party && tig_net_is_coop_enabled() && tig_net_is_host() && !player_is_local_pc_obj(pc_obj)
         && pc_obj != OBJ_HANDLE_NULL && obj_field_int32_get(pc_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        /* PT81: an NPC-started dialog becomes that client's party dialog. */
+        if (coop_lite_host_npc_party_begin(pc_obj, npc_obj)) {
+            dialog_ui_start_dialog(pc_obj, npc_obj, script_num, script_line, num);
+            coop_lite_host_npc_party_end(pc_obj);
+            return;
+        }
         tig_debug_printf("DialogUI: remote PC dialog skipped on host\n");
         return;
     }

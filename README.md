@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 45`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 52`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -51,6 +51,8 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Dialogs:** NPC dialogs run on the host, with restrictions on which player may talk.
 - **Chat:** Enter opens the broadcast field; messages float over the sender and appear in a small fading log for everyone. The launcher mirrors chat while the game runs.
 - **Loot, merchants, and pickpocketing**, resolved by the host.
+- **Follower item exchange:** a client can open the barter/exchange window with their own follower (from the follower's dialog); the host validates every transfer.
+- **Known world-map locations:** areas discovered by any player are shared with the whole party (sent on join and when new ones are found).
 - Animation and combat state of PCs and NPCs.
 
 ### Travel
@@ -133,15 +135,17 @@ See the upstream build notes below. Use the CMake presets, or a mingw-w64 cross-
 
 ## Known limitations
 
-- **Pre-release, limited testing.** The full campaign has **not** been played through in co-op yet. So far it has been tested **only on a single local machine** (host and client on the same PC, 127.0.0.1). It has **not** been tested over a real network or between separate PCs, and the Steam transport is **untested**. Expect bugs and desyncs.
+- **Pre-release, limited testing.** The full campaign has **not** been played through in co-op yet. There have been only a few short playtests (on one PC and over the internet between two PCs), and many recent fixes are **not tested in play** yet. Expect bugs and desyncs.
 - Windows x64 only for co-op. Other platforms are untested.
 - The **Steam transport** has not been tested at all yet.
+- **Cyrillic (non-Latin) text input is not supported** (chat, names).
+- Known open bug: a client could sometimes no longer move after dialogs; the cause is not found yet. If it happens, please send both logs (host and client).
 - The world map is driven by the host. Clients can't travel on their own.
 - When the ready check delays a world-map stop, the host can stand at the old spot until the check finishes.
 - While the host is down, each reconnect attempt can block the client's menu for up to about 5 s.
 - No protection against deliberately cheating clients (see the trust model).
 - The launcher update check (PT65) is new and off by default.
-- **Arcanum: ReForged** compatibility is a design goal but is **not finished or verified**.
+- **Arcanum: ReForged** is **not supported**: compatibility is a goal, but it is not done or verified, so expect it not to work.
 
 ## Roadmap
 

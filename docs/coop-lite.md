@@ -3622,3 +3622,38 @@ recover: the heartbeat is only removed after it fires, so Arbalah appears
 the next time the party is near his house, as long as some party PC has
 quest 1158. Nobody having heard Brehgo's ghost keeps him hidden (vanilla).
 No wire change; protocol stays 52. Not tested in play.
+
+## PT81 — pre-release review fixes (no wire change, protocol stays 52)
+
+Four findings from an external review of 2fe933cd, each checked against the code.
+
+1. **Client follower exchange before the FOLLOWERS table (confirmed).** If the
+   NPC is recruited in the same dialog and the exchange opens before the next
+   FOLLOWERS table arrives, the client's local copy still has no leader, and the
+   inventory UI refused the follower. `coop_lite_client_exchange_tick` now binds
+   the NPC to the local PC first (same pattern as the FOLLOWERS handler:
+   `multiplayer_lock` + `tig_net_local_suspend_begin` + `critter_follow`). It is
+   local only and sends no packets. The next FOLLOWERS table is still
+   authoritative, and the host still validates every transfer.
+   Log: `exchange: '<name>' bound to us ahead of the FOLLOWERS table: done|failed`.
+2. **NPC-initiated dialogs with a client PC (confirmed).** They were dropped
+   (`remote PC dialog skipped on host`). The host now opens them as a party
+   dialog for that slot (`coop_lite_host_npc_party_begin/_end` in
+   `dialog_ui_start_dialog`), using the same distance/busy checks as a
+   client-started talk. Limited to one attempt per slot every 5 s, and skipped
+   while another party dialog/vote is open or the host is in combat (then the
+   old skip log is kept). Logs: `party dialog: an NPC starts a dialog with slot N`,
+   `got no dialog (NPC start)`. This most likely does **not** explain the client
+   movement freeze (PT80 C): the client was never put into a dialog there.
+3. **Known areas on join (adjusted).** Sending `PACKET_COOP_AREA_KNOWN` right
+   after `SESSION_SYNC` alone would not help: the client drops it until it is
+   in session (after the teleport/world load). So the host sends it to the slot
+   right after `SESSION_SYNC` (`areas: known locations sent to slot N with
+   SESSION_SYNC`), and the client buffers the latest one and applies it when
+   `coop_lite_client_finish_sync` marks it in session.
+4. **README / README.ru:** protocol 45 → 52, follower exchange and shared
+   world-map locations added, known limitations refreshed (few playtests, many
+   fixes untested in play, Steam untested, ReForged not supported, no Cyrillic
+   input, open client movement freeze bug).
+
+Not tested in play.

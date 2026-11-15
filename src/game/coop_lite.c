@@ -1206,6 +1206,8 @@ static void coop_lite_client_pc_stats_tick(unsigned int now_ms);
 static void coop_lite_host_story_tick(unsigned int now_ms);
 static void coop_lite_client_story_tick(unsigned int now_ms);
 static void coop_lite_area_tick(unsigned int now_ms); /* PT78 */
+static void coop_lite_host_area_send_slot(int slot); /* PT81 */
+static void coop_lite_area_pending_flush(void); /* PT81 */
 static void coop_lite_host_npc_stats(int64_t npc, unsigned int now_ms); /* PT79 */
 static void coop_lite_story_reset(void);
 static void coop_lite_host_dialog_tick(unsigned int now_ms);
@@ -4726,6 +4728,7 @@ static bool coop_lite_host_spawn_client(int slot)
 
     /* Per-slot: only this client may apply it. */
     tig_net_send_app(&sync, sizeof(sync), slot);
+    coop_lite_host_area_send_slot(slot); /* PT81 */
     coop_pending_offers[slot].valid = false;
     coop_layout_seq_applied[slot] = 0; /* PT54: a (re)joined client numbers its layouts from 1 */
     coop_lite_host_vitals_force(); /* PT54: host PC alive/dead + HP to the (re)joined client */
@@ -4849,6 +4852,7 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     coop_lite_session_synced = true;
     coop_lite_client_in_session = true;
     coop_client_pos_valid = false;
+    coop_lite_area_pending_flush(); /* PT81 */
 
     /* Camera on our own PC (like SP New Game); roofs/walls too (PT77l). */
     coop_lite_client_refresh_own_view(local_pc);
@@ -10386,6 +10390,7 @@ static void (*coop_dialog_host_refresh_hook)(void);
 static int coop_party_slot = -1;
 static int64_t coop_party_pc;
 static unsigned int coop_party_start_ms[8];
+static unsigned int coop_party_npc_ms[8]; /* PT81: last NPC-started party dialog per slot */
 static unsigned int coop_party_choose_ms;
 static bool (*coop_party_choose_hook)(int option);
 /* client */
@@ -10464,6 +10469,7 @@ static void coop_lite_dialog_reset(void)
     coop_party_talk_sent = false;
     coop_party_exchange_pending = 0;
     coop_party_exchange_open = false;
+    memset(coop_party_npc_ms, 0, sizeof(coop_party_npc_ms));
 }
 
 static void coop_dialog_votes_ensure(void)
@@ -10590,6 +10596,62 @@ static void coop_lite_host_handle_party_start(const PacketCoopDialogState* pkt)
         coop_party_slot = -1;
         coop_party_pc = OBJ_HANDLE_NULL;
         tig_debug_printf("CoopLite: party dialog: slot %d got no dialog\n", slot);
+    }
+}
+
+/* PT81 (review 2): an NPC starts a dialog with a client's PC (script
+   SAT_DIALOG, e.g. Tarant noble script 1581). The host used to drop it
+   ("remote PC dialog skipped on host"), so the client never saw it and the
+   NPC retried every second or so. Run it as that client's party dialog,
+   with the same checks as a client-started one, at most once per 5 s per
+   slot. */
+#define COOP_PARTY_NPC_INTERVAL_MS 5000u
+
+bool coop_lite_host_npc_party_begin(int64_t pc_obj, int64_t npc_obj)
+{
+    unsigned int now_ms = (unsigned int)(SDL_GetTicksNS() / 1000000u);
+    int64_t host;
+    int slot;
+    int r;
+
+    if (!tig_net_is_active() || !tig_net_is_host() || !tig_net_is_coop_enabled()
+        || pc_obj == OBJ_HANDLE_NULL || npc_obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    slot = coop_lite_slot_of_obj(pc_obj);
+    if (slot < 1 || slot >= 8 || !tig_net_client_is_active(slot)) {
+        return false;
+    }
+    if (coop_party_npc_ms[slot] != 0
+        && !coop_lite_interval_elapsed(coop_party_npc_ms[slot], now_ms, COOP_PARTY_NPC_INTERVAL_MS)) {
+        return false;
+    }
+    host = player_get_local_pc_obj();
+    if (host == OBJ_HANDLE_NULL || !map_is_valid() || map_is_clearing_objects()
+        || obj_field_int32_get(npc_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC || critter_is_dead(npc_obj)
+        || critter_is_dead(pc_obj) || critter_is_unconscious(pc_obj)
+        || combat_critter_is_combat_mode_active(pc_obj)) {
+        return false;
+    }
+    r = coop_lite_party_talk_check(slot, (int)object_dist(pc_obj, npc_obj), (int)object_dist(host, npc_obj),
+        coop_party_slot > 0 || coop_dialog_votes.open || combat_critter_is_combat_mode_active(host));
+    if (r != 0) {
+        return false;
+    }
+    coop_party_npc_ms[slot] = now_ms != 0 ? now_ms : 1;
+    coop_party_start_ms[slot] = coop_party_npc_ms[slot];
+    coop_party_slot = slot;
+    coop_party_pc = pc_obj;
+    tig_debug_printf("CoopLite: party dialog: an NPC starts a dialog with slot %d\n", slot);
+    return true;
+}
+
+void coop_lite_host_npc_party_end(int64_t pc_obj)
+{
+    if (coop_party_slot > 0 && coop_party_pc == pc_obj && !coop_dialog_votes.open) {
+        tig_debug_printf("CoopLite: party dialog: slot %d got no dialog (NPC start)\n", coop_party_slot);
+        coop_party_slot = -1;
+        coop_party_pc = OBJ_HANDLE_NULL;
     }
 }
 
@@ -17018,9 +17080,12 @@ static unsigned int coop_area_key_ms;
    bits may be from a later save or another game and would leak into an
    earlier host save). */
 static bool coop_area_baseline;
+static PacketCoopAreaKnown coop_area_pending; /* PT81 */
+static bool coop_area_pending_valid;
 
 void coop_lite_area_session_reset(void)
 {
+    coop_area_pending_valid = false;
     coop_area_baseline = false;
     coop_area_sent_count = -1;
     coop_area_key_ms = 0;
@@ -17059,6 +17124,22 @@ static void coop_lite_area_tick(unsigned int now_ms)
     coop_area_sent_count = pkt.count;
     memcpy(coop_area_sent, pkt.bits, sizeof(pkt.bits));
     tig_net_send_app_all(&pkt, sizeof(pkt));
+}
+
+/* PT81 (review 3): a (re)joined slot gets the host's set together with
+   SESSION_SYNC instead of on the next 10 s keyframe. */
+static void coop_lite_host_area_send_slot(int slot)
+{
+    PacketCoopAreaKnown pkt;
+
+    if (!tig_net_is_host() || slot < 1 || slot >= 8) {
+        return;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_AREA_KNOWN;
+    pkt.count = area_known_bits_get(pkt.bits, COOP_AREA_KNOWN_MAX);
+    tig_net_send_app(&pkt, sizeof(pkt), slot);
+    tig_debug_printf("CoopLite: areas: known locations sent to slot %d with SESSION_SYNC (%d)\n", slot, pkt.count);
 }
 
 /* PT79 (review 1.4): NPC followers level on the host only (xp from the
@@ -17185,17 +17266,37 @@ void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt)
     }
 }
 
+static void coop_lite_area_known_apply(const PacketCoopAreaKnown* pkt);
+
 void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt)
 {
-    int added;
-
     if (!tig_net_is_active() || !tig_net_is_coop_enabled()
         || !coop_lite_area_known_valid(pkt, tig_net_last_message_size())) {
         return;
     }
     if (!tig_net_is_host() && !coop_lite_client_in_session) {
+        /* PT81: the host's set rides with SESSION_SYNC, which the client
+           applies only after its own load/teleport: keep the newest one. */
+        coop_area_pending = *pkt;
+        coop_area_pending_valid = true;
         return;
     }
+    coop_lite_area_known_apply(pkt);
+}
+
+/* PT81: client, session just synced: the set that arrived with SESSION_SYNC. */
+static void coop_lite_area_pending_flush(void)
+{
+    if (coop_area_pending_valid && !tig_net_is_host() && coop_lite_client_in_session) {
+        coop_area_pending_valid = false;
+        coop_lite_area_known_apply(&coop_area_pending);
+    }
+}
+
+static void coop_lite_area_known_apply(const PacketCoopAreaKnown* pkt)
+{
+    int added;
+
     if (!tig_net_is_host() && !coop_area_baseline) {
         area_known_clear_all(); /* PT79: the host's set is the baseline */
         coop_area_baseline = true;
@@ -18349,6 +18450,8 @@ void coop_lite_handle_area_known(PacketCoopAreaKnown* pkt) { (void)pkt; }
 void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt) { (void)pkt; }
 static void coop_lite_host_npc_stats(int64_t npc, unsigned int now_ms) { (void)npc; (void)now_ms; }
 static void coop_lite_area_tick(unsigned int now_ms) { (void)now_ms; }
+static void coop_lite_host_area_send_slot(int slot) { (void)slot; }
+static void coop_lite_area_pending_flush(void) { }
 void coop_lite_area_session_reset(void) { }
 void coop_lite_host_portal_touch(int64_t portal) { (void)portal; }
 void coop_lite_host_object_touch(int64_t obj) { (void)obj; }
@@ -19571,6 +19674,37 @@ static void coop_lite_client_exchange_tick(void)
     }
     name[0] = '\0';
     object_examine(npc, pc, name);
+    if (critter_leader_get(npc) != pc && obj_field_int32_get(npc, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
+        /* PT81 (review 1): the host checked that it follows us (ACT_EXCHANGE
+           is only sent for the speaker's own follower), but our copy has not
+           seen the FOLLOWERS table yet (recruited in this very dialog):
+           inven_ui would open merchant barter (0 gold, every move refused).
+           Bind it here exactly as the FOLLOWERS handler does - local only,
+           no packets; the next table stays authoritative (it disbands an
+           NPC the host no longer lists). */
+        bool ok;
+        int i;
+
+        multiplayer_lock();
+        tig_net_local_suspend_begin();
+        ok = critter_follow(npc, pc, true);
+        tig_net_local_suspend_end();
+        multiplayer_unlock();
+        if (ok) {
+            ObjectID oid = obj_get_id(npc);
+
+            for (i = 0; i < coop_client_followers_cnt; i++) {
+                if (coop_lite_oid_raw_equal(&oid, &coop_client_followers[i])) {
+                    break;
+                }
+            }
+            if (i == coop_client_followers_cnt && coop_client_followers_cnt < COOP_FOLLOWERS_MAX) {
+                coop_client_followers[coop_client_followers_cnt++] = oid;
+            }
+        }
+        tig_debug_printf("CoopLite: exchange: '%s' bound to us ahead of the FOLLOWERS table: %s\n", name,
+            ok ? "done" : "failed");
+    }
     tig_debug_printf("CoopLite: exchange: opening the exchange window with '%s' (leader here: %s)\n", name,
         critter_leader_get(npc) == pc ? "me" : "not me");
     coop_inven_open_hook(pc, npc, 1 /* INVEN_UI_MODE_BARTER */);

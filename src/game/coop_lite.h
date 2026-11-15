@@ -1950,6 +1950,10 @@ bool coop_lite_client_party_talk(int64_t npc_obj, int64_t pc_obj);
 int64_t coop_lite_party_dialog_pc(void);
 /* PT80 host: the party dialog speaker picked "let's trade" with its own follower. */
 void coop_lite_party_dialog_exchange(int64_t pc_obj, int64_t npc_obj);
+/* PT81 host: an NPC-started dialog with a client's PC runs as its party
+   dialog (true = party state set; call _end after the start attempt). */
+bool coop_lite_host_npc_party_begin(int64_t pc_obj, int64_t npc_obj);
+void coop_lite_host_npc_party_end(int64_t pc_obj);
 /* PT80: a follower barter (exchange) is free; true when npc follows pc. */
 bool coop_lite_follower_exchange(int64_t pc_obj, int64_t npc_obj);
 void coop_lite_party_dialog_ended(int64_t pc_obj);
