@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "game/critter.h"
+#include "game/coop_lite.h"
 #include "game/mes.h"
 #include "game/stat.h"
 
@@ -195,6 +196,23 @@ bool rumor_qstate_get(int rumor)
     return ((rumor_qstate[pos] >> bit) & 1) != 0;
 }
 
+// Co-op story sync (host -> client): raw quelled bit by index (num - 1000).
+bool rumor_qstate_raw_get(int idx)
+{
+    return idx >= 0 && idx < MAX_RUMORS && ((rumor_qstate[idx / 8] >> (idx % 8)) & 1) != 0;
+}
+
+void rumor_qstate_raw_set(int idx, bool quelled)
+{
+    if (idx >= 0 && idx < MAX_RUMORS) {
+        if (quelled) {
+            rumor_qstate[idx / 8] |= (uint8_t)(1 << (idx % 8));
+        } else {
+            rumor_qstate[idx / 8] &= (uint8_t) ~(1 << (idx % 8));
+        }
+    }
+}
+
 /**
  * Marks a rumor as quelled.
  *
@@ -206,6 +224,10 @@ void rumor_qstate_set(int rumor)
 {
     int pos;
     int bit;
+
+    if (coop_lite_story_write_blocked()) {
+        return;
+    }
 
     pos = rumor_num_to_idx(rumor) / 8;
     bit = rumor_num_to_idx(rumor) % 8;
@@ -275,6 +297,11 @@ void rumor_known_set(int64_t obj, int rumor)
 
     // Ensure the rumor is not already known.
     if (rumor_known_get(obj, rumor)) {
+        return;
+    }
+
+    // Co-op: a client's rumors are the host's.
+    if (coop_lite_story_write_blocked()) {
         return;
     }
 

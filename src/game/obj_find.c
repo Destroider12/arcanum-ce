@@ -1,5 +1,7 @@
 #include "game/obj_find.h"
 
+#include <inttypes.h>
+
 #include "game/obj.h"
 #include "game/sector.h"
 
@@ -156,6 +158,13 @@ void obj_find_remove(int64_t obj)
 
     // Retrieve the object's find node.
     find_node = (FindNode*)obj_field_ptr_get(obj, OBJ_F_FIND_NODE);
+
+    /* CE coop PT63: a co-op client crashed here (NULL node) while a map
+       reload freed an object whose node had already been released. */
+    if (find_node == NULL) {
+        tig_debug_printf("Error: obj_find_remove: object %" PRIx64 " has no find node (already removed) - skipped\n", obj);
+        return;
+    }
 
     // Validate that the node is active.
     if ((find_node->flags & 0x02) == 0) {

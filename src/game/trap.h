@@ -21,6 +21,7 @@ bool trap_init(GameInitInfo* init_info);
 void trap_exit(void);
 bool trap_timeevent_process(TimeEvent* timeevent);
 int trap_type(int64_t obj);
+void trap_remove(int64_t trap_obj);
 bool trap_attempt_spot(int64_t pc_obj, int64_t trap_obj);
 bool trap_is_spotted(int64_t pc_obj, int64_t trap_obj);
 void trap_mark_known(int64_t pc_obj, int64_t trap_obj, int reason);

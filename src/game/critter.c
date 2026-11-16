@@ -1,9 +1,12 @@
 #include "game/critter.h"
 
+#include <string.h>
+
 #include "game/ai.h"
 #include "game/anim.h"
 #include "game/background.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/effect.h"
 #include "game/gamelib.h"
 #include "game/item.h"
@@ -12,6 +15,8 @@
 #include "game/magictech.h"
 #include "game/map.h"
 #include "game/mes.h"
+#include "game/mp_utils.h"
+#include "game/multiplayer.h"
 #include "game/monstergen.h"
 #include "game/mt_item.h"
 #include "game/object.h"
@@ -26,6 +31,8 @@
 #include "game/stat.h"
 #include "game/tf.h"
 #include "game/ui.h"
+#include "net/tig_net.h"
+#include "game/coop_lite.h"
 
 typedef enum FatigueEventType {
     FATIGUE_EVENT_RECOVERY,
@@ -36,6 +43,7 @@ static void critter_disband_internal(int64_t obj);
 static bool fatigue_timeevent_check(TimeEvent* timeevent);
 static bool resting_timeevent_check(TimeEvent* timeevent);
 static bool decay_timeevent_check(TimeEvent* timeevent);
+static bool critter_corpse_is_kept(int64_t obj);
 static void critter_set_concealed_internal(int64_t obj, bool concealed);
 
 /**
@@ -478,6 +486,17 @@ int critter_fatigue_damage_set(int64_t obj, int value)
     obj_field_int32_set(obj, OBJ_F_CRITTER_FATIGUE_DAMAGE, value);
     ui_refresh_fatigue_bar(obj);
 
+    if (tig_net_is_active() && tig_net_is_host() && !multiplayer_is_locked()) {
+        Packet100 pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type = 100;
+        pkt.subtype = 13;
+        pkt.d.z.field_8 = obj_get_id(obj);
+        pkt.d.z.field_38 = object_hp_damage_get(obj);
+        pkt.d.z.field_3C = value;
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+
     if (value != 0 && !obj_is_proto(obj)) {
         // Schedule fatigue recovery every 80 game seconds (10 RL seconds).
         critter_fatigue_timeevent_schedule(obj, FATIGUE_EVENT_RECOVERY, 80000);
@@ -720,11 +739,20 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
         }
 
         // Remove victim from the group.
+        // PT77q: mark a kept companion corpse first, while its leader
+        // chain still reaches a PC, and do not restore NPC_LEADER after
+        // disband (the body is no longer in the PC's follower list, and
+        // leaving the leader set made coop_lite_npc_follows_other_player
+        // treat the corpse as an active follower). OCF2_NO_DECAY is what
+        // stops the body vanishing, including after a map change.
+        if (critter_corpse_is_kept(victim_obj)) {
+            obj_field_int32_set(victim_obj, OBJ_F_CRITTER_FLAGS2,
+                obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) | OCF2_NO_DECAY);
+        }
         leader_obj = critter_leader_get(victim_obj);
         if (leader_obj != OBJ_HANDLE_NULL) {
             critter_disband(victim_obj, true);
         }
-        critter_leader_set(victim_obj, leader_obj);
 
         // Notify monstergen system of kill.
         monstergen_notify_killed(victim_obj);
@@ -743,8 +771,14 @@ void critter_notify_killed(int64_t victim_obj, int64_t killer_obj, int anim)
     // Play dying animation.
     anim_goal_dying(victim_obj, anim);
 
-    // Schedule body decay.
-    if ((obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) == 0) {
+    // Schedule body decay. PT66: player and companion bodies never decay
+    // (they can be carried back and resurrected); they are marked
+    // OCF2_NO_DECAY, a saved vanilla flag, so it holds across map changes.
+    if (critter_corpse_is_kept(victim_obj)) {
+        obj_field_int32_set(victim_obj, OBJ_F_CRITTER_FLAGS2,
+            obj_field_int32_get(victim_obj, OBJ_F_CRITTER_FLAGS2) | OCF2_NO_DECAY);
+        critter_decay_timeevent_cancel(victim_obj);
+    } else {
         critter_decay_timeevent_schedule(victim_obj);
     }
 
@@ -878,6 +912,12 @@ bool critter_follow(int64_t follower_obj, int64_t leader_obj, bool force)
 {
     unsigned int flags;
 
+    /* Coop: followers are host-owned; clients only receive them. */
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        tig_debug_printf("critter_follow: refused on coop client\n");
+        return false;
+    }
+
     // Validate follower is an NPC.
     if (obj_field_int32_get(follower_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
         return false;
@@ -936,6 +976,10 @@ bool critter_disband(int64_t obj, bool force)
 {
     int64_t leader_obj;
     int64_t v1;
+
+    if (coop_lite_is_client_role() && !multiplayer_is_locked()) {
+        return false;
+    }
 
     leader_obj = critter_leader_get(obj);
     if (leader_obj != OBJ_HANDLE_NULL) {
@@ -1546,12 +1590,47 @@ bool critter_decay_timeevent_process(TimeEvent* timeevent)
             return false;
         }
 
+        // PT66: a decay queued before this fix (old save) or before the
+        // body was marked: a player's / companion's body stays.
+        if (critter_corpse_is_kept(obj)) {
+            return true;
+        }
+
         sub_463860(obj, true);
     }
 
     object_destroy(obj);
 
     return true;
+}
+
+/* PT66/PT77q: a PC, an NPC whose leader chain still reaches a PC (checked
+   before disband), or a body already marked OCF2_NO_DECAY. */
+static bool critter_corpse_is_kept(int64_t obj)
+{
+    int type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    bool leads_to_pc = false;
+
+    if (!obj_type_is_critter(type)) {
+        return false;
+    }
+    if (type == OBJ_TYPE_NPC) {
+        int64_t leader = obj;
+        int guard = 0;
+
+        while (guard++ < 16) {
+            leader = critter_leader_get(leader);
+            if (leader == OBJ_HANDLE_NULL) {
+                break;
+            }
+            if (obj_field_int32_get(leader, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+                leads_to_pc = true;
+                break;
+            }
+        }
+    }
+    return coop_lite_corpse_keep(type == OBJ_TYPE_PC, leads_to_pc,
+        (obj_field_int32_get(obj, OBJ_F_CRITTER_FLAGS2) & OCF2_NO_DECAY) != 0);
 }
 
 /**
@@ -1836,8 +1915,6 @@ int critter_xp_worth(int64_t obj)
  */
 void critter_give_xp(int64_t obj, int xp_gain)
 {
-    int xp;
-
     if (obj_field_int32_get(obj, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return;
     }
@@ -1855,6 +1932,25 @@ void critter_give_xp(int64_t obj, int xp_gain)
         xp_gain -= xp_gain / 2;
         break;
     }
+
+    // Co-op: XP is the host's (clients get it with the PC build sync), and
+    // the host splits it among the living party.
+    if (tig_net_is_active() && tig_net_is_coop_enabled()) {
+        if (!tig_net_is_host() || coop_lite_host_share_xp(obj, xp_gain)) {
+            return;
+        }
+    }
+
+    critter_award_xp(obj, xp_gain);
+}
+
+/**
+ * Adds already difficulty-adjusted XP to a living PC (the vanilla tail of
+ * critter_give_xp, also used by the co-op party split).
+ */
+void critter_award_xp(int64_t obj, int xp_gain)
+{
+    int xp;
 
     // Single-player game - just give all reward to the local PC.
     if (!critter_is_dead(obj)) {
