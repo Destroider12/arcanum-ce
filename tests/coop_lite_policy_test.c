@@ -2621,6 +2621,14 @@ int main(int argc, char** argv)
                 fprintf(stderr, "PT77 sanitize got '%s'\n", buf);
                 return 1;
             }
+            /* PT83: idle critters (no effects, no light) keyframe slower. */
+            if (coop_lite_fx_keyframe_ms(0, false) != COOP_FX_KEYFRAME_IDLE_MS
+                || coop_lite_fx_keyframe_ms(2, false) != COOP_FX_KEYFRAME_MS
+                || coop_lite_fx_keyframe_ms(0, true) != COOP_FX_KEYFRAME_MS
+                || COOP_FX_KEYFRAME_IDLE_MS <= COOP_FX_KEYFRAME_MS) {
+                fprintf(stderr, "PT83 fx keyframe policy\n");
+                return 1;
+            }
             if (coop_lite_chat_prepare("   ", buf, sizeof(buf)) || !coop_lite_chat_prepare("yo", buf, sizeof(buf))) {
                 fprintf(stderr, "PT77 prepare\n");
                 return 1;

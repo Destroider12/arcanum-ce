@@ -727,6 +727,9 @@ bool coop_lite_chat_valid(const PacketCoopChat* pkt, int size);
 /* Strip/replace control chars, trim, clamp to max_len (NUL-terminated). */
 void coop_lite_chat_sanitize(char* text, size_t max_len);
 /* Copy + sanitize into out; returns false if the result is empty. */
+#define COOP_FX_KEYFRAME_MS 5000u
+#define COOP_FX_KEYFRAME_IDLE_MS 15000u
+unsigned int coop_lite_fx_keyframe_ms(int effect_count, bool has_light); /* PT83 */
 bool coop_lite_chat_prepare(const char* in, char* out, size_t out_size);
 /* Format "[Name]: text" into out; always NUL-terminated. */
 void coop_lite_chat_format_line(const char* name, const char* text, char* out, size_t out_size);

@@ -1536,11 +1536,27 @@ static void start_check(bool probe_port)
         return;
     }
     job = (PortCheckJob*)malloc(sizeof(*job));
+    if (job == NULL) {
+        InterlockedExchange(&g_check_running, 0); /* PT83 */
+        return;
+    }
     GetWindowTextA(item(IDC_ADDR), addr, sizeof(addr));
     job->port = port_of(addr);
     job->probe_port = probe_port;
     SetWindowTextA(item(IDC_CHECK_OUT), "Checking the port... (a few seconds)");
-    CloseHandle(CreateThread(NULL, 0, check_thread, job, 0, NULL));
+    {
+        HANDLE th = CreateThread(NULL, 0, check_thread, job, 0, NULL);
+
+        if (th == NULL) {
+            /* PT83: no thread - the check never ran and the button stayed
+               dead for the rest of the session. */
+            free(job);
+            InterlockedExchange(&g_check_running, 0);
+            SetWindowTextA(item(IDC_CHECK_OUT), "Port check could not start.");
+        } else {
+            CloseHandle(th);
+        }
+    }
 }
 
 static void add_firewall_rule(void)
@@ -1590,6 +1606,9 @@ static void upd_post(int ready, const char* fmt, const char* a)
 {
     char* t = (char*)malloc(300);
 
+    if (t == NULL) {
+        return; /* PT83 */
+    }
     snprintf(t, 300, fmt, a != NULL ? a : "");
     PostMessageA(g_wnd, WM_APP_UPD, (WPARAM)ready, (LPARAM)t);
 }

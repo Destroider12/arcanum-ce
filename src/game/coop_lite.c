@@ -9867,7 +9867,6 @@ static void coop_lite_host_pc_stats_tick(unsigned int now_ms)
 }
 
 #define COOP_FX_CACHE 512
-#define COOP_FX_KEYFRAME_MS 5000u
 typedef struct CoopFxCacheEntry {
     int64_t obj;
     unsigned int sig;
@@ -9935,7 +9934,7 @@ static void coop_lite_host_critter_effects_send(int64_t obj)
     sig = coop_lite_critter_effects_sig(n, effects, causes, light_flags, light_aid, light_color);
     c = coop_lite_fx_cache_slot(obj);
     if (c->obj == obj && c->sig == sig
-        && !coop_lite_interval_elapsed(c->sent_ms, coop_obj_now_ms, COOP_FX_KEYFRAME_MS)) {
+        && !coop_lite_interval_elapsed(c->sent_ms, coop_obj_now_ms, coop_lite_fx_keyframe_ms(n, light_flags != 0 || light_aid != 0))) {
         return;
     }
     memset(&pkt, 0, offsetof(PacketCoopCritterEffects, data));
@@ -15841,7 +15840,9 @@ static int64_t coop_world_rx_sectors[COOP_WORLD_FULL_SECTORS];
 static int coop_world_rx_sector_cnt;
 static bool coop_world_rx_sector_overflow;
 static bool coop_world_rx_trunc; /* PT79: host cut the full list - no prune */
-static int coop_world_stats[6]; /* per kind: applied changes */
+/* PT83: indexed by CoopWorldKind up to COOP_WORLD_SECTOR_SCOPE (8); the old
+   [6] was written one past the end for every changed scenery (kind 6). */
+static int coop_world_stats[COOP_WORLD_SECTOR_SCOPE + 1]; /* per kind: applied changes */
 static int coop_world_req_key = -1;
 static unsigned int coop_world_req_ms;
 static int64_t coop_world_req_sector = -1; /* PT77ad */
@@ -21037,6 +21038,15 @@ void coop_lite_chat_sanitize(char* text, size_t max_len)
     while (o > 0 && text[o - 1] == ' ') {
         text[--o] = '\0';
     }
+}
+
+/* PT83: unchanged CRITTER_EFFECTS are re-sent as a keyframe (a lost or
+   too-early packet heals). A critter without effects - most of the NPCs
+   around a PC - only needs it rarely: 5 s for every NPC was ~10 packets/s
+   in a town for nothing. Changes are still sent at once. */
+unsigned int coop_lite_fx_keyframe_ms(int effect_count, bool has_light)
+{
+    return effect_count > 0 || has_light ? COOP_FX_KEYFRAME_MS : COOP_FX_KEYFRAME_IDLE_MS;
 }
 
 bool coop_lite_chat_prepare(const char* in, char* out, size_t out_size)

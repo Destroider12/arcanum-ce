@@ -3694,3 +3694,34 @@ inventory (key ring), and who clicked the gate (`CoopLite: door: ... refused`
 lines).
 
 Not tested in play.
+
+## PT83 — code review: fixes and sync cost
+
+Full review of the coop code at 22b8a0f5. Protocol stays 52 (no wire change).
+
+Fixed:
+- `coop_world_stats[6]` was indexed by world kind up to SCENERY (6) and
+  SECTOR_SCOPE (8): every applied scenery change on a client wrote past the
+  array (static memory corruption). Now sized `COOP_WORLD_SECTOR_SCOPE + 1`.
+- Launcher port check: unchecked `malloc`, and a failed `CreateThread`
+  leaked the job and left `g_check_running` at 1, so the check button never
+  worked again. The update-status `malloc` is checked too.
+
+Sync/bandwidth:
+- CRITTER_EFFECTS keyframe for critters with no effects and no light is
+  15 s instead of 5 s (`coop_lite_fx_keyframe_ms`). Those are most NPCs near
+  a PC, so the steady background traffic drops ~3x; any change is still sent
+  at once, and critters with effects/light keep the 5 s heal keyframe.
+
+Verified non-issues: handle_pc_pos `sender` warning, cursor NULL (guarded),
+snprintf truncation warnings, PC name/char bundle/batch length checks, chat
+rate limit, speaker/vote cleanup on disconnect.
+
+Deferred (not low risk):
+- Per-handler rate limits for BODY_DRAG / THROW / INVEN_LAYOUT / BARTER
+  requests (bounded by validation today; add `coop_lite_host_rate_ok` kinds
+  if a malicious client becomes a concern).
+- NPC hp cache: full-cache fallback slot collisions only cost extra sends;
+  a larger or per-sector cache would need measurement first.
+- NPC_POS: delta + keyframe already; further savings (quantization, range
+  culling per client) change the wire format — protocol bump, later.
