@@ -2027,7 +2027,18 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
     case SAT_SET_LOCK_STATE: {
         int64_t obj = script_get_obj(action->op_type[0], action->op_value[0], state);
         int num = script_get_value(action->op_type[1], action->op_value[1], state);
-        object_locked_set(obj, num);
+        /* PT82: WorldEd values are 0 = unlocked, 1 = locked, 2 = unlock
+           permanently. Passing 2 as a bool LOCKED the door: Bates' mansion
+           gate (captbatesguard / its heartbeat set 2 once the guard lets
+           you in) stayed locked for good. */
+        if (num == 2) {
+            object_locked_set(obj, false);
+            object_lock_timeevent_cancel(obj);
+            tig_debug_printf("Script: lock state 2 - %s unlocked permanently\n",
+                obj != OBJ_HANDLE_NULL ? "object" : "(none)");
+        } else {
+            object_locked_set(obj, num != 0);
+        }
         return NEXT;
     }
     case SAT_CALL_SCRIPT_IN:

@@ -4190,6 +4190,24 @@ bool object_lock_timeevent_process(TimeEvent* timeevent)
     return true;
 }
 
+/* PT82: drop the pending re-lock of obj (script "unlock permanently"). */
+static int64_t object_lock_cancel_obj;
+
+static bool object_lock_cancel_match(TimeEvent* timeevent)
+{
+    return timeevent->params[0].object_value == object_lock_cancel_obj;
+}
+
+void object_lock_timeevent_cancel(int64_t obj)
+{
+    if (obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+    object_lock_cancel_obj = obj;
+    timeevent_clear_all_ex(TIMEEVENT_TYPE_LOCK, object_lock_cancel_match);
+    object_lock_cancel_obj = OBJ_HANDLE_NULL;
+}
+
 // 0x441F10
 bool object_jammed_set(int64_t obj, bool jammed)
 {

@@ -1695,6 +1695,23 @@ bool sub_463340(int lock_id, int key_id)
     return lock_id == key_id;
 }
 
+/* PT82: a co-op player's PC (host and clients: the client checks the lock
+   itself before it asks the host to open the door). */
+static bool item_coop_party_pc(int64_t obj)
+{
+    int player;
+
+    if (obj == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled() || !tig_net_is_active()) {
+        return false;
+    }
+    for (player = 0; player < 8; player++) {
+        if (sub_4A2B60(player) == obj) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x463370
 bool sub_463370(int64_t obj, int key_id)
 {
@@ -1729,6 +1746,32 @@ bool sub_463370(int64_t obj, int key_id)
 
     if (node != NULL) {
         return true;
+    }
+
+    /* PT82: co-op is one party - a key the guard gave to another player
+       (Isle of Despair gate, Thorvald's house) opens the door for everyone.
+       Vanilla key sharing needs a server option co-op never sets. */
+    if (item_coop_party_pc(leader_obj)) {
+        for (player = 0; player < 8; player++) {
+            party_member_obj = sub_4A2B60(player);
+            if (party_member_obj == OBJ_HANDLE_NULL || party_member_obj == leader_obj) {
+                continue;
+            }
+            if (sub_463240(party_member_obj, key_id)) {
+                tig_debug_printf("Item: co-op key %d found on party slot %d\n", key_id, player);
+                return true;
+            }
+            object_list_all_followers(party_member_obj, &objects);
+            node = objects.head;
+            while (node != NULL && !sub_463240(node->obj, key_id)) {
+                node = node->next;
+            }
+            object_list_destroy(&objects);
+            if (node != NULL) {
+                tig_debug_printf("Item: co-op key %d found with slot %d's follower\n", key_id, player);
+                return true;
+            }
+        }
     }
 
     if (tig_net_is_active()

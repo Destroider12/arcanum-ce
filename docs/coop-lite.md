@@ -3657,3 +3657,40 @@ Four findings from an external review of 2fe933cd, each checked against the code
    input, open client movement freeze bug).
 
 Not tested in play.
+
+## PT82 — guards don't let the party through gates (no wire change, protocol stays 52)
+
+Report: Isle of Despair gate guard, Ogdin (Thorvald's house, after the pit)
+and the guards at Bates' mansion gate don't open the way after the dialog;
+it happens with Denis as host and as client.
+
+Vanilla mechanism (game data, read locally):
+- **Isle of Despair / Ogdin:** the dialog gives a key (`in-4410` "Key to the
+  Gates of the Isle of Despair Encampment", gamekey 11; `in -4419` "Key to
+  Thorvald's House", gamekey 29). The gate opens for whoever carries the key.
+- **Bates' mansion:** the captain's dialog sets `gf1024` and ends in script
+  1060 line 62 (`lock state of the gate (name 806): set to 2`); his heartbeat
+  script 2235 does the same while `gf1024` is set. Line 48 opens it once
+  (toggle, closes 20 game seconds later).
+
+Root causes:
+1. **Lock state 2 locked the gate (upstream bug).** WorldEd: 0 = unlocked,
+   1 = locked, **2 = unlock permanently**. `SAT_SET_LOCK_STATE` passed the
+   number to `object_locked_set(obj, bool)`, so 2 meant "locked": the Bates
+   gate was re-locked by the dialog and by every guard heartbeat. Now 2
+   unlocks and drops the pending re-lock; 0/1 unchanged. Same fix applies to
+   the Tarant orc-uprising factory door (02059) and the tomb secret door
+   (01149). Log: `Script: lock state 2 - object unlocked permanently`.
+2. **Keys weren't shared in co-op.** The key goes to the player who talked.
+   Vanilla shares keys only with a server option co-op never sets, so the
+   other player's PC (host or client) still found the gate locked. Keys
+   carried by any co-op player's PC or its followers now open locks for the
+   whole party (host check and the client's local pre-check). Log:
+   `Item: co-op key N found on party slot S` / `... with slot S's follower`.
+
+If the Isle/Ogdin gate still stays shut for the player who got the key
+himself, need both logs plus: who talked, whether the key is in that
+inventory (key ring), and who clicked the gate (`CoopLite: door: ... refused`
+lines).
+
+Not tested in play.
