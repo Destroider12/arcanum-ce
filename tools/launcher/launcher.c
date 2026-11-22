@@ -802,7 +802,23 @@ static void start_game(void)
     EnableWindow(item(IDC_START), FALSE);
     EnableWindow(item(IDC_UPD_CHECK), FALSE); /* PT65: no update while the game runs */
     EnableWindow(item(IDC_UPD_GO), FALSE);
-    CloseHandle(CreateThread(NULL, 0, game_watch_thread, pi.hProcess, 0, NULL));
+    {
+        HANDLE th = CreateThread(NULL, 0, game_watch_thread, pi.hProcess, 0, NULL);
+
+        if (th == NULL) {
+            /* PT84: nobody would ever post WM_APP_GAMEEXIT - Start, the
+               update buttons and the lobby stayed in "game running" for
+               the rest of the session. Let the game run untracked. */
+            CloseHandle(pi.hProcess);
+            g_game = NULL;
+            EnableWindow(item(IDC_START), TRUE);
+            EnableWindow(item(IDC_UPD_CHECK), TRUE);
+            show_panel(true);
+            set_status("Game started, but the launcher cannot watch it (thread failed).");
+            return;
+        }
+        CloseHandle(th);
+    }
     show_lobby(true);
     set_status(host ? "Game started as host. Friends can join any time (late join)." : "Game started - joining the host.");
 }
@@ -1640,11 +1656,16 @@ static char* upd_get(const char* url, DWORD* out_len, DWORD max)
                 if (len + got + 1 > cap) {
                     char* nb;
 
-                    cap = (len + got + 1) * 2;
-                    if (cap > max) {
+                    if (len + got + 1 > max) {
                         free(buf);
                         buf = NULL;
                         break;
+                    }
+                    /* PT84: doubling past `max` refused bodies between
+                       max/2 and max; clamp instead. */
+                    cap = (len + got + 1) * 2;
+                    if (cap > max) {
+                        cap = max;
                     }
                     nb = (char*)realloc(buf, cap);
                     if (nb == NULL) {
@@ -1993,7 +2014,19 @@ static void upd_start(bool apply)
     }
     EnableWindow(item(IDC_UPD_GO), FALSE);
     SetWindowTextA(item(IDC_UPD_TEXT), apply ? "Updating..." : "Checking for updates...");
-    CloseHandle(CreateThread(NULL, 0, apply ? upd_apply_thread : upd_check_thread, NULL, 0, NULL));
+    {
+        HANDLE th = CreateThread(NULL, 0, apply ? upd_apply_thread : upd_check_thread, NULL, 0, NULL);
+
+        if (th == NULL) {
+            /* PT84: g_upd_busy stayed 1 - Start then refused forever with
+               "Wait for the update to finish". */
+            InterlockedExchange(&g_upd_busy, 0);
+            SetWindowTextA(item(IDC_UPD_TEXT), "Update check could not start.");
+            EnableWindow(item(IDC_UPD_GO), g_upd_ready && g_game == NULL);
+            return;
+        }
+        CloseHandle(th);
+    }
 }
 
 static void upd_on_msg(WPARAM ready, char* text)
