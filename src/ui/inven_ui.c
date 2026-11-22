@@ -4132,6 +4132,9 @@ void sub_578B80(int a1)
     Packet81* pkt;
 
     pkt = (Packet81*)MALLOC(sizeof(*pkt));
+    /* PT84: the NULL ObjectIDs below set only .type; the rest (and the
+       padding) went to the host as uninitialised heap bytes. */
+    memset(pkt, 0, sizeof(*pkt));
     pkt->type = 81;
     pkt->field_5C = dword_739F84;
     pkt->field_8 = dword_739F60;

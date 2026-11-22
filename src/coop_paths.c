@@ -130,8 +130,19 @@ static bool coop_paths_copy_file(const char* dst, const char* src)
             break;
         }
     }
+    /* PT84: a read error or a failed flush (disk full) left a cut cfg in
+       the role folder that was never re-seeded; drop it so the next start
+       copies again. */
+    if (ferror(in)) {
+        ok = false;
+    }
     fclose(in);
-    fclose(out);
+    if (fclose(out) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        remove(dst);
+    }
     return ok;
 }
 

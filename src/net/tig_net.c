@@ -788,9 +788,12 @@ int tig_net_connect_configured(void)
 
     /* PT58: Steam joins a SteamID64 (ARCANUM_COOP_STEAM_HOST wins over -join). */
     target = join_host;
-    if (tp != tig_net_transport_enet() && getenv("ARCANUM_COOP_STEAM_HOST") != NULL
-        && getenv("ARCANUM_COOP_STEAM_HOST")[0] != '\0') {
-        target = getenv("ARCANUM_COOP_STEAM_HOST");
+    if (tp != tig_net_transport_enet()) {
+        const char* steam_host = getenv("ARCANUM_COOP_STEAM_HOST");
+
+        if (steam_host != NULL && steam_host[0] != '\0') {
+            target = steam_host;
+        }
     }
     if (target[0] == '\0') {
         tig_debug_printf("tig_net: join host not configured\n");
@@ -975,8 +978,15 @@ void tig_net_pump(void)
                 } else if (is_host ? clients[from].refused : host_refused) {
                     /* Protocol mismatch: disconnect pending, drop it. */
                 } else if (is_host && from > 0 && !clients[from].handshaken) {
-                    /* No valid HELLO yet: app traffic is not accepted. */
-                    tig_debug_printf("tig_net: dropping app packet from slot %d before handshake\n", from);
+                    /* No valid HELLO yet: app traffic is not accepted.
+                       PT84: log budget - a peer that never says HELLO
+                       could fill the log for the 5 s handshake window. */
+                    static unsigned int log_pre_n;
+
+                    if (tig_net_log_budget(&log_pre_n)) {
+                        tig_debug_printf("tig_net: dropping app packet from slot %d before handshake (%u so far)\n",
+                            from, log_pre_n);
+                    }
                 } else if (!is_host && from != 0) {
                     /* Clients only accept app traffic from the host. */
                 } else if (is_host && from == 0) {

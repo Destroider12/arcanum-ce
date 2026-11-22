@@ -514,6 +514,21 @@ int main(void)
     test_pick();
     test_fake_host();
     test_steam();
+    {
+        /* PT84: the pre-handshake drop log uses this budget: first 20, then
+           every 1000th. */
+        unsigned int c = 0;
+        int i;
+        int logged = 0;
+
+        for (i = 0; i < 3000; i++) {
+            logged += tig_net_log_budget(&c) ? 1 : 0;
+        }
+        if (logged != 23 || c != 3000u || !tig_net_log_budget(NULL)) {
+            fprintf(stderr, "FAIL: log budget logged %d of %u\n", logged, c);
+            failures++;
+        }
+    }
     if (failures != 0) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;
