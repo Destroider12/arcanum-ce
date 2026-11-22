@@ -3725,3 +3725,59 @@ Deferred (not low risk):
   a larger or per-sector cache would need measurement first.
 - NPC_POS: delta + keyframe already; further savings (quantization, range
   culling per client) change the wire format — protocol bump, later.
+
+## PT84 — extended leak / bug analysis
+
+Deeper pass after PT83 (dd532747). Protocol stays 52 (no wire change).
+
+Tools run (box, Linux):
+- ASan+UBSan+LSan build (`/workspace/nbuild-asan`, separate): all 16 ctest
+  targets, halt_on_error, including the headless host+client loopback,
+  net8/fuzz8/stress8/rx_fuzz/net_hardening - no reports.
+- valgrind memcheck on all 16 test binaries: clean except two expected
+  items (the `putenv(strdup())` SteamAppId string, which must stay alive by
+  putenv rules, once per process; uninitialised bytes in packets the
+  hardening test itself crafts).
+- cppcheck --enable=all (coop, net, chat, crash handler, launcher with
+  win64 platform), clang-tidy (bugprone, clang-analyzer, cert) on 26 coop
+  and coop-hooked engine files, scan-build on the whole tree.
+  Every coop-authored hit was checked; the fixes below are the real ones.
+
+Fixed:
+- inven_ui `sub_578B80`: the Packet81 a client sends for every inventory
+  move was MALLOC'd without zeroing; NULL ObjectIDs set only `.type`, so
+  ~80 bytes of client heap went to the host per move. Now memset.
+- tig_net: "dropping app packet before handshake" had no log budget (a
+  peer that never says HELLO could fill the log for 5 s); uses
+  `tig_net_log_budget` now. The Steam host env var is read once.
+- Launcher: a failed `CreateThread` for the game watcher left Start and
+  the update buttons disabled for the session (nobody posts the exit);
+  a failed update thread left `g_upd_busy` = 1 so Start refused with
+  "Wait for the update to finish" forever. Both recover now.
+- Launcher `upd_get`: buffer doubling refused bodies between max/2 and max
+  (cap clamped to max instead).
+- coop_paths cfg seed copy: a read error / failed flush left a truncated
+  cfg in the role folder that was never re-seeded; it is removed now.
+
+Verified false positives (short): analyzer "garbage value" in the inven
+batch apply (owner count is bounded by the same buffer), PC_POS `sender`,
+ObjectID memcmp (bytes are memcpy'd, packets memset), bool-array memsets,
+`tp` NULL (library_ready implies tp), realloc-on-failure and uninit hits
+in vanilla engine code (dialog/sector/obj/wmap, upstream lines), tig
+compat strncat bound, launcher string buffers.
+
+Deferred:
+- Vanilla packets built on the stack without memset (item.c 26/27/28,
+  mp_utils, multiplayer) carry stack padding on the wire. Harmless between
+  friends; fix with a memset per packet when those files are touched.
+- Steam CTRL channel is drained without a per-poll budget; Steam rate
+  limits it, add a budget if a hostile peer becomes a concern.
+- `multiplayer_notify_level_scheme_changed` (vanilla, unused) writes one
+  byte of the name and has an inverted NULL check - dead code, upstream.
+- Launcher: results posted to a closed window leak one small buffer at
+  exit (harmless).
+
+Tests: `tig_net_transport` checks the log budget (first 20, then every
+1000th). nbuild ctest 16/16, ASan ctest 16/16, win64 exe + launcher built.
+
+Not tested in play.
