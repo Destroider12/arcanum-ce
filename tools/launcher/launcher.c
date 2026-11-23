@@ -33,6 +33,10 @@
  * PT77: while the game runs, a lobby pane lists connected players and mirrors
  * in-game chat (game log [CHAT] lines + lobby_players.txt / lobby_chat_in.txt
  * in the role folder).
+ *
+ * Coop Middle M1: Host mode has three rule checkboxes (Split gold, Loot
+ * feed, Rest vote), kept in [rules] gold_split / loot_feed / rest_vote of the
+ * ini (defaults 0, 1, 1) and passed to the host as ARCANUM_COOP_RULES.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -40,6 +44,8 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+
+#include "game/coop_rules.h" /* Coop Middle: ARCANUM_COOP_RULES */
 #include <wininet.h>
 #include <bcrypt.h>
 #include <stdbool.h>
@@ -81,6 +87,10 @@
 #define IDC_LOBBY_INPUT 126
 #define IDC_LOBBY_SEND 127
 #define IDC_LOBBY_LABEL 128
+#define IDC_RULES_LABEL 129 /* Coop Middle M1 */
+#define IDC_RULE_GOLD 130
+#define IDC_RULE_LOOT 131
+#define IDC_RULE_REST 132
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -165,6 +175,10 @@ static void refresh(void)
     snprintf(ip, sizeof(ip), "Public IP: %s", g_public_ip[0] ? g_public_ip : "(UPnP: none)");
     SetWindowTextA(item(IDC_PUBIP), ip);
     EnableWindow(item(IDC_COPY), host && !steam);
+    EnableWindow(item(IDC_RULES_LABEL), host); /* Coop Middle: rules are the host's */
+    EnableWindow(item(IDC_RULE_GOLD), host);
+    EnableWindow(item(IDC_RULE_LOOT), host);
+    EnableWindow(item(IDC_RULE_REST), host);
 }
 
 static void find_local_ip(void)
@@ -276,6 +290,30 @@ static void load_settings(void)
     SetWindowTextA(item(IDC_STEAMID), buf);
     SendMessageA(item(IDC_WINDOWED), BM_SETCHECK,
         GetPrivateProfileIntA("coop", "windowed", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_GOLD), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "gold_split", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_LOOT), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "loot_feed", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_REST), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "rest_vote", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static bool rule_checked(int id)
+{
+    return SendMessageA(item(id), BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+/* Coop Middle M1: the host's ARCANUM_COOP_RULES from the checkboxes. */
+static void rules_env(char* out, size_t sz)
+{
+    CoopRules r;
+
+    coop_rules_default(&r);
+    r.flags &= ~(COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE);
+    r.flags |= (rule_checked(IDC_RULE_GOLD) ? COOP_RULE_GOLD_SPLIT : 0u)
+        | (rule_checked(IDC_RULE_LOOT) ? COOP_RULE_LOOT_FEED : 0u)
+        | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u);
+    coop_rules_format_env(&r, out, sz);
 }
 
 static void save_settings(void)
@@ -292,6 +330,9 @@ static void save_settings(void)
     WritePrivateProfileStringA("coop", "steam_host", buf, g_ini);
     WritePrivateProfileStringA("coop", "windowed",
         SendMessageA(item(IDC_WINDOWED), BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "gold_split", rule_checked(IDC_RULE_GOLD) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "loot_feed", rule_checked(IDC_RULE_LOOT) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "rest_vote", rule_checked(IDC_RULE_REST) ? "1" : "0", g_ini);
 }
 
 static bool file_exists(const char* path)
@@ -759,6 +800,13 @@ static void start_game(void)
     SetEnvironmentVariableA("ARCANUM_COOP_TRANSPORT", steam ? "steam" : "direct");
     SetEnvironmentVariableA("ARCANUM_COOP_STEAM_HOST", !host && steam ? steam_id : NULL);
     SetEnvironmentVariableA("ARCANUM_COOP_AUTOLOAD", host && g_autoload_next ? "latest" : NULL);
+    {
+        /* Coop Middle M1: session rules (host only; clients get them on join). */
+        char rules[128];
+
+        rules_env(rules, sizeof(rules));
+        SetEnvironmentVariableA("ARCANUM_COOP_RULES", host ? rules : NULL);
+    }
     /* PT63: a client's Reconnect skips the main menu and rejoins (parked PC). */
     SetEnvironmentVariableA("ARCANUM_COOP_AUTOJOIN", !host && g_autoload_next ? "1" : NULL);
     g_autoload_next = false;
@@ -1596,7 +1644,8 @@ static void add_firewall_rule(void)
 
 /* ---- PT65: optional self-update of arcanum-ce.exe from GitHub Releases ----
    Off unless arcanum-coop-launcher.ini has [update] enabled=1. Source:
-   [update] releases_url (default the fork's API), tag_prefix (coop-lite-).
+   [update] releases_url (default the fork's API), tag_prefix (coop-middle- on the Middle line, so a Middle
+   launcher never installs a Coop Lite (protocol 52) build).
    Only arcanum-ce.exe next to the launcher is replaced: never coop-host\ /
    coop-client\, the launcher, game data, saves or the ini. */
 #define WM_APP_UPD (WM_APP + 4)
@@ -1803,7 +1852,7 @@ static DWORD WINAPI upd_check_thread(LPVOID arg)
 
     (void)arg;
     GetPrivateProfileStringA("update", "releases_url", UPD_DEFAULT_URL, url, sizeof(url), g_ini);
-    GetPrivateProfileStringA("update", "tag_prefix", "coop-lite-", prefix, sizeof(prefix), g_ini);
+    GetPrivateProfileStringA("update", "tag_prefix", "coop-middle-", prefix, sizeof(prefix), g_ini);
     json = upd_get(url, NULL, 8u << 20);
     if (json == NULL) {
         upd_post(0, "Update check failed (offline or no releases).%s", NULL);
@@ -2070,8 +2119,12 @@ static void create_controls(void)
     make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 200, 20, IDC_WINDOWED);
     make("BUTTON", "Check port", WS_TABSTOP, 220, 230, 100, 26, IDC_CHECK);
     make("BUTTON", "Add firewall rule", WS_TABSTOP, 326, 230, 104, 26, IDC_FIREWALL);
+    make("STATIC", "Rules (host):", 0, 12, 264, 88, 20, IDC_RULES_LABEL);
+    make("BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 104, 262, 100, 20, IDC_RULE_GOLD);
+    make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 210, 262, 100, 20, IDC_RULE_LOOT);
+    make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 316, 262, 114, 20, IDC_RULE_REST);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 262, 418, 150, IDC_CHECK_OUT);
+        12, 288, 418, 124, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
     make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
     make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);
