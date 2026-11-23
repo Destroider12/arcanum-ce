@@ -53,6 +53,8 @@ static const struct {
     { "trade", "direct_trade", NULL, COOP_RULE_DIRECT_TRADE },
     { "pause", "client_pause", NULL, COOP_RULE_CLIENT_PAUSE },
     { "ff", "no_ff_aoe", "noffaoe", COOP_RULE_NO_FRIENDLY_FIRE_AOE }, /* M1-M2 wrote "noffaoe" */
+    { "qitems", "shared_quest_items", NULL, COOP_RULE_SHARED_QUEST_ITEMS },
+    { "sfol", "shared_followers", NULL, COOP_RULE_SHARED_FOLLOWERS },
 };
 
 #define COOP_RULES_KEY_COUNT ((int)(sizeof(coop_rules_keys) / sizeof(coop_rules_keys[0])))
@@ -217,24 +219,28 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
     if (ru) {
         snprintf(out, sz,
             "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, пауза клиентов %s, "
-            "без огня по своим %s, HP врагов %u%%, опыт %u%%",
+            "без огня по своим %s, общие квестовые предметы %s, общие спутники %s, HP врагов %u%%, опыт %u%%",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
             (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
             (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? on : off,
             (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? on : off,
+            (s.flags & COOP_RULE_SHARED_QUEST_ITEMS) != 0 ? on : off,
+            (s.flags & COOP_RULE_SHARED_FOLLOWERS) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
     } else {
         snprintf(out, sz,
             "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, client pause %s, no friendly fire %s, "
-            "enemy HP %u%%, XP %u%%",
+            "shared quest items %s, shared followers %s, enemy HP %u%%, XP %u%%",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
             (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
             (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? on : off,
             (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? on : off,
+            (s.flags & COOP_RULE_SHARED_QUEST_ITEMS) != 0 ? on : off,
+            (s.flags & COOP_RULE_SHARED_FOLLOWERS) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
     }
 }

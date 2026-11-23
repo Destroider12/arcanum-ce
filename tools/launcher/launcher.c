@@ -42,6 +42,9 @@
  * 0), No friendly fire ([rules] no_ff_aoe, default 1), Enemy HP % ([rules]
  * enemy_hp_pct 100/150/200/250/300) and XP % ([rules] xp_mult_pct
  * 100/125/150/200), all in the same ARCANUM_COOP_RULES string.
+ * Coop Middle M4: a third row - Shared quest items ([rules]
+ * shared_quest_items, default 1) and Shared followers ([rules]
+ * shared_followers, default 1).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -101,6 +104,8 @@
 #define IDC_RULE_NOFF 135
 #define IDC_RULE_HP 136
 #define IDC_RULE_XP 137
+#define IDC_RULE_QITEMS 138 /* Coop Middle M4 */
+#define IDC_RULE_SFOL 139
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -194,6 +199,8 @@ static void refresh(void)
     EnableWindow(item(IDC_RULE_NOFF), host);
     EnableWindow(item(IDC_RULE_HP), host);
     EnableWindow(item(IDC_RULE_XP), host);
+    EnableWindow(item(IDC_RULE_QITEMS), host);
+    EnableWindow(item(IDC_RULE_SFOL), host);
 }
 
 static void find_local_ip(void)
@@ -344,6 +351,10 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "client_pause", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_NOFF), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "no_ff_aoe", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_QITEMS), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "shared_quest_items", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_SFOL), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "shared_followers", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
         rule_pct_index(k_rule_hp, RULE_HP_COUNT, GetPrivateProfileIntA("rules", "enemy_hp_pct", 100, g_ini)), 0);
     SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL,
@@ -367,7 +378,9 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u)
         | (rule_checked(IDC_RULE_TRADE) ? COOP_RULE_DIRECT_TRADE : 0u)
         | (rule_checked(IDC_RULE_PAUSE) ? COOP_RULE_CLIENT_PAUSE : 0u)
-        | (rule_checked(IDC_RULE_NOFF) ? COOP_RULE_NO_FRIENDLY_FIRE_AOE : 0u);
+        | (rule_checked(IDC_RULE_NOFF) ? COOP_RULE_NO_FRIENDLY_FIRE_AOE : 0u)
+        | (rule_checked(IDC_RULE_QITEMS) ? COOP_RULE_SHARED_QUEST_ITEMS : 0u)
+        | (rule_checked(IDC_RULE_SFOL) ? COOP_RULE_SHARED_FOLLOWERS : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
     coop_rules_format_env(&r, out, sz);
@@ -393,6 +406,8 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "direct_trade", rule_checked(IDC_RULE_TRADE) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "client_pause", rule_checked(IDC_RULE_PAUSE) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "no_ff_aoe", rule_checked(IDC_RULE_NOFF) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "shared_quest_items", rule_checked(IDC_RULE_QITEMS) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "shared_followers", rule_checked(IDC_RULE_SFOL) ? "1" : "0", g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT));
@@ -866,7 +881,7 @@ static void start_game(void)
     SetEnvironmentVariableA("ARCANUM_COOP_AUTOLOAD", host && g_autoload_next ? "latest" : NULL);
     {
         /* Coop Middle M1: session rules (host only; clients get them on join). */
-        char rules[128];
+        char rules[192];
 
         rules_env(rules, sizeof(rules));
         SetEnvironmentVariableA("ARCANUM_COOP_RULES", host ? rules : NULL);
@@ -2208,8 +2223,11 @@ static void create_controls(void)
         }
         SendMessageA(combo, CB_SETCURSEL, 0, 0);
     }
+    /* Coop Middle M4: third rules row (the output box below got shorter). */
+    make("BUTTON", "Shared quest items", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 312, 130, 20, IDC_RULE_QITEMS);
+    make("BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 312, 120, 20, IDC_RULE_SFOL);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 314, 418, 98, IDC_CHECK_OUT);
+        12, 338, 418, 74, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
     make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
     make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);
