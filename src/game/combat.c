@@ -1,5 +1,6 @@
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle M3: enemy HP / friendly fire */
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -1446,6 +1447,14 @@ void combat_dmg(CombatContext* combat)
         return;
     }
 
+    /* Coop Middle M3 (host): party on party does nothing - no HP / fatigue
+       damage, no crit effects, no script reaction, no aggro. */
+    if (coop_middle_host_ff_block(combat->attacker_obj, combat->target_obj)) {
+        memset(combat->dam, 0, sizeof(combat->dam));
+        combat->dam_flags = 0;
+        return;
+    }
+
     obj_type = obj_field_int32_get(combat->target_obj, OBJ_F_TYPE);
     if (obj_type_is_critter(obj_type)) {
         unsigned int critter_flags = obj_field_int32_get(combat->target_obj, OBJ_F_CRITTER_FLAGS);
@@ -1538,6 +1547,12 @@ void combat_dmg(CombatContext* combat)
         dam *= 2;
     } else if ((dam_flags & CDF_BONUS_DAM_50) != 0) {
         dam += dam / 2;
+    }
+
+    /* Coop Middle M3 (host): enemies with enemy_hp_pct% HP take damage /
+       pct (OBJ_F_HP_ADJ untouched; a kill shot stays a kill shot). */
+    if ((dam_flags & (CDF_FULL | CDF_DEATH)) == 0) {
+        dam = coop_middle_host_enemy_damage(combat->target_obj, dam);
     }
 
     if (obj_type_is_critter(obj_type)) {

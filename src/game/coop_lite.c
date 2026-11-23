@@ -2317,6 +2317,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_HOTBAR: /* PT63: client layout -> host, kept layout -> client */
     case PACKET_COOP_CHAT: /* PT77: client text -> host, host relay -> all */
     case PACKET_COOP_AREA_KNOWN: /* PT78: client set -> host, union -> all */
+    case PACKET_COOP_PING: /* Coop Middle M3: client ping -> host, stamped -> all */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3515,6 +3516,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopNpcStats);
     case PACKET_COOP_RULES: /* Coop Middle M1 */
         return sizeof(PacketCoopRules);
+    case PACKET_COOP_PING: /* Coop Middle M3 */
+        return sizeof(PacketCoopPing);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -9744,9 +9747,12 @@ bool coop_lite_host_share_xp(int64_t earner, int xp)
     int slot;
     int i;
 
+    int raw_xp = xp;
+
     if (!tig_net_is_host() || xp <= 0) {
         return false;
     }
+    xp = coop_middle_host_scale_xp(xp); /* Coop Middle M3: XP % before the split */
     for (slot = 0; slot < 8; slot++) {
         int64_t pc = sub_4A2B60(slot);
 
@@ -9772,6 +9778,10 @@ bool coop_lite_host_share_xp(int64_t earner, int xp)
         return true;
     }
     if (n == 1 && pcs[0] == earner) {
+        if (xp != raw_xp) {
+            critter_award_xp(earner, xp); /* alone, scaled */
+            return true;
+        }
         return false; /* alone: vanilla */
     }
     coop_lite_xp_split(xp, n, carry, amounts);
@@ -22808,6 +22818,15 @@ static void coop_chat_net_send(const char* text, bool present_local, bool bubble
         return;
     }
     local_slot = sub_529520();
+    if (coop_middle_parse_cmd(clean) != COOP_CMD_NONE) {
+        /* Coop Middle M3: a command is not chat. The host runs it here; a
+           client sends it to the host (no local echo). */
+        if (tig_net_is_host()) {
+            coop_middle_try_chat_command(0, clean);
+            return;
+        }
+        present_local = false;
+    }
     now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
     if (local_slot >= 0 && local_slot < 8) {
         if (coop_chat_last_send_ms[local_slot] != 0
@@ -22853,6 +22872,24 @@ void coop_lite_mid_prompt(const char* text)
     }
 }
 
+void coop_lite_mid_move_pc(int slot, int64_t pc, int64_t loc)
+{
+    if (pc == OBJ_HANDLE_NULL || slot < 0 || slot >= 8 || loc == 0) {
+        return;
+    }
+    multiplayer_lock();
+    sub_424070(pc, 3, false, true); /* stop its walk / attack */
+    sub_43E770(pc, loc, 0, 0);
+    multiplayer_unlock();
+    coop_lite_keep_sector(slot, loc);
+    if (slot > 0) {
+        /* One fresh epoch for this correction; the pose tick sends the
+           owner COOP_PC_POS_FORCE (and the pose to the others). */
+        coop_lite_pose_order_bump(&coop_pose_rx[slot]);
+        coop_pose_force_active[slot] = true;
+    }
+}
+
 bool coop_lite_mid_prompt_busy(void)
 {
     return coop_treq_active || coop_sreq_load_active || coop_travel_active;
@@ -22895,6 +22932,9 @@ void coop_lite_handle_chat(PacketCoopChat* pkt)
         }
         if (!coop_lite_chat_prepare(pkt->text, clean, sizeof(clean))) {
             return;
+        }
+        if (coop_middle_try_chat_command(sender, clean)) {
+            return; /* Coop Middle M3: /tp, /stuck, /gather - not chat */
         }
         if (coop_chat_last_send_ms[sender] != 0
             && !coop_lite_interval_elapsed(coop_chat_last_send_ms[sender], now, COOP_CHAT_RATE_MS)) {

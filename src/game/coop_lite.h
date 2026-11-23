@@ -53,7 +53,7 @@ extern "C" {
 #define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
 #define PACKET_COOP_AREA_KNOWN 165 /* PT78: known world-map areas, both ways (union) */
 #define PACKET_COOP_NPC_STATS 166 /* PT79: host party-follower build (level, stats, hp/fatigue pts) -> clients */
-#define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
+#define PACKET_COOP_TYPE_LIMIT 169 /* exclusive upper bound (168 = Coop Middle M3 PACKET_COOP_PING) */
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */

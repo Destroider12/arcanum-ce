@@ -9,6 +9,7 @@
 
 #include "game/coop_middle.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +172,54 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
         }
         break;
     }
+    case COOP_MID_CHAT_REGROUP:
+        if (atoi(what) == 1) {
+            snprintf(out, sz, ru ? "[Кооп] %s собрал отряд вокруг себя." : "[Co-op] %s gathered the party.", who);
+        } else {
+            snprintf(out, sz, ru ? "[Кооп] %s телепортировался к хосту." : "[Co-op] %s regrouped to the host.", who);
+        }
+        break;
+    case COOP_MID_CHAT_CMD_REFUSE: {
+        int reason = 0;
+        int secs = 0;
+
+        if (sscanf(what, "%d %d", &reason, &secs) < 1) {
+            reason = 0;
+        }
+        switch (reason) {
+        case COOP_TP_REFUSE_DEAD:
+            snprintf(out, sz, ru ? "[Кооп] Телепорт невозможен: вы или хост мертвы." : "[Co-op] Can't regroup: you or the host is dead.");
+            break;
+        case COOP_TP_REFUSE_MAP:
+            snprintf(out, sz, ru ? "[Кооп] Телепорт невозможен: вы не на карте хоста." : "[Co-op] Can't regroup: you are not on the host's map.");
+            break;
+        case COOP_TP_REFUSE_COMBAT:
+            snprintf(out, sz, ru ? "[Кооп] Телепорт невозможен: идёт бой." : "[Co-op] Can't regroup: combat mode is on.");
+            break;
+        case COOP_TP_REFUSE_TARGETED:
+            snprintf(out, sz, ru ? "[Кооп] Телепорт невозможен: рядом враг, который атакует вас." : "[Co-op] Can't regroup: an enemy nearby is fighting you.");
+            break;
+        case COOP_TP_REFUSE_COOLDOWN:
+            snprintf(out, sz, ru ? "[Кооп] Команда будет доступна через %d с." : "[Co-op] Command available again in %d s.", secs);
+            break;
+        case COOP_TP_REFUSE_HOST_ONLY:
+            snprintf(out, sz, ru ? "[Кооп] /gather может использовать только хост." : "[Co-op] Only the host can use /gather.");
+            break;
+        case COOP_TP_REFUSE_NOBODY:
+            snprintf(out, sz, ru ? "[Кооп] Некого собирать: никто не может телепортироваться сейчас." : "[Co-op] Nobody to gather: no player can be moved now.");
+            break;
+        case COOP_TP_REFUSE_SELF:
+            snprintf(out, sz, ru ? "[Кооп] Хост собирает отряд командой /gather." : "[Co-op] The host uses /gather to pull the party.");
+            break;
+        default:
+            snprintf(out, sz, ru ? "[Кооп] Команда отклонена." : "[Co-op] Command refused.");
+            break;
+        }
+        break;
+    }
+    case COOP_MID_CHAT_PAUSE_DROP:
+        snprintf(out, sz, ru ? "[Кооп] %s отключился - пауза снята." : "[Co-op] %s left - pause lifted.", who);
+        break;
     default:
         out[0] = '\0';
         break;
@@ -211,6 +260,9 @@ bool coop_middle_party_ctrl_valid(const PacketCoopPartyCtrl* pkt)
     }
     if (pkt->op == COOP_CTRL_SLOT_STATUS) {
         return pkt->b == 0; /* a: any packing (the handler masks a client's) */
+    }
+    if (pkt->op == COOP_CTRL_PAUSE) {
+        return (pkt->a == 0 || pkt->a == 1) && pkt->b >= 0 && pkt->b < 8;
     }
     return false;
 }
@@ -353,12 +405,149 @@ bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_targe
 
 /* ---- game side ------------------------------------------------------------ */
 
+/* ---- M3 pure ---- */
+
+int coop_middle_scale_enemy_damage(int raw_dmg, int enemy_hp_pct, int* frac_rem_inout)
+{
+    int64_t total;
+    int64_t scaled;
+    int rem = frac_rem_inout != NULL ? *frac_rem_inout : 0;
+
+    if (raw_dmg <= 0) {
+        return 0;
+    }
+    if (enemy_hp_pct < 100) {
+        enemy_hp_pct = 100;
+    }
+    if (rem < 0 || rem >= enemy_hp_pct) {
+        rem = 0;
+    }
+    total = (int64_t)raw_dmg * 100 + rem;
+    scaled = total / enemy_hp_pct;
+    rem = (int)(total % enemy_hp_pct);
+    if (scaled < 1) {
+        scaled = 1; /* a hit always hurts; the fraction is used up */
+        rem = 0;
+    }
+    if (frac_rem_inout != NULL) {
+        *frac_rem_inout = rem;
+    }
+    return scaled > INT_MAX ? INT_MAX : (int)scaled;
+}
+
+int coop_middle_scale_xp(int raw_xp, int pct)
+{
+    int64_t v;
+
+    if (raw_xp <= 0 || pct <= 0) {
+        return raw_xp;
+    }
+    v = ((int64_t)raw_xp * pct) / 100;
+    if (v > INT_MAX) {
+        v = INT_MAX;
+    }
+    if (pct >= 100 && v < raw_xp) {
+        v = raw_xp;
+    }
+    return (int)v;
+}
+
+int coop_middle_parse_cmd(const char* text)
+{
+    char word[16];
+    char arg[16];
+    size_t n = 0;
+    size_t m = 0;
+    const char* p = text;
+
+    if (p == NULL) {
+        return COOP_CMD_NONE;
+    }
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != '/') {
+        return COOP_CMD_NONE;
+    }
+    p++;
+    while (*p != '\0' && *p != ' ' && *p != '\t') {
+        if (n + 1 >= sizeof(word)) {
+            return COOP_CMD_NONE;
+        }
+        word[n++] = (char)tolower((unsigned char)*p++);
+    }
+    word[n] = '\0';
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    while (*p != '\0' && *p != ' ' && *p != '\t') {
+        if (m + 1 >= sizeof(arg)) {
+            return COOP_CMD_NONE;
+        }
+        arg[m++] = (char)tolower((unsigned char)*p++);
+    }
+    arg[m] = '\0';
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != '\0') {
+        return COOP_CMD_NONE; /* more words: plain text */
+    }
+    if (strcmp(word, "tp") == 0) {
+        if (m == 0) {
+            return COOP_CMD_TP;
+        }
+        return strcmp(arg, "all") == 0 ? COOP_CMD_GATHER : COOP_CMD_NONE;
+    }
+    if (m != 0) {
+        return COOP_CMD_NONE;
+    }
+    if (strcmp(word, "stuck") == 0) {
+        return COOP_CMD_STUCK;
+    }
+    if (strcmp(word, "gather") == 0) {
+        return COOP_CMD_GATHER;
+    }
+    return COOP_CMD_NONE;
+}
+
+bool coop_middle_rate_admit(bool* have_last, unsigned int* last_ms, unsigned int now_ms, unsigned int interval_ms)
+{
+    if (have_last == NULL || last_ms == NULL) {
+        return false;
+    }
+    if (*have_last && (unsigned int)(now_ms - *last_ms) < interval_ms) {
+        return false;
+    }
+    *have_last = true;
+    *last_ms = now_ms;
+    return true;
+}
+
+int coop_middle_cooldown_left_s(bool have_last, unsigned int last_ms, unsigned int now_ms, unsigned int interval_ms)
+{
+    unsigned int passed = now_ms - last_ms;
+
+    if (!have_last || passed >= interval_ms) {
+        return 0;
+    }
+    return (int)((interval_ms - passed + 999u) / 1000u);
+}
+
+bool coop_middle_ping_valid(const PacketCoopPing* pkt, int size)
+{
+    return pkt != NULL && size == (int)sizeof(PacketCoopPing) && pkt->type == PACKET_COOP_PING
+        && pkt->kind >= 0 && pkt->kind <= COOP_PING_KIND_MAX && pkt->slot >= 0 && pkt->slot < 8;
+}
+
 #ifndef COOP_LITE_TEST_STUBS
 
 #include "game/combat.h"
 #include "game/critter.h"
+#include "game/gsound.h"
 #include "game/item.h"
 #include "game/location.h"
+#include "game/map.h"
 #include "game/obj.h"
 #include "game/obj_flags.h"
 #include "game/multiplayer.h"
@@ -368,6 +557,7 @@ bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_targe
 #include "game/stat.h"
 #include "tig/debug.h"
 #include "tig/memory.h"
+#include "ui/mainmenu_ui.h"
 #include "ui/sleep_ui.h"
 
 _Static_assert(COOP_MID_T_WEAPON == OBJ_TYPE_WEAPON && COOP_MID_T_AMMO == OBJ_TYPE_AMMO
@@ -402,6 +592,13 @@ static CoopFeedLimiter coop_feed;
 static bool coop_status_handle(const PacketCoopPartyCtrl* pkt); /* M2 */
 static void coop_status_host_tick(unsigned int now_ms);
 static void coop_status_client_tick(unsigned int now_ms);
+static bool coop_pause_handle(const PacketCoopPartyCtrl* pkt); /* M3 */
+static void coop_pause_set(bool on, int by, const char* why);
+static void coop_pause_send(int to_slot);
+static void coop_pause_clear(void);
+static void coop_pings_clear(void);
+static bool coop_pause_on;
+static int coop_pause_by;
 
 /* Gold a player dropped (ground piles), never split when picked up. */
 #define COOP_MID_DROPS 32
@@ -536,6 +733,10 @@ void coop_middle_host_slot_synced(int slot)
     if (coop_rest_active && coop_rest_slot == slot) {
         coop_rest_active = false; /* a rejoin starts clean */
         coop_lite_mid_prompt(NULL);
+    }
+    if (coop_pause_on) {
+        coop_pause_send(slot); /* M3: a joiner during a pause starts paused */
+        tig_debug_printf("CoopMiddle: pause state sent to slot %d (paused by %d)\n", slot, coop_pause_by);
     }
 }
 
@@ -1007,6 +1208,9 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
     if (pkt != NULL && pkt->op == COOP_CTRL_SLOT_STATUS) {
         return coop_status_handle(pkt);
     }
+    if (pkt != NULL && pkt->op == COOP_CTRL_PAUSE) {
+        return coop_pause_handle(pkt); /* M3 */
+    }
     if (pkt == NULL || (pkt->op != COOP_CTRL_REST_ASK && pkt->op != COOP_CTRL_REST_REFUSE)) {
         return false;
     }
@@ -1298,6 +1502,548 @@ bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item)
     return true;
 }
 
+/* ---- M3: shared tactical pause ---- */
+
+static bool coop_pause_on;
+static int coop_pause_by = -1;
+static bool coop_pause_have[8]; /* host: per slot; client: [0] = own asks */
+static unsigned int coop_pause_last_ms[8];
+static bool coop_pause_note_have;
+static unsigned int coop_pause_note_ms;
+
+bool coop_middle_is_paused(void)
+{
+    return coop_pause_on && tig_net_is_active() && tig_net_is_coop_enabled();
+}
+
+int coop_middle_paused_by(void)
+{
+    return coop_middle_is_paused() ? coop_pause_by : -1;
+}
+
+/* Host: the state to one slot (> 0) or everyone (-1). */
+static void coop_pause_send(int to_slot)
+{
+    PacketCoopPartyCtrl pkt;
+    int depth;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_CTRL;
+    pkt.op = COOP_CTRL_PAUSE;
+    pkt.a = coop_pause_on ? 1 : 0;
+    pkt.b = coop_pause_on && coop_pause_by >= 0 && coop_pause_by < 8 ? coop_pause_by : 0;
+    depth = tig_net_local_suspend_pause();
+    if (to_slot > 0) {
+        tig_net_send_app(&pkt, sizeof(pkt), to_slot);
+    } else {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static void coop_pause_set(bool on, int by, const char* why)
+{
+    if (coop_pause_on == on && (!on || coop_pause_by == by)) {
+        return;
+    }
+    coop_pause_on = on;
+    coop_pause_by = on ? by : -1;
+    tig_debug_printf("CoopMiddle: pause %s (slot %d, %s)\n", on ? "ON" : "OFF", by, why);
+    if (coop_mid_session_host()) {
+        coop_pause_send(-1);
+    }
+}
+
+static void coop_pause_host_request(int slot, bool want)
+{
+    if (slot > 0) {
+        if (!coop_middle_rule_on(COOP_RULE_CLIENT_PAUSE) || !tig_net_client_is_active(slot)) {
+            tig_debug_printf("CoopMiddle: pause request from slot %d refused (rule off or inactive)\n", slot);
+            coop_pause_send(slot); /* resync the asker */
+            return;
+        }
+        if (!coop_middle_rate_admit(&coop_pause_have[slot], &coop_pause_last_ms[slot], coop_mid_now_ms,
+                COOP_PAUSE_RATE_MS)) {
+            tig_debug_printf("CoopMiddle: pause request from slot %d dropped (rate limit)\n", slot);
+            return;
+        }
+    }
+    coop_pause_set(want, slot, slot == 0 ? "host key" : "client request");
+}
+
+bool coop_middle_pause_key(void)
+{
+    PacketCoopPartyCtrl pkt;
+    int depth;
+    bool want;
+    bool ru = coop_lite_lang_ru();
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return false;
+    }
+    want = !coop_middle_is_paused();
+    if (tig_net_is_host()) {
+        coop_pause_host_request(0, want);
+        return true;
+    }
+    if (!coop_middle_rule_on(COOP_RULE_CLIENT_PAUSE)) {
+        coop_lite_mid_notice(ru ? "Хост не разрешил паузу клиентам." : "The host has client pause turned off.", false);
+        return true;
+    }
+    if (!coop_middle_rate_admit(&coop_pause_have[0], &coop_pause_last_ms[0], coop_mid_now_ms, COOP_PAUSE_RATE_MS)) {
+        coop_lite_mid_notice(ru ? "Не так часто: пауза раз в 2 секунды." : "Not so fast: one pause toggle per 2 seconds.", false);
+        return true;
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_CTRL;
+    pkt.op = COOP_CTRL_PAUSE;
+    pkt.a = want ? 1 : 0;
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app(&pkt, sizeof(pkt), 0);
+    tig_net_local_suspend_resume(depth);
+    tig_debug_printf("CoopMiddle: pause %s asked\n", want ? "on" : "off");
+    return true;
+}
+
+static bool coop_pause_handle(const PacketCoopPartyCtrl* pkt)
+{
+    if (tig_net_is_host()) {
+        int slot = sub_52A530();
+
+        if (slot <= 0 || slot >= 8) {
+            return true;
+        }
+        coop_pause_host_request(slot, pkt->a == 1);
+        return true;
+    }
+    if (sub_52A530() != 0) {
+        return true;
+    }
+    if ((pkt->a == 1) != coop_pause_on || (pkt->a == 1 && pkt->b != coop_pause_by)) {
+        tig_debug_printf("CoopMiddle: pause %s from the host (slot %d)\n", pkt->a == 1 ? "ON" : "OFF", pkt->b);
+    }
+    coop_pause_on = pkt->a == 1;
+    coop_pause_by = coop_pause_on ? pkt->b : -1;
+    return true;
+}
+
+bool coop_middle_orders_blocked(bool notice)
+{
+    if (!coop_middle_is_paused()) {
+        return false;
+    }
+    if (notice && coop_middle_rate_admit(&coop_pause_note_have, &coop_pause_note_ms, coop_mid_now_ms, 1500u)) {
+        coop_lite_mid_notice(coop_lite_lang_ru() ? "Пауза: приказы недоступны до продолжения."
+                                                 : "Paused: no orders until the game resumes.",
+            false);
+    }
+    return true;
+}
+
+static void coop_pause_clear(void)
+{
+    coop_pause_on = false;
+    coop_pause_by = -1;
+    memset(coop_pause_have, 0, sizeof(coop_pause_have));
+    coop_pause_note_have = false;
+}
+
+/* ---- M3: difficulty (host) ---- */
+
+#define COOP_DMG_REM_SLOTS 32
+static struct {
+    int64_t obj;
+    int rem;
+} coop_dmg_rem[COOP_DMG_REM_SLOTS];
+static int coop_dmg_rem_next;
+static bool coop_dmg_logged;
+static bool coop_ff_have;
+static unsigned int coop_ff_log_ms;
+
+static int* coop_dmg_rem_for(int64_t obj)
+{
+    int i;
+
+    for (i = 0; i < COOP_DMG_REM_SLOTS; i++) {
+        if (coop_dmg_rem[i].obj == obj) {
+            return &(coop_dmg_rem[i].rem);
+        }
+    }
+    i = coop_dmg_rem_next;
+    coop_dmg_rem_next = (coop_dmg_rem_next + 1) % COOP_DMG_REM_SLOTS;
+    coop_dmg_rem[i].obj = obj;
+    coop_dmg_rem[i].rem = 0;
+    return &(coop_dmg_rem[i].rem);
+}
+
+int coop_middle_host_enemy_damage(int64_t target, int dam)
+{
+    int pct;
+    int64_t host_pc;
+    int scaled;
+
+    if (dam <= 0 || target == OBJ_HANDLE_NULL || !coop_mid_session_host()) {
+        return dam;
+    }
+    pct = coop_middle_rules()->enemy_hp_pct;
+    if (pct <= 100 || obj_field_int32_get(target, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+        return dam;
+    }
+    host_pc = sub_4A2B60(0);
+    if (host_pc == OBJ_HANDLE_NULL || coop_lite_party_no_fight(host_pc, target)) {
+        return dam; /* a follower / summon of the party: never scaled */
+    }
+    scaled = coop_middle_scale_enemy_damage(dam, pct, coop_dmg_rem_for(target));
+    if (!coop_dmg_logged) {
+        coop_dmg_logged = true;
+        tig_debug_printf("CoopMiddle: enemy HP %d%%: damage %d -> %d (first hit on this map)\n", pct, dam, scaled);
+    }
+    return scaled;
+}
+
+bool coop_middle_host_ff_block(int64_t attacker, int64_t target)
+{
+    if (attacker == OBJ_HANDLE_NULL || target == OBJ_HANDLE_NULL || attacker == target || !coop_mid_session_host()
+        || !coop_middle_rule_on(COOP_RULE_NO_FRIENDLY_FIRE_AOE) || !coop_lite_party_no_fight(attacker, target)) {
+        return false;
+    }
+    if (coop_middle_rate_admit(&coop_ff_have, &coop_ff_log_ms, coop_mid_now_ms, 1000u)) {
+        tig_debug_printf("CoopMiddle: friendly fire blocked (attacker slot %d -> target slot %d, type %d)\n",
+            coop_mid_slot_of(attacker), coop_mid_slot_of(target), obj_field_int32_get(target, OBJ_F_TYPE));
+    }
+    return true;
+}
+
+int coop_middle_host_scale_xp(int xp)
+{
+    if (!coop_mid_session_host()) {
+        return xp;
+    }
+    return coop_middle_scale_xp(xp, coop_middle_rules()->xp_mult_pct);
+}
+
+/* ---- M3: pings ---- */
+
+typedef struct CoopPingEntry {
+    bool used;
+    int slot;
+    int kind;
+    int map;
+    int64_t loc;
+    unsigned int t_ms;
+    char name[32];
+} CoopPingEntry;
+
+static CoopPingEntry coop_pings[COOP_PING_MAX];
+static int coop_ping_next;
+static unsigned int coop_ping_serial;
+static bool coop_ping_have[8];
+static unsigned int coop_ping_last_ms[8];
+
+static void coop_pings_clear(void)
+{
+    memset(coop_pings, 0, sizeof(coop_pings));
+    coop_ping_next = 0;
+    coop_ping_serial++;
+}
+
+static void coop_ping_add(const PacketCoopPing* p)
+{
+    CoopPingEntry* e = &coop_pings[coop_ping_next];
+    int64_t pc = player_get_local_pc_obj();
+
+    coop_ping_next = (coop_ping_next + 1) % COOP_PING_MAX;
+    memset(e, 0, sizeof(*e));
+    e->used = true;
+    e->slot = p->slot;
+    e->kind = p->kind;
+    e->map = p->map;
+    e->loc = p->loc;
+    e->t_ms = coop_mid_now_ms;
+    coop_mid_pc_name(p->slot, sub_4A2B60(p->slot), e->name, sizeof(e->name));
+    coop_ping_serial++;
+    tig_debug_printf("CoopMiddle: ping from slot %d (%s) kind %d at %d,%d\n", p->slot, e->name, p->kind,
+        (int)LOCATION_GET_X(p->loc), (int)LOCATION_GET_Y(p->loc));
+    if (pc != OBJ_HANDLE_NULL
+        && location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), p->loc) <= COOP_PING_SOUND_RANGE) {
+        gsound_play_sfx(0, 1); /* the soft UI click */
+    }
+}
+
+/* Host: validate, stamp, rebroadcast, show. */
+static void coop_ping_host_accept(PacketCoopPing* p, int sender)
+{
+    if (p->map != map_current_map() || !coop_lite_loc_in_map(p->loc)) {
+        tig_debug_printf("CoopMiddle: ping from slot %d dropped (map %d / off map)\n", sender, p->map);
+        return;
+    }
+    if (!coop_middle_rate_admit(&coop_ping_have[sender], &coop_ping_last_ms[sender], coop_mid_now_ms,
+            COOP_PING_RATE_MS)) {
+        tig_debug_printf("CoopMiddle: ping from slot %d dropped (rate limit)\n", sender);
+        return;
+    }
+    p->slot = sender;
+    {
+        int depth = tig_net_local_suspend_pause();
+
+        tig_net_send_app_all(p, sizeof(*p));
+        tig_net_local_suspend_resume(depth);
+    }
+    coop_ping_add(p);
+}
+
+void coop_middle_handle_ping(PacketCoopPing* pkt)
+{
+    int size = tig_net_last_message_size();
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return;
+    }
+    if (!coop_middle_ping_valid(pkt, size)) {
+        tig_debug_printf("CoopMiddle: ping dropped (size %d)\n", size);
+        return;
+    }
+    if (tig_net_is_host()) {
+        int sender = sub_52A530();
+        PacketCoopPing p = *pkt;
+
+        if (sender <= 0 || sender >= 8) {
+            return;
+        }
+        coop_ping_host_accept(&p, sender);
+        return;
+    }
+    if (sub_52A530() != 0 || pkt->map != map_current_map()) {
+        return;
+    }
+    coop_ping_add(pkt);
+}
+
+bool coop_middle_ping_send(int64_t loc, int kind)
+{
+    PacketCoopPing p;
+    int slot = sub_529520();
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled() || slot < 0 || slot >= 8) {
+        return false;
+    }
+    memset(&p, 0, sizeof(p));
+    p.type = PACKET_COOP_PING;
+    p.slot = slot;
+    p.map = map_current_map();
+    p.kind = kind == COOP_PING_KIND_DANGER ? COOP_PING_KIND_DANGER : COOP_PING_KIND_LOOK;
+    p.loc = loc;
+    if (tig_net_is_host()) {
+        coop_ping_host_accept(&p, 0);
+        return true;
+    }
+    /* A little slower than the host's limit, so jitter never drops ours. */
+    if (!coop_middle_rate_admit(&coop_ping_have[0], &coop_ping_last_ms[0], coop_mid_now_ms,
+            COOP_PING_RATE_MS + 100u)) {
+        return false;
+    }
+    {
+        int depth = tig_net_local_suspend_pause();
+
+        tig_net_send_app(&p, sizeof(p), 0);
+        tig_net_local_suspend_resume(depth);
+    }
+    tig_debug_printf("CoopMiddle: ping sent kind %d at %d,%d\n", p.kind, (int)LOCATION_GET_X(loc),
+        (int)LOCATION_GET_Y(loc));
+    return true;
+}
+
+int coop_middle_pings_get(CoopPingView* out, int max, unsigned int now_ms)
+{
+    int n = 0;
+    int i;
+    int map = map_current_map();
+
+    if (out == NULL || max <= 0 || !tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return 0;
+    }
+    for (i = 0; i < COOP_PING_MAX && n < max; i++) {
+        CoopPingEntry* e = &coop_pings[(coop_ping_next + i) % COOP_PING_MAX]; /* oldest first */
+        unsigned int age;
+
+        if (!e->used || e->map != map) {
+            continue;
+        }
+        age = now_ms - e->t_ms;
+        if (age >= COOP_PING_LIFE_MS) {
+            continue;
+        }
+        out[n].slot = e->slot;
+        out[n].kind = e->kind;
+        out[n].loc = e->loc;
+        out[n].age_ms = age;
+        snprintf(out[n].name, sizeof(out[n].name), "%s", e->name);
+        n++;
+    }
+    return n;
+}
+
+unsigned int coop_middle_pings_serial(void)
+{
+    return coop_ping_serial;
+}
+
+unsigned int coop_middle_now_ms(void)
+{
+    return coop_mid_now_ms;
+}
+
+void coop_middle_slot_name(int slot, char* out, size_t sz)
+{
+    if (out == NULL || sz == 0) {
+        return;
+    }
+    if (slot < 0 || slot >= 8) {
+        snprintf(out, sz, "?");
+        return;
+    }
+    coop_mid_pc_name(slot, sub_4A2B60(slot), out, sz);
+}
+
+/* ---- M3: /tp, /stuck, /gather (host) ---- */
+
+static bool coop_cmd_have[8];
+static unsigned int coop_cmd_last_ms[8];
+
+static void coop_cmd_refuse(int slot, int reason, int secs)
+{
+    char what[32];
+
+    snprintf(what, sizeof(what), "%d %d", reason, secs);
+    tig_debug_printf("CoopMiddle: command from slot %d refused (reason %d, %d s)\n", slot, reason, secs);
+    coop_mid_sys_line(COOP_MID_CHAT_CMD_REFUSE, 0, "", what, slot, -1);
+}
+
+static bool coop_cmd_targeted(int64_t pc)
+{
+    int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    LocRect rect;
+    ObjectList objects;
+    ObjectNode* node;
+    bool hit = false;
+
+    rect.x1 = LOCATION_GET_X(loc) - COOP_TP_ENEMY_RANGE;
+    rect.x2 = LOCATION_GET_X(loc) + COOP_TP_ENEMY_RANGE;
+    rect.y1 = LOCATION_GET_Y(loc) - COOP_TP_ENEMY_RANGE;
+    rect.y2 = LOCATION_GET_Y(loc) + COOP_TP_ENEMY_RANGE;
+    object_list_rect(&rect, OBJ_TM_NPC, &objects);
+    for (node = objects.head; node != NULL && !hit; node = node->next) {
+        if (critter_is_dead(node->obj) || coop_lite_party_no_fight(pc, node->obj)) {
+            continue;
+        }
+        hit = obj_field_handle_get(node->obj, OBJ_F_NPC_COMBAT_FOCUS) == pc;
+    }
+    object_list_destroy(&objects);
+    return hit;
+}
+
+/* 0 = this client may be moved to the host now, else COOP_TP_REFUSE_*. */
+static int coop_cmd_check(int slot, int64_t host_pc, int64_t* pc_out)
+{
+    int64_t pc = OBJ_HANDLE_NULL;
+
+    if (!coop_mid_slot_living(slot, &pc) || critter_is_dead(host_pc)) {
+        return COOP_TP_REFUSE_DEAD;
+    }
+    if (!coop_lite_loc_in_map(obj_field_int64_get(pc, OBJ_F_LOCATION))) {
+        return COOP_TP_REFUSE_MAP;
+    }
+    if (combat_critter_is_combat_mode_active(pc) || combat_critter_is_combat_mode_active(host_pc)) {
+        return COOP_TP_REFUSE_COMBAT;
+    }
+    if (coop_cmd_targeted(pc)) {
+        return COOP_TP_REFUSE_TARGETED;
+    }
+    *pc_out = pc;
+    return 0;
+}
+
+static void coop_cmd_move(int slot, int64_t pc, int64_t host_loc)
+{
+    int64_t loc = coop_lite_follow_loc_for_slot(host_loc, slot);
+
+    coop_lite_mid_move_pc(slot, pc, loc);
+    tig_debug_printf("CoopMiddle: regroup slot %d -> %d,%d\n", slot, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+}
+
+bool coop_middle_try_chat_command(int sender_slot, const char* text)
+{
+    int cmd = coop_middle_parse_cmd(text);
+    int64_t host_pc;
+    int64_t host_loc;
+    int64_t pc = OBJ_HANDLE_NULL;
+    char name[64];
+    int left;
+    int reason;
+
+    if (cmd == COOP_CMD_NONE || !coop_mid_session_host() || sender_slot < 0 || sender_slot >= 8) {
+        return false;
+    }
+    tig_debug_printf("CoopMiddle: command %d from slot %d\n", cmd, sender_slot);
+    host_pc = sub_4A2B60(0);
+    if (host_pc == OBJ_HANDLE_NULL) {
+        return true;
+    }
+    host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+    if (cmd == COOP_CMD_GATHER && sender_slot != 0) {
+        coop_cmd_refuse(sender_slot, COOP_TP_REFUSE_HOST_ONLY, 0);
+        return true;
+    }
+    if (cmd != COOP_CMD_GATHER && sender_slot == 0) {
+        coop_cmd_refuse(0, COOP_TP_REFUSE_SELF, 0);
+        return true;
+    }
+    left = coop_middle_cooldown_left_s(coop_cmd_have[sender_slot], coop_cmd_last_ms[sender_slot], coop_mid_now_ms,
+        COOP_CMD_COOLDOWN_MS);
+    if (left > 0) {
+        coop_cmd_refuse(sender_slot, COOP_TP_REFUSE_COOLDOWN, left);
+        return true;
+    }
+    if (cmd == COOP_CMD_GATHER) {
+        int slot;
+        int moved = 0;
+
+        if (critter_is_dead(host_pc)) {
+            coop_cmd_refuse(0, COOP_TP_REFUSE_DEAD, 0);
+            return true;
+        }
+        if (combat_critter_is_combat_mode_active(host_pc)) {
+            coop_cmd_refuse(0, COOP_TP_REFUSE_COMBAT, 0);
+            return true;
+        }
+        for (slot = 1; slot < 8; slot++) {
+            if (coop_cmd_check(slot, host_pc, &pc) == 0) {
+                coop_cmd_move(slot, pc, host_loc);
+                moved++;
+            }
+        }
+        if (moved == 0) {
+            coop_cmd_refuse(0, COOP_TP_REFUSE_NOBODY, 0);
+            return true;
+        }
+        coop_middle_rate_admit(&coop_cmd_have[0], &coop_cmd_last_ms[0], coop_mid_now_ms, 0u);
+        coop_mid_pc_name(0, host_pc, name, sizeof(name));
+        tig_debug_printf("CoopMiddle: /gather moved %d player(s)\n", moved);
+        coop_mid_sys_line(COOP_MID_CHAT_REGROUP, 0, name, "1", -1, -1);
+        return true;
+    }
+    reason = coop_cmd_check(sender_slot, host_pc, &pc);
+    if (reason != 0) {
+        coop_cmd_refuse(sender_slot, reason, 0);
+        return true;
+    }
+    coop_cmd_move(sender_slot, pc, host_loc);
+    coop_middle_rate_admit(&coop_cmd_have[sender_slot], &coop_cmd_last_ms[sender_slot], coop_mid_now_ms, 0u);
+    coop_mid_pc_name(sender_slot, pc, name, sizeof(name));
+    coop_mid_sys_line(COOP_MID_CHAT_REGROUP, sender_slot, name, "0", -1, -1);
+    return true;
+}
+
 /* ---- lifecycle ---- */
 
 void coop_middle_session_reset(void)
@@ -1322,6 +2068,12 @@ void coop_middle_session_reset(void)
     coop_trade_local = false;
     coop_trade_local_partner = OBJ_HANDLE_NULL;
     coop_status_reset();
+    coop_pause_clear(); /* M3 */
+    coop_pings_clear();
+    memset(coop_cmd_have, 0, sizeof(coop_cmd_have));
+    memset(coop_ping_have, 0, sizeof(coop_ping_have));
+    memset(coop_dmg_rem, 0, sizeof(coop_dmg_rem));
+    coop_dmg_logged = false;
 }
 
 void coop_middle_slot_gone(int slot)
@@ -1332,12 +2084,36 @@ void coop_middle_slot_gone(int slot)
     if (coop_rest_active && coop_rest_slot == slot) {
         coop_rest_end(-1, "the asker disconnected");
     }
+    if (slot > 0 && slot < 8) {
+        coop_cmd_have[slot] = false;
+        coop_ping_have[slot] = false;
+        coop_pause_have[slot] = false;
+    }
+    if (coop_mid_session_host() && coop_pause_on && coop_pause_by == slot && slot > 0) {
+        char name[64];
+
+        coop_mid_pc_name(slot, sub_4A2B60(slot), name, sizeof(name));
+        coop_pause_set(false, slot, "the pauser disconnected");
+        coop_mid_sys_line(COOP_MID_CHAT_PAUSE_DROP, slot, name, "-", -1, -1);
+    }
 }
 
 void coop_middle_map_changed(void)
 {
     coop_rest_end(COOP_REST_REFUSE_CANCELLED, "map change");
     memset(coop_mid_stash, 0, sizeof(coop_mid_stash)); /* containers of the old map */
+    /* M3: a new map (travel or a save load) starts unpaused, no old pings. */
+    if (coop_pause_on) {
+        if (coop_mid_session_host()) {
+            coop_pause_set(false, coop_pause_by, "map change / load");
+        } else {
+            coop_pause_on = false;
+            coop_pause_by = -1;
+        }
+    }
+    coop_pings_clear();
+    memset(coop_dmg_rem, 0, sizeof(coop_dmg_rem));
+    coop_dmg_logged = false;
 }
 
 static void (*coop_mid_ui_tick)(unsigned int now_ms);
@@ -1362,6 +2138,14 @@ void coop_middle_tick(unsigned int now_ms)
         return;
     }
     coop_status_host_tick(now_ms);
+    if (coop_pause_on) {
+        /* M3: the main menu, or a pauser that is gone, lifts the pause. */
+        if (mainmenu_ui_is_active()) {
+            coop_pause_set(false, coop_pause_by, "main menu");
+        } else if (coop_pause_by > 0 && !tig_net_client_is_active(coop_pause_by)) {
+            coop_pause_set(false, coop_pause_by, "pauser inactive");
+        }
+    }
     more = coop_middle_feed_take_suppressed(&coop_feed, now_ms);
     if (more > 0) {
         char what[16];
@@ -1438,5 +2222,25 @@ bool coop_middle_trade_local_is(int64_t partner) { (void)partner; return false; 
 int coop_middle_trade_barter_kind(int64_t target, int kind) { (void)target; return kind; }
 bool coop_middle_trade_refuse_take(int64_t partner) { (void)partner; return false; }
 bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item) { (void)pc; (void)partner; (void)item; return false; }
+bool coop_middle_is_paused(void) { return false; }
+int coop_middle_paused_by(void) { return -1; }
+bool coop_middle_pause_key(void) { return false; }
+bool coop_middle_orders_blocked(bool notice) { (void)notice; return false; }
+int coop_middle_host_enemy_damage(int64_t target, int dam) { (void)target; return dam; }
+bool coop_middle_host_ff_block(int64_t attacker, int64_t target) { (void)attacker; (void)target; return false; }
+int coop_middle_host_scale_xp(int xp) { return xp; }
+void coop_middle_handle_ping(PacketCoopPing* pkt) { (void)pkt; }
+bool coop_middle_ping_send(int64_t loc, int kind) { (void)loc; (void)kind; return false; }
+int coop_middle_pings_get(CoopPingView* out, int max, unsigned int now_ms) { (void)out; (void)max; (void)now_ms; return 0; }
+unsigned int coop_middle_pings_serial(void) { return 0; }
+unsigned int coop_middle_now_ms(void) { return 0; }
+void coop_middle_slot_name(int slot, char* out, size_t sz)
+{
+    (void)slot;
+    if (out != NULL && sz > 0) {
+        out[0] = '\0';
+    }
+}
+bool coop_middle_try_chat_command(int sender_slot, const char* text) { (void)sender_slot; (void)text; return false; }
 
 #endif /* COOP_LITE_TEST_STUBS */

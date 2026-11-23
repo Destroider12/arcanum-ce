@@ -5,6 +5,9 @@
  * Coop Middle M1 (protocol 53): gold split, loot feed, client rest request.
  * Coop Middle M2 (protocol 54): direct trade, status badges (+ the UI-only
  * Alt loot labels and F9 net HUD in ui/coop_middle_ui.c).
+ * Coop Middle M3 (protocol 55): shared tactical pause, enemy damage / XP
+ * scaling, no party friendly fire, map pings (PACKET_COOP_PING), /tp
+ * /stuck /gather.
  *
  * All Middle logic lives in coop_middle.c (and coop_rules.c). coop_lite.c and
  * the engine files only call the hooks below, so Coop Lite bugfixes merge in
@@ -29,6 +32,10 @@ extern "C" {
 /* M2: client -> host: a = own COOP_STATUS_INVEN | _DIALOG bits;
    host -> clients: a = all slots, 4 bits each (coop_middle_status_pack). */
 #define COOP_CTRL_SLOT_STATUS 7
+/* M3: client -> host: a = 1 pause / 0 resume, b = 0;
+   host -> all: a = state, b = paused_by_slot (0..7). */
+#define COOP_CTRL_PAUSE 8
+#define COOP_PAUSE_RATE_MS 2000u /* per slot, client asks and host accepts */
 
 #define COOP_STATUS_INVEN 0x1 /* inventory / loot / trade window open */
 #define COOP_STATUS_DIALOG 0x2 /* in a dialog */
@@ -62,7 +69,48 @@ extern "C" {
 #define COOP_MID_CHAT_MORE 3 /* name = "", text = count of collapsed lines */
 #define COOP_MID_CHAT_TRADE 4 /* M2: name = giver, text = "receiver|item" */
 #define COOP_MID_CHAT_TRADE_GOLD 5 /* M2: name = giver, text = "receiver|amount" */
-#define COOP_MID_CHAT_KIND_MAX 5
+#define COOP_MID_CHAT_REGROUP 6 /* M3: name = player, text = "0" (/tp, /stuck) or "1" (/gather) */
+#define COOP_MID_CHAT_CMD_REFUSE 7 /* M3: name = "", text = "reason seconds" (COOP_TP_REFUSE_*) */
+#define COOP_MID_CHAT_PAUSE_DROP 8 /* M3: name = the pauser who left, text = "-" */
+#define COOP_MID_CHAT_KIND_MAX 8
+
+/* M3 chat commands (pure parse; the host runs them, never relayed). */
+#define COOP_CMD_NONE 0
+#define COOP_CMD_TP 1 /* /tp: a client to the host */
+#define COOP_CMD_STUCK 2 /* /stuck: the same */
+#define COOP_CMD_GATHER 3 /* /gather or /tp all: the host pulls everyone */
+#define COOP_CMD_COOLDOWN_MS 30000u /* per slot */
+#define COOP_TP_ENEMY_RANGE 20 /* tiles: a hostile NPC focused on you blocks /tp */
+
+#define COOP_TP_REFUSE_DEAD 1
+#define COOP_TP_REFUSE_MAP 2
+#define COOP_TP_REFUSE_COMBAT 3
+#define COOP_TP_REFUSE_TARGETED 4
+#define COOP_TP_REFUSE_COOLDOWN 5 /* + seconds left */
+#define COOP_TP_REFUSE_HOST_ONLY 6 /* /gather from a client */
+#define COOP_TP_REFUSE_NOBODY 7 /* /gather: nobody could be moved */
+#define COOP_TP_REFUSE_SELF 8 /* /tp from the host */
+#define COOP_TP_REFUSE_MAX 8
+
+/* M3 pings: a marked tile, shown to everyone on the same map. */
+#define PACKET_COOP_PING 168
+typedef struct PacketCoopPing {
+    /* 0000 */ int type; /* PACKET_COOP_PING */
+    /* 0004 */ int slot; /* the host stamps the sender's slot */
+    /* 0008 */ int map; /* map_current_map() */
+    /* 000C */ int kind; /* COOP_PING_KIND_* */
+    /* 0010 */ int64_t loc; /* target tile */
+} PacketCoopPing;
+_Static_assert(sizeof(PacketCoopPing) == 0x18, "PacketCoopPing size");
+_Static_assert(offsetof(PacketCoopPing, loc) == 0x10, "PacketCoopPing.loc");
+
+#define COOP_PING_KIND_LOOK 0 /* blue-gold: look here */
+#define COOP_PING_KIND_DANGER 1 /* red: enemy / trap */
+#define COOP_PING_KIND_MAX 1
+#define COOP_PING_RATE_MS 1000u /* per slot */
+#define COOP_PING_LIFE_MS 4500u
+#define COOP_PING_MAX 16 /* ring buffer */
+#define COOP_PING_SOUND_RANGE 40 /* tiles from the local PC */
 
 /* M2 direct trade: a free give between two players, in the pickpocket
    (STEAL) inventory window. COOP_BARTER_OPEN_TRADE extends Lite's
@@ -159,6 +207,24 @@ typedef struct CoopLabelRect {
    above min_y is hidden. Returns the visible count. */
 int coop_middle_labels_deoverlap(CoopLabelRect* rects, int count, int min_y, int max_y);
 
+/* M3: damage to a non-party enemy when enemies have pct% HP: (raw * 100 +
+   *rem) / pct, the remainder carried in *frac_rem_inout (may be NULL);
+   at least 1 when raw > 0, 0 when raw <= 0. pct < 100 counts as 100. */
+int coop_middle_scale_enemy_damage(int raw_dmg, int enemy_hp_pct, int* frac_rem_inout);
+/* M3: raw * pct / 100 (64-bit, clamped to INT_MAX), never below raw for
+   pct >= 100; raw <= 0 stays as is. */
+int coop_middle_scale_xp(int raw_xp, int pct);
+/* M3: "/tp", "/stuck", "/gather", "/tp all" (case-insensitive, spaces
+   trimmed) -> COOP_CMD_*; anything else (plain text, "/unknown") -> NONE. */
+int coop_middle_parse_cmd(const char* text);
+/* M3: once per interval: true (and *last_ms = now) when nothing was
+   admitted yet or interval_ms passed. */
+bool coop_middle_rate_admit(bool* have_last, unsigned int* last_ms, unsigned int now_ms, unsigned int interval_ms);
+/* M3: whole seconds left of a cooldown (rounded up, 0 = ready). */
+int coop_middle_cooldown_left_s(bool have_last, unsigned int last_ms, unsigned int now_ms, unsigned int interval_ms);
+/* M3: PACKET_COOP_PING wire check: exact size, type, kind, slot 0..7. */
+bool coop_middle_ping_valid(const PacketCoopPing* pkt, int size);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -229,6 +295,45 @@ bool coop_middle_trade_refuse_take(int64_t partner);
 /* Host's own give in its trade window: true = done here (vanilla skipped). */
 bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item);
 
+/* M3 pause: one shared state (host owns it). While paused timeevent_ping
+   advances only real time: no game / anim time, AI, combat, spell ticks.
+   Net, render, camera, chat and the UI windows keep running. */
+bool coop_middle_is_paused(void);
+int coop_middle_paused_by(void); /* slot, -1 when not paused */
+/* The Pause key: true when consumed (an active co-op session). */
+bool coop_middle_pause_key(void);
+/* New world orders (move / attack / cast / throw / hotkey) are refused
+   while paused; notice = show the "paused" line (rate limited). */
+bool coop_middle_orders_blocked(bool notice);
+
+/* M3 difficulty (host only, no-ops elsewhere). */
+int coop_middle_host_enemy_damage(int64_t target, int dam);
+/* True: this hit is party on party with the rule on (zero it, no aggro). */
+bool coop_middle_host_ff_block(int64_t attacker, int64_t target);
+int coop_middle_host_scale_xp(int xp);
+
+/* M3 pings. */
+void coop_middle_handle_ping(PacketCoopPing* pkt);
+/* Local trigger (MMB / Alt+RMB on the map): true when sent. */
+bool coop_middle_ping_send(int64_t loc, int kind);
+typedef struct CoopPingView {
+    int slot;
+    int kind;
+    int64_t loc;
+    unsigned int age_ms;
+    char name[32];
+} CoopPingView;
+/* Live pings on the current map, oldest first. */
+int coop_middle_pings_get(CoopPingView* out, int max, unsigned int now_ms);
+unsigned int coop_middle_pings_serial(void); /* bumps on add / clear */
+unsigned int coop_middle_now_ms(void); /* the Middle tick clock */
+/* A slot's player name (PC name, else the net nick). */
+void coop_middle_slot_name(int slot, char* out, size_t sz);
+
+/* M3 chat commands: the host runs them before the relay (or on its own
+   send); true = consumed (not chat). */
+bool coop_middle_try_chat_command(int sender_slot, const char* text);
+
 /* ---- bridge: small helpers coop_lite.c exports for Middle (game only) ---- */
 void coop_lite_mid_notice(const char* str, bool good);
 void coop_lite_mid_prompt(const char* text); /* NULL hides the Y / N panel */
@@ -236,6 +341,9 @@ bool coop_lite_mid_prompt_busy(void); /* a Lite Y / N (travel, load) is up */
 void coop_lite_mid_chat_line(const char* line);
 void coop_lite_host_sync_slot_inven(int slot);
 bool coop_lite_container_is_store(int64_t container, int64_t pc);
+/* M3: host moves a slot's PC to loc (lock, stop anims, keep the sector);
+   the pose tick then sends the owner a FORCE with a fresh epoch. */
+void coop_lite_mid_move_pc(int slot, int64_t pc, int64_t loc);
 
 #ifdef __cplusplus
 }

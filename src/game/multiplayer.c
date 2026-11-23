@@ -1225,6 +1225,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_RULES: /* Coop Middle M1 */
         coop_middle_handle_rules((PacketCoopRules*)msg);
         break;
+    case PACKET_COOP_PING: /* Coop Middle M3 */
+        coop_middle_handle_ping((PacketCoopPing*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;

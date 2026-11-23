@@ -1,6 +1,7 @@
 #include "game/timeevent.h"
 
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle M3: shared pause */
 
 #include <stdio.h>
 
@@ -839,7 +840,9 @@ void timeevent_ping(tig_timestamp_t timestamp)
      * via PacketGameTime. Clients must still advance real-time (already done
      * above) and anim-time so local movement/rendering are not frozen.
      */
-    if (!sub_45B300()) {
+    /* Coop Middle M3: a shared pause freezes game and anim time (AI,
+       combat, anims, spell ticks, fatigue); real-time UI / MP events run. */
+    if (!sub_45B300() && !coop_middle_is_paused()) {
         if (coop_lite_can_advance_game_time()) {
             if (!combat_turn_based_is_active()) {
                 datetime_add_milliseconds(&timeevent_game_time, 8 * delta);
