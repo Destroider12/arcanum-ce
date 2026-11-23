@@ -6,7 +6,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | --- | --- | --- |
 | Coop Lite 1.0 | `coop-lite` (tag `coop-lite-v1.0`) | 52 |
 | Coop Middle M1 | `coop-middle` (up to `23e1797d`) | 53 |
-| Coop Middle M2 | `coop-middle` | **54** |
+| Coop Middle M2 | `coop-middle` (up to `283402e5`) | 54 |
+| Coop Middle M3 | `coop-middle` | **55** |
 
 Lite and Middle builds refuse each other at the handshake. Every player needs the same build.
 
@@ -16,7 +17,7 @@ All Middle code lives in new files:
 
 - `src/game/coop_rules.h/.c`: the session rules contract (pure C, also linked into the launcher and the tests).
 - `src/game/coop_middle.h/.c`: the M1/M2 mechanics. Pure helpers come first (headless tests). The game side is compiled out under `COOP_LITE_TEST_STUBS`.
-- `src/ui/coop_middle_ui.h/.c` (M2): trade entry points, portrait badges, Alt loot labels, F9 net HUD.
+- `src/ui/coop_middle_ui.h/.c` (M2): trade entry points, portrait badges, Alt loot labels, F9 net HUD; M3: pause banner, pings, the world mouse hook.
 
 Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge into `coop-middle` without conflicts:
 
@@ -37,6 +38,15 @@ Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge 
 | `coop_chat_ui.c` | overlay draw / scroll also call `coop_middle_ui_draw()` / `coop_middle_ui_on_scroll()` (one overlay hook in gamelib) |
 | `gameuilib.c` | module `CoopMiddle-UI` (init / reset / exit / resize) |
 | `tig_net.c`, `tig_net_transport.h`, `tig_net_enet.c`, `tig_net_steam.c` | HUD stats: last app packet per slot, optional `peer_stats` (ENet RTT / loss; Steam NULL) |
+| **M3** | |
+| `tig_net.h` | protocol 55 |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 169 |
+| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_PING`; `coop_lite_host_share_xp` -> `coop_middle_host_scale_xp`; chat relay / own send -> `coop_middle_try_chat_command`; bridge `coop_lite_mid_move_pc` |
+| `multiplayer.c` | dispatch of `PACKET_COOP_PING` |
+| `timeevent.c` | `timeevent_ping`: no game / anim time while `coop_middle_is_paused()` |
+| `combat.c` | `combat_dmg`: `coop_middle_host_ff_block` (start), `coop_middle_host_enemy_damage` (after the bonuses) |
+| `intgame.c` | `intgame_process_event` start -> `coop_middle_ui_world_event` (ping, paused clicks); Pause key -> `coop_middle_pause_key`; spell hotkey refused while paused |
+| `wmap_ui.c` | town map draws live pings (blinking cross); `wmap_ui_coop_town_refresh()` |
 
 The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pings, pause, difficulty, quest pocket, town map fog, parallel dialogs, ...) was reverted in one commit before M1. Ideas from it come back stage by stage in the Middle files. **Parallel dialogs are dropped for now** and can return as a separate stage.
 
@@ -46,8 +56,8 @@ The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pin
 typedef struct CoopRules {
     uint32_t version;      /* 1 */
     uint32_t flags;        /* COOP_RULE_* */
-    uint16_t enemy_hp_pct; /* 100..300, default 100 (reserved for M3) */
-    uint16_t xp_mult_pct;  /* 100..250, default 100 (reserved for M3) */
+    uint16_t enemy_hp_pct; /* 100..300, default 100 (M3, key hp) */
+    uint16_t xp_mult_pct;  /* 100..250, default 100 (M3, key xp) */
     uint32_t reserved[4];  /* zero */
 } CoopRules;               /* 28 bytes, _Static_assert on size / alignment */
 ```
@@ -58,11 +68,13 @@ typedef struct CoopRules {
 | 1 | `COOP_RULE_LOOT_FEED` | on | `loot` (`loot_feed`) |
 | 2 | `COOP_RULE_REST_VOTE` | on | `rest` (`rest_vote`) |
 | 3 | `COOP_RULE_DIRECT_TRADE` (M2) | **on** | `trade` (`direct_trade`) |
-| 4 | `COOP_RULE_CLIENT_PAUSE` (reserved) | off | `pause` |
-| 5 | `COOP_RULE_NO_FRIENDLY_FIRE_AOE` (M3, reserved) | off | `noffaoe` |
+| 4 | `COOP_RULE_CLIENT_PAUSE` (M3) | off | `pause` (`client_pause`) |
+| 5 | `COOP_RULE_NO_FRIENDLY_FIRE_AOE` (M3) | **on** | `ff` (`no_ff_aoe`; M1-M2 spelling `noffaoe` still read) |
+| - | `enemy_hp_pct` (M3) | 100 | `hp` (`enemy_hp_pct`) |
+| - | `xp_mult_pct` (M3) | 100 | `xp` (`xp_mult_pct`) |
 
 - `coop_rules_sanitize` clamps the percentages, drops unknown flag bits (the reserved ones are kept), zeroes `reserved` and fixes `version`.
-- `ARCANUM_COOP_RULES`: `gold=1,loot=1,rest=1,trade=1,hp=100,xp=100` (M2: `trade` is always written; reserved keys only when set). Keys are separated by `,` or `;`, values can be numbers or `on/off/yes/no/true/false`, unknown keys and bad values are ignored, and missing keys keep their defaults. The host reads it once.
+- `ARCANUM_COOP_RULES`: `gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100` (M3: every key is always written). Keys are separated by `,` or `;`, values can be numbers or `on/off/yes/no/true/false`, unknown keys and bad values are ignored, and missing keys keep their defaults. The host reads it once.
 - `PACKET_COOP_RULES` (type **167**, 32 bytes, host -> client only): the host sends it to a slot right after SESSION_SYNC (join and reconnect). The client checks the size and type, sanitizes the rules, keeps them for the session, shows the summary in chat, and goes back to the defaults on `coop_lite_session_reset`. A rules packet from a client is dropped by the direction table (and again in the handler).
 
 ## M1: gold split (`COOP_RULE_GOLD_SPLIT`, host only)
@@ -156,6 +168,75 @@ typedef struct TigNetHudStats {
 
 Line: `Host 3/8 | RTT 45 ms (avg 30) | loss 0% | sync OK` (client: `Client 3/8 | RTT 45 ms | loss 0% | sync OK`; RU: `Хост 3/8 | RTT 45 мс (ср. 30) | потери 0% | синхр. OK`). The line turns orange with **sync LAG N s** when no app packet arrived for more than **6 s**. That is longer than the 5 s status heartbeat, so an idle but connected peer stays OK. The thresholds and fields are easy to change in `coop_middle_ui.c`.
 
+## M3: shared tactical pause (`COOP_RULE_CLIENT_PAUSE`)
+
+- **Pause** (the key) toggles one shared pause for the whole session. It does not work while typing in chat or in the main menu. The host can always pause. A client can pause only when the host turned on **Client pause** (`pause=1`, default **off**); otherwise it gets a notice. A client can toggle at most once per 2 s (checked on the client and again on the host).
+- Wire: `PACKET_COOP_PARTY_CTRL` op `COOP_CTRL_PAUSE` (8). Client -> host: `a` = 1 pause / 0 resume, `b` = 0. Host -> all: `a` = state, `b` = the slot that paused. The host sends the state to a slot that joins during a pause, right after SESSION_SYNC.
+- **What stops:** `timeevent_ping` keeps advancing only real time while paused. Game and anim time stand still, so no AI, combat, animation, spell or poison ticks, fatigue or script timers run. Because the real-time reference keeps moving, the resume has no time jump.
+- **What keeps running:** the main loop, ENet / `multiplayer_ping`, the crash-handler heartbeat, rendering, camera scroll, chat (Enter), inventory, journal, character sheet (points can be spent) and the hotbar.
+- **Blocked:** new world orders on the map (LMB / RMB: move, attack, cast, throw) and spell hotkeys, on host and client. A rate-limited notice explains why.
+- **Banner:** top centre, under the F9 HUD when it is on. It is a solid plate (bg 20,16,12, frame 210,170,70) and clicks pass through it.
+  - EN: `PAUSED (<Name>) - Press Pause to resume`
+  - RU: `ПАУЗА (<Имя>) - нажмите Pause для продолжения`
+  - The game fonts have no em dash, so it shows as ` - `.
+- **Auto-resume:**
+  - when the client who paused disconnects, with a chat line `[Co-op] <Name> left - pause lifted.` / `[Кооп] <Имя> отключился - пауза снята.`;
+  - when the host opens the main menu;
+  - on a map change or save load;
+  - on a session reset.
+
+## M3: difficulty (host only)
+
+| Rule | Range / default | Env key (alias) | Effect |
+| --- | --- | --- | --- |
+| `enemy_hp_pct` | 100..300, default 100 | `hp` (`enemy_hp_pct`) | Damage to enemy NPCs is divided by pct%. The remainder carries per target, and every hit does at least 1. `OBJ_F_HP_ADJ` is never touched. |
+| `xp_mult_pct` | 100..250, default 100 | `xp` (`xp_mult_pct`) | Party XP is multiplied before the split. |
+| `COOP_RULE_NO_FRIENDLY_FIRE_AOE` | **on** by default | `ff` (`no_ff_aoe`, old `noffaoe`) | Party members never damage each other. |
+
+- **Enemy HP:** the pure helper is `coop_middle_scale_enemy_damage(raw, pct, &rem)` = `(raw*100 + rem) / pct`.
+  - It runs in `combat_dmg` after resistances, difficulty and crit bonuses, so it covers melee, ranged, spells, grenades, traps and scripts.
+  - It only scales damage to NPC targets that are not on the co-op side (PCs, their followers and summons excluded). Kill shots (`CDF_FULL` / `CDF_DEATH`) stay kill shots.
+  - Up to 32 targets keep a remainder; the table is cleared on map change.
+- **XP:** `coop_middle_scale_xp(raw, pct)` uses 64-bit math, clamps to `INT_MAX` and never drops below `raw`. It is applied in `coop_lite_host_share_xp` before the split. A lone player also gets the scaled amount.
+- **No friendly fire:** at the very start of `combat_dmg`, if the attacker and target are different objects and both are on the co-op side (`coop_lite_party_no_fight`), the HP and fatigue damage and the damage flags are cleared and the function returns.
+  - That means no damage, crit effects, `SAP_TAKING_DAMAGE` script, aggro or retaliation.
+  - It applies to every party-on-party hit, not only AoE.
+
+## M3: map pings (`PACKET_COOP_PING` = 168)
+
+```c
+typedef struct PacketCoopPing {
+    int type;    /* 0x00 */
+    int slot;    /* 0x04: the host stamps the sender's slot */
+    int map;     /* 0x08: map_current_map() */
+    int kind;    /* 0x0C: 0 = look (blue-gold), 1 = danger (red) */
+    int64_t loc; /* 0x10: target tile */
+} PacketCoopPing; /* 0x18, _Static_assert */
+```
+
+- **Trigger:** **MMB** (release) or **Alt+RMB** on the map, in normal mode with no dialog or inventory open. Alt+LMB stays the Lite body drag.
+  - The ping marks the tile under the cursor.
+  - It is a danger ping when a hostile NPC (its combat focus is set, or its reaction is dislike or hatred) or a spotted trap is under the cursor.
+  - **MMB conflicts:** none on the map. MMB is used only in `dialog_ui.c`, `mainmenu_ui.c` and `slide_ui.c`, which are other windows. Alt+RMB down on the map is swallowed, so the vanilla RMB action does not run.
+- **Host:** `PACKET_COOP_TYPE_LIMIT` is 169 and the role is `BOTH`.
+  - It checks the exact size, kind 0..1, `map == map_current_map()` and `coop_lite_loc_in_map`, and allows at most 1 ping per second per slot. The client waits 1.1 s between its own pings.
+  - It stamps the slot, sends the ping to everyone (the sender included) and shows it itself.
+- **Display:**
+  - The last 16 pings are kept, each for 4.5 s, and cleared on map change and session reset.
+  - Each ping is a pulsing diamond on the tile with a `[Name]` plate. It is drawn in the iso overlay pass (no extra windows), and its rect is invalidated on every pulse step (150 ms) and when it disappears.
+  - A soft UI click plays when the ping is within 40 tiles of the local PC.
+  - On the open town map (`wmap_ui.c`, town mode) a ping on the current map blinks as a cross, repainted every 300 ms.
+
+## M3: `/tp`, `/stuck`, `/gather` (host)
+
+- `coop_middle_parse_cmd` is case-insensitive and trims spaces: `/tp` and `/stuck` -> regroup to the host; `/gather` and `/tp all` -> the host pulls everyone. Plain text, `/unknown` and extra words stay chat.
+- The host runs a command before the chat relay (`coop_lite_handle_chat`) or on its own send, so commands never show as chat. A client's command text is not echoed locally.
+- **`/tp` or `/stuck` (client):** cooldown 30 s per slot. Both the host and the client must be alive, the client's PC must be on the host's map, neither may be in combat mode, and no live hostile NPC within 20 tiles may have the client as `OBJ_F_NPC_COMBAT_FOCUS`.
+  - The client is moved to a free walkable tile by its slot (`coop_lite_follow_loc_for_slot`). The bridge `coop_lite_mid_move_pc` stops its anims, moves it, keeps the sector and bumps the pose epoch, and the pose tick sends `COOP_PC_POS_FORCE` to the owner and the pose to the others.
+  - Line: `[Co-op] <Name> regrouped to the host.` / `[Кооп] <Имя> телепортировался к хосту.`
+- **`/gather` (host only):** the host must be alive and out of combat; cooldown 30 s. Every connected client that passes the same checks is moved. Line: `[Co-op] <Host> gathered the party.`
+- **Refusals** go to the asker only, as a system line in their own language: dead, other map, combat, enemy fighting you, `N s` cooldown, `/gather` is host-only, nobody to gather, or the host using `/tp`.
+
 ## Launcher
 
 `arcanum-coop-launcher.ini`:
@@ -166,14 +247,23 @@ gold_split=0
 loot_feed=1
 rest_vote=1
 direct_trade=1
+client_pause=0
+no_ff_aoe=1
+enemy_hp_pct=100
+xp_mult_pct=100
 ```
 
-Host mode shows one row of checkboxes (**Split gold**, **Loot feed**, **Rest vote**, **Direct trade**; disabled in Join mode). At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
+Host mode shows two rows (disabled in Join mode):
+
+- **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
+- M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200).
+
+An odd ini value lands on the nearest step below it. At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
 
 ## Log lines
 
 ```
-CoopMiddle: host rules from ARCANUM_COOP_RULES='...' (N keys): gold=0,loot=1,rest=1,hp=100,xp=100 | Rules: ...
+CoopMiddle: host rules from ARCANUM_COOP_RULES='...' (N keys): gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100 | Rules: ...
 CoopMiddle: rules sent to slot S: gold=...
 CoopMiddle: rules received from the host: gold=...
 CoopMiddle: rules packet from slot S dropped (host -> client only)
@@ -206,6 +296,24 @@ CoopMiddle: labels: Alt held, N label(s)
 CoopMiddle: net HUD on|off (F9)
 CoopMiddle: net HUD: <line>                                   (when sync turns LAG / OK)
 [CHAT] [Trade] ...
+CoopMiddle: pause ON|OFF (slot S, host key|client request|the pauser disconnected|main menu|map change / load|pauser inactive)
+CoopMiddle: pause on|off asked                                (client)
+CoopMiddle: pause ON|OFF from the host (slot S)               (client)
+CoopMiddle: pause request from slot S refused (rule off or inactive)
+CoopMiddle: pause request from slot S dropped (rate limit)
+CoopMiddle: pause state sent to slot S (paused by P)
+CoopMiddle: pause banner: <text>
+CoopMiddle: enemy HP P%: damage D -> S (first hit on this map)
+CoopMiddle: friendly fire blocked (attacker slot A -> target slot T, type N)   (1/s)
+CoopMiddle: ping sent kind K at X,Y                            (client)
+CoopMiddle: ping from slot S (<name>) kind K at X,Y
+CoopMiddle: ping from slot S dropped (map M / off map|rate limit)
+CoopMiddle: ping dropped (size N)
+CoopMiddle: command C from slot S
+CoopMiddle: command from slot S refused (reason R, N s)
+CoopMiddle: regroup slot S -> X,Y
+CoopMiddle: /gather moved N player(s)
+[CHAT] [Co-op] ...
 ```
 
 ## Tests
@@ -214,7 +322,7 @@ CoopMiddle: net HUD: <line>                                   (when sync turns L
 
 1. `coop_rules_default` / `coop_rules_sanitize`: bounds, unknown bits, reserved bits kept, `reserved[]` zeroed.
 2. `coop_rules_format_env` <-> `coop_rules_parse_env` round trip for every flag combination, ini aliases, partial, garbage, overlong and out-of-range strings, truncated output.
-3. `PACKET_COOP_RULES`: size 32, type 167 < type limit, min size, role `CLIENT_APPLY`, `coop_lite_packet_allowed` (host -> client only), version check, `TIG_NET_PROTOCOL == 54`.
+3. `PACKET_COOP_RULES`: size 32, type 167 < type limit, min size, role `CLIENT_APPLY`, `coop_lite_packet_allowed` (host -> client only), version check, `TIG_NET_PROTOCOL == 55`.
 4. `coop_middle_split_gold`: 1..8 players, no loss (`each * n + rem == amount`), carry, too little to split, overflow saturation.
 5. `coop_middle_loot_feed_worthy` (keys, scrolls, written, quest, unique, cost 250 pass; junk, cheap potions, ammo, gold, non-items fail), the 5/s limiter with the collapse count and ms-clock wrap, and the EN/RU line formats.
 6. `COOP_CTRL_REST_ASK` / `COOP_CTRL_REST_REFUSE` in `coop_lite_party_ctrl_valid` (modes, reasons, `b == 0`, Lite ops unchanged, unknown ops refused), the 5 s ask limit.
@@ -222,12 +330,18 @@ CoopMiddle: net HUD: <line>                                   (when sync turns L
 8. M2 status: `coop_middle_status_pack` / `_get` (nibbles, masking, bounds), badge priority and colours X > Z > P > D > I > C, `COOP_CTRL_SLOT_STATUS` validity (`b == 0`, short packet).
 9. M2 labels: `coop_middle_labels_deoverlap` (same spot, side by side, a stack of 32 stays pairwise apart and inside the view, limited room hides the rest, degenerate input, a label below the view is pulled up).
 
+10. M3 rules: pause / ff defaults and active bits, `pause` / `ff` / ini aliases / old `noffaoe`, hp / xp keys, long aliases, clamps, launcher steps round trip, describe EN/RU.
+11. M3 scaling: `coop_middle_scale_enemy_damage` at 100 / 150 / 200 / 300, the remainder series (6 + 7 + 7, 300 hits lose nothing), minimum 1, 0 for <= 0, bad remainder, NULL; `coop_middle_scale_xp` at 100 / 125 / 150 / 250, floor, <= 0, `INT_MAX` overflow.
+12. M3 commands: `coop_middle_parse_cmd` (`/tp`, `/TP  `, `/stuck`, `/gather`, `/tp all`; plain text, `/unknown`, extra words, overlong not caught), cooldown seconds (round up, wrap), EN/RU regroup / refusal / pause-drop lines.
+13. M3 pings: id 168 < limit 169, size 24, offsets, min size, role `BOTH`, direction, `coop_middle_ping_valid` (size, type, kind 0..1, slot 0..7), 1/s rate limit.
+14. M3 pause: `COOP_CTRL_PAUSE` in `coop_lite_party_ctrl_valid` (`a` 0/1, `b` 0..7, short packet), 2 s rate limit, `TIG_NET_PROTOCOL == 55`, stub hooks are no-ops.
+
 ## Not done / risks (M1)
 
 - **Not tested in play yet:** only the build and headless tests.
 - The rest prompt uses the Lite travel Y/N panel. If a travel or load prompt opens while a rest request waits, the rest request is cancelled (busy) rather than queued.
 - An item the host places itself after a client's loot move failed (the client's grid cell was taken on the host, PT46 retry) gets no feed line. This path is rare.
-- `enemy_hp_pct`, `xp_mult_pct` and the reserved flags (`pause`, `noffaoe`) are carried and validated, but have no effect yet.
+- `enemy_hp_pct`, `xp_mult_pct` and the reserved flags (`pause`, `noffaoe`) are carried and validated, but have no effect yet (M3: all of them are active now).
 
 ## Not done / risks (M2)
 
@@ -238,3 +352,13 @@ CoopMiddle: net HUD: <line>                                   (when sync turns L
 - While the rule is on, Ctrl+LMB on a teammate no longer runs the vanilla Ctrl action on that PC.
 - The HUD's sync check uses "time since any app packet". The 5 s status heartbeat keeps an idle link at OK. RTT and loss come from ENet only (Steam shows `RTT ?`).
 - A client's INVEN / DIALOG badge lags by one host poll (250 ms) plus the network.
+
+## Not done / risks (M3)
+
+- **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests. The banner, the ping diamonds and the town-map cross have not been checked on screen.
+- The pause freezes game and anim time on every machine, but real-time events still run (UI, MP, the TB-combat timer, fidget queueing). Co-op disables turn-based combat, so the TB timer does not matter in practice.
+- The host opening the in-game main menu (Esc) also lifts the pause, as the spec asks ("reset on main menu").
+- No friendly fire covers every party-on-party hit, not only AoE, because the spec's condition has no AoE test. A party member can no longer hurt a teammate on purpose while the rule is on.
+- Enemy damage scaling divides the final HP damage only. Fatigue and poison damage to enemies are not scaled.
+- A danger ping is detected on the hovered object or on objects on the cursor tile. A hostile NPC standing next to that tile gives a normal ping.
+- `/tp` decides "same map" from the client PC's location on the host (`coop_lite_loc_in_map`). A client that is still loading has no PC there yet and gets "dead / not here".
