@@ -8,7 +8,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Middle M1 | `coop-middle` (up to `23e1797d`) | 53 |
 | Coop Middle M2 | `coop-middle` (up to `283402e5`) | 54 |
 | Coop Middle M3 | `coop-middle` (up to `ecc31c26`) | 55 |
-| Coop Middle M4 | `coop-middle` | **56** |
+| Coop Middle M4 | `coop-middle` (up to `9f60cded`) | 56 |
+| Coop Middle M5 | `coop-middle` | **57** |
 
 Lite and Middle builds refuse each other at the handshake. Every player needs the same build.
 
@@ -56,6 +57,17 @@ Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge 
 | `dialog.c` | conditions `in` / `ni` and action `in` -> `coop_middle_find_party_item` (+ `coop_middle_quest_handed_over`) |
 | `script.c` | `SCT_OBJ_HAS_ITEM_NAMED`, `SAT_TRANSFER_ITEM`, `SAT_DESTROY_ITEM_NAMED` -> the same |
 | `townmap.c` | `townmap_coop_fog()` / `townmap_coop_fog_touched()` (the known-tile bit array) |
+| **M5** | |
+| `tig_net.h/.c` | protocol 57; `tig_net_send_pose(data, size, slot)` (addressed unreliable send for NPC_POS) |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 172 |
+| `coop_lite.c` | NPC_POS per-slot batches (44 tiles, seen mask); DOOR_STATE / TRAP_FX / PROJECTILE_FX -> `coop_middle_send_app_near`; keep window -> `coop_middle_keep_sector_set`; role `BOTH` + min size of 170; host world-map dimming off while `ow` is active; party travel aborts world map trips; client world map click -> `coop_middle_owt_client_propose`; a transiting slot is BUSY in the ready check; bridges `coop_lite_mid_keep*` / `coop_lite_mid_center_local` |
+| `sector.c/.h` | co-op cache 128; `sector_cache_coop_stats()` |
+| `teleport.c` | host's own hop on map 1 with `ow`: carries no other PCs, no FOLLOW_HOST |
+| `multiplayer.c` | dispatch of `PACKET_COOP_OVERWORLD_TRAVEL` |
+| `mp_utils.c` / `magictech.c` | sound (106) and eye-candy add (77) -> `coop_middle_send_app_near` |
+| `wmap_ui.c/.h` | frozen clock + own encounter rolls on map 1; client close -> CANCEL; ally markers (WORLD view); `wmap_ui_coop_marker_set` / `_local_sector` / `_refresh` |
+| `wmap_rnd.c/.h` | `wmap_rnd_coop_check(loc)` |
+| `sleep_ui.c` / `intgame.c` | rest choice -> `coop_middle_sleep_choose`; Y / N -> `coop_middle_sleep_key` |
 | `dialog_ui.c` | `sub_567420` returns a client PC's own entry on the host; party checks by slot; the choose hook gets the slot; a client's dialog never cuts the host's voice line |
 | `inven_ui.c` | follower (free) barter mode also for a shared follower |
 | `coop_middle_ui.c` | Ctrl+LMB on a teammate's follower opens the follower exchange |
@@ -282,6 +294,29 @@ typedef struct PacketCoopPing {
 - 4b: a move inside a follower's pack (Packet81 `from == to == follower`, or `INVEN_LAYOUT` for the follower) is applied for the leader, or for any party player with the rule, when it has that follower's window open. The sender and everyone with that follower open get the pack, and NPC_POS re-sends the follower (worn items).
 - 4c: with the rule, any living party player within 6 tiles may open the free follower exchange with any party follower: `coop_lite_barter_partner_ok`, `COOP_DIALOG_ACT_EXCHANGE`, the client's exchange open, and Ctrl+LMB on a teammate's follower. The leader keeps the follower (no re-binding on the client).
 
+## M5: interest management
+
+- Co-op sector cache 96 -> 128. Each remote slot keeps a 3x3 sector window while there are <= 4 remote slots or >= 36 cache slots would stay free; otherwise an adaptive 2x2 (own sector + the nearer neighbour per axis, margin 32). The decision uses the free count *as if* every slot held 3x3, so it does not flip back and forth. The PT77y corpse fixes stay.
+- NPC_POS: each slot gets its own batch (`tig_net_send_pose`) with only NPCs within 44 tiles of its PC (Chebyshev, all maps). A per-NPC seen mask sends the state at once to a slot that enters range; a state change resets the mask.
+- On map 1 only: DOOR_STATE to slots within 96 tiles; TRAP_FX, PROJECTILE_FX, sounds (106) and eye-candy adds (77) within 56 tiles of the source / target. Other maps and vanilla MP: broadcast as before. Eye-candy removals stay broadcast (no stuck particles).
+
+## M5: free world map (`COOP_RULE_FREE_OVERWORLD`, key `ow`, default on)
+
+Off = Lite behaviour. On, and only while the party is on map 1 (the world):
+
+- World map travel does not move the clock and gives no travel healing; speed stays vanilla.
+- The host's world map does not dim clients and does not open the PT73 spectator. The host's own hop moves only its PC and followers (no FOLLOW_HOST, no carry).
+- A client's route click sends `PACKET_COOP_OVERWORLD_TRAVEL` (170, 0x20 bytes, role `BOTH`) START. The host validates (rule, map 1, alive, not in combat / targeted within 15 tiles, destination on the map, no ready check / sleep running), hides the PC and its followers (`OF_OFF | OF_INVULNERABLE`), moves them one sector per 62 ms, rolls `wmap_rnd` every 5-11 sectors and sends PROGRESS every 150 ms. ARRIVED / CANCEL (closing the world map) / an encounter land the PC (sectors kept, epoch bump, PC_POS FORCE); the client closes its world map and re-centres. A new START during a trip re-routes it. Refusals: REFUSED with a reason (EN/RU notice).
+- Allies' markers: refreshed every 1000 ms (PROGRESS without MOVING), coloured by slot; an encounter shows a blinking red marker for 15 s.
+- Map-changing transitions keep the ready check: a transiting slot is BUSY, and party travel cancels all trips and carries everybody.
+
+## M5: unified sleep (`COOP_RULE_UNIFIED_SLEEP`, key `usleep`, default on)
+
+- A rest choice in the sleep window becomes a vote (`COOP_CTRL_SLEEP_VOTE` 9, mode 1 morning, 2 evening, 3 healed, 4 8 h, 5-8 the 1 / 2 / 4 / 24 h buttons). The host keeps the round (`coop_middle_sleep_step`) and sends `COOP_CTRL_SLEEP_STATE` 10 (ready mask, mode, initiator, living count) on every change and every 2 s.
+- A lone living player (host) sleeps at once with the vanilla window. Otherwise a banner shows "Sleep: n/m ready (Name: mode). Y = join sleep, N = cancel" (RU behind `ARCANUM_COOP_LANG=ru`). Moving, combat, a dialog or a world map trip cancels your own vote. Ready players regain 2 fatigue per second while waiting.
+- When every living player is ready: REST_BEGIN, host fade, the clock moves (morning 08:00 / evening 20:00 / fixed hours / until healed, max 168 h), all PCs and followers heal, time and vitals are synced, REST_END. Dead and disconnected players do not block.
+- **With the M1 rest vote:** while `usleep=1`, unified sleep replaces the M1 client rest request (and the Lite refusal). With `usleep=0`, the M1 rest vote (`rest=1`) and the Lite behaviour are unchanged.
+
 ## Launcher
 
 `arcanum-coop-launcher.ini`:
@@ -296,15 +331,18 @@ client_pause=0
 no_ff_aoe=1
 shared_quest_items=1
 shared_followers=1
+free_overworld=1
+unified_sleep=1
 enemy_hp_pct=100
 xp_mult_pct=100
 ```
 
-Host mode shows three rows (disabled in Join mode):
+Host mode shows four rows (disabled in Join mode):
 
 - **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
 - M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200);
-- M4: **Shared quest items**, **Shared followers**.
+- M4: **Shared quest items**, **Shared followers**;
+- M5: **Free world map**, **Unified sleep**.
 
 An odd ini value lands on the nearest step below it. At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
 
@@ -379,6 +417,22 @@ CoopMiddle: followers: exchange window with '<name>' requested
 [CHAT] [Co-op] ...
 ```
 
+M5 log lines:
+
+```
+CoopMiddle: sector keep window 3x3|adaptive 2x2 (remote R, cache C, locked L, free if 3x3 F)
+CoopMiddle: world map trip of slot S: x,y -> x,y (N object(s) in transit)
+CoopMiddle: world map trip of slot S re-routed to x,y
+CoopMiddle: world map trip of slot S ended (arrived|stopped|random encounter|disconnected|party travels|...) at x,y
+CoopMiddle: world map trip of slot S refused (reason R)
+CoopMiddle: world map trip to x,y asked
+CoopMiddle: slot S landed from the world map at x,y [(encounter)]
+CoopMiddle: random encounter on the host's own world map trip at x,y
+CoopMiddle: unified sleep: ready 0xMM mode M (vote|check|moved|dialog|combat / travel|...)
+CoopMiddle: unified sleep: everyone ready (...) - sleeping, mode M
+CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
+```
+
 ## Tests
 
 `ctest` target **`coop_middle`** (`tests/coop_middle_test.c`, headless; also built in the ASan/UBSan tree):
@@ -403,6 +457,11 @@ CoopMiddle: followers: exchange window with '<name>' requested
 17. M4 fog: id 169 < limit 170, size 0x410, offsets, role `BOTH`, min size, `coop_middle_townmap_fog_valid` (short / long, flags, id, len 0 / > 1024, offset cap, no wrap, type), `coop_middle_fog_merge` (OR count, idempotent, REPLACE), FNV-1a.
 18. M4 dialogs: `coop_middle_dialog_route` (own > attached > host > recent, gone sessions, bad input).
 19. M4 followers: `coop_middle_follower_access_ok` (leader always, range 6, rule off, not a party follower, dead), `PacketCoopNpcStats` 0x120 with the skill offsets, the old 0xA0 size refused, min size.
+
+20. M5 rules: bits 0x100 / 0x200, on by default, `ow` / `usleep` always in the string, ini aliases, describe EN/RU.
+21. M5 interest: `coop_middle_keep_sector_margin` (<= 4 remote or >= 36 free -> 3x3, else margin 32), `coop_middle_keep_ids` (3x3, 2x2 corners at offsets 31 / 32, no negative sectors, max), `coop_middle_loc_within`, radii per packet type on / off map 1, NPC_POS force on range entry.
+22. M5 world map travel: id 170, limit >= 172, size 0x20, role `BOTH`, min size, `coop_middle_overworld_pkt_valid` (ops, direction, flags, slot, size), `coop_middle_owt_advance`, `TIG_NET_PROTOCOL == 57`.
+23. M5 sleep: `coop_middle_sleep_step` for 1..8 players (solo, wait, execute, mode kept, initiator hand-over, dead player not blocking, cleared, refusals), `coop_middle_sleep_minutes` across midnight, `coop_middle_sleep_mode_from_ui`, banner text EN/RU, `SLEEP_VOTE` / `SLEEP_STATE` validity.
 
 ## Not done / risks (M1)
 
@@ -438,3 +497,13 @@ CoopMiddle: followers: exchange window with '<name>' requested
 - Fog: the client applies host packets for any valid town map (the game keeps one town map's array in memory, so this swaps the cached array and saves the old one). A client that changes town map at the same moment as the host can wait for the next snapshot (SESSION_SYNC or map change) before it sends its own bits.
 - Dialogs: the leader-distance rule of PT41 (`coop_lite_party_talk_check`) is kept, so a client's story dialog still needs the host nearby, but two or more dialogs can now run at once. The client keeps one viewer panel: it shows the routed session only. Headless dialogs play no voice while the host is in its own dialog.
 - Followers: `spell_tech[16]` carries the 16 spell colleges as the spec asks; tech degrees (`OBJ_F_CRITTER_SPELL_TECH_IDX` 17..24) are not in the packet. The client does not send a follower's grid layout (`INVEN_LAYOUT`); its follower-window moves arrive as Packet81, and the host also accepts a follower layout if one comes. With the rule on, Ctrl+LMB on a teammate's follower opens the exchange instead of the vanilla Ctrl action.
+
+## Not done / risks (M5)
+
+- **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
+- Distances are Chebyshev (tile squares), not the engine's path distance.
+- A client trip is a straight 8-way line over world sectors (not the vanilla road route); an encounter roll uses the vanilla `wmap_rnd_check` at the trip's sector (its level / table quirks come from the host PC). The landing spot of a stopped trip is the nearest known area, else the sector centre.
+- Markers are drawn in the WORLD view only (not on the continent view). "Clicking" a marker is the normal route click on that spot.
+- ARRIVED is broadcast to all (others un-hide the traveller). Closing the world map during a trip stops it.
+- Morning is 08:00 as the spec says (vanilla uses 07:00). Unified sleep always heals (the vanilla "wait" choice is not separate). Execution is synchronous on the host with a fade.
+- Doors and eye-candy removals outside map 1 are not filtered; on map 1 a door changed far away reaches a slot through the radius WORLD_REQ when it enters the sector.
