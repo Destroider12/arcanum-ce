@@ -63,7 +63,7 @@ static void test_rules_default_sanitize(void)
     coop_rules_default(&r);
     CHECK(r.version == 1u);
     CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
-        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
@@ -116,7 +116,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,hp=100,xp=100") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -134,12 +134,13 @@ static void test_rules_env(void)
     n = coop_rules_parse_env(&r, " gold_split = 1 ; loot_feed=0, rest_vote=on ");
     CHECK(n == 3);
     CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
-        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
     CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
-        | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
+        | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS
+        | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -192,7 +193,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 56);
+    CHECK(TIG_NET_PROTOCOL == 57);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -365,7 +366,7 @@ static void test_rest_ops(void)
     c.op = COOP_CTRL_TRAVEL_STATE;
     c.a = COOP_TRAVEL_READY;
     CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
-    c.op = 9;
+    c.op = 11; /* 9 / 10 are the M5 sleep ops */
     c.a = 1;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
     c.op = 0;
@@ -641,7 +642,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 10);
+            CHECK(coop_rules_parse_env(&back, text) == 12);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -777,7 +778,7 @@ static void test_m3_ping(void)
     unsigned int last = 0;
 
     CHECK(PACKET_COOP_PING == 168 && PACKET_COOP_PING < PACKET_COOP_TYPE_LIMIT);
-    CHECK(PACKET_COOP_TYPE_LIMIT == 170);
+    CHECK(PACKET_COOP_TYPE_LIMIT == 172);
     CHECK(sizeof(PacketCoopPing) == 24);
     CHECK(offsetof(PacketCoopPing, kind) == 0x0C && offsetof(PacketCoopPing, loc) == 0x10);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_PING) == sizeof(PacketCoopPing));
@@ -832,7 +833,7 @@ static void test_m3_pause(void)
     unsigned int last = 0;
     int b;
 
-    CHECK(TIG_NET_PROTOCOL == 56);
+    CHECK(TIG_NET_PROTOCOL == 57);
     CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
     memset(&c, 0, sizeof(c));
     c.type = PACKET_COOP_PARTY_CTRL;
@@ -888,7 +889,7 @@ static void test_m4_rules(void)
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 10 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 12 && coop_rules_equal(&r, &back));
     n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
     CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
     n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
@@ -1040,6 +1041,262 @@ static void test_m4_followers(void)
     }
 }
 
+#ifndef LOCATION_MAKE
+#define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
+#endif
+#ifndef SECTOR_MAKE
+#define SECTOR_MAKE(a, b) ((int64_t)(a) | ((int64_t)(b) << 26))
+#endif
+
+/* 20. M5 rules: ow / usleep */
+static void test_m5_rules(void)
+{
+    CoopRules r;
+    CoopRules back;
+    char text[200];
+    char desc[512];
+
+    CHECK(COOP_RULE_FREE_OVERWORLD == 0x100u && COOP_RULE_UNIFIED_SLEEP == 0x200u);
+    CHECK(COOP_RULE_KNOWN_MASK == COOP_RULE_ACTIVE_MASK);
+    coop_rules_default(&r);
+    CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP))
+        == (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
+    r.flags &= ~(COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP);
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, "ow=0") != NULL && strstr(text, "usleep=0") != NULL); /* off still listed */
+    CHECK(coop_rules_parse_env(&back, text) == 12 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&r, "free_overworld=0,unified_sleep=off") == 2);
+    CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP)) == 0);
+    coop_rules_default(&r);
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strstr(desc, "free world map on") != NULL && strstr(desc, "unified sleep on") != NULL);
+    CHECK(strstr(desc, "XP 100%") != NULL);
+    coop_rules_describe(&r, true, desc, sizeof(desc));
+    CHECK(strstr(desc, "свободная карта мира вкл") != NULL && strstr(desc, "единый сон вкл") != NULL);
+}
+
+/* 21. M5 interest management: keep window, ranges, radii */
+static void test_m5_interest(void)
+{
+    int64_t ids[9];
+    int64_t base = LOCATION_MAKE(10 * 64 + 32, 7 * 64 + 32);
+    int n;
+
+    CHECK(COOP_SECTOR_CACHE_COOP == 128);
+    CHECK(coop_middle_keep_sector_margin(0, 0) == 0);
+    CHECK(coop_middle_keep_sector_margin(4, 0) == 0); /* few players: full 3x3 */
+    CHECK(coop_middle_keep_sector_margin(5, 36) == 0); /* enough room */
+    CHECK(coop_middle_keep_sector_margin(5, 35) == COOP_KEEP_MARGIN);
+    CHECK(coop_middle_keep_sector_margin(7, -20) == COOP_KEEP_MARGIN);
+
+    CHECK(coop_middle_keep_ids(base, 0, ids, 9) == 9); /* 3x3 */
+    n = coop_middle_keep_ids(base, COOP_KEEP_MARGIN, ids, 9);
+    CHECK(n == 4 && ids[0] == SECTOR_MAKE(10, 7) && ids[1] == SECTOR_MAKE(11, 7)); /* offset 32: the +1 side */
+    n = coop_middle_keep_ids(LOCATION_MAKE(10 * 64 + 31, 7 * 64 + 31), COOP_KEEP_MARGIN, ids, 9);
+    CHECK(n == 4 && ids[1] == SECTOR_MAKE(9, 7) && ids[3] == SECTOR_MAKE(9, 6)); /* offset 31: the -1 side */
+    n = coop_middle_keep_ids(LOCATION_MAKE(10 * 64 + 31, 7 * 64 + 31), 8, ids, 9);
+    CHECK(n == 1 && ids[0] == SECTOR_MAKE(10, 7)); /* narrow margin, sector middle: own only */
+    n = coop_middle_keep_ids(LOCATION_MAKE(10 * 64 + 3, 7 * 64 + 60), COOP_KEEP_MARGIN, ids, 9);
+    CHECK(n == 4); /* corner: 2x2 */
+    CHECK(ids[0] == SECTOR_MAKE(10, 7) && ids[1] == SECTOR_MAKE(9, 7) && ids[2] == SECTOR_MAKE(10, 8)
+        && ids[3] == SECTOR_MAKE(9, 8));
+    n = coop_middle_keep_ids(LOCATION_MAKE(5, 5), COOP_KEEP_MARGIN, ids, 9);
+    CHECK(n == 1 && ids[0] == SECTOR_MAKE(0, 0)); /* no negative sectors */
+    CHECK(coop_middle_keep_ids(LOCATION_MAKE(64 * 10 + 3, 64 * 7 + 3), COOP_KEEP_MARGIN, ids, 2) == 2);
+    CHECK(coop_middle_keep_ids(base, COOP_KEEP_MARGIN, NULL, 9) == 0);
+
+    CHECK(coop_middle_loc_within(base, base, 0));
+    CHECK(coop_middle_loc_within(base, LOCATION_MAKE(10 * 64 + 32 + 44, 7 * 64 + 32 - 44), 44));
+    CHECK(!coop_middle_loc_within(base, LOCATION_MAKE(10 * 64 + 32 + 45, 7 * 64 + 32), 44));
+    CHECK(!coop_middle_loc_within(0, base, 1000) && !coop_middle_loc_within(base, 0, 1000));
+
+    CHECK(coop_middle_interest_radius(PACKET_COOP_NPC_POS, false) == 44);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_NPC_POS, true) == 44);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_DOOR_STATE, true) == 96);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_DOOR_STATE, false) == 0);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_TRAP_FX, true) == 56);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_PROJECTILE_FX, true) == 56);
+    CHECK(coop_middle_interest_radius(106, true) == 56 && coop_middle_interest_radius(77, true) == 56);
+    CHECK(coop_middle_interest_radius(106, false) == 0 && coop_middle_interest_radius(77, false) == 0);
+    CHECK(coop_middle_interest_radius(PACKET_COOP_RULES, true) == 0);
+
+    /* NPC_POS seen mask: a slot entering range forces a send */
+    CHECK(coop_lite_npc_pos_force(0x02, 0x06, true));
+    CHECK(!coop_lite_npc_pos_force(0x06, 0x06, true));
+    CHECK(coop_lite_npc_pos_force(0x06, 0x06, false));
+}
+
+/* 22. M5 world map travel packet */
+static void test_m5_overworld(void)
+{
+    PacketCoopOverworldTravel p;
+    int x;
+    int y;
+
+    CHECK(TIG_NET_PROTOCOL == 57);
+    CHECK(PACKET_COOP_OVERWORLD_TRAVEL == 170 && PACKET_COOP_TYPE_LIMIT >= 172);
+    CHECK(sizeof(PacketCoopOverworldTravel) == 0x20);
+    CHECK(coop_lite_mp_packet_role(PACKET_COOP_OVERWORLD_TRAVEL) == COOP_MP_PKT_BOTH);
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_OVERWORLD_TRAVEL) == sizeof(PacketCoopOverworldTravel));
+
+    memset(&p, 0, sizeof(p));
+    p.type = PACKET_COOP_OVERWORLD_TRAVEL;
+    p.op = COOP_OWT_START;
+    p.slot = 2;
+    p.loc = LOCATION_MAKE(1000, 2000);
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true)); /* START is client -> host */
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p) - 1, false));
+    CHECK(!coop_middle_overworld_pkt_valid(NULL, sizeof(p), false));
+    p.flags = COOP_OWT_F_MOVING;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.flags = 0;
+    p.loc = 0;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.op = COOP_OWT_CANCEL;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_PROGRESS;
+    p.flags = COOP_OWT_F_MOVING | COOP_OWT_F_ENCOUNTER;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.flags = 4;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_ARRIVED;
+    p.flags = COOP_OWT_F_ENCOUNTER;
+    p.loc = LOCATION_MAKE(5, 5);
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.flags = COOP_OWT_F_MOVING;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_REFUSED;
+    p.flags = 0;
+    p.world_x = COOP_OWT_REFUSE_COMBAT;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.world_x = COOP_OWT_REFUSE_MAX + 1;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = 0;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_PROGRESS;
+    p.flags = 0;
+    p.slot = 8;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+
+    x = 0;
+    y = 0;
+    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 1) == 1 && x == 1 && y == -1); /* diagonal */
+    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 10) == 2 && x == 3 && y == -1);
+    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 10) == 0);
+    CHECK(coop_middle_owt_advance(NULL, &y, 3, -1, 10) == 0);
+}
+
+/* 23. M5 unified sleep: vote round for 1..8 players, times, ctrl ops */
+static void test_m5_sleep(void)
+{
+    CoopSleepState st;
+    PacketCoopPartyCtrl c;
+    char text[192];
+    int players;
+
+    coop_middle_sleep_reset(&st);
+    CHECK(st.ready_mask == 0 && st.initiator == -1);
+    CHECK(coop_middle_sleep_step(&st, 0x01, COOP_SLEEP_EV_VOTE, 0, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_SOLO);
+    CHECK(st.initiator == -1);
+    for (players = 2; players <= 8; players++) {
+        uint8_t living = (uint8_t)((1u << players) - 1u);
+        int s;
+
+        coop_middle_sleep_reset(&st);
+        CHECK(coop_middle_sleep_step(&st, living, COOP_SLEEP_EV_VOTE, players - 1, COOP_SLEEP_MODE_MORNING)
+            == COOP_SLEEP_RES_WAIT);
+        CHECK(st.initiator == players - 1 && st.mode == COOP_SLEEP_MODE_MORNING);
+        for (s = 0; s < players - 2; s++) {
+            CHECK(coop_middle_sleep_step(&st, living, COOP_SLEEP_EV_VOTE, s, COOP_SLEEP_MODE_1H) == COOP_SLEEP_RES_WAIT);
+            CHECK(st.mode == COOP_SLEEP_MODE_MORNING); /* a later vote keeps the mode */
+        }
+        CHECK(coop_middle_sleep_step(&st, living, COOP_SLEEP_EV_CHECK, -1, 0) == COOP_SLEEP_RES_NONE);
+        CHECK(coop_middle_sleep_step(&st, living, COOP_SLEEP_EV_VOTE, players - 2, COOP_SLEEP_MODE_1H)
+            == COOP_SLEEP_RES_EXECUTE);
+    }
+    /* a dead / gone player does not block */
+    coop_middle_sleep_reset(&st);
+    CHECK(coop_middle_sleep_step(&st, 0x07, COOP_SLEEP_EV_VOTE, 0, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_WAIT);
+    CHECK(coop_middle_sleep_step(&st, 0x07, COOP_SLEEP_EV_VOTE, 1, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_WAIT);
+    CHECK(coop_middle_sleep_step(&st, 0x03, COOP_SLEEP_EV_CHECK, -1, 0) == COOP_SLEEP_RES_EXECUTE);
+    /* the initiator cancels: the lowest ready slot leads, mode kept */
+    coop_middle_sleep_reset(&st);
+    coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_VOTE, 2, COOP_SLEEP_MODE_HEALED);
+    coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_VOTE, 3, COOP_SLEEP_MODE_1H);
+    CHECK(coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_CANCEL, 2, 0) == COOP_SLEEP_RES_WAIT);
+    CHECK(st.initiator == 3 && st.mode == COOP_SLEEP_MODE_HEALED && st.ready_mask == 0x08);
+    CHECK(coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_CANCEL, 3, 0) == COOP_SLEEP_RES_CLEARED);
+    CHECK(st.initiator == -1 && st.ready_mask == 0);
+    CHECK(coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_CANCEL, 3, 0) == COOP_SLEEP_RES_NONE);
+    /* the only ready slot dies: the round is cleared */
+    coop_middle_sleep_step(&st, 0x0F, COOP_SLEEP_EV_VOTE, 1, COOP_SLEEP_MODE_2H);
+    CHECK(coop_middle_sleep_step(&st, 0x0D, COOP_SLEEP_EV_CHECK, -1, 0) == COOP_SLEEP_RES_CLEARED);
+    /* refusals */
+    CHECK(coop_middle_sleep_step(&st, 0x03, COOP_SLEEP_EV_VOTE, 2, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_REFUSED);
+    CHECK(coop_middle_sleep_step(&st, 0x03, COOP_SLEEP_EV_VOTE, 1, 0) == COOP_SLEEP_RES_REFUSED);
+    CHECK(coop_middle_sleep_step(&st, 0x03, COOP_SLEEP_EV_VOTE, 1, COOP_SLEEP_MODE_MAX + 1) == COOP_SLEEP_RES_REFUSED);
+    CHECK(coop_middle_sleep_step(&st, 0x03, COOP_SLEEP_EV_VOTE, 9, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_REFUSED);
+    CHECK(coop_middle_sleep_step(NULL, 0x03, COOP_SLEEP_EV_VOTE, 1, 1) == COOP_SLEEP_RES_NONE);
+
+    /* minutes: morning 08:00, evening 20:00, across midnight */
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_MORNING, 22, 30) == 9 * 60 + 30);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_MORNING, 7, 0) == 60);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_MORNING, 8, 0) == 24 * 60);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_EVENING, 21, 0) == 23 * 60);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_EVENING, 0, 15) == 19 * 60 + 45);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_8H, 3, 3) == 480);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_24H, 3, 3) == 1440);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_HEALED, 3, 3) == -1);
+    CHECK(coop_middle_sleep_minutes(COOP_SLEEP_MODE_8H, 24, 0) == -1);
+    CHECK(coop_middle_sleep_mode_from_ui(1) == COOP_SLEEP_MODE_1H && coop_middle_sleep_mode_from_ui(2) == COOP_SLEEP_MODE_2H);
+    CHECK(coop_middle_sleep_mode_from_ui(4) == COOP_SLEEP_MODE_4H && coop_middle_sleep_mode_from_ui(8) == COOP_SLEEP_MODE_8H);
+    CHECK(coop_middle_sleep_mode_from_ui(24) == COOP_SLEEP_MODE_24H);
+    CHECK(coop_middle_sleep_mode_from_ui(-1) == COOP_SLEEP_MODE_MORNING);
+    CHECK(coop_middle_sleep_mode_from_ui(-2) == COOP_SLEEP_MODE_EVENING);
+    CHECK(coop_middle_sleep_mode_from_ui(-3) == COOP_SLEEP_MODE_HEALED);
+    CHECK(coop_middle_sleep_mode_from_ui(3) == 0);
+    CHECK(coop_middle_sleep_count(0xFF) == 8 && coop_middle_sleep_count(0) == 0);
+
+    coop_middle_sleep_banner_text(text, sizeof(text), 2, 3, "Bob", COOP_SLEEP_MODE_MORNING, false);
+    CHECK(strcmp(text, "Sleep: 2/3 ready (Bob: until morning). Y = join sleep, N = cancel") == 0);
+    coop_middle_sleep_banner_text(text, sizeof(text), 2, 3, "Bob", COOP_SLEEP_MODE_HEALED, true);
+    CHECK(strstr(text, "готовы 2/3") != NULL && strstr(text, "до исцеления") != NULL);
+    coop_middle_sleep_banner_text(text, 8, 2, 3, "Bob", 1, false);
+    CHECK(strlen(text) < 8);
+
+    /* ctrl ops */
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_PARTY_CTRL;
+    c.op = COOP_CTRL_SLEEP_VOTE;
+    c.a = COOP_SLEEP_MODE_24H;
+    CHECK(coop_middle_party_ctrl_valid(&c));
+    c.a = 0;
+    CHECK(coop_middle_party_ctrl_valid(&c)); /* cancel */
+    c.a = COOP_SLEEP_MODE_MAX + 1;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.a = 1;
+    c.b = 1;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.op = COOP_CTRL_SLEEP_STATE;
+    c.a = 0x03 | (COOP_SLEEP_MODE_MORNING << 8);
+    c.b = 1 | (3 << 8);
+    CHECK(coop_middle_party_ctrl_valid(&c));
+    c.b = 0xFF;
+    CHECK(coop_middle_party_ctrl_valid(&c)); /* no round */
+    c.b = 9;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.b = 1 | (9 << 8);
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.b = 1;
+    c.a = 0x03 | (9 << 8);
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.a = -1;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -1061,12 +1318,17 @@ int main(void)
     test_m4_fog();
     test_m4_dialog_route();
     test_m4_followers();
+    test_m5_rules();
+    test_m5_interest();
+    test_m5_overworld();
+    test_m5_sleep();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
     }
     printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops, "
            "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause, "
-           "M4 rules / quest items / town map fog / dialog routing / followers)\n");
+           "M4 rules / quest items / town map fog / dialog routing / followers, "
+           "M5 rules / interest / world map travel / unified sleep)\n");
     return 0;
 }
