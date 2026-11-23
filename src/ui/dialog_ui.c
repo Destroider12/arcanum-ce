@@ -16,6 +16,7 @@
 #include "game/hrp.h"
 #include "game/obj_private.h"
 #include "game/player.h"
+#include "game/reaction.h"
 #include "game/script.h"
 #include "game/script_name.h"
 #include "game/stat.h"
@@ -62,6 +63,8 @@ static void dialog_ui_coop_view_show(const CoopDialogView* view);
 static void dialog_ui_coop_view_close(void);
 static void dialog_ui_coop_view_init(void);
 static void dialog_ui_coop_view_exit(void);
+static bool dialog_ui_pdlg_choose(int64_t pc_obj, int option);
+static void dialog_ui_pdlg_drop(int64_t pc_obj);
 
 // 0x66DAB8
 static DialogUiEntry stru_66DAB8[8];
@@ -116,6 +119,7 @@ void dialog_ui_reset(void)
         dialog_ui_local_pc_dialog_active = false;
     }
     coop_lite_host_dialog_closed();
+    coop_lite_pdlg_reset_all(); /* parallel dialogs: tell every speaker / watcher */
     dialog_ui_coop_view_close();
 
     for (index = 0; index < MAX_ENTRIES; index++) {
@@ -136,7 +140,23 @@ DialogUiEntry* sub_567420(int64_t obj)
 {
     int index = 0;
 
-    return &(stru_66DAB8[index]);
+    /* Coop Middle parallel dialogs: entry = the speaker's slot on the host.
+       A running remote dialog is always found by its PC (whatever the rule
+       state is now); without the rule every PC uses entry 0 as before. */
+    if (obj != OBJ_HANDLE_NULL) {
+        for (index = 1; index < MAX_ENTRIES; index++) {
+            if (stru_66DAB8[index].field_1850 && stru_66DAB8[index].state.pc_obj == obj) {
+                return &(stru_66DAB8[index]);
+            }
+        }
+        index = coop_lite_pdlg_entry_index(obj);
+        if (index < 0 || index >= MAX_ENTRIES) {
+            index = 0;
+        }
+        return &(stru_66DAB8[index]);
+    }
+
+    return &(stru_66DAB8[0]);
 }
 
 // 0x567460
@@ -154,8 +174,14 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
      * other players' followers, citizens — just barks.
      */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
-    party = pc_obj != OBJ_HANDLE_NULL && pc_obj == coop_lite_party_dialog_pc();
-    if (party) {
+    if (coop_lite_pdlg_on()) {
+        /* parallel dialogs: a remote PC talks when the host sanctioned it
+           (client START or an NPC-started talk); nobody waits for anybody */
+        party = pc_obj != OBJ_HANDLE_NULL && !player_is_local_pc_obj(pc_obj) && coop_lite_pdlg_allowed(pc_obj);
+        if (party) {
+            talk_policy = COOP_TALK_ALLOW;
+        }
+    } else if ((party = pc_obj != OBJ_HANDLE_NULL && pc_obj == coop_lite_party_dialog_pc())) {
         talk_policy = COOP_TALK_ALLOW; /* PT41: host runs a client's story dialog */
     } else if (coop_lite_party_dialog_pc() != OBJ_HANDLE_NULL) {
         /* single dialog entry: busy with a client's party dialog */
@@ -219,6 +245,35 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
         return;
     }
 
+    if (coop_lite_pdlg_on() && coop_lite_pdlg_npc_busy(npc_obj, pc_obj) != OBJ_HANDLE_NULL) {
+        /* parallel dialogs: this NPC talks to another player right now */
+        if (player_is_local_pc_obj(pc_obj)) {
+            dialog_ui_float_line(npc_obj, pc_obj,
+                coop_lite_lang_ru() ? "(Я сейчас говорю с другим.)" : "(I'm talking to someone else right now.)", -1);
+        }
+        tig_debug_printf("DialogUI: NPC busy in another player's dialog\n");
+        return;
+    }
+    if (coop_lite_pdlg_on() && npc_obj != OBJ_HANDLE_NULL && obj_field_int32_get(npc_obj, OBJ_F_TYPE) == OBJ_TYPE_NPC) {
+        /* parallel dialogs: an NPC still marked as talking to a PC that has
+           no dialog with it (a save made during a client's talk, a dropped
+           entry) would refuse everybody - clear that stale mark */
+        int64_t talker = sub_4C1110(npc_obj);
+        int index;
+
+        if (talker != OBJ_HANDLE_NULL && talker != pc_obj && obj_handle_is_valid(talker)) {
+            for (index = 0; index < MAX_ENTRIES; index++) {
+                if (stru_66DAB8[index].field_1850 && stru_66DAB8[index].state.npc_obj == npc_obj) {
+                    break;
+                }
+            }
+            if (index == MAX_ENTRIES) {
+                tig_debug_printf("DialogUI: stale NPC talk mark cleared\n");
+                sub_4C10A0(npc_obj, talker);
+            }
+        }
+    }
+
     if (ai_can_speak(npc_obj, pc_obj, false) != AI_SPEAK_OK) {
         return;
     }
@@ -235,6 +290,11 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
     }
 
     entry = sub_567420(pc_obj);
+    if (coop_lite_pdlg_on() && entry->field_1850 && entry != &(stru_66DAB8[0])) {
+        /* this player's entry is still in a dialog: never overwrite it */
+        tig_debug_printf("DialogUI: entry %d busy - dialog not started\n", entry->slot);
+        return;
+    }
 
     if (script_num != 0 && script_name_build_dlg_name(script_num, path, sizeof(path))) {
         if (!dialog_load(path, &(entry->dlg))) {
@@ -328,9 +388,8 @@ void dialog_ui_end_dialog(int64_t obj, int a2)
     if (player_is_local_pc_obj(obj)) {
         intgame_dialog_end();
         dialog_ui_local_pc_dialog_active = 0;
-        coop_lite_host_dialog_closed();
     }
-    coop_lite_party_dialog_ended(obj);
+    coop_lite_host_dialog_end_pc(obj); /* PT36 / PT41, or the parallel session */
 
     dialog_unload(entry->dlg);
 
@@ -421,7 +480,9 @@ bool dialog_ui_process_option(DialogUiEntry* entry, int option)
         TB_EXPIRE_DEFAULT,
         entry->state.options[option]);
     tb_remove(entry->state.npc_obj);
-    dialog_ui_speech_stop();
+    if (!coop_lite_pdlg_on() || is_pc) {
+        dialog_ui_speech_stop(); /* a remote answer never cuts the host's own voice */
+    }
     sub_413130(&(entry->state), option);
 
     switch (entry->state.field_17E8) {
@@ -622,8 +683,8 @@ void dialog_ui_display(DialogUiEntry* entry)
         for (index = 0; index < entry->state.num_options; index++) {
             intgame_dialog_set_option(index, dialog_ui_option_label(entry, index));
         }
-    } else if (entry->state.pc_obj == coop_lite_party_dialog_pc()) {
-        dialog_ui_coop_publish(entry);
+    } else {
+        dialog_ui_coop_publish(entry); /* PT41 party dialog / parallel dialog of a client */
     }
 }
 
@@ -641,6 +702,10 @@ void dialog_ui_npc_say(int64_t npc_obj, int64_t pc_obj, int type, int expires_in
     tb_add(npc_obj, type, str);
     tb_expire_in(npc_obj, expires_in);
 
+    if (coop_lite_pdlg_on() && pc_obj != OBJ_HANDLE_NULL && !player_is_local_pc_obj(pc_obj)
+        && obj_field_int32_get(pc_obj, OBJ_F_TYPE) == OBJ_TYPE_PC) {
+        return; /* parallel dialogs: a client's NPC does not speak on the host */
+    }
     dialog_ui_speech_start(npc_obj, pc_obj, speech_id);
 }
 
@@ -726,6 +791,7 @@ void dialog_ui_speech_stop(void)
 #define CDV_MARGIN 4
 #define CDV_PAD 4
 #define CDV_MAX_TEXT_LINES 6
+#define CDV_MAX_TEXT_LINES_BIG 14 /* parallel dialogs: the speaker's own talk */
 #define CDV_MAX_OPTIONS 5
 #define CDV_MAX_WRAP_LINES 128
 #define CDV_TMP 256
@@ -772,8 +838,10 @@ static void dialog_ui_coop_publish(DialogUiEntry* entry)
     char npc_name[256];
     int index;
 
-    if (!tig_net_is_coop_enabled() || !tig_net_is_host()
-        || (!player_is_local_pc_obj(entry->state.pc_obj) && entry->state.pc_obj != coop_lite_party_dialog_pc())) {
+    /* coop_lite_host_dialog_publish picks the receivers (PT36 / PT41 or the
+       parallel session of this PC). Not tig_net_is_host(): it reads false
+       under local suspension; the parallel latch is host-only. */
+    if (!tig_net_is_coop_enabled() || (!tig_net_is_host() && !coop_lite_pdlg_on())) {
         return;
     }
     npc_name[0] = '\0';
@@ -783,7 +851,8 @@ static void dialog_ui_coop_publish(DialogUiEntry* entry)
     for (index = 0; index < 5; index++) {
         options[index] = entry->state.options[index];
     }
-    coop_lite_host_dialog_state(npc_name, entry->state.reply, entry->state.num_options, options);
+    coop_lite_host_dialog_publish(entry->state.pc_obj, entry->state.npc_obj, npc_name, entry->state.reply,
+        entry->state.num_options, options);
 }
 
 /* Host: a client's vote changed the counts; redraw the option list. */
@@ -837,6 +906,23 @@ static bool cdv_message_filter(TigMessage* msg)
         if (msg->data.keyboard.pressed && msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE
             && coop_lite_client_dialog_leave()) {
             return true;
+        }
+        if (msg->data.keyboard.pressed && coop_lite_client_dialog_private() && coop_lite_client_dialog_speaker()) {
+            /* parallel dialogs: the speaker answers with 1-5 like in a normal dialog */
+            int sc = (int)msg->data.keyboard.scancode;
+            int idx = -1;
+
+            if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_5) {
+                idx = sc - SDL_SCANCODE_1;
+            } else if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_5) {
+                idx = sc - SDL_SCANCODE_KP_1;
+            }
+            if (idx >= 0) {
+                if (idx < cdv_view.num_options) {
+                    coop_lite_client_dialog_vote(idx);
+                }
+                return true;
+            }
         }
         if (msg->data.keyboard.pressed && msg->data.keyboard.scancode == SDL_SCANCODE_V
             && cdv_view.num_options > 0) {
@@ -1007,6 +1093,7 @@ static void cdv_layout(void)
     int sw = hrp_iso_window_width_get();
     int sh = hrp_iso_window_height_get();
     int rows;
+    bool big;
 
     if (sw <= 0) {
         sw = 800;
@@ -1031,16 +1118,18 @@ static void cdv_layout(void)
     }
     cdv_lh += 1;
 
-    cdv_w = sw * 2 / 5;
-    if (cdv_w < 360) {
-        cdv_w = 360;
+    big = coop_lite_client_dialog_private() && coop_lite_client_dialog_speaker();
+    /* parallel dialogs: the speaker's own talk gets a bigger panel */
+    cdv_w = big ? sw * 3 / 5 : sw * 2 / 5;
+    if (cdv_w < (big ? 420 : 360)) {
+        cdv_w = big ? 420 : 360;
     }
     if (cdv_w > sw - 2 * CDV_MARGIN) {
         cdv_w = sw - 2 * CDV_MARGIN;
     }
     /* name + text lines + options + hint */
-    cdv_text_lines = CDV_MAX_TEXT_LINES;
-    rows = (sh / 3 - 2 * CDV_PAD) / cdv_lh;
+    cdv_text_lines = big ? CDV_MAX_TEXT_LINES_BIG : CDV_MAX_TEXT_LINES;
+    rows = ((big ? sh / 2 : sh / 3) - 2 * CDV_PAD) / cdv_lh;
     while (cdv_text_lines > 1 && 1 + cdv_text_lines + CDV_MAX_OPTIONS + 1 > rows) {
         cdv_text_lines--;
     }
@@ -1112,8 +1201,18 @@ static void cdv_draw(void)
             cdv_opt_y + index * cdv_lh, text_w, cdv_lh);
     }
 
-    cdv_write(cdv_font_hint, coop_lite_lang("Клик/V: голос / Click/V: vote"), CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w,
-        cdv_lh);
+    {
+        const char* hint = coop_lite_lang("Клик/V: голос / Click/V: vote");
+
+        if (coop_lite_client_dialog_private()) {
+            if (coop_lite_client_dialog_speaker()) {
+                hint = coop_lite_lang_ru() ? "1-5 / клик: ответ, Esc: выйти" : "1-5 / click: answer, Esc: leave";
+            } else {
+                hint = coop_lite_lang_ru() ? "Клик/V: голос, Esc: выйти" : "Click/V: vote, Esc: leave";
+            }
+        }
+        cdv_write(cdv_font_hint, hint, CDV_PAD, cdv_opt_y + CDV_MAX_OPTIONS * cdv_lh, text_w, cdv_lh);
+    }
 }
 
 static void dialog_ui_coop_view_show(const CoopDialogView* view)
@@ -1194,6 +1293,46 @@ static bool dialog_ui_party_choose(int option)
         dialog_ui_end_dialog(entry->state.pc_obj, 0);
     }
     return true;
+}
+
+/* Parallel dialogs (host): a remote speaker's answer, validated by coop_lite. */
+static bool dialog_ui_pdlg_choose(int64_t pc_obj, int option)
+{
+    DialogUiEntry* entry = sub_567420(pc_obj);
+    int code;
+
+    if (!entry->field_1850 || entry->state.pc_obj != pc_obj || option < 0 || option >= entry->state.num_options) {
+        return false;
+    }
+    dialog_ui_process_option(entry, option);
+    if (!entry->field_1850 || entry->state.pc_obj != pc_obj) {
+        return true;
+    }
+    code = entry->state.field_17E8;
+    if (code >= 3 && code != 4) {
+        /* barter / identify / repair open on the speaker's side when the
+           dialog closes; the other windows would only change the client's
+           copy (character sheet, world map, schematics) */
+        if (!coop_lite_pdlg_ui_request(pc_obj, entry->state.npc_obj, code)) {
+            tig_debug_printf("DialogUI: parallel dialog window %d stays on the host - dialog closed\n", code);
+        }
+        dialog_ui_end_dialog(pc_obj, 0);
+    }
+    return true;
+}
+
+/* Parallel dialogs: the PC / NPC of a remote entry are gone (map unload):
+   free the entry without touching them. */
+static void dialog_ui_pdlg_drop(int64_t pc_obj)
+{
+    int index;
+
+    for (index = 1; index < MAX_ENTRIES; index++) {
+        if (stru_66DAB8[index].field_1850 && stru_66DAB8[index].state.pc_obj == pc_obj) {
+            stru_66DAB8[index].field_1850 = false;
+            dialog_unload(stru_66DAB8[index].dlg);
+        }
+    }
 }
 
 /* PT50: travel ready-check notice. Small solid panel in the top-left corner
@@ -1316,6 +1455,7 @@ static void dialog_ui_coop_view_init(void)
     cdv_font_hint = cdv_font_make(130, 130, 150);
     cdv_fonts_ready = true;
     coop_lite_set_party_choose_hook(dialog_ui_party_choose);
+    coop_lite_set_pdlg_hooks(dialog_ui_pdlg_choose, dialog_ui_pdlg_drop);
     coop_lite_set_dialog_view_hooks(dialog_ui_coop_view_show, dialog_ui_coop_view_close, dialog_ui_coop_refresh_votes);
     coop_lite_set_travel_ui_hooks(dialog_ui_travel_busy, dialog_ui_travel_show, dialog_ui_travel_hide);
     coop_lite_set_travel_close_hook(dialog_ui_travel_close_all);
