@@ -6,6 +6,7 @@
 #include "game/anim.h"
 #include "game/antiteleport.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle M3: pings on the town map */
 #include "game/area.h"
 #include "game/critter.h"
 #include "game/gamelib.h"
@@ -1504,6 +1505,14 @@ int wmap_ui_is_created(void)
 bool wmap_ui_is_town_mode(void)
 {
     return wmap_ui_created && wmap_ui_mode == WMAP_UI_MODE_TOWN;
+}
+
+/* Coop Middle M3: repaint the open town map (ping blink). */
+void wmap_ui_coop_town_refresh(void)
+{
+    if (wmap_ui_is_town_mode()) {
+        wmap_town_refresh_rect(NULL);
+    }
 }
 
 // 0x560FA0
@@ -4968,6 +4977,40 @@ void wmap_town_refresh_rect(TigRect* rect)
             mark.height = 5;
             if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
                 tig_window_fill(wmap_ui_window, &clip, tig_color_make(40, 120, 255));
+            }
+        }
+
+        /* Coop Middle M3: live pings of this map blink as a cross. */
+        {
+            CoopPingView pings[COOP_PING_MAX];
+            int pings_count = coop_middle_pings_get(pings, COOP_PING_MAX, coop_middle_now_ms());
+
+            for (int p = 0; p < pings_count; p++) {
+                tig_color_t color;
+
+                if (((pings[p].age_ms / 300u) & 1u) != 0
+                    || townmap_get(sector_id_from_loc(pings[p].loc)) != wmap_ui_townmap) {
+                    continue;
+                }
+                color = pings[p].kind == COOP_PING_KIND_DANGER ? tig_color_make(235, 60, 40)
+                                                                : tig_color_make(250, 200, 60);
+                townmap_loc_to_coords(&wmap_ui_tmi, pings[p].loc, &offset_x, &offset_y);
+                offset_x -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_34;
+                offset_y -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_38;
+                mark.x = bounds.x + (int)offset_x - 6;
+                mark.y = bounds.y + (int)offset_y - 1;
+                mark.width = 13;
+                mark.height = 3;
+                if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
+                    tig_window_fill(wmap_ui_window, &clip, color);
+                }
+                mark.x = bounds.x + (int)offset_x - 1;
+                mark.y = bounds.y + (int)offset_y - 6;
+                mark.width = 3;
+                mark.height = 13;
+                if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
+                    tig_window_fill(wmap_ui_window, &clip, color);
+                }
             }
         }
     } else if (tig_net_is_active()) {

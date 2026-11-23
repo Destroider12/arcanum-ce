@@ -1,5 +1,5 @@
 /*
- * Coop Middle M2 UI (protocol 54). See ui/coop_middle_ui.h and
+ * Coop Middle M2 / M3 UI (protocol 55). See ui/coop_middle_ui.h and
  * docs/coop-middle.md. Engine files only call the entry points here.
  */
 #include "ui/coop_middle_ui.h"
@@ -21,12 +21,15 @@
 #include "game/object_node.h"
 #include "game/object.h"
 #include "game/player.h"
+#include "game/reaction.h"
+#include "game/trap.h"
 #include "net/tig_net.h"
 #include "tig/art.h"
 #include "tig/color.h"
 #include "tig/debug.h"
 #include "tig/font.h"
 #include "tig/kb.h"
+#include "tig/message.h"
 #include "tig/mouse.h"
 #include "tig/rect.h"
 #include "tig/video.h"
@@ -37,6 +40,7 @@
 #include "ui/inven_ui.h"
 #include "ui/mainmenu_ui.h"
 #include "ui/textedit_ui.h"
+#include "ui/wmap_ui.h"
 
 static bool coop_mid_ui_inited;
 
@@ -761,13 +765,375 @@ static void coop_mid_ui_hud_draw(GameDrawInfo* draw_info)
     }
 }
 
+/* ---- M3: pause banner ---- */
+
+#define COOP_MID_BANNER_H 18
+#define COOP_MID_BANNER_W_MAX 520
+
+static bool coop_mid_banner_shown;
+static TigRect coop_mid_banner_rect;
+static TigVideoBuffer* coop_mid_banner_vb;
+static char coop_mid_banner_text[160];
+
+static void coop_mid_ui_banner_hide(void)
+{
+    if (coop_mid_banner_shown) {
+        gamelib_invalidate_rect(&coop_mid_banner_rect);
+        coop_mid_banner_shown = false;
+    }
+}
+
+static void coop_mid_ui_banner_tick(void)
+{
+    char name[64];
+    char text[160];
+    TigRect rect;
+    TigRect dirty;
+    tig_font_handle_t font;
+    int w;
+    tig_color_t frame;
+
+    if (!coop_mid_ui_session() || !coop_middle_is_paused() || coop_mid_iso_window == TIG_WINDOW_HANDLE_INVALID
+        || mainmenu_ui_is_active()) {
+        coop_mid_ui_banner_hide();
+        return;
+    }
+    coop_middle_slot_name(coop_middle_paused_by(), name, sizeof(name));
+    /* The game fonts have no em dash: " - " stands in for it. */
+    snprintf(text, sizeof(text), coop_lite_lang_ru() ? "ПАУЗА (%s) - нажмите Pause для продолжения"
+                                                     : "PAUSED (%s) - Press Pause to resume",
+        name);
+    font = coop_mid_ui_font(240, 220, 160);
+    w = coop_mid_ui_text_width(font, text) + 16;
+    if (w > COOP_MID_BANNER_W_MAX) {
+        w = COOP_MID_BANNER_W_MAX;
+    }
+    rect.width = w;
+    rect.height = COOP_MID_BANNER_H;
+    rect.x = (coop_mid_iso_w - w) / 2;
+    if (rect.x < 0) {
+        rect.x = 0;
+    }
+    rect.y = 4 + (coop_mid_hud_shown ? COOP_MID_HUD_H + 4 : 0); /* under the F9 HUD */
+    if (coop_mid_banner_shown && strcmp(text, coop_mid_banner_text) == 0 && rect.x == coop_mid_banner_rect.x
+        && rect.y == coop_mid_banner_rect.y && rect.width == coop_mid_banner_rect.width) {
+        return;
+    }
+    if (coop_mid_banner_vb == NULL) {
+        coop_mid_banner_vb = coop_mid_ui_vb_create(COOP_MID_BANNER_W_MAX, COOP_MID_BANNER_H);
+        if (coop_mid_banner_vb == NULL) {
+            return;
+        }
+    }
+    coop_mid_ui_banner_hide(); /* the old spot repaints */
+    snprintf(coop_mid_banner_text, sizeof(coop_mid_banner_text), "%s", text);
+    coop_mid_banner_rect = rect;
+    frame = tig_color_make(210, 170, 70);
+    rect.x = 0;
+    rect.y = 0;
+    tig_video_buffer_fill(coop_mid_banner_vb, &rect, tig_color_make(20, 16, 12));
+    rect.height = 1;
+    tig_video_buffer_fill(coop_mid_banner_vb, &rect, frame);
+    rect.y = COOP_MID_BANNER_H - 1;
+    tig_video_buffer_fill(coop_mid_banner_vb, &rect, frame);
+    rect.y = 0;
+    rect.width = 1;
+    rect.height = COOP_MID_BANNER_H;
+    tig_video_buffer_fill(coop_mid_banner_vb, &rect, frame);
+    rect.x = w - 1;
+    tig_video_buffer_fill(coop_mid_banner_vb, &rect, frame);
+    rect.x = 8;
+    rect.y = 2;
+    rect.width = w - 16;
+    rect.height = COOP_MID_BANNER_H - 3;
+    tig_font_push(font);
+    tig_font_write(coop_mid_banner_vb, coop_mid_banner_text, &rect, &dirty);
+    tig_font_pop();
+    coop_mid_banner_shown = true;
+    gamelib_invalidate_rect(&coop_mid_banner_rect);
+    tig_debug_printf("CoopMiddle: pause banner: %s\n", coop_mid_banner_text);
+}
+
+static void coop_mid_ui_banner_draw(GameDrawInfo* draw_info)
+{
+    if (coop_mid_banner_shown && coop_mid_banner_vb != NULL) {
+        coop_mid_ui_blit(draw_info, coop_mid_banner_vb, &coop_mid_banner_rect, 0, 0);
+    }
+}
+
+/* ---- M3: map pings ---- */
+
+#define COOP_MID_PING_CELL_W 120
+#define COOP_MID_PING_LABEL_H 16
+#define COOP_MID_PING_DIAMOND_H 44
+#define COOP_MID_PING_CELL_H (COOP_MID_PING_LABEL_H + COOP_MID_PING_DIAMOND_H)
+#define COOP_MID_PING_STEP_MS 150u
+#define COOP_MID_TOWN_BLINK_MS 300u
+
+typedef struct CoopMidPingDraw {
+    TigRect rect; /* screen cell: label on top, the diamond below */
+    int step; /* pulse phase */
+    int kind;
+    int label_w;
+    char label[40];
+} CoopMidPingDraw;
+
+static CoopMidPingDraw coop_mid_ping_draw[COOP_PING_MAX];
+static int coop_mid_ping_draw_n;
+static TigVideoBuffer* coop_mid_ping_vb;
+static unsigned int coop_mid_town_ms;
+static bool coop_mid_town_had;
+
+static void coop_mid_ui_pings_invalidate(void)
+{
+    int i;
+
+    for (i = 0; i < coop_mid_ping_draw_n; i++) {
+        gamelib_invalidate_rect(&coop_mid_ping_draw[i].rect);
+    }
+}
+
+static void coop_mid_ui_pings_off(void)
+{
+    coop_mid_ui_pings_invalidate();
+    coop_mid_ping_draw_n = 0;
+}
+
+/* A diamond outline (pct% of a tile) centred in a cell row. */
+static void coop_mid_ui_diamond(int cell_y, int pct, int thick, tig_color_t color)
+{
+    int half_h = 20 * pct / 100;
+    int half_w = 40 * pct / 100;
+    int cx = COOP_MID_PING_CELL_W / 2;
+    int cy = cell_y + COOP_MID_PING_LABEL_H + COOP_MID_PING_DIAMOND_H / 2;
+    int r;
+    TigRect rect;
+
+    if (half_h < 2) {
+        return;
+    }
+    for (r = -half_h; r <= half_h; r++) {
+        int w = half_w * (half_h - (r < 0 ? -r : r)) / half_h;
+
+        rect.y = cy + r;
+        rect.height = 1;
+        rect.width = thick;
+        rect.x = cx - w - thick / 2;
+        tig_video_buffer_fill(coop_mid_ping_vb, &rect, color);
+        rect.x = cx + w - thick / 2;
+        tig_video_buffer_fill(coop_mid_ping_vb, &rect, color);
+    }
+}
+
+static void coop_mid_ui_pings_render(void)
+{
+    static const int k_pulse[4] = { 100, 86, 72, 86 };
+    TigRect rect;
+    TigRect dirty;
+    int i;
+
+    if (coop_mid_ping_vb == NULL) {
+        coop_mid_ping_vb = coop_mid_ui_vb_create(COOP_MID_PING_CELL_W, COOP_MID_PING_CELL_H * COOP_PING_MAX);
+        if (coop_mid_ping_vb == NULL) {
+            return;
+        }
+    }
+    for (i = 0; i < coop_mid_ping_draw_n; i++) {
+        CoopMidPingDraw* d = &coop_mid_ping_draw[i];
+        int y0 = i * COOP_MID_PING_CELL_H;
+        bool danger = d->kind == COOP_PING_KIND_DANGER;
+        tig_color_t outer = danger ? tig_color_make(235, 60, 40) : tig_color_make(250, 200, 60);
+        tig_color_t inner = danger ? tig_color_make(255, 150, 90) : tig_color_make(60, 140, 255);
+        int pct = k_pulse[d->step & 3];
+
+        rect.x = 0;
+        rect.y = y0;
+        rect.width = COOP_MID_PING_CELL_W;
+        rect.height = COOP_MID_PING_CELL_H;
+        tig_video_buffer_fill(coop_mid_ping_vb, &rect, coop_mid_key);
+        coop_mid_ui_diamond(y0, pct, 3, outer);
+        coop_mid_ui_diamond(y0, pct * 70 / 100, 1, inner);
+        /* [Name] plate */
+        rect.width = d->label_w;
+        rect.height = COOP_MID_PING_LABEL_H;
+        rect.x = (COOP_MID_PING_CELL_W - d->label_w) / 2;
+        rect.y = y0;
+        tig_video_buffer_fill(coop_mid_ping_vb, &rect, tig_color_make(20, 16, 12));
+        rect.x += 4;
+        rect.y += 1;
+        rect.width -= 8;
+        rect.height -= 2;
+        tig_font_push(danger ? coop_mid_ui_font(255, 120, 90) : coop_mid_ui_font(250, 210, 110));
+        tig_font_write(coop_mid_ping_vb, d->label, &rect, &dirty);
+        tig_font_pop();
+    }
+}
+
+static void coop_mid_ui_pings_tick(unsigned int now_ms)
+{
+    CoopPingView views[COOP_PING_MAX];
+    CoopMidPingDraw next[COOP_PING_MAX];
+    int n = 0;
+    int count = 0;
+    int i;
+    bool same;
+
+    if (coop_mid_ui_session() && coop_mid_iso_window != TIG_WINDOW_HANDLE_INVALID && !mainmenu_ui_is_active()) {
+        count = coop_middle_pings_get(views, COOP_PING_MAX, coop_middle_now_ms());
+    }
+    /* Town map: the ping cross blinks (wmap_ui.c draws it). */
+    if (wmap_ui_is_town_mode() && (count > 0 || coop_mid_town_had)
+        && (unsigned int)(now_ms - coop_mid_town_ms) >= COOP_MID_TOWN_BLINK_MS) {
+        coop_mid_town_ms = now_ms;
+        coop_mid_town_had = count > 0;
+        wmap_ui_coop_town_refresh();
+    }
+    for (i = 0; i < count; i++) {
+        CoopMidPingDraw* d = &next[n];
+        int64_t sx;
+        int64_t sy;
+        int cx;
+        int cy;
+
+        location_xy(views[i].loc, &sx, &sy);
+        cx = (int)sx + 40;
+        cy = (int)sy + 20;
+        if (cx < -COOP_MID_PING_CELL_W || cx > coop_mid_iso_w + COOP_MID_PING_CELL_W || cy < -COOP_MID_PING_CELL_H
+            || cy > coop_mid_iso_h + COOP_MID_PING_CELL_H) {
+            continue; /* off screen */
+        }
+        memset(d, 0, sizeof(*d));
+        d->rect.x = cx - COOP_MID_PING_CELL_W / 2;
+        d->rect.y = cy - COOP_MID_PING_DIAMOND_H / 2 - COOP_MID_PING_LABEL_H;
+        d->rect.width = COOP_MID_PING_CELL_W;
+        d->rect.height = COOP_MID_PING_CELL_H;
+        d->step = (int)(views[i].age_ms / COOP_MID_PING_STEP_MS) & 3;
+        d->kind = views[i].kind;
+        snprintf(d->label, sizeof(d->label), "[%s]", views[i].name[0] != '\0' ? views[i].name : "?");
+        d->label_w = coop_mid_ui_text_width(coop_mid_ui_font(250, 210, 110), d->label) + 8;
+        if (d->label_w > COOP_MID_PING_CELL_W) {
+            d->label_w = COOP_MID_PING_CELL_W;
+        }
+        n++;
+    }
+    same = n == coop_mid_ping_draw_n;
+    for (i = 0; i < n && same; i++) {
+        same = memcmp(&next[i].rect, &coop_mid_ping_draw[i].rect, sizeof(TigRect)) == 0
+            && next[i].step == coop_mid_ping_draw[i].step && next[i].kind == coop_mid_ping_draw[i].kind
+            && strcmp(next[i].label, coop_mid_ping_draw[i].label) == 0;
+    }
+    if (same) {
+        return;
+    }
+    coop_mid_ui_pings_invalidate(); /* old spots repaint */
+    memcpy(coop_mid_ping_draw, next, sizeof(next[0]) * (size_t)n);
+    coop_mid_ping_draw_n = n;
+    coop_mid_ui_pings_render();
+    coop_mid_ui_pings_invalidate();
+}
+
+static void coop_mid_ui_pings_draw(GameDrawInfo* draw_info)
+{
+    int i;
+
+    if (coop_mid_ping_vb == NULL) {
+        return;
+    }
+    for (i = 0; i < coop_mid_ping_draw_n; i++) {
+        coop_mid_ui_blit(draw_info, coop_mid_ping_vb, &coop_mid_ping_draw[i].rect, 0, i * COOP_MID_PING_CELL_H);
+    }
+}
+
+/* Danger when a hostile NPC or a spotted trap is under the cursor. */
+static bool coop_mid_ui_is_danger(int64_t pc, int64_t obj)
+{
+    int type;
+
+    if (obj == OBJ_HANDLE_NULL || pc == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    if (type == OBJ_TYPE_TRAP) {
+        return trap_is_spotted(pc, obj);
+    }
+    if (type != OBJ_TYPE_NPC || critter_is_dead(obj) || coop_lite_party_no_fight(pc, obj)) {
+        return false;
+    }
+    return obj_field_handle_get(obj, OBJ_F_NPC_COMBAT_FOCUS) != OBJ_HANDLE_NULL
+        || reaction_translate(reaction_get(obj, pc)) >= REACTION_DISLIKE;
+}
+
+static bool coop_mid_ui_ping_here(TigMessage* msg)
+{
+    int64_t pc = player_get_local_pc_obj();
+    int64_t hover;
+    int64_t loc = 0;
+    int kind = COOP_PING_KIND_LOOK;
+
+    if (pc == OBJ_HANDLE_NULL || intgame_mode_get() != INTGAME_MODE_MAIN || mainmenu_ui_is_active()
+        || inven_ui_is_created() || dialog_ui_is_local_pc_in_dialog() || !sub_5517A0(msg)) {
+        return false;
+    }
+    hover = object_hover_obj_get();
+    if (hover != OBJ_HANDLE_NULL && coop_mid_ui_is_danger(pc, hover)) {
+        kind = COOP_PING_KIND_DANGER;
+        loc = obj_field_int64_get(hover, OBJ_F_LOCATION);
+    } else if (!intgame_get_location_under_cursor(&loc)) {
+        return false;
+    } else {
+        ObjectList objects;
+        ObjectNode* node;
+
+        object_list_location(loc, OBJ_TM_NPC | OBJ_TM_TRAP, &objects);
+        for (node = objects.head; node != NULL; node = node->next) {
+            if (coop_mid_ui_is_danger(pc, node->obj)) {
+                kind = COOP_PING_KIND_DANGER;
+                break;
+            }
+        }
+        object_list_destroy(&objects);
+    }
+    coop_middle_ping_send(loc, kind);
+    return true;
+}
+
+bool coop_middle_ui_world_event(TigMessage* msg)
+{
+    TigMessageMouseEvent ev;
+    bool alt;
+
+    if (!coop_mid_ui_inited || msg == NULL || msg->type != TIG_MESSAGE_MOUSE || !coop_mid_ui_session()) {
+        return false;
+    }
+    ev = msg->data.mouse.event;
+    alt = tig_kb_is_key_pressed(SDL_SCANCODE_LALT) || tig_kb_is_key_pressed(SDL_SCANCODE_RALT);
+    if (ev == TIG_MESSAGE_MOUSE_MIDDLE_BUTTON_UP || (alt && ev == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP)) {
+        if (coop_mid_ui_ping_here(msg)) {
+            return true;
+        }
+    } else if (alt && ev == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_DOWN && sub_5517A0(msg)
+        && intgame_mode_get() == INTGAME_MODE_MAIN) {
+        return true; /* the ping fires on the release */
+    }
+    if (coop_middle_is_paused()
+        && (ev == TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN || ev == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_DOWN
+            || ev == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP)
+        && sub_5517A0(msg)) {
+        coop_middle_orders_blocked(true); /* move / attack / cast / throw wait for the resume */
+        return true;
+    }
+    return false;
+}
+
 void coop_middle_ui_draw(GameDrawInfo* draw_info)
 {
     if (!coop_mid_ui_inited || draw_info == NULL || coop_mid_iso_window == TIG_WINDOW_HANDLE_INVALID) {
         return;
     }
     coop_mid_ui_labels_draw(draw_info);
+    coop_mid_ui_pings_draw(draw_info);
     coop_mid_ui_hud_draw(draw_info);
+    coop_mid_ui_banner_draw(draw_info);
 }
 
 void coop_middle_ui_on_scroll(int dx, int dy)
@@ -786,6 +1152,19 @@ void coop_middle_ui_on_scroll(int dx, int dy)
         rect.x += dx;
         rect.y += dy;
         gamelib_invalidate_rect(&rect);
+    }
+    if (coop_mid_banner_shown) {
+        gamelib_invalidate_rect(&coop_mid_banner_rect);
+        rect = coop_mid_banner_rect;
+        rect.x += dx;
+        rect.y += dy;
+        gamelib_invalidate_rect(&rect);
+    }
+    for (i = 0; i < coop_mid_ping_draw_n; i++) {
+        rect = coop_mid_ping_draw[i].rect;
+        rect.x += dx;
+        rect.y += dy;
+        gamelib_invalidate_rect(&rect); /* the shifted copy; the tick moves the ping */
     }
     if (coop_mid_labels_on) {
         for (i = 0; i < coop_mid_label_count; i++) {
@@ -819,6 +1198,8 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     if (!coop_mid_ui_session()) {
         coop_mid_ui_labels_off();
         coop_mid_ui_hud_tick(now_ms); /* hides it */
+        coop_mid_ui_banner_tick();
+        coop_mid_ui_pings_tick(now_ms);
         return;
     }
     if (inven_ui_is_created()) {
@@ -835,6 +1216,8 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     }
     coop_mid_ui_labels_tick(now_ms);
     coop_mid_ui_hud_tick(now_ms);
+    coop_mid_ui_banner_tick(); /* after the HUD: it sits under it */
+    coop_mid_ui_pings_tick(now_ms);
 }
 
 bool coop_middle_ui_init(GameInitInfo* init_info)
@@ -857,6 +1240,16 @@ void coop_middle_ui_exit(void)
         tig_video_buffer_destroy(coop_mid_hud_vb);
         coop_mid_hud_vb = NULL;
     }
+    if (coop_mid_banner_vb != NULL) {
+        tig_video_buffer_destroy(coop_mid_banner_vb);
+        coop_mid_banner_vb = NULL;
+    }
+    if (coop_mid_ping_vb != NULL) {
+        tig_video_buffer_destroy(coop_mid_ping_vb);
+        coop_mid_ping_vb = NULL;
+    }
+    coop_mid_banner_shown = false;
+    coop_mid_ping_draw_n = 0;
     coop_mid_labels_on = false;
     coop_mid_label_count = 0;
     coop_mid_hud_shown = false;
@@ -873,6 +1266,8 @@ void coop_middle_ui_reset(void)
         gamelib_invalidate_rect(&coop_mid_hud_rect);
         coop_mid_hud_shown = false;
     }
+    coop_mid_ui_banner_hide();
+    coop_mid_ui_pings_off();
 }
 
 void coop_middle_ui_resize(GameResizeInfo* resize_info)
@@ -883,4 +1278,6 @@ void coop_middle_ui_resize(GameResizeInfo* resize_info)
     coop_mid_ui_labels_off();
     coop_mid_ui_set_iso(resize_info->window_handle);
     coop_mid_hud_shown = false;
+    coop_mid_banner_shown = false;
+    coop_mid_ping_draw_n = 0;
 }

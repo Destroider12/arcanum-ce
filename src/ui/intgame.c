@@ -4,6 +4,7 @@
 
 #include "game/coop_lite.h"
 #include "game/coop_middle.h"
+#include "game/coop_middle.h"
 #include "ui/coop_middle_ui.h"
 
 #include <stdarg.h>
@@ -2531,6 +2532,11 @@ bool sub_54B5D0(TigMessage* msg)
                     return true; /* Coop Middle M2: net HUD */
                 }
                 break;
+            case SDL_SCANCODE_PAUSE:
+                if (!mainmenu_ui_is_active() && !textedit_ui_is_focused() && coop_middle_pause_key()) {
+                    return true; /* Coop Middle M3: shared tactical pause */
+                }
+                break;
             case SDL_SCANCODE_G:
                 /* PT71: G (F is the game's Fate key). */
                 if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_follow_toggle()) {
@@ -2716,6 +2722,10 @@ void intgame_process_event(TigMessage* msg)
     TigMessage fake_mouse_move;
 
     pc_obj = player_get_local_pc_obj();
+
+    if (coop_middle_ui_world_event(msg)) {
+        return; /* Coop Middle M3: map ping, or a world order while paused */
+    }
 
     if (combat_turn_based_is_active()) {
         if (combat_turn_based_whos_turn_get() != pc_obj) {
@@ -3787,6 +3797,13 @@ void intgame_hotkey_activate(Hotkey* hotkey)
 
     if ((hotkey->flags & HOTKEY_DRAGGED) != 0) {
         intgame_coop_click_trace("hotkey: ignored (being dragged)");
+        return;
+    }
+
+    /* Coop Middle M3: no new casts while paused (items, skills and the
+       hotbar itself stay usable; their world clicks are refused). */
+    if (hotkey->type == HOTKEY_SPELL && coop_middle_orders_blocked(true)) {
+        intgame_coop_click_trace("hotkey: spell ignored (co-op pause)");
         return;
     }
 

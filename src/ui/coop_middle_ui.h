@@ -3,7 +3,7 @@
 
 /*
  * Coop Middle M2 UI: direct trade entry points, teammate status badges,
- * Alt-hold loot labels and the F9 net HUD. Co-op sessions only: every
+ * Alt-hold loot labels and the F9 net HUD. M3: pause banner, map pings. Co-op sessions only: every
  * entry point returns at once in single player.
  */
 
@@ -38,6 +38,11 @@ void coop_middle_ui_on_scroll(int dx, int dy);
 
 /* F9: net HUD on / off. False outside a co-op session (key goes on). */
 bool coop_middle_ui_hud_toggle(void);
+
+/* M3, first thing in intgame_process_event: MMB up / Alt+RMB on the map
+   sends a ping; while paused, world clicks (orders) are refused. True =
+   consumed. The pause banner and the pings draw in coop_middle_ui_draw. */
+bool coop_middle_ui_world_event(TigMessage* msg);
 
 #ifdef __cplusplus
 }
