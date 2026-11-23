@@ -65,6 +65,9 @@ typedef struct TigNetTransport {
     void (*describe_peer)(TigNetTPeer* peer, char* buf, size_t size);
     /* What a client types to reach us (Steam: our SteamID64). */
     bool (*local_id)(char* buf, size_t size);
+    /* Coop Middle M2 (optional, NULL = unknown): RTT and loss of a peer for
+       the F9 net HUD. */
+    bool (*peer_stats)(TigNetTPeer* peer, unsigned int* rtt_ms, unsigned int* loss_pct);
 } TigNetTransport;
 
 const TigNetTransport* tig_net_transport_enet(void);

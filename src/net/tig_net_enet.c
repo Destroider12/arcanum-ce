@@ -211,6 +211,18 @@ static bool tne_local_id(char* buf, size_t size)
     return false;
 }
 
+static bool tne_peer_stats(TigNetTPeer* peer, unsigned int* rtt_ms, unsigned int* loss_pct)
+{
+    ENetPeer* p = (ENetPeer*)peer;
+
+    if (p == NULL) {
+        return false;
+    }
+    *rtt_ms = p->roundTripTime;
+    *loss_pct = (unsigned int)(((unsigned long long)p->packetLoss * 100u) / ENET_PEER_PACKET_LOSS_SCALE);
+    return true;
+}
+
 static const TigNetTransport tne_transport = {
     "enet",
     tne_init,
@@ -229,6 +241,7 @@ static const TigNetTransport tne_transport = {
     tne_now_ms,
     tne_describe_peer,
     tne_local_id,
+    tne_peer_stats,
 };
 
 const TigNetTransport* tig_net_transport_enet(void)

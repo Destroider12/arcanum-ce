@@ -345,6 +345,7 @@ static TigNetClient clients[TIG_NET_MAX_PLAYERS];
 static int local_slot;
 static int last_sender_slot;
 static int max_players = TIG_NET_MAX_PLAYERS;
+static unsigned int tig_net_hud_rx_ms[TIG_NET_MAX_PLAYERS]; /* Coop Middle M2: last app packet per slot */
 static unsigned int server_options;
 static char server_name[64] = "Arcanum";
 static char server_description[128] = "Description";
@@ -859,6 +860,8 @@ void tig_net_reset_connection(void)
 {
     int i;
 
+    memset(tig_net_hud_rx_ms, 0, sizeof(tig_net_hud_rx_ms));
+
 #ifdef ARCANUM_UPNP
     if (is_host && tp == tig_net_transport_enet()) {
         coop_upnp_stop(); /* PT51: drop the router mapping */
@@ -993,6 +996,9 @@ void tig_net_pump(void)
                     /* Host never receives from itself over the wire. */
                 } else {
                     tig_net_stat_add(tig_net_stat_rx_pk, tig_net_stat_rx_bytes, event.data, event.size, 1);
+                    if (from >= 0 && from < TIG_NET_MAX_PLAYERS) {
+                        tig_net_hud_rx_ms[from] = tp->now_ms();
+                    }
                     tig_net_dispatch_app(event.data, event.size, from);
                 }
             }
@@ -1295,6 +1301,58 @@ bool tig_net_kick_slot(int slot)
     clients[slot].handshaken = false;
     clients[slot].name[0] = '\0';
     tig_net_fire_event(TIG_NET_EVENT_DISCONNECT, slot, NULL, 0);
+    return true;
+}
+
+bool tig_net_get_hud_stats(TigNetHudStats* out)
+{
+    unsigned int now;
+    unsigned int rtt;
+    unsigned int loss;
+    long long rtt_sum = 0;
+    int rtt_n = 0;
+    int i;
+
+    if (out == NULL) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->max_players = max_players;
+    if (!active || !coop_enabled || tp == NULL) {
+        return false;
+    }
+    out->active = true;
+    out->is_host = is_host;
+    now = tp->now_ms();
+    for (i = 0; i < max_players && i < TIG_NET_MAX_PLAYERS; i++) {
+        if (clients[i].active) {
+            out->active_players++;
+        }
+        if (clients[i].peer == NULL || (is_host && i == 0) || (!is_host && i != 0)) {
+            continue; /* host: the client links; client: the host link */
+        }
+        if (is_host && !clients[i].active) {
+            continue;
+        }
+        if (tig_net_hud_rx_ms[i] != 0 && now - tig_net_hud_rx_ms[i] > out->since_rx_ms) {
+            out->since_rx_ms = now - tig_net_hud_rx_ms[i];
+        }
+        if (tp->peer_stats != NULL && tp->peer_stats(clients[i].peer, &rtt, &loss)) {
+            out->rtt_known = true;
+            if ((int)rtt > out->rtt_ms) {
+                out->rtt_ms = (int)rtt;
+            }
+            if ((int)loss > out->loss_pct) {
+                out->loss_pct = (int)loss;
+            }
+            rtt_sum += rtt;
+            rtt_n++;
+        }
+    }
+    if (out->active_players < 1) {
+        out->active_players = 1; /* this machine */
+    }
+    out->rtt_avg_ms = rtt_n > 0 ? (int)(rtt_sum / rtt_n) : 0;
     return true;
 }
 

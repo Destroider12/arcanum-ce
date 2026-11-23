@@ -162,7 +162,7 @@ static bool fk_id(char* b, size_t n)
 
 static const TigNetTransport fk_transport = {
     "fake", fk_init, fk_listen, fk_connect, fk_service, fk_event_done, fk_send, fk_flush, fk_disconnect, fk_reset,
-    fk_timeout, fk_close, fk_is_open, fk_data, fk_now, fk_desc, fk_id,
+    fk_timeout, fk_close, fk_is_open, fk_data, fk_now, fk_desc, fk_id, NULL,
 };
 
 /* tig_net wire bits the fake remote speaks (mirrors tig_net.c). */

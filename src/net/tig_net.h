@@ -90,6 +90,20 @@ int tig_net_local_server_get_max_players(void);
 unsigned int tig_net_local_server_get_options(void);
 void tig_net_local_server_set_options(unsigned int options);
 
+/* Coop Middle M2: read-only numbers for the F9 net HUD. */
+typedef struct TigNetHudStats {
+    bool active; /* a co-op session is running */
+    bool is_host;
+    int active_players; /* connected slots, this machine included */
+    int max_players;
+    bool rtt_known; /* the transport reports RTT / loss (ENet: yes) */
+    int rtt_ms; /* client: to the host; host: the worst client */
+    int rtt_avg_ms; /* host: average over clients; client: = rtt_ms */
+    int loss_pct; /* client: host link; host: the worst client */
+    unsigned int since_rx_ms; /* client: since the host's last packet; host: the most silent client */
+} TigNetHudStats;
+bool tig_net_get_hud_stats(TigNetHudStats* out);
+
 bool tig_net_client_is_active(int client_id);
 bool tig_net_kick_slot(int slot); /* PT77n: host drops a stale slot now */
 /* Unreliable+sequenced pose traffic on its own channel (review M7). */

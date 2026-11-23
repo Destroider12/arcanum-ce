@@ -767,6 +767,7 @@ static const TigNetTransport tns_transport = {
     tns_now,
     tns_describe_peer,
     tns_local_id,
+    NULL, /* peer_stats: not reported (HUD shows RTT "?") */
 };
 
 const TigNetTransport* tig_net_transport_steam(void)
