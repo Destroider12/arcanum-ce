@@ -31,7 +31,9 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 52
+/* 53: Coop Middle - PACKET_COOP_MID 167, PACKET_COOP_TOWNMAP 168, follower
+   skills in PACKET_COOP_NPC_STATS (bigger layout). */
+#define TIG_NET_PROTOCOL 53
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,
@@ -46,6 +48,9 @@ typedef bool (*TigNetNetworkEventFunc)(int type, int client_id, void* data, int 
 void tig_net_set_coop_enabled(bool enabled);
 bool tig_net_is_coop_enabled(void);
 bool tig_net_describe_coop_mode(char* buf, size_t size); /* PT37: main menu status line */
+/* Coop Middle (F9 HUD): round trip / lost packets to `slot` (host: a client;
+   client: slot 0). false when the transport does not report them (Steam). */
+bool tig_net_peer_stats(int slot, int* rtt_ms, int* lost);
 /* -join host[:port] was given (client can reconnect). */
 bool tig_net_join_configured(void);
 

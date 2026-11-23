@@ -53,7 +53,9 @@ extern "C" {
 #define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
 #define PACKET_COOP_AREA_KNOWN 165 /* PT78: known world-map areas, both ways (union) */
 #define PACKET_COOP_NPC_STATS 166 /* PT79: host party-follower build (level, stats, hp/fatigue pts) -> clients */
-#define PACKET_COOP_TYPE_LIMIT 168 /* raised for chat; exclusive upper bound */
+#define PACKET_COOP_MID 167 /* Coop Middle: multiplexed small ops (rules, pings, votes, status), both ways */
+#define PACKET_COOP_TOWNMAP 168 /* Coop Middle: town map known-tile bits, both ways (union) */
+#define PACKET_COOP_TYPE_LIMIT 169 /* exclusive upper bound */
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -709,8 +711,13 @@ typedef struct PacketCoopNpcStats {
     /* 0094 */ int hp_adj;
     /* 0098 */ int fatigue_pts;
     /* 009C */ int fatigue_adj;
+    /* Coop Middle (protocol 53): skills and spell colleges / tech degrees,
+       so a client's character window shows its follower's real build. */
+    /* 00A0 */ int basic[12]; /* OBJ_F_CRITTER_BASIC_SKILL_IDX */
+    /* 00D0 */ int tech[4]; /* OBJ_F_CRITTER_TECH_SKILL_IDX */
+    /* 00E0 */ int spell_tech[25]; /* OBJ_F_CRITTER_SPELL_TECH_IDX */
 } PacketCoopNpcStats;
-COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0xA0, "PacketCoopNpcStats size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0x144, "PacketCoopNpcStats size");
 bool coop_lite_npc_stats_valid(const PacketCoopNpcStats* pkt, int size);
 void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt);
 
@@ -2047,5 +2054,204 @@ int coop_lite_inv_sanitize(int64_t owner); /* PT53b */
 bool coop_lite_oid_raw_equal(const void* a, const void* b);
 bool coop_lite_handle_list_contains(const int64_t* list, int n, int64_t h);
 int coop_lite_handle_list_clear(int64_t* list, int n, int64_t h);
+
+/* ---- Coop Middle (protocol 53) ------------------------------------------ */
+
+/* Host rules (CoopRules). The host reads ARCANUM_COOP_RULES (the launcher's
+   Rules box writes it, "key=value,..."), sends them to every client right
+   after it joins (PACKET_COOP_MID op RULES) and on every change. Defaults
+   keep vanilla behaviour where a rule could change balance. */
+#define COOP_RULE_FF_AOE 0x0001u /* area spells hit teammates (vanilla) */
+#define COOP_RULE_GOLD_SPLIT 0x0002u /* found gold / gold rewards split evenly */
+#define COOP_RULE_CLIENT_PAUSE 0x0004u /* clients may toggle the shared pause */
+#define COOP_RULE_REST_VOTE 0x0008u /* clients may ask the host to rest */
+#define COOP_RULE_TP 0x0010u /* clients may /tp to the host */
+#define COOP_RULE_TP_CONFIRM 0x0020u /* ... only after the host says Y */
+#define COOP_RULE_QUEST_POCKET 0x0040u /* quest item checks see nearby teammates */
+#define COOP_RULE_SHARED_FOG 0x0080u /* town map fog shared between players */
+#define COOP_RULE_LOOT_FEED 0x0100u /* "[Loot] X picked up: Y" chat lines */
+#define COOP_RULE_PINGS 0x0200u /* middle-click pings */
+#define COOP_RULE_ALL 0x03FFu
+
+typedef struct CoopRules {
+    unsigned int flags;
+    int hp_scale_pct; /* enemy max HP +pct per extra player: 0 / 35 / 50 (0..100) */
+    int xp_mult_pct; /* shared XP multiplier: 100 / 125 / 150 (100..200) */
+    int tp_cooldown_s; /* /tp cooldown, 0..600 s (default 30) */
+} CoopRules;
+
+void coop_lite_rules_default(CoopRules* r);
+/* Clamp every field to its legal range and drop unknown flag bits. */
+void coop_lite_rules_sanitize(CoopRules* r);
+/* Parse "hp=35,xp=125,ff=0,gold=1,pause=1,rest=1,tp=1,tpconfirm=0,
+   quest=1,fog=1,feed=1,pings=1,tpcd=30" over the defaults; unknown keys
+   are ignored. Returns how many keys were understood. */
+int coop_lite_rules_parse(const char* text, CoopRules* r);
+/* Same "key=value,..." text back (round-trips through parse). */
+void coop_lite_rules_format(const CoopRules* r, char* out, size_t out_size);
+/* One human line for the lobby / chat (English or Russian). */
+void coop_lite_rules_describe(const CoopRules* r, bool ru, char* out, size_t out_size);
+/* Current rules (host: own; client: the host's last RULES; else defaults). */
+const CoopRules* coop_lite_rules(void);
+bool coop_lite_rule_on(unsigned int flag);
+/* Pure: enemy max HP with `extra` extra players at +pct each. */
+int coop_lite_scaled_hp(int base, int pct, int extra);
+/* Pure: shared XP with the multiplier (rounded down, never below xp > 0 ? 1 : 0). */
+int coop_lite_scaled_xp(int xp, int pct);
+
+/* PACKET_COOP_MID ops. Direction is checked per op (coop_lite_mid_op_ok). */
+#define COOP_MID_OP_RULES 1 /* host -> client: a = flags, b = hp%, c = xp%, d = tp cooldown s */
+#define COOP_MID_OP_STATUS 2 /* client -> host: a = own UI flags; host -> all: a = packed (4 bits / slot) */
+#define COOP_MID_OP_LOOT 3 /* host -> all: slot found text (item name), a = kind */
+#define COOP_MID_OP_GOLD_SPLIT 4 /* host -> all: slot found a gold, b share, c players */
+#define COOP_MID_OP_REST 5 /* client -> host: ask to rest; host -> client: a = answer */
+#define COOP_MID_OP_PING 6 /* client -> host -> others (host: all): slot, loc, a = map */
+#define COOP_MID_OP_PAUSE 7 /* client -> host: a = want; host -> all: a = paused, slot = by */
+#define COOP_MID_OP_TP 8 /* client -> host: gather me; host -> client: a = answer */
+#define COOP_MID_OP_GOLD_GIVE 9 /* client -> host: a = amount, b = target slot */
+#define COOP_MID_OP_FOLLOWER_SHARE 10 /* client -> host: a = teammates may trade with my followers;
+                                         host -> all: a = mask of slots that allow it */
+#define COOP_MID_OP_COUNT 11
+
+/* COOP_MID_OP_STATUS own UI flags (the rest of the marks are computed by
+   everyone from synced state). */
+#define COOP_STATUS_INVEN 0x1u /* I: inventory / trade window open */
+#define COOP_STATUS_DIALOG 0x2u /* D: in a dialog */
+#define COOP_STATUS_MASK 0x3u
+
+/* Answers (op REST / TP, a). */
+#define COOP_MID_ANS_ASKED 0
+#define COOP_MID_ANS_YES 1
+#define COOP_MID_ANS_NO 2
+#define COOP_MID_ANS_COMBAT 3
+#define COOP_MID_ANS_COOLDOWN 4
+#define COOP_MID_ANS_OFF 5
+#define COOP_MID_ANS_BUSY 6
+
+#define COOP_MID_TEXT 96
+typedef struct PacketCoopMid {
+    /* 0000 */ int type;
+    /* 0004 */ int op;
+    /* 0008 */ int slot; /* stamped by the host on relay */
+    /* 000C */ int a;
+    /* 0010 */ int b;
+    /* 0014 */ int c;
+    /* 0018 */ int d;
+    /* 001C */ int reserved;
+    /* 0020 */ int64_t loc;
+    /* 0028 */ unsigned char oid[24];
+    /* 0040 */ char text[COOP_MID_TEXT];
+} PacketCoopMid;
+COOP_STATIC_ASSERT(sizeof(PacketCoopMid) == 0xA0, "PacketCoopMid size");
+/* Pure: exact size, known op, NUL inside text. */
+bool coop_lite_mid_valid(const PacketCoopMid* pkt, int size);
+/* Pure: may `op` arrive at a host (from a client) / at a client (from the host)? */
+bool coop_lite_mid_op_ok(int op, bool receiver_is_host);
+void coop_lite_handle_mid(PacketCoopMid* pkt);
+
+/* Town map known tiles, both ways; the host ORs and re-sends the union. */
+#define COOP_TOWNMAP_BYTES 512 /* up to 4096 tiles */
+typedef struct PacketCoopTownmap {
+    /* 0000 */ int type;
+    /* 0004 */ int map; /* townmap id (townmap.mes) */
+    /* 0008 */ int size; /* bytes used in bits[] */
+    /* 000C */ int reserved;
+    /* 0010 */ unsigned char bits[COOP_TOWNMAP_BYTES];
+} PacketCoopTownmap;
+COOP_STATIC_ASSERT(sizeof(PacketCoopTownmap) == 0x210, "PacketCoopTownmap size");
+bool coop_lite_townmap_valid(const PacketCoopTownmap* pkt, int size);
+/* Pure: OR n bytes of src into dst; returns how many bytes changed. */
+int coop_lite_bits_union(unsigned char* dst, const unsigned char* src, int n);
+void coop_lite_handle_townmap(PacketCoopTownmap* pkt);
+
+/* Pure: 4-bit status per slot packed into one int. */
+unsigned int coop_lite_status_pack(unsigned int packed, int slot, unsigned int flags);
+unsigned int coop_lite_status_unpack(unsigned int packed, int slot);
+/* Pure: the portrait letters (I D C P Z X order) into out; returns count. */
+int coop_lite_status_letters(unsigned int ui_flags, bool combat, bool poisoned, bool unconscious,
+    bool dead, char* out, size_t out_size);
+
+/* Pure: loot feed classifier. kind 0 = not worth a line. */
+#define COOP_LOOT_NONE 0
+#define COOP_LOOT_KEY 1
+#define COOP_LOOT_QUEST 2
+#define COOP_LOOT_SCHEMATIC 3
+#define COOP_LOOT_VALUABLE 4
+#define COOP_LOOT_VALUABLE_WORTH 500
+int coop_lite_loot_kind(int obj_type, int written_subtype, unsigned int item_flags, int worth);
+
+/* Pure: chat slash commands. */
+#define COOP_CMD_NONE 0 /* plain chat text */
+#define COOP_CMD_TP 1 /* /tp: pull me to the host (client) */
+#define COOP_CMD_GATHER 2 /* /gather: pull everyone to me (host) */
+#define COOP_CMD_GOLD 3 /* /gold N [name] */
+#define COOP_CMD_PAUSE 4 /* /pause */
+#define COOP_CMD_RULES 5 /* /rules */
+#define COOP_CMD_HELP 6 /* /help */
+#define COOP_CMD_FOLLOWERS 7 /* /share on|off: teammates may trade with my followers */
+#define COOP_CMD_UNKNOWN 99
+int coop_lite_chat_command(const char* text, int* amount, char* arg, size_t arg_size);
+
+/* Pure: /tp gate. Returns a COOP_MID_ANS_* (YES = go now, ASKED = host must confirm). */
+int coop_lite_tp_gate(unsigned int flags, bool in_combat, unsigned int last_ms, unsigned int now_ms,
+    int cooldown_s);
+/* Pure: even split of `amount` between n players; the finder keeps the rest.
+   Returns the share each other player gets (0 = no split). */
+int coop_lite_gold_share(int amount, int n);
+/* Pure: F9 HUD line. rtt_ms < 0 = unknown. */
+void coop_lite_net_hud_format(int rtt_ms, int lost, int players, bool synced, char* out, size_t out_size);
+
+/* Game side (no-ops without a co-op session). */
+void coop_lite_mid_tick(unsigned int now_ms);
+void coop_lite_mid_session_reset(void);
+/* Labels / pings / pause banner / HUD drawn by ui/coop_mid_ui.c. */
+void coop_lite_set_mid_ui_hooks(void (*tick)(unsigned int now_ms), void (*ping_added)(void));
+bool coop_lite_mid_hud_text(char* out, size_t out_size); /* F9 */
+void coop_lite_mid_hud_toggle(void);
+bool coop_lite_mid_paused(void);
+bool coop_lite_mid_pause_banner(char* out, size_t out_size);
+bool coop_lite_mid_pause_key(void); /* Pause key; true if handled */
+/* Pings: i-th live ping (age < 5 s) on this map. */
+#define COOP_PING_MS 5000u
+#define COOP_PING_MAX 8
+bool coop_lite_mid_ping_get(int i, int64_t* loc, int* slot, unsigned int* age_ms);
+void coop_lite_mid_ping_at(int64_t loc); /* local MMB */
+/* Pure-ish: per-slot ping colour (r,g,b). */
+void coop_lite_slot_color(int slot, int* r, int* g, int* b);
+/* Direct trade: open the give window on a teammate PC. */
+bool coop_lite_mid_direct_trade(int64_t mate_pc);
+bool coop_lite_mid_direct_trade_active(void);
+void coop_lite_mid_direct_trade_end(void);
+/* In the give window: dragging out of the teammate's pack is refused (true
+   = refused, a notice was shown). */
+bool coop_lite_mid_direct_trade_take_blocked(int64_t target);
+/* Portrait marks for a teammate PC ("" = none). */
+int coop_lite_mid_status_text(int64_t pc, char* out, size_t out_size);
+/* Rest vote: client S press (true = handled, no local sleep window). */
+bool coop_lite_mid_client_rest_request(void);
+/* Y / N for the Coop Middle prompts (rest / tp); true if handled. */
+bool coop_lite_mid_vote_key(bool yes);
+/* Chat: true when the text was a command (handled, not sent as chat). */
+bool coop_lite_mid_chat_command(const char* text);
+/* Gold found by a party PC (host): split it when the rule is on. */
+void coop_lite_mid_gold_found(int64_t from_obj, int64_t to_obj, int qty);
+/* Difficulty hooks. */
+int coop_lite_mid_hp_max(int64_t obj, int value);
+int coop_lite_mid_xp(int xp);
+bool coop_lite_mid_ff_blocked(int64_t caster, int64_t victim, int64_t aimed);
+/* Shared quest pocket (host): a living teammate within 25 tiles holding
+   item `name`; OBJ_HANDLE_NULL if none / rule off / not a party PC. */
+#define COOP_POCKET_RANGE 25
+int64_t coop_lite_mid_pocket_find(int64_t pc, int name);
+/* After an item left a teammate's pack on the host: resync that player. */
+void coop_lite_mid_pocket_taken(int64_t holder);
+/* Town map fog: a remote party PC moved (object.c); host + client. */
+void coop_lite_mid_remote_pc_moved(int64_t obj, int64_t loc);
+/* Follower trade: may `pc` exchange with `npc` (own follower, or a
+   teammate's follower whose owner allowed it)? */
+bool coop_lite_mid_follower_trade_ok(int64_t pc, int64_t npc);
+/* Host's own give / take window on a follower it may exchange with: a plain
+   transfer instead of the pickpocket roll (true = done here). */
+bool coop_lite_mid_host_follower_exchange(int64_t pc, int64_t npc, int64_t item, bool take);
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

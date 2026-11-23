@@ -37,5 +37,10 @@ bool townmap_mark_visited(int64_t loc);
 bool townmap_set_known(int map, bool known);
 bool townmap_tile_blit_info(int map, int index, TigVideoBufferBlitInfo* vb_blit_info);
 bool townmap_is_waitable(int map);
+/* Coop Middle: copy the known-tile bit array of `map` (0 = failed / empty). */
+int townmap_known_bits_get(int map, uint8_t* out, int max);
+/* Coop Middle: OR `bits` into the known tiles of `map`; returns how many
+   bytes gained a bit (the k-state is saved with the game as usual). */
+int townmap_known_bits_merge(int map, const uint8_t* bits, int size);
 
 #endif /* ARCANUM_GAME_TOWNMAP_H_ */

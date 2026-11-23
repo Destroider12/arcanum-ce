@@ -1,6 +1,7 @@
 #include "game/townmap.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "game/mes.h"
 #include "game/sector.h"
@@ -756,4 +757,51 @@ bool townmap_kstate_flush(void)
     }
 
     return true;
+}
+
+/* Coop Middle: shared town map fog. */
+int townmap_known_bits_get(int map, uint8_t* out, int max)
+{
+    TownMapInfo tmi;
+
+    if (map == TOWNMAP_NONE || out == NULL || max <= 0) {
+        return 0;
+    }
+    if (!townmap_info(map, &tmi) || !townmap_kstate_load(map) || townmap_kstate == NULL) {
+        return 0;
+    }
+    if (townmap_kstate_size <= 0 || townmap_kstate_size > max) {
+        return 0;
+    }
+    memcpy(out, townmap_kstate, townmap_kstate_size);
+    return townmap_kstate_size;
+}
+
+int townmap_known_bits_merge(int map, const uint8_t* bits, int size)
+{
+    TownMapInfo tmi;
+    int idx;
+    int changed = 0;
+
+    if (map == TOWNMAP_NONE || bits == NULL || size <= 0) {
+        return 0;
+    }
+    if (!townmap_info(map, &tmi) || !townmap_kstate_load(map) || townmap_kstate == NULL) {
+        return 0;
+    }
+    if (size > townmap_kstate_size) {
+        size = townmap_kstate_size;
+    }
+    for (idx = 0; idx < size; idx++) {
+        uint8_t v = (uint8_t)(townmap_kstate[idx] | bits[idx]);
+
+        if (v != townmap_kstate[idx]) {
+            townmap_kstate[idx] = v;
+            changed++;
+        }
+    }
+    if (changed != 0) {
+        townmap_kstate_modified = true;
+    }
+    return changed;
 }

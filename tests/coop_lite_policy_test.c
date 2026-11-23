@@ -2413,6 +2413,198 @@ static int test_pt53c(void)
     return 0;
 }
 
+/* Coop Middle (protocol 53): pure helpers. */
+static int test_coop_mid(void)
+{
+    CoopRules r;
+    CoopRules r2;
+    char buf[512];
+    char letters[8];
+    PacketCoopMid mid;
+    PacketCoopTownmap tm;
+    unsigned char a[4] = { 0x01, 0x00, 0xF0, 0x00 };
+    unsigned char b[4] = { 0x02, 0x00, 0xF0, 0x80 };
+    int amount;
+    char arg[64];
+    int fails = 0;
+
+#define MID_CHECK(cond, what) \
+    do { \
+        if (!(cond)) { \
+            fprintf(stderr, "coop mid: %s\n", what); \
+            fails++; \
+        } \
+    } while (0)
+
+    MID_CHECK(TIG_NET_PROTOCOL == 53, "protocol 53");
+    MID_CHECK(PACKET_COOP_MID == 167 && PACKET_COOP_TOWNMAP == 168 && PACKET_COOP_TYPE_LIMIT == 169, "packet ids");
+    MID_CHECK(sizeof(PacketCoopMid) == 0xA0 && sizeof(PacketCoopTownmap) == 0x210, "packet sizes");
+    MID_CHECK(coop_lite_packet_allowed(PACKET_COOP_MID, true, 1) && coop_lite_packet_allowed(PACKET_COOP_MID, false, 0),
+        "MID both ways");
+    MID_CHECK(coop_lite_packet_allowed(PACKET_COOP_TOWNMAP, true, 1) && coop_lite_packet_allowed(PACKET_COOP_TOWNMAP, false, 0),
+        "TOWNMAP both ways");
+    MID_CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_MID) == sizeof(PacketCoopMid), "MID min size");
+    MID_CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_TOWNMAP) == sizeof(PacketCoopTownmap), "TOWNMAP min size");
+
+    /* rules */
+    coop_lite_rules_default(&r);
+    MID_CHECK((r.flags & COOP_RULE_FF_AOE) != 0 && (r.flags & COOP_RULE_GOLD_SPLIT) == 0
+            && (r.flags & COOP_RULE_CLIENT_PAUSE) == 0 && (r.flags & COOP_RULE_TP_CONFIRM) == 0
+            && r.hp_scale_pct == 0 && r.xp_mult_pct == 100 && r.tp_cooldown_s == 30,
+        "safe defaults");
+    MID_CHECK(coop_lite_rules_parse("hp=35,xp=125,ff=0,gold=1,pause=on,tpconfirm=yes,pings=off,tpcd=45,bogus=1", &r) == 8,
+        "parse count");
+    MID_CHECK(r.hp_scale_pct == 35 && r.xp_mult_pct == 125 && (r.flags & COOP_RULE_FF_AOE) == 0
+            && (r.flags & COOP_RULE_GOLD_SPLIT) != 0 && (r.flags & COOP_RULE_CLIENT_PAUSE) != 0
+            && (r.flags & COOP_RULE_TP_CONFIRM) != 0 && (r.flags & COOP_RULE_PINGS) == 0 && r.tp_cooldown_s == 45,
+        "parse values");
+    coop_lite_rules_format(&r, buf, sizeof(buf));
+    coop_lite_rules_parse(buf, &r2);
+    MID_CHECK(memcmp(&r, &r2, sizeof(r)) == 0, "format round trip");
+    coop_lite_rules_parse("hp=500,xp=10,tpcd=-4", &r);
+    MID_CHECK(r.hp_scale_pct == 100 && r.xp_mult_pct == 100 && r.tp_cooldown_s == 0, "clamped");
+    r.flags = 0xFFFFFFFFu;
+    coop_lite_rules_sanitize(&r);
+    MID_CHECK(r.flags == COOP_RULE_ALL, "unknown flags dropped");
+    coop_lite_rules_parse(NULL, &r);
+    MID_CHECK(r.xp_mult_pct == 100, "NULL = defaults");
+    coop_lite_rules_describe(&r, false, buf, sizeof(buf));
+    MID_CHECK(strstr(buf, "Rules:") != NULL, "describe en");
+    coop_lite_rules_describe(&r, true, buf, sizeof(buf));
+    MID_CHECK(strstr(buf, "Правила") != NULL, "describe ru");
+    MID_CHECK(coop_lite_rule_on(COOP_RULE_TP) && !coop_lite_rule_on(COOP_RULE_GOLD_SPLIT), "current rules = defaults");
+
+    /* difficulty */
+    MID_CHECK(coop_lite_scaled_hp(100, 0, 3) == 100 && coop_lite_scaled_hp(100, 35, 0) == 100, "hp off");
+    MID_CHECK(coop_lite_scaled_hp(100, 35, 1) == 135 && coop_lite_scaled_hp(100, 50, 3) == 250, "hp scaled");
+    MID_CHECK(coop_lite_scaled_hp(2000000000, 100, 7) == 2000000000, "hp overflow");
+    MID_CHECK(coop_lite_scaled_xp(100, 100) == 100 && coop_lite_scaled_xp(100, 125) == 125
+            && coop_lite_scaled_xp(3, 150) == 4 && coop_lite_scaled_xp(0, 150) == 0,
+        "xp scaled");
+
+    /* packets */
+    memset(&mid, 0, sizeof(mid));
+    mid.type = PACKET_COOP_MID;
+    mid.op = COOP_MID_OP_PING;
+    MID_CHECK(coop_lite_mid_valid(&mid, (int)sizeof(mid)), "mid valid");
+    MID_CHECK(!coop_lite_mid_valid(&mid, (int)sizeof(mid) - 1), "mid short");
+    mid.op = COOP_MID_OP_COUNT;
+    MID_CHECK(!coop_lite_mid_valid(&mid, (int)sizeof(mid)), "mid bad op");
+    mid.op = COOP_MID_OP_LOOT;
+    memset(mid.text, 'x', sizeof(mid.text));
+    MID_CHECK(!coop_lite_mid_valid(&mid, (int)sizeof(mid)), "mid unterminated text");
+    MID_CHECK(coop_lite_mid_op_ok(COOP_MID_OP_GOLD_GIVE, true) && !coop_lite_mid_op_ok(COOP_MID_OP_GOLD_GIVE, false),
+        "gold give to host only");
+    MID_CHECK(!coop_lite_mid_op_ok(COOP_MID_OP_RULES, true) && coop_lite_mid_op_ok(COOP_MID_OP_RULES, false),
+        "rules from host only");
+    MID_CHECK(!coop_lite_mid_op_ok(COOP_MID_OP_LOOT, true) && !coop_lite_mid_op_ok(COOP_MID_OP_GOLD_SPLIT, true),
+        "feed lines from host only");
+    MID_CHECK(coop_lite_mid_op_ok(COOP_MID_OP_PING, true) && coop_lite_mid_op_ok(COOP_MID_OP_PING, false)
+            && coop_lite_mid_op_ok(COOP_MID_OP_FOLLOWER_SHARE, false),
+        "both-way ops");
+    MID_CHECK(!coop_lite_mid_op_ok(0, true) && !coop_lite_mid_op_ok(99, false), "unknown op");
+    memset(&tm, 0, sizeof(tm));
+    tm.type = PACKET_COOP_TOWNMAP;
+    tm.map = 3;
+    tm.size = 10;
+    MID_CHECK(coop_lite_townmap_valid(&tm, (int)sizeof(tm)), "townmap valid");
+    tm.size = COOP_TOWNMAP_BYTES + 1;
+    MID_CHECK(!coop_lite_townmap_valid(&tm, (int)sizeof(tm)), "townmap size");
+    tm.size = 10;
+    tm.map = 0;
+    MID_CHECK(!coop_lite_townmap_valid(&tm, (int)sizeof(tm)), "townmap map 0");
+    MID_CHECK(coop_lite_bits_union(a, b, 4) == 2 && a[0] == 0x03 && a[2] == 0xF0 && a[3] == 0x80, "bits union");
+    MID_CHECK(coop_lite_bits_union(a, b, 4) == 0, "union idempotent");
+
+    /* status marks */
+    {
+        unsigned int p = 0;
+
+        p = coop_lite_status_pack(p, 0, COOP_STATUS_INVEN);
+        p = coop_lite_status_pack(p, 7, COOP_STATUS_DIALOG | COOP_STATUS_INVEN);
+        MID_CHECK(coop_lite_status_unpack(p, 0) == COOP_STATUS_INVEN && coop_lite_status_unpack(p, 7) == 3
+                && coop_lite_status_unpack(p, 3) == 0 && coop_lite_status_unpack(p, 8) == 0,
+            "status pack");
+        p = coop_lite_status_pack(p, 0, 0);
+        MID_CHECK(coop_lite_status_unpack(p, 0) == 0 && coop_lite_status_unpack(p, 7) == 3, "status clear");
+    }
+    MID_CHECK(coop_lite_status_letters(COOP_STATUS_INVEN | COOP_STATUS_DIALOG, true, true, true, false, letters, sizeof(letters)) == 5
+            && strcmp(letters, "IDCPZ") == 0,
+        "letters order");
+    MID_CHECK(coop_lite_status_letters(COOP_STATUS_INVEN, true, false, false, true, letters, sizeof(letters)) == 1
+            && strcmp(letters, "X") == 0,
+        "dead = X only");
+    MID_CHECK(coop_lite_status_letters(0, false, false, false, false, letters, sizeof(letters)) == 0 && letters[0] == '\0',
+        "no marks");
+
+    /* loot feed classifier (obj types: gold 8, key 11, written 13) */
+    MID_CHECK(coop_lite_loot_kind(11, 0, 0, 0) == COOP_LOOT_KEY, "key");
+    MID_CHECK(coop_lite_loot_kind(13, 5, 0, 0) == COOP_LOOT_SCHEMATIC, "schematic");
+    MID_CHECK(coop_lite_loot_kind(13, 0, 0, 10) == COOP_LOOT_NONE, "book");
+    MID_CHECK(coop_lite_loot_kind(5, 0, 0x2u, 10) == COOP_LOOT_QUEST, "wont sell = quest");
+    MID_CHECK(coop_lite_loot_kind(5, 0, 0, COOP_LOOT_VALUABLE_WORTH) == COOP_LOOT_VALUABLE, "valuable");
+    MID_CHECK(coop_lite_loot_kind(5, 0, 0, COOP_LOOT_VALUABLE_WORTH - 1) == COOP_LOOT_NONE, "cheap");
+    MID_CHECK(coop_lite_loot_kind(8, 0, 0, 100000) == COOP_LOOT_NONE, "gold not a line");
+    MID_CHECK(coop_lite_loot_kind(11, 0, 0x10u, 0) == COOP_LOOT_NONE, "hidden item");
+
+    /* chat commands */
+    MID_CHECK(coop_lite_chat_command("hello", &amount, arg, sizeof(arg)) == COOP_CMD_NONE, "plain text");
+    MID_CHECK(coop_lite_chat_command("  /TP", &amount, arg, sizeof(arg)) == COOP_CMD_TP, "/tp");
+    MID_CHECK(coop_lite_chat_command("/gather", NULL, NULL, 0) == COOP_CMD_GATHER, "/gather");
+    MID_CHECK(coop_lite_chat_command("/gold 150 Bob ", &amount, arg, sizeof(arg)) == COOP_CMD_GOLD
+            && amount == 150 && strcmp(arg, "Bob") == 0,
+        "/gold N name");
+    MID_CHECK(coop_lite_chat_command("/gold 20", &amount, arg, sizeof(arg)) == COOP_CMD_GOLD && amount == 20 && arg[0] == '\0',
+        "/gold N");
+    MID_CHECK(coop_lite_chat_command("/gold", &amount, arg, sizeof(arg)) == COOP_CMD_UNKNOWN, "/gold no amount");
+    MID_CHECK(coop_lite_chat_command("/gold 0", &amount, arg, sizeof(arg)) == COOP_CMD_UNKNOWN, "/gold 0");
+    MID_CHECK(coop_lite_chat_command("/share off", &amount, arg, sizeof(arg)) == COOP_CMD_FOLLOWERS && amount == 0,
+        "/share off");
+    MID_CHECK(coop_lite_chat_command("/share on", &amount, arg, sizeof(arg)) == COOP_CMD_FOLLOWERS && amount == 1,
+        "/share on");
+    MID_CHECK(coop_lite_chat_command("/pause", NULL, NULL, 0) == COOP_CMD_PAUSE
+            && coop_lite_chat_command("/rules", NULL, NULL, 0) == COOP_CMD_RULES
+            && coop_lite_chat_command("/help", NULL, NULL, 0) == COOP_CMD_HELP,
+        "/pause /rules /help");
+    MID_CHECK(coop_lite_chat_command("/whatever", NULL, NULL, 0) == COOP_CMD_UNKNOWN, "unknown");
+
+    /* /tp gate */
+    MID_CHECK(coop_lite_tp_gate(0, false, 0, 1000, 30) == COOP_MID_ANS_OFF, "tp off");
+    MID_CHECK(coop_lite_tp_gate(COOP_RULE_TP, true, 0, 1000, 30) == COOP_MID_ANS_COMBAT, "tp combat");
+    MID_CHECK(coop_lite_tp_gate(COOP_RULE_TP, false, 0, 1000, 30) == COOP_MID_ANS_YES, "tp first");
+    MID_CHECK(coop_lite_tp_gate(COOP_RULE_TP, false, 1000, 20000, 30) == COOP_MID_ANS_COOLDOWN, "tp cooldown");
+    MID_CHECK(coop_lite_tp_gate(COOP_RULE_TP, false, 1000, 31001, 30) == COOP_MID_ANS_YES, "tp after cooldown");
+    MID_CHECK(coop_lite_tp_gate(COOP_RULE_TP | COOP_RULE_TP_CONFIRM, false, 1000, 2000, 30) == COOP_MID_ANS_ASKED,
+        "tp confirm");
+
+    /* gold split + HUD + colours */
+    MID_CHECK(coop_lite_gold_share(100, 3) == 33 && coop_lite_gold_share(2, 3) == 0
+            && coop_lite_gold_share(100, 1) == 0 && coop_lite_gold_share(-5, 2) == 0,
+        "gold share");
+    coop_lite_net_hud_format(42, 1, 3, true, buf, sizeof(buf));
+    MID_CHECK(strcmp(buf, "Ping 42 ms | Loss 1 | Players 3 | Sync OK") == 0, "hud");
+    coop_lite_net_hud_format(-1, 0, 1, false, buf, sizeof(buf));
+    MID_CHECK(strcmp(buf, "Ping - | Loss 0 | Players 1 | Sync WAIT") == 0, "hud unknown");
+    {
+        int cr = 0;
+        int cg = 0;
+        int cb = 0;
+        int r1 = 0;
+
+        coop_lite_slot_color(0, &cr, &cg, &cb);
+        coop_lite_slot_color(1, &r1, NULL, NULL);
+        MID_CHECK(cr == 255 && cr != r1, "slot colours");
+    }
+    /* follower skills in NPC_STATS */
+    MID_CHECK(sizeof(PacketCoopNpcStats) == 0x144, "npc stats size");
+#undef MID_CHECK
+    if (fails == 0) {
+        printf("Coop Middle pure helpers OK\n");
+        fflush(stdout);
+    }
+    return fails;
+}
+
 int main(int argc, char** argv)
 {
     tig_net_set_coop_enabled(false);
@@ -2423,6 +2615,9 @@ int main(int argc, char** argv)
     }
     printf("SP: worldmap/time/save allowed OK\n");
 
+    if (test_coop_mid() != 0) {
+        return 1;
+    }
     if (test_classify_and_offsets() != 0) {
         return 1;
     }
