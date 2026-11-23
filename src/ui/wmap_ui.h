@@ -17,8 +17,6 @@ void wmap_ui_select(int64_t obj, int spell);
 void wmap_ui_close(void);
 int wmap_ui_is_created(void);
 bool wmap_ui_is_town_mode(void);
-/* Coop Middle: blink ping dots on the open town map. */
-void wmap_ui_coop_ping_tick(unsigned int now_ms);
 void wmap_ui_scroll(int direction);
 void sub_564000(int a1);
 void wmap_ui_mark_townmap(int64_t obj);

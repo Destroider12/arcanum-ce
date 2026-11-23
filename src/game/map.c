@@ -1166,7 +1166,6 @@ void map_close(void)
     if (!dword_5D11E8) {
         dword_5D11E8 = true;
 
-        coop_lite_pdlg_map_closing(); /* parallel dialogs end before the objects go */
         coop_lite_before_map_flush();
         wallcheck_flush();
         gsound_flush();

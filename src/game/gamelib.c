@@ -821,27 +821,10 @@ void gamelib_set_overlay_scroll_func(void (*func)(int dx, int dy))
     gamelib_overlay_scroll_func = func;
 }
 
-/* Coop Middle: a second overlay (labels, pings, pause banner, net HUD). */
-static void (*gamelib_overlay2_draw_func)(GameDrawInfo* draw_info);
-static void (*gamelib_overlay2_scroll_func)(int dx, int dy);
-
-void gamelib_set_overlay2_draw_func(void (*func)(GameDrawInfo* draw_info))
-{
-    gamelib_overlay2_draw_func = func;
-}
-
-void gamelib_set_overlay2_scroll_func(void (*func)(int dx, int dy))
-{
-    gamelib_overlay2_scroll_func = func;
-}
-
 void gamelib_overlay_scrolled(int dx, int dy)
 {
     if (gamelib_overlay_scroll_func != NULL) {
         gamelib_overlay_scroll_func(dx, dy);
-    }
-    if (gamelib_overlay2_scroll_func != NULL) {
-        gamelib_overlay2_scroll_func(dx, dy);
     }
 }
 
@@ -1774,9 +1757,6 @@ void gamelib_draw_game(GameDrawInfo* draw_info)
         tb_draw(draw_info);
         tf_draw(draw_info);
         tc_draw(draw_info);
-        if (gamelib_overlay2_draw_func != NULL) {
-            gamelib_overlay2_draw_func(draw_info);
-        }
         if (gamelib_overlay_draw_func != NULL) {
             gamelib_overlay_draw_func(draw_info);
         }

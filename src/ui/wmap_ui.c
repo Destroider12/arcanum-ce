@@ -1506,39 +1506,6 @@ bool wmap_ui_is_town_mode(void)
     return wmap_ui_created && wmap_ui_mode == WMAP_UI_MODE_TOWN;
 }
 
-/* Coop Middle: repaint the open town map ~4 times a second while a ping
-   on it is live (so its dot blinks), and once more after the last one. */
-void wmap_ui_coop_ping_tick(unsigned int now_ms)
-{
-    static unsigned int last_ms;
-    static bool had_live;
-    bool live = false;
-    int p;
-
-    if (!wmap_ui_is_town_mode()) {
-        had_live = false;
-        return;
-    }
-    for (p = 0; p < COOP_PING_MAX; p++) {
-        int64_t ping_loc;
-
-        if (coop_lite_mid_ping_get(p, &ping_loc, NULL, NULL)
-            && townmap_get(sector_id_from_loc(ping_loc)) == wmap_ui_townmap) {
-            live = true;
-            break;
-        }
-    }
-    if (!live && !had_live) {
-        return;
-    }
-    if (live && last_ms != 0 && now_ms - last_ms < 250u) {
-        return;
-    }
-    last_ms = now_ms;
-    had_live = live;
-    wmap_town_refresh_rect(NULL);
-}
-
 // 0x560FA0
 bool wmap_ui_create(void)
 {
@@ -5001,40 +4968,6 @@ void wmap_town_refresh_rect(TigRect* rect)
             mark.height = 5;
             if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
                 tig_window_fill(wmap_ui_window, &clip, tig_color_make(40, 120, 255));
-            }
-        }
-
-        // Coop Middle: pings on this town map blink in the pinger's colour.
-        for (int p = 0; p < COOP_PING_MAX; p++) {
-            int64_t ping_loc;
-            int ping_slot;
-            unsigned int ping_age;
-            int r;
-            int g;
-            int b;
-
-            if (!coop_lite_mid_ping_get(p, &ping_loc, &ping_slot, &ping_age)
-                || townmap_get(sector_id_from_loc(ping_loc)) != wmap_ui_townmap
-                || (ping_age / 250u) % 2u != 0u) {
-                continue;
-            }
-            coop_lite_slot_color(ping_slot, &r, &g, &b);
-            townmap_loc_to_coords(&wmap_ui_tmi, ping_loc, &offset_x, &offset_y);
-            offset_x -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_34;
-            offset_y -= wmap_ui_mode_info[WMAP_UI_MODE_TOWN].field_38;
-            mark.x = bounds.x + (int)offset_x - 6;
-            mark.y = bounds.y + (int)offset_y - 6;
-            mark.width = 13;
-            mark.height = 13;
-            if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
-                tig_window_fill(wmap_ui_window, &clip, tig_color_make(255, 255, 255));
-            }
-            mark.x += 2;
-            mark.y += 2;
-            mark.width = 9;
-            mark.height = 9;
-            if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
-                tig_window_fill(wmap_ui_window, &clip, tig_color_make(r, g, b));
             }
         }
     } else if (tig_net_is_active()) {

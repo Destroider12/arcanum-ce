@@ -2245,15 +2245,6 @@ void MTComponentDamage_ProcFunc(void)
         return;
     }
 
-    /* Coop Middle: area friendly fire rule (off = an area spell from a party
-       member skips teammates it was not aimed at; host only). */
-    if (coop_lite_mid_ff_blocked(magictech_cur_run_info->attacker_obj.obj != OBJ_HANDLE_NULL
-                ? magictech_cur_run_info->attacker_obj.obj
-                : magictech_cur_run_info->parent_obj.obj,
-            stru_5E6D28.target_obj, magictech_cur_run_info->target_obj.obj)) {
-        return;
-    }
-
     sub_4B2210(magictech_cur_run_info->parent_obj.obj, stru_5E6D28.target_obj, &combat);
 
     combat.dam_flags |= magictech_cur_component->data.damage.damage_flags;

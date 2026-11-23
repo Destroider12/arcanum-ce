@@ -839,9 +839,7 @@ void timeevent_ping(tig_timestamp_t timestamp)
      * via PacketGameTime. Clients must still advance real-time (already done
      * above) and anim-time so local movement/rendering are not frozen.
      */
-    /* Coop Middle: the shared pause freezes game + anim time on every peer
-       (real time still runs: UI, chat, network). */
-    if (!sub_45B300() && !coop_lite_mid_paused()) {
+    if (!sub_45B300()) {
         if (coop_lite_can_advance_game_time()) {
             if (!combat_turn_based_is_active()) {
                 datetime_add_milliseconds(&timeevent_game_time, 8 * delta);

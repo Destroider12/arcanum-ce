@@ -1541,9 +1541,7 @@ bool sub_4150D0(DialogState* a1, char* a2)
                         node = node->next;
                     }
                     object_list_destroy(&followers);
-                    if (node == NULL
-                        && coop_lite_mid_pocket_find(a1->pc_obj, value) == OBJ_HANDLE_NULL) {
-                        /* Coop Middle: shared quest pocket (nearby teammates) */
+                    if (node == NULL) {
                         return false;
                     }
                 }
@@ -1707,9 +1705,6 @@ bool sub_4150D0(DialogState* a1, char* a2)
                 object_list_destroy(&followers);
                 if (node != NULL) {
                     return false;
-                }
-                if (coop_lite_mid_pocket_find(a1->pc_obj, value) != OBJ_HANDLE_NULL) {
-                    return false; /* Coop Middle: shared quest pocket */
                 }
             }
             break;
@@ -1919,7 +1914,6 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
         switch (act) {
         case DIALOG_ACTION_GOLD:
             if (value > 0) {
-                /* Coop Middle: item_gold_transfer reports it (gold split rule). */
                 item_gold_transfer(OBJ_HANDLE_NULL, a1->pc_obj, value, OBJ_HANDLE_NULL);
             } else if (value < 0) {
                 int total_gold;
@@ -2022,7 +2016,6 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             int64_t item_obj;
             int64_t substitute_inventory_obj;
             int64_t parent_obj;
-            int64_t pocket_holder;
 
             if (value < 0) {
                 value = -value;
@@ -2058,16 +2051,6 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
                     object_list_destroy(&followers);
                 }
 
-                /* Coop Middle: shared quest pocket - take it from the
-                   nearby teammate who carries it (resynced at once). */
-                pocket_holder = OBJ_HANDLE_NULL;
-                if (item_obj == OBJ_HANDLE_NULL) {
-                    item_obj = coop_lite_mid_pocket_find(a1->pc_obj, value);
-                    if (item_obj != OBJ_HANDLE_NULL) {
-                        item_parent(item_obj, &pocket_holder);
-                    }
-                }
-
                 if (item_obj != OBJ_HANDLE_NULL) {
                     item_transfer(item_obj, a1->npc_obj);
                     item_parent(item_obj, &parent_obj);
@@ -2079,7 +2062,6 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
                             object_destroy(item_obj);
                         }
                     }
-                    coop_lite_mid_pocket_taken(pocket_holder);
                 }
             }
             break;

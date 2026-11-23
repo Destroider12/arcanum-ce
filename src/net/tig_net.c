@@ -894,43 +894,6 @@ int sub_5280F0(void)
     return was_active ? 0 : 1;
 }
 
-bool tig_net_peer_stats(int slot, int* rtt_ms, int* lost)
-{
-    TigNetTPeer* p;
-    char desc[256];
-    const char* r;
-    const char* l;
-
-    if (rtt_ms != NULL) {
-        *rtt_ms = -1;
-    }
-    if (lost != NULL) {
-        *lost = 0;
-    }
-    if (!active || slot < 0 || slot >= max_players || slot >= TIG_NET_MAX_PLAYERS
-        || tp == NULL || tp->describe_peer == NULL) {
-        return false;
-    }
-    p = clients[slot].peer;
-    if (p == NULL || (is_host && slot == 0) || (!is_host && slot != 0)) {
-        return false;
-    }
-    desc[0] = '\0';
-    tp->describe_peer(p, desc, sizeof(desc));
-    r = strstr(desc, "rtt=");
-    if (r == NULL) {
-        return false;
-    }
-    if (rtt_ms != NULL) {
-        *rtt_ms = atoi(r + 4);
-    }
-    l = strstr(desc, "lost=");
-    if (l != NULL && lost != NULL) {
-        *lost = atoi(l + 5);
-    }
-    return true;
-}
-
 static void tig_net_peer_diag_log(void)
 {
     int i;
