@@ -1,6 +1,8 @@
 /*
  * Coop Middle M1 (protocol 53): session rules contract, PACKET_COOP_RULES,
  * gold split, loot feed filter / limiter, REST_ASK / REST_REFUSE ops.
+ * Coop Middle M2 (protocol 54): trade partner / transfer rules and lines,
+ * SLOT_STATUS pack / get / badge priority, Alt label deoverlap.
  * Headless (no engine); also run under ASan/UBSan (nbuild-asan).
  */
 #include <limits.h>
@@ -510,6 +512,85 @@ static void test_status(void)
     CHECK(coop_middle_slot_status(0) == 0 && coop_middle_status_packed() == 0);
 }
 
+static bool label_overlap(const CoopLabelRect* a, const CoopLabelRect* b)
+{
+    return a->x < b->x + b->w && b->x < a->x + a->w && a->y < b->y + b->h && b->y < a->y + a->h;
+}
+
+static void set_label(CoopLabelRect* r, int x, int y, int w, int h)
+{
+    r->x = x;
+    r->y = y;
+    r->w = w;
+    r->h = h;
+    r->hidden = true; /* the function decides */
+}
+
+/* 9. M2 Alt labels: deoverlap */
+static void test_labels(void)
+{
+    CoopLabelRect r[COOP_LABELS_MAX];
+    int i;
+    int j;
+    int n;
+
+    /* two on the same spot: the second goes right above the first */
+    set_label(&r[0], 100, 200, 60, 16);
+    set_label(&r[1], 110, 200, 60, 16);
+    n = coop_middle_labels_deoverlap(r, 2, 0, 600);
+    CHECK(n == 2 && !r[0].hidden && !r[1].hidden);
+    CHECK(r[0].y == 200 && r[1].y == 200 - 16 - 1 && r[1].x == 110);
+    CHECK(!label_overlap(&r[0], &r[1]));
+
+    /* side by side: untouched */
+    set_label(&r[0], 0, 100, 50, 16);
+    set_label(&r[1], 60, 100, 50, 16);
+    CHECK(coop_middle_labels_deoverlap(r, 2, 0, 600) == 2 && r[1].y == 100);
+
+    /* a stack of 32 on one point: all pairwise apart, inside [min, max) */
+    for (i = 0; i < COOP_LABELS_MAX; i++) {
+        set_label(&r[i], 300 + (i % 3), 590, 80, 16);
+    }
+    n = coop_middle_labels_deoverlap(r, COOP_LABELS_MAX, 40, 600);
+    CHECK(n > 0 && n <= COOP_LABELS_MAX);
+    for (i = 0; i < COOP_LABELS_MAX; i++) {
+        if (r[i].hidden) {
+            continue;
+        }
+        CHECK(r[i].y >= 40 && r[i].y + r[i].h <= 600);
+        for (j = 0; j < i; j++) {
+            if (!r[j].hidden) {
+                CHECK(!label_overlap(&r[i], &r[j]));
+            }
+        }
+    }
+    CHECK(!r[0].hidden && r[0].y == 600 - 16); /* clamped into the view */
+    CHECK(n == COOP_LABELS_MAX); /* 33 rows of 17 px fit in 560 px: all 32 */
+    for (i = 0; i < COOP_LABELS_MAX; i++) {
+        set_label(&r[i], 300, 590, 80, 16);
+    }
+    n = coop_middle_labels_deoverlap(r, COOP_LABELS_MAX, 400, 600);
+    CHECK(n == 11); /* y = 584 - 17 k >= 400: k = 0..10 */
+    CHECK(!r[10].hidden && r[10].y == 584 - 170 && r[11].hidden && r[31].hidden);
+
+    /* no room above: hidden */
+    set_label(&r[0], 0, 0, 100, 16);
+    set_label(&r[1], 0, 0, 100, 16);
+    n = coop_middle_labels_deoverlap(r, 2, 0, 600);
+    CHECK(n == 1 && !r[0].hidden && r[1].hidden);
+
+    /* degenerate input */
+    set_label(&r[0], 0, 10, 0, 16);
+    set_label(&r[1], 0, 10, 10, 100);
+    CHECK(coop_middle_labels_deoverlap(r, 2, 0, 50) == 0 && r[0].hidden && r[1].hidden);
+    CHECK(coop_middle_labels_deoverlap(NULL, 3, 0, 50) == 0);
+    CHECK(coop_middle_labels_deoverlap(r, 0, 0, 50) == 0);
+
+    /* a label below the view is pulled up into it */
+    set_label(&r[0], 0, 900, 40, 16);
+    CHECK(coop_middle_labels_deoverlap(r, 1, 0, 600) == 1 && r[0].y == 584);
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -520,10 +601,12 @@ int main(void)
     test_rest_ops();
     test_trade();
     test_status();
+    test_labels();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
     }
-    printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops)\n");
+    printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops, "
+           "trade, status badges, label deoverlap)\n");
     return 0;
 }

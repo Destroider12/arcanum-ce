@@ -8,6 +8,7 @@
  * invalidated so the map repaints over it.
  */
 #include "ui/coop_chat_ui.h"
+#include "ui/coop_middle_ui.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -66,6 +67,7 @@ static void coop_chat_ui_on_scroll(int dx, int dy)
 {
     TigRect rect;
 
+    coop_middle_ui_on_scroll(dx, dy); /* Coop Middle M2 */
     if (!coop_chat_inited || !coop_chat_visible || coop_chat_count <= 0) {
         return;
     }
@@ -147,6 +149,7 @@ static void coop_chat_ui_draw(GameDrawInfo* draw_info)
     TigRectListNode* node;
     TigWindowBlitInfo blit;
 
+    coop_middle_ui_draw(draw_info); /* Coop Middle M2: Alt labels, F9 HUD */
     if (!coop_chat_visible || coop_chat_count <= 0
         || coop_chat_iso_window == TIG_WINDOW_HANDLE_INVALID
         || coop_chat_font == TIG_FONT_HANDLE_INVALID) {

@@ -284,6 +284,56 @@ bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* t
     return true;
 }
 
+static bool coop_label_overlap(const CoopLabelRect* a, const CoopLabelRect* b)
+{
+    return a->x < b->x + b->w && b->x < a->x + a->w && a->y < b->y + b->h && b->y < a->y + a->h;
+}
+
+int coop_middle_labels_deoverlap(CoopLabelRect* rects, int count, int min_y, int max_y)
+{
+    int visible = 0;
+    int i;
+    int j;
+
+    if (rects == NULL || count <= 0) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        CoopLabelRect* r = &rects[i];
+        bool moved = true;
+        int guard = 2 * count + 2;
+
+        r->hidden = r->w <= 0 || r->h <= 0 || r->h > max_y - min_y;
+        if (r->hidden) {
+            continue;
+        }
+        if (r->y + r->h > max_y) {
+            r->y = max_y - r->h;
+        }
+        if (r->y < min_y) {
+            r->y = min_y;
+        }
+        /* Each move goes strictly up, so this ends. */
+        while (moved && !r->hidden) {
+            moved = false;
+            for (j = 0; j < i; j++) {
+                if (!rects[j].hidden && coop_label_overlap(r, &rects[j])) {
+                    r->y = rects[j].y - r->h - 1;
+                    moved = true;
+                    if (r->y < min_y || --guard <= 0) {
+                        r->hidden = true;
+                    }
+                    break;
+                }
+            }
+        }
+        if (!r->hidden) {
+            visible++;
+        }
+    }
+    return visible;
+}
+
 bool coop_middle_trade_partner_ok(bool rule_on, int self_slot, int partner_slot, bool partner_is_pc,
     bool partner_active, bool self_dead, bool partner_dead, int dist)
 {

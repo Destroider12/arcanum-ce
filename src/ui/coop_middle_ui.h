@@ -31,6 +31,14 @@ bool coop_middle_ui_trade_try(int64_t target, bool from_portrait);
    width pixels wide; draws nothing when the teammate has no status. */
 void coop_middle_ui_draw_badge(tig_window_handle_t window_handle, int64_t obj, int width);
 
+/* Iso overlay (called from the co-op chat overlay hook, after the map,
+   objects and text floaters): Alt loot labels + F9 net HUD. */
+void coop_middle_ui_draw(GameDrawInfo* draw_info);
+void coop_middle_ui_on_scroll(int dx, int dy);
+
+/* F9: net HUD on / off. False outside a co-op session (key goes on). */
+bool coop_middle_ui_hud_toggle(void);
+
 #ifdef __cplusplus
 }
 #endif

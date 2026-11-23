@@ -143,6 +143,22 @@ uint8_t coop_middle_status_get(uint32_t packed, int slot);
 bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* tag, uint8_t* r, uint8_t* g,
     uint8_t* b);
 
+/* M2 Alt loot labels (screen rects, priority order: index 0 first). */
+#define COOP_LABELS_MAX 32
+#define COOP_LABELS_RANGE 22 /* tiles around the PC */
+typedef struct CoopLabelRect {
+    int x;
+    int y;
+    int w;
+    int h;
+    bool hidden; /* out: no room left above */
+} CoopLabelRect;
+
+/* Moves each label up past the higher-priority labels it overlaps (a
+   1 px gap), keeps it inside [min_y, max_y); a label that runs out of room
+   above min_y is hidden. Returns the visible count. */
+int coop_middle_labels_deoverlap(CoopLabelRect* rects, int count, int min_y, int max_y);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
