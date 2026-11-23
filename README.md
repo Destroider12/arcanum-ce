@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 53`** on this branch (`coop-middle`, Coop Middle M1); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 54`** on this branch (`coop-middle`, Coop Middle M2; M1 was 53); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -81,7 +81,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 ### Launcher (`arcanum-coop-launcher.exe`)
 
 - Name, Host/Join, transport **Direct + UPnP** or **Steam**, port (default 7777) or host address / SteamID64, Windowed mode.
-- **Rules (host, Coop Middle):** Split gold / Loot feed / Rest vote checkboxes, saved in `[rules]` of `arcanum-coop-launcher.ini` and passed to the game as `ARCANUM_COOP_RULES`.
+- **Rules (host, Coop Middle):** Split gold / Loot feed / Rest vote / Direct trade checkboxes, saved in `[rules]` of `arcanum-coop-launcher.ini` and passed to the game as `ARCANUM_COOP_RULES`.
 - **Lobby pane** while the game runs: connected players and a chat mirror with Send.
 - Shows your local IP and, through UPnP, your public IP, with a **Copy** button.
 - **Port check:** local bind, STUN (public IP and port mapping), UPnP mapping test, CGNAT detection, Windows firewall rule check, and an optional "Add firewall rule" (runs elevated, only when you click it).
@@ -97,6 +97,9 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 | **N** | in game | host: refuse a travel, save, load or rest request |
 | **F7** | client | save on the host |
 | **F8** | client | ask the host to load |
+| **Ctrl+LMB** on a player / **RMB** on a teammate portrait | in game | direct trade (Coop Middle M2, within 6 tiles) |
+| **Alt** (hold) | in game | loot labels (Coop Middle M2) |
+| **F9** | in game | net HUD on / off (Coop Middle M2) |
 | **J** / **Enter** | client main menu | Join Host (rejoin the last host, no New Game) |
 | **Enter** | in game | open chat / broadcast bubble (relayed in co-op) |
 
@@ -115,14 +118,14 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 | `ARCANUM_COOP_AUTOJOIN` | `1`: join right away with the rejoin token (used by the launcher's Reconnect) |
 | `ARCANUM_COOP_WAIT_HOST` | `0`: turn off the client's automatic waiting for the host |
 | `ARCANUM_COOP_LANG` | `ru`: Russian co-op messages (default English) |
-| `ARCANUM_COOP_RULES` | host session rules (Coop Middle), e.g. `gold=1,loot=1,rest=1,hp=100,xp=100`; see [docs/coop-middle.md](docs/coop-middle.md) |
+| `ARCANUM_COOP_RULES` | host session rules (Coop Middle), e.g. `gold=1,loot=1,rest=1,trade=1,hp=100,xp=100`; see [docs/coop-middle.md](docs/coop-middle.md) |
 | `ARCANUM_COOP_NO_CHAR_BUNDLE`, `ARCANUM_COOP_NO_OBJ_BLOB`, `ARCANUM_COOP_NO_WORLD_STATE`, `ARCANUM_COOP_WORLD_TRACE` | debugging switches (turn off parts of the sync / add tracing). Not for normal play. |
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 53)
+## Coop Middle (branch `coop-middle`, protocol 54)
 
-Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
+Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
 Stage **M1 (foundation)**:
 
@@ -130,6 +133,13 @@ Stage **M1 (foundation)**:
 - **Gold split** (off by default): gold a player picks up from the ground, a container or a corpse is shared equally among the living players. The picker keeps the remainder, and gold a player dropped or stashed is never split.
 - **Loot feed** (on): `[Loot] <Name> picked up: <Item>` chat lines for keys, scrolls, notes and schematics, quest or unique items, and gear worth 250+. At most 5 lines a second; a "Take all" burst collapses into "... and N more".
 - **Rest vote** (on): a client's rest button or bed sends a request to the host (Y = rest, N = refuse) instead of the old "Only the party leader can rest" refusal.
+
+Stage **M2 (QoL and team UX)**:
+
+- **Direct trade** (on): Ctrl+LMB on another player's PC, or RMB on a teammate portrait, opens a trade window (within 6 tiles). Giving from your own pack is free. Nothing can be taken from the other player. `[Trade] <From> gave <Item> to <To>` goes to both players, or to everyone when the loot feed is on.
+- **Alt loot labels**: hold Alt to see ground items, containers and corpses with loot nearby (local only, up to 32).
+- **Status badges** on teammate portraits: X dead, Z unconscious, P poisoned, D dialog, I inventory, C combat.
+- **F9 net HUD**: players, RTT, packet loss and sync state (local only).
 
 Not tested in play yet. Details, keys and log lines are in [docs/coop-middle.md](docs/coop-middle.md).
 
