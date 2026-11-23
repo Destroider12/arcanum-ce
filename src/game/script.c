@@ -899,7 +899,9 @@ int script_execute_condition(ScriptCondition* condition, int line, ScriptState* 
         name = script_get_value(condition->op_type[1], condition->op_value[1], state);
         matched = 0;
         for (index = 0; index < cnt; index++) {
-            if (item_find_by_name(objs[index], name) != OBJ_HANDLE_NULL) {
+            if (item_find_by_name(objs[index], name) != OBJ_HANDLE_NULL
+                || coop_lite_mid_pocket_find(objs[index], name) != OBJ_HANDLE_NULL) {
+                /* Coop Middle: shared quest pocket (no-op outside co-op) */
                 matched++;
             }
         }
@@ -1909,8 +1911,17 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         int64_t from_obj = script_get_obj(action->op_type[1], action->op_value[1], state);
         int64_t to_obj = script_get_obj(action->op_type[2], action->op_value[2], state);
         int64_t item_obj = item_find_by_name(from_obj, name);
+        int64_t pocket_holder = OBJ_HANDLE_NULL;
+        if (item_obj == OBJ_HANDLE_NULL) {
+            /* Coop Middle: shared quest pocket */
+            item_obj = coop_lite_mid_pocket_find(from_obj, name);
+            if (item_obj != OBJ_HANDLE_NULL) {
+                item_parent(item_obj, &pocket_holder);
+            }
+        }
         if (item_obj != OBJ_HANDLE_NULL) {
             item_transfer(item_obj, to_obj);
+            coop_lite_mid_pocket_taken(pocket_holder);
         }
         return NEXT;
     }
@@ -2747,8 +2758,17 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         int name = script_get_value(action->op_type[0], action->op_value[0], state);
         int64_t obj = script_get_obj(action->op_type[1], action->op_value[1], state);
         int64_t item_obj = item_find_by_name(obj, name);
+        int64_t pocket_holder = OBJ_HANDLE_NULL;
+        if (item_obj == OBJ_HANDLE_NULL) {
+            /* Coop Middle: shared quest pocket */
+            item_obj = coop_lite_mid_pocket_find(obj, name);
+            if (item_obj != OBJ_HANDLE_NULL) {
+                item_parent(item_obj, &pocket_holder);
+            }
+        }
         if (item_obj != OBJ_HANDLE_NULL) {
             object_destroy(item_obj);
+            coop_lite_mid_pocket_taken(pocket_holder);
         }
         return NEXT;
     }

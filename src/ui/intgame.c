@@ -2515,13 +2515,28 @@ bool sub_54B5D0(TigMessage* msg)
                 }
                 return true;
             case SDL_SCANCODE_Y:
-                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(true) || coop_lite_travel_key())) {
+                if (!mainmenu_ui_is_active()
+                    && (coop_lite_save_req_key(true) || coop_lite_mid_vote_key(true) || coop_lite_travel_key())) {
                     return true; /* PT50: travel ready / host go now */
                 }
                 break;
             case SDL_SCANCODE_N:
-                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(false) || coop_lite_travel_refuse_key())) {
+                if (!mainmenu_ui_is_active()
+                    && (coop_lite_save_req_key(false) || coop_lite_mid_vote_key(false) || coop_lite_travel_refuse_key())) {
                     return true; /* PT57: host refuses a client's travel request */
+                }
+                break;
+            case SDL_SCANCODE_PAUSE:
+                /* Coop Middle: shared pause (host; clients if the host allows). */
+                if (!mainmenu_ui_is_active() && tig_net_is_active() && coop_lite_mid_pause_key()) {
+                    return true;
+                }
+                break;
+            case SDL_SCANCODE_F9:
+                /* Coop Middle: net HUD (Ping | Loss | Players | Sync). */
+                if (!mainmenu_ui_is_active() && tig_net_is_active()) {
+                    coop_lite_mid_hud_toggle();
+                    return true;
                 }
                 break;
             case SDL_SCANCODE_G:
@@ -2779,6 +2794,14 @@ void intgame_process_event(TigMessage* msg)
                 break;
             case TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP:
                 dword_64C6D8 = false;
+                break;
+            case TIG_MESSAGE_MOUSE_MIDDLE_BUTTON_UP:
+                /* Coop Middle: ping the tile under the cursor. */
+                if (tig_net_is_active() && sub_5517A0(msg)
+                    && sub_552050(msg->data.mouse.x, msg->data.mouse.y, &td)) {
+                    coop_lite_mid_ping_at(td.is_loc ? td.loc : obj_field_int64_get(td.obj, OBJ_F_LOCATION));
+                    return;
+                }
                 break;
             case TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP:
                 if (pc_obj != OBJ_HANDLE_NULL) {
@@ -3307,6 +3330,14 @@ void sub_54ED30(TargetDescriptor* td)
     target_type = obj_field_int32_get(td->obj, OBJ_F_TYPE);
     if (!td->is_loc && td->obj == pc_obj) {
         intgame_coop_click_trace("on own PC, ignored");
+        return;
+    }
+    /* Coop Middle: Ctrl+click on a teammate opens the give window. */
+    if (!td->is_loc && (target_type == OBJ_TYPE_PC || target_type == OBJ_TYPE_NPC) && tig_net_is_active()
+        && tig_kb_get_modifier(SDL_KMOD_CTRL)
+        && inven_ui_drag_item_obj_get() == OBJ_HANDLE_NULL
+        && coop_lite_mid_direct_trade(td->obj)) {
+        intgame_coop_click_trace("ctrl+click on a teammate: give window");
         return;
     }
     intgame_coop_click_trace("object type %d, combat mode %d, auto attack %d",

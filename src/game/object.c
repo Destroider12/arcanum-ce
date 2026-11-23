@@ -1689,6 +1689,7 @@ int object_hp_max(int64_t obj)
     obj_type = obj_field_int32_get(obj, OBJ_F_TYPE);
     if (obj_type_is_critter(obj_type)) {
         value = effect_adjust_max_hit_points(obj, sub_43D630(obj) + value);
+        value = coop_lite_mid_hp_max(obj, value); /* Coop Middle: enemy HP rule */
     }
     return value;
 }
@@ -5340,6 +5341,8 @@ void sub_444270(int64_t obj, int a2)
             roof_recalc(loc);
             wallcheck_recalc(loc);
             scroll_set_center(loc);
+        } else {
+            coop_lite_mid_remote_pc_moved(obj, loc); /* Coop Middle: shared town map fog */
         }
 
         map_process_jumppoint(loc, obj);

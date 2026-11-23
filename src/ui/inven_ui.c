@@ -1162,6 +1162,7 @@ void inven_ui_destroy(void)
 
     inven_ui_created = false;
     sub_4A53B0(inven_ui_pc_obj, 0);
+    coop_lite_mid_direct_trade_end(); /* Coop Middle */
 
     if (inven_ui_mode == INVEN_UI_MODE_BARTER
         && coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
@@ -2380,6 +2381,11 @@ bool sub_575100(bool* a1)
         return true;
     }
 
+    /* Coop Middle: host gives to a follower it may exchange with. */
+    if (coop_lite_mid_host_follower_exchange(inven_ui_pc_obj, qword_682C78, v1, false)) {
+        return true;
+    }
+
     /* PT53: host PC gives to a co-op teammate: a plain host-side transfer,
        no pickpocket animation, and the window stays open for more gifts. */
     if (tig_net_is_coop_enabled() && tig_net_is_host()
@@ -2405,11 +2411,22 @@ bool sub_575180(bool* a1)
         return false;
     }
 
+    /* Coop Middle: the direct trade (give) window never takes. */
+    if (coop_lite_mid_direct_trade_take_blocked(qword_682C78)) {
+        sub_575770();
+        return true;
+    }
+
     v1 = inven_ui_drag_item_obj;
     sub_575770();
 
     if (coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
         coop_lite_client_request_steal(inven_ui_pc_obj, qword_682C78, v1, false);
+        return true;
+    }
+
+    /* Coop Middle: host takes from a follower it may exchange with. */
+    if (coop_lite_mid_host_follower_exchange(inven_ui_pc_obj, qword_682C78, v1, true)) {
         return true;
     }
 

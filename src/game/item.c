@@ -607,8 +607,50 @@ bool item_transfer(int64_t item_obj, int64_t critter_obj)
     return item_transfer_ex(item_obj, critter_obj, -1);
 }
 
-// 0x461810
+/* Coop Middle: gold that reaches a party PC from the ground, a container,
+   a corpse or a dialog / script reward is reported once (outermost call
+   only) for the host's gold split rule. */
+static int item_coop_gold_depth;
+static bool item_transfer_ex_internal(int64_t item_obj, int64_t critter_obj, int inventory_location);
+static bool item_gold_transfer_internal(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj);
+
 bool item_transfer_ex(int64_t item_obj, int64_t critter_obj, int inventory_location)
+{
+    int64_t from_obj = OBJ_HANDLE_NULL;
+    int qty = 0;
+    bool ok;
+
+    if (item_coop_gold_depth == 0 && item_obj != OBJ_HANDLE_NULL && tig_net_is_active() && tig_net_is_host()
+        && obj_field_int32_get(item_obj, OBJ_F_TYPE) == OBJ_TYPE_GOLD) {
+        qty = obj_field_int32_get(item_obj, OBJ_F_GOLD_QUANTITY);
+        if (!item_parent(item_obj, &from_obj)) {
+            from_obj = OBJ_HANDLE_NULL;
+        }
+    }
+    item_coop_gold_depth++;
+    ok = item_transfer_ex_internal(item_obj, critter_obj, inventory_location);
+    item_coop_gold_depth--;
+    if (ok && qty > 0 && item_coop_gold_depth == 0) {
+        coop_lite_mid_gold_found(from_obj, critter_obj, qty);
+    }
+    return ok;
+}
+
+bool item_gold_transfer(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
+{
+    bool ok;
+
+    item_coop_gold_depth++;
+    ok = item_gold_transfer_internal(from_obj, to_obj, qty, gold_obj);
+    item_coop_gold_depth--;
+    if (ok && qty > 0 && to_obj != OBJ_HANDLE_NULL && item_coop_gold_depth == 0) {
+        coop_lite_mid_gold_found(from_obj, to_obj, qty);
+    }
+    return ok;
+}
+
+// 0x461810
+static bool item_transfer_ex_internal(int64_t item_obj, int64_t critter_obj, int inventory_location)
 {
     int64_t existing_item_obj;
     bool v1;
@@ -2538,7 +2580,7 @@ int64_t item_gold_obj(int64_t obj)
 }
 
 // 0x464830
-bool item_gold_transfer(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
+static bool item_gold_transfer_internal(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
 {
     int from_qty;
     int to_qty;

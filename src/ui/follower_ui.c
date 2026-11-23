@@ -875,6 +875,24 @@ bool follower_ui_message_filter(TigMessage* msg)
         }
         return false;
     case TIG_MESSAGE_MOUSE:
+        /* Coop Middle: right click on a teammate's portrait opens the give
+           window (direct trade). */
+        if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP && follower_ui_team_count > 0) {
+            tig_window_handle_t team_window;
+
+            if (tig_window_get_at_position(msg->data.mouse.x, msg->data.mouse.y, &team_window) == TIG_OK) {
+                for (index = 0; index < follower_ui_team_count; index++) {
+                    if (team_window == follower_ui_team_windows[index]) {
+                        sub_444130(&follower_ui_team[index]);
+                        if (follower_ui_team[index].obj != OBJ_HANDLE_NULL
+                            && coop_lite_mid_direct_trade(follower_ui_team[index].obj)) {
+                            return true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP && follower_ui_visible) {
             tig_window_handle_t window_handle;
 
@@ -1520,5 +1538,20 @@ static void follower_ui_team_draw(void)
         }
         fatigue_percent = critter_fatigue_max(obj) > 0 ? 100 * critter_fatigue_current(obj) / critter_fatigue_max(obj) : 0;
         follower_ui_draw(follower_ui_team_windows[index], FOLLOWER_UI_FATIGUE_BAR_ART, 3, 44, fatigue_percent, 100);
+        /* Coop Middle: status marks I D C P Z X over the portrait. */
+        {
+            char marks[8];
+            TigRect text_rect;
+
+            if (coop_lite_mid_status_text(obj, marks, sizeof(marks)) > 0) {
+                text_rect.x = 5;
+                text_rect.y = 4;
+                text_rect.width = 34;
+                text_rect.height = 14;
+                tig_font_push(follower_ui_drop_down_menu_item_highlighted_color);
+                tig_window_text_write(follower_ui_team_windows[index], marks, &text_rect);
+                tig_font_pop();
+            }
+        }
     }
 }
