@@ -209,12 +209,79 @@ bool coop_middle_party_ctrl_valid(const PacketCoopPartyCtrl* pkt)
     if (pkt->op == COOP_CTRL_REST_REFUSE) {
         return pkt->a >= 0 && pkt->a <= COOP_REST_REFUSE_MAX && pkt->b == 0;
     }
+    if (pkt->op == COOP_CTRL_SLOT_STATUS) {
+        return pkt->b == 0; /* a: any packing (the handler masks a client's) */
+    }
     return false;
 }
 
 bool coop_middle_rest_ask_allowed(bool have_last, unsigned int last_ms, unsigned int now_ms)
 {
     return !have_last || (unsigned int)(now_ms - last_ms) >= COOP_REST_ASK_INTERVAL_MS;
+}
+
+uint32_t coop_middle_status_pack(const uint8_t bits[8])
+{
+    uint32_t packed = 0;
+    int slot;
+
+    if (bits == NULL) {
+        return 0;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        packed |= (uint32_t)(bits[slot] & 0x0Fu) << (slot * 4);
+    }
+    return packed;
+}
+
+uint8_t coop_middle_status_get(uint32_t packed, int slot)
+{
+    if (slot < 0 || slot >= 8) {
+        return 0;
+    }
+    return (uint8_t)((packed >> (slot * 4)) & 0x0Fu);
+}
+
+bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* tag, uint8_t* r, uint8_t* g,
+    uint8_t* b)
+{
+    char c;
+    uint8_t cr;
+    uint8_t cg;
+    uint8_t cb;
+
+    if (dead) {
+        c = 'X', cr = 220, cg = 60, cb = 60;
+    } else if (unconscious) {
+        c = 'Z', cr = 180, cg = 130, cb = 230;
+    } else if ((bits & COOP_STATUS_POISON) != 0) {
+        c = 'P', cr = 90, cg = 220, cb = 90;
+    } else if ((bits & COOP_STATUS_DIALOG) != 0) {
+        c = 'D', cr = 240, cg = 200, cb = 80;
+    } else if ((bits & COOP_STATUS_INVEN) != 0) {
+        c = 'I', cr = 100, cg = 210, cb = 240;
+    } else if ((bits & COOP_STATUS_COMBAT) != 0) {
+        c = 'C', cr = 240, cg = 140, cb = 60;
+    } else {
+        if (tag != NULL) {
+            tag[0] = '\0';
+        }
+        return false;
+    }
+    if (tag != NULL) {
+        tag[0] = c;
+        tag[1] = '\0';
+    }
+    if (r != NULL) {
+        *r = cr;
+    }
+    if (g != NULL) {
+        *g = cg;
+    }
+    if (b != NULL) {
+        *b = cb;
+    }
+    return true;
 }
 
 bool coop_middle_trade_partner_ok(bool rule_on, int self_slot, int partner_slot, bool partner_is_pc,
@@ -248,6 +315,7 @@ bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_targe
 #include "game/obj_id.h"
 #include "game/object.h"
 #include "game/player.h"
+#include "game/stat.h"
 #include "tig/debug.h"
 #include "tig/memory.h"
 #include "ui/sleep_ui.h"
@@ -280,6 +348,10 @@ static bool coop_rest_asked;
 static unsigned int coop_rest_asked_ms;
 
 static CoopFeedLimiter coop_feed;
+
+static bool coop_status_handle(const PacketCoopPartyCtrl* pkt); /* M2 */
+static void coop_status_host_tick(unsigned int now_ms);
+static void coop_status_client_tick(unsigned int now_ms);
 
 /* Gold a player dropped (ground piles), never split when picked up. */
 #define COOP_MID_DROPS 32
@@ -882,6 +954,9 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
 {
     int slot;
 
+    if (pkt != NULL && pkt->op == COOP_CTRL_SLOT_STATUS) {
+        return coop_status_handle(pkt);
+    }
     if (pkt == NULL || (pkt->op != COOP_CTRL_REST_ASK && pkt->op != COOP_CTRL_REST_REFUSE)) {
         return false;
     }
@@ -901,6 +976,118 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
     coop_lite_mid_notice(coop_middle_rest_refuse_text(pkt->a, coop_lite_lang_ru()), false);
     tig_debug_printf("CoopMiddle: rest request refused by the host (reason %d)\n", pkt->a);
     return true;
+}
+
+/* ---- M2: status badges ---- */
+
+static uint8_t coop_status_local; /* this machine's INVEN / DIALOG */
+static uint8_t coop_status_client[8]; /* host: what each client reported */
+static uint32_t coop_status_rx; /* client: the host's last broadcast */
+static uint32_t coop_status_host; /* host: the merged packing */
+static bool coop_status_sent_valid;
+static uint32_t coop_status_sent;
+static unsigned int coop_status_sent_ms;
+static unsigned int coop_status_poll_ms;
+static bool coop_status_c_sent_valid;
+static uint8_t coop_status_c_sent;
+static unsigned int coop_status_c_sent_ms;
+
+int coop_middle_slot_of_pc(int64_t obj)
+{
+    return coop_mid_slot_of(obj);
+}
+
+void coop_middle_status_set_local(uint8_t bits)
+{
+    coop_status_local = bits & COOP_STATUS_CLIENT_MASK;
+}
+
+uint32_t coop_middle_status_packed(void)
+{
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return 0;
+    }
+    return tig_net_is_host() ? coop_status_host : coop_status_rx;
+}
+
+uint8_t coop_middle_slot_status(int slot)
+{
+    return coop_middle_status_get(coop_middle_status_packed(), slot);
+}
+
+static void coop_status_host_tick(unsigned int now_ms)
+{
+    uint8_t bits[8];
+    int slot;
+
+    if (coop_status_sent_valid && (unsigned int)(now_ms - coop_status_poll_ms) < COOP_STATUS_POLL_MS) {
+        return;
+    }
+    coop_status_poll_ms = now_ms;
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        bits[slot] = 0;
+        if (pc == OBJ_HANDLE_NULL || (slot > 0 && !tig_net_client_is_active(slot))) {
+            continue;
+        }
+        bits[slot] = slot == 0 ? coop_status_local : coop_status_client[slot];
+        if (stat_level_get(pc, STAT_POISON_LEVEL) > 0) {
+            bits[slot] |= COOP_STATUS_POISON;
+        }
+        if (combat_critter_is_combat_mode_active(pc)) {
+            bits[slot] |= COOP_STATUS_COMBAT;
+        }
+    }
+    coop_status_host = coop_middle_status_pack(bits);
+    if (coop_status_sent_valid && coop_status_host == coop_status_sent
+        && (unsigned int)(now_ms - coop_status_sent_ms) < COOP_STATUS_SEND_MS) {
+        return;
+    }
+    if (!coop_status_sent_valid || coop_status_host != coop_status_sent) {
+        tig_debug_printf("CoopMiddle: status: 0x%08x\n", (unsigned int)coop_status_host);
+    }
+    coop_status_sent_valid = true;
+    coop_status_sent = coop_status_host;
+    coop_status_sent_ms = now_ms;
+    coop_mid_ctrl_send(COOP_CTRL_SLOT_STATUS, (int)coop_status_host, -1);
+}
+
+static void coop_status_client_tick(unsigned int now_ms)
+{
+    if (coop_status_c_sent_valid && coop_status_c_sent == coop_status_local
+        && (unsigned int)(now_ms - coop_status_c_sent_ms) < COOP_STATUS_SEND_MS) {
+        return;
+    }
+    coop_status_c_sent_valid = true;
+    coop_status_c_sent = coop_status_local;
+    coop_status_c_sent_ms = now_ms;
+    coop_mid_ctrl_send(COOP_CTRL_SLOT_STATUS, coop_status_local, 0);
+}
+
+static bool coop_status_handle(const PacketCoopPartyCtrl* pkt)
+{
+    int slot;
+
+    if (tig_net_is_host()) {
+        slot = sub_52A530();
+        if (slot > 0 && slot < 8) {
+            coop_status_client[slot] = (uint8_t)(pkt->a & COOP_STATUS_CLIENT_MASK);
+        }
+        return true;
+    }
+    coop_status_rx = (uint32_t)pkt->a;
+    return true;
+}
+
+static void coop_status_reset(void)
+{
+    coop_status_local = 0;
+    memset(coop_status_client, 0, sizeof(coop_status_client));
+    coop_status_rx = 0;
+    coop_status_host = 0;
+    coop_status_sent_valid = false;
+    coop_status_c_sent_valid = false;
 }
 
 /* ---- M2: direct trade ---- */
@@ -1084,10 +1271,14 @@ void coop_middle_session_reset(void)
     coop_mid_stash_next = 0;
     coop_trade_local = false;
     coop_trade_local_partner = OBJ_HANDLE_NULL;
+    coop_status_reset();
 }
 
 void coop_middle_slot_gone(int slot)
 {
+    if (slot > 0 && slot < 8) {
+        coop_status_client[slot] = 0;
+    }
     if (coop_rest_active && coop_rest_slot == slot) {
         coop_rest_end(-1, "the asker disconnected");
     }
@@ -1114,9 +1305,13 @@ void coop_middle_tick(unsigned int now_ms)
     if (coop_mid_ui_tick != NULL) {
         coop_mid_ui_tick(now_ms);
     }
+    if (tig_net_is_active() && !tig_net_is_host() && tig_net_is_coop_enabled()) {
+        coop_status_client_tick(now_ms);
+    }
     if (!coop_mid_session_host()) {
         return;
     }
+    coop_status_host_tick(now_ms);
     more = coop_middle_feed_take_suppressed(&coop_feed, now_ms);
     if (more > 0) {
         char what[16];
@@ -1153,6 +1348,10 @@ bool coop_middle_rule_on(uint32_t flag) { return (coop_middle_rules()->flags & f
 void coop_middle_session_reset(void) { }
 void coop_middle_tick(unsigned int now_ms) { (void)now_ms; }
 void coop_middle_set_ui_tick(void (*fn)(unsigned int now_ms)) { (void)fn; }
+void coop_middle_status_set_local(uint8_t bits) { (void)bits; }
+uint8_t coop_middle_slot_status(int slot) { (void)slot; return 0; }
+uint32_t coop_middle_status_packed(void) { return 0; }
+int coop_middle_slot_of_pc(int64_t obj) { (void)obj; return -1; }
 void coop_middle_host_slot_synced(int slot) { (void)slot; }
 void coop_middle_slot_gone(int slot) { (void)slot; }
 void coop_middle_map_changed(void) { }

@@ -26,6 +26,17 @@ extern "C" {
 /* PACKET_COOP_PARTY_CTRL ops added by Middle (Lite uses 1..4). */
 #define COOP_CTRL_REST_ASK 5 /* client -> host: a = COOP_REST_MODE_* */
 #define COOP_CTRL_REST_REFUSE 6 /* host -> client: a = COOP_REST_REFUSE_* */
+/* M2: client -> host: a = own COOP_STATUS_INVEN | _DIALOG bits;
+   host -> clients: a = all slots, 4 bits each (coop_middle_status_pack). */
+#define COOP_CTRL_SLOT_STATUS 7
+
+#define COOP_STATUS_INVEN 0x1 /* inventory / loot / trade window open */
+#define COOP_STATUS_DIALOG 0x2 /* in a dialog */
+#define COOP_STATUS_POISON 0x4 /* STAT_POISON_LEVEL > 0 (host) */
+#define COOP_STATUS_COMBAT 0x8 /* combat mode on (host) */
+#define COOP_STATUS_CLIENT_MASK (COOP_STATUS_INVEN | COOP_STATUS_DIALOG)
+#define COOP_STATUS_SEND_MS 5000u /* resend even without a change */
+#define COOP_STATUS_POLL_MS 250u
 
 #define COOP_REST_MODE_NIGHT 1 /* until morning / 8 hours (bed) */
 #define COOP_REST_MODE_HEALED 2 /* until healed (rest button) */
@@ -124,6 +135,14 @@ bool coop_middle_trade_partner_ok(bool rule_on, int self_slot, int partner_slot,
    teammate never. Other kinds: false (Lite decides those). */
 bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_target);
 
+/* M2 status badges: 4 bits per slot, slot 0 in the low nibble. */
+uint32_t coop_middle_status_pack(const uint8_t bits[8]);
+uint8_t coop_middle_status_get(uint32_t packed, int slot);
+/* The portrait badge: false = none. Priority X dead, Z unconscious,
+   P poisoned, D dialog, I inventory, C combat. tag gets 2 chars. */
+bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* tag, uint8_t* r, uint8_t* g,
+    uint8_t* b);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -168,6 +187,13 @@ void coop_middle_take_done(CoopMiddleTake* t, bool ok);
 
 /* M2: ui/coop_middle_ui.c's per-frame tick (game code cannot call UI). */
 void coop_middle_set_ui_tick(void (*fn)(unsigned int now_ms));
+
+/* M2 status: the UI reports this machine's INVEN / DIALOG bits each tick;
+   the badge reads one slot's bits (host: merged, client: last broadcast). */
+void coop_middle_status_set_local(uint8_t bits);
+uint8_t coop_middle_slot_status(int slot);
+uint32_t coop_middle_status_packed(void);
+int coop_middle_slot_of_pc(int64_t obj);
 
 /* M2 trade (game side). */
 bool coop_middle_trade_live(int64_t pc, int64_t partner);

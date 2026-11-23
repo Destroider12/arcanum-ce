@@ -1531,5 +1531,6 @@ static void follower_ui_team_draw(void)
         }
         fatigue_percent = critter_fatigue_max(obj) > 0 ? 100 * critter_fatigue_current(obj) / critter_fatigue_max(obj) : 0;
         follower_ui_draw(follower_ui_team_windows[index], FOLLOWER_UI_FATIGUE_BAR_ART, 3, 44, fatigue_percent, 100);
+        coop_middle_ui_draw_badge(follower_ui_team_windows[index], obj, 40); /* Coop Middle M2 */
     }
 }

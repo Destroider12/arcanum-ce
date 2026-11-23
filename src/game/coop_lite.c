@@ -20323,7 +20323,7 @@ bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_PARTY_CTRL && size >= (int)sizeof(PacketCoopPartyCtrl)
         && ((pkt->op >= COOP_CTRL_TRAVEL_START && pkt->op <= COOP_CTRL_SPELL_END)
-            || coop_middle_party_ctrl_valid(pkt)); /* Coop Middle: REST_ASK / REST_REFUSE */
+            || coop_middle_party_ctrl_valid(pkt)); /* Coop Middle: REST_ASK / REST_REFUSE / SLOT_STATUS */
 }
 
 /* PT57 */

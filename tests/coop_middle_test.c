@@ -449,6 +449,67 @@ static void test_trade(void)
     CHECK(!coop_middle_trade_refuse_take(42));
 }
 
+/* 8. M2 status badges: pack / get, badge priority, SLOT_STATUS op */
+static void test_status(void)
+{
+    uint8_t bits[8] = { 0x1, 0x2, 0x4, 0x8, 0xF, 0x0, 0x3, 0xC };
+    uint8_t over[8] = { 0xFF, 0x10, 0, 0, 0, 0, 0, 0x1F };
+    PacketCoopPartyCtrl c;
+    uint32_t p;
+    char tag[4];
+    uint8_t r = 0;
+    uint8_t g = 0;
+    uint8_t b = 0;
+    int slot;
+
+    p = coop_middle_status_pack(bits);
+    CHECK(p == 0xC30F8421u);
+    for (slot = 0; slot < 8; slot++) {
+        CHECK(coop_middle_status_get(p, slot) == bits[slot]);
+    }
+    CHECK(coop_middle_status_get(p, -1) == 0 && coop_middle_status_get(p, 8) == 0);
+    CHECK(coop_middle_status_pack(NULL) == 0);
+    p = coop_middle_status_pack(over); /* only the low nibble of each slot */
+    CHECK(coop_middle_status_get(p, 0) == 0xF && coop_middle_status_get(p, 1) == 0
+        && coop_middle_status_get(p, 7) == 0xF);
+    CHECK(coop_middle_status_get(0xFFFFFFFFu, 7) == 0xF);
+
+    /* priority: X dead > Z unconscious > P poison > D dialog > I inventory > C combat */
+    CHECK(coop_middle_status_badge(true, true, 0xF, tag, &r, &g, &b) && strcmp(tag, "X") == 0
+        && r == 220 && g == 60 && b == 60);
+    CHECK(coop_middle_status_badge(false, true, 0xF, tag, &r, &g, &b) && strcmp(tag, "Z") == 0
+        && r == 180 && g == 130 && b == 230);
+    CHECK(coop_middle_status_badge(false, false, 0xF, tag, &r, &g, &b) && strcmp(tag, "P") == 0
+        && r == 90 && g == 220 && b == 90);
+    CHECK(coop_middle_status_badge(false, false, COOP_STATUS_DIALOG | COOP_STATUS_INVEN | COOP_STATUS_COMBAT, tag,
+              &r, &g, &b)
+        && strcmp(tag, "D") == 0 && r == 240 && g == 200 && b == 80);
+    CHECK(coop_middle_status_badge(false, false, COOP_STATUS_INVEN | COOP_STATUS_COMBAT, tag, &r, &g, &b)
+        && strcmp(tag, "I") == 0 && r == 100 && g == 210 && b == 240);
+    CHECK(coop_middle_status_badge(false, false, COOP_STATUS_COMBAT, tag, &r, &g, &b) && strcmp(tag, "C") == 0
+        && r == 240 && g == 140 && b == 60);
+    CHECK(!coop_middle_status_badge(false, false, 0, tag, &r, &g, &b) && tag[0] == '\0');
+    CHECK(coop_middle_status_badge(true, false, 0, NULL, NULL, NULL, NULL)); /* NULL outputs ok */
+
+    /* SLOT_STATUS: valid with b == 0 and any packing */
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_PARTY_CTRL;
+    c.op = COOP_CTRL_SLOT_STATUS;
+    c.a = (int)0xC30F8421u;
+    CHECK(coop_middle_party_ctrl_valid(&c));
+    CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = COOP_STATUS_INVEN | COOP_STATUS_DIALOG;
+    CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.b = 1;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.b = 0;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c) - 1)); /* short */
+    CHECK(COOP_CTRL_SLOT_STATUS > COOP_CTRL_REST_REFUSE);
+    CHECK(COOP_STATUS_CLIENT_MASK == 0x3);
+    /* stubbed game side */
+    CHECK(coop_middle_slot_status(0) == 0 && coop_middle_status_packed() == 0);
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -458,6 +519,7 @@ int main(void)
     test_loot_feed();
     test_rest_ops();
     test_trade();
+    test_status();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
