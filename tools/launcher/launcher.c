@@ -37,6 +37,7 @@
  * Coop Middle M1: Host mode has three rule checkboxes (Split gold, Loot
  * feed, Rest vote), kept in [rules] gold_split / loot_feed / rest_vote of the
  * ini (defaults 0, 1, 1) and passed to the host as ARCANUM_COOP_RULES.
+ * Coop Middle M2: a fourth one, Direct trade ([rules] direct_trade, default 1).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -91,6 +92,7 @@
 #define IDC_RULE_GOLD 130
 #define IDC_RULE_LOOT 131
 #define IDC_RULE_REST 132
+#define IDC_RULE_TRADE 133 /* Coop Middle M2 */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -179,6 +181,7 @@ static void refresh(void)
     EnableWindow(item(IDC_RULE_GOLD), host);
     EnableWindow(item(IDC_RULE_LOOT), host);
     EnableWindow(item(IDC_RULE_REST), host);
+    EnableWindow(item(IDC_RULE_TRADE), host);
 }
 
 static void find_local_ip(void)
@@ -296,6 +299,8 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "loot_feed", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_REST), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "rest_vote", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_TRADE), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "direct_trade", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 static bool rule_checked(int id)
@@ -309,10 +314,11 @@ static void rules_env(char* out, size_t sz)
     CoopRules r;
 
     coop_rules_default(&r);
-    r.flags &= ~(COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE);
+    r.flags &= ~(COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE);
     r.flags |= (rule_checked(IDC_RULE_GOLD) ? COOP_RULE_GOLD_SPLIT : 0u)
         | (rule_checked(IDC_RULE_LOOT) ? COOP_RULE_LOOT_FEED : 0u)
-        | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u);
+        | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u)
+        | (rule_checked(IDC_RULE_TRADE) ? COOP_RULE_DIRECT_TRADE : 0u);
     coop_rules_format_env(&r, out, sz);
 }
 
@@ -333,6 +339,7 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "gold_split", rule_checked(IDC_RULE_GOLD) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "loot_feed", rule_checked(IDC_RULE_LOOT) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "rest_vote", rule_checked(IDC_RULE_REST) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "direct_trade", rule_checked(IDC_RULE_TRADE) ? "1" : "0", g_ini);
 }
 
 static bool file_exists(const char* path)
@@ -2119,10 +2126,11 @@ static void create_controls(void)
     make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 200, 20, IDC_WINDOWED);
     make("BUTTON", "Check port", WS_TABSTOP, 220, 230, 100, 26, IDC_CHECK);
     make("BUTTON", "Add firewall rule", WS_TABSTOP, 326, 230, 104, 26, IDC_FIREWALL);
-    make("STATIC", "Rules (host):", 0, 12, 264, 88, 20, IDC_RULES_LABEL);
-    make("BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 104, 262, 100, 20, IDC_RULE_GOLD);
-    make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 210, 262, 100, 20, IDC_RULE_LOOT);
-    make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 316, 262, 114, 20, IDC_RULE_REST);
+    make("STATIC", "Rules (host):", 0, 12, 264, 76, 20, IDC_RULES_LABEL);
+    make("BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 262, 80, 20, IDC_RULE_GOLD);
+    make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 172, 262, 76, 20, IDC_RULE_LOOT);
+    make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 250, 262, 80, 20, IDC_RULE_REST);
+    make("BUTTON", "Direct trade", WS_TABSTOP | BS_AUTOCHECKBOX, 332, 262, 92, 20, IDC_RULE_TRADE);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         12, 288, 418, 124, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);

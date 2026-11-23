@@ -177,8 +177,8 @@ int coop_rules_format_env(const CoopRules* r, char* out, size_t sz)
         coop_rules_sanitize(&s);
     }
     for (i = 0; i < COOP_RULES_KEY_COUNT; i++) {
-        /* M1 keys always; reserved M2-M3 keys only when set (compact). */
-        if ((coop_rules_keys[i].flag & COOP_RULE_M1_MASK) == 0 && (s.flags & coop_rules_keys[i].flag) == 0) {
+        /* Active keys always; reserved M3 keys only when set (compact). */
+        if ((coop_rules_keys[i].flag & COOP_RULE_ACTIVE_MASK) == 0 && (s.flags & coop_rules_keys[i].flag) == 0) {
             continue;
         }
         n = snprintf(out + len, sz - len, "%s%s=%d", len > 0 ? "," : "", coop_rules_keys[i].key,
@@ -214,23 +214,24 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
         coop_rules_sanitize(&s);
     }
     extra[0] = '\0';
-    if ((s.flags & ~COOP_RULE_M1_MASK) != 0) {
-        snprintf(extra, sizeof(extra), ru ? "; на будущее:%s%s%s" : "; reserved:%s%s%s",
-            (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? " trade" : "",
+    if ((s.flags & ~COOP_RULE_ACTIVE_MASK) != 0) {
+        snprintf(extra, sizeof(extra), ru ? "; на будущее:%s%s" : "; reserved:%s%s",
             (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? " pause" : "",
             (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? " noffaoe" : "");
     }
     if (ru) {
-        snprintf(out, sz, "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, HP врагов %u%%, опыт %u%%%s",
+        snprintf(out, sz, "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, HP врагов %u%%, опыт %u%%%s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
+            (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, extra);
     } else {
-        snprintf(out, sz, "Rules: gold split %s, loot feed %s, rest vote %s, enemy HP %u%%, XP %u%%%s",
+        snprintf(out, sz, "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, enemy HP %u%%, XP %u%%%s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
+            (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, extra);
     }
 }

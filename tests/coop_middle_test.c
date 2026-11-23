@@ -57,7 +57,7 @@ static void test_rules_default_sanitize(void)
 
     coop_rules_default(&r);
     CHECK(r.version == 1u);
-    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE));
+    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
@@ -110,7 +110,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,hp=100,xp=100") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -120,18 +120,18 @@ static void test_rules_env(void)
         r.xp_mult_pct = (uint16_t)(100 + (mask * 13) % 151);
         coop_rules_format_env(&r, text, sizeof(text));
         n = coop_rules_parse_env(&back, text);
-        CHECK(n >= 5);
+        CHECK(n >= 6);
         CHECK(coop_rules_equal(&r, &back));
     }
 
     /* the launcher's own form, with ini aliases and spaces */
     n = coop_rules_parse_env(&r, " gold_split = 1 ; loot_feed=0, rest_vote=on ");
     CHECK(n == 3);
-    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE));
+    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
-    CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE));
+    CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -184,7 +184,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 53);
+    CHECK(TIG_NET_PROTOCOL == 54);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -357,7 +357,7 @@ static void test_rest_ops(void)
     c.op = COOP_CTRL_TRAVEL_STATE;
     c.a = COOP_TRAVEL_READY;
     CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
-    c.op = 7;
+    c.op = 9;
     c.a = 1;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
     c.op = 0;

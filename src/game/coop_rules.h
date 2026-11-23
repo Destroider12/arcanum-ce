@@ -28,15 +28,18 @@ extern "C" {
 #define COOP_RULE_GOLD_SPLIT 0x00000001u /* split picked-up gold among living players */
 #define COOP_RULE_LOOT_FEED 0x00000002u /* [Loot] chat lines for notable items */
 #define COOP_RULE_REST_VOTE 0x00000004u /* clients may ask the host to rest (Y / N) */
-/* Reserved for M2-M3: stored, sanitized and sent, no effect yet. */
-#define COOP_RULE_DIRECT_TRADE 0x00000008u
+/* M2 */
+#define COOP_RULE_DIRECT_TRADE 0x00000008u /* free give between players (trade window) */
+/* Reserved for M3: stored, sanitized and sent, no effect yet. */
 #define COOP_RULE_CLIENT_PAUSE 0x00000010u
 #define COOP_RULE_NO_FRIENDLY_FIRE_AOE 0x00000020u
 
 #define COOP_RULE_M1_MASK (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
+/* Rules that do something (always in the env string / description). */
+#define COOP_RULE_ACTIVE_MASK (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE)
 #define COOP_RULE_KNOWN_MASK \
     (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE)
-#define COOP_RULE_DEFAULT_FLAGS (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
+#define COOP_RULE_DEFAULT_FLAGS (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE)
 
 #define COOP_RULES_HP_MIN 100
 #define COOP_RULES_HP_MAX 300
