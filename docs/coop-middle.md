@@ -7,7 +7,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Lite 1.0 | `coop-lite` (tag `coop-lite-v1.0`) | 52 |
 | Coop Middle M1 | `coop-middle` (up to `23e1797d`) | 53 |
 | Coop Middle M2 | `coop-middle` (up to `283402e5`) | 54 |
-| Coop Middle M3 | `coop-middle` | **55** |
+| Coop Middle M3 | `coop-middle` (up to `ecc31c26`) | 55 |
+| Coop Middle M4 | `coop-middle` | **56** |
 
 Lite and Middle builds refuse each other at the handshake. Every player needs the same build.
 
@@ -47,8 +48,19 @@ Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge 
 | `combat.c` | `combat_dmg`: `coop_middle_host_ff_block` (start), `coop_middle_host_enemy_damage` (after the bonuses) |
 | `intgame.c` | `intgame_process_event` start -> `coop_middle_ui_world_event` (ping, paused clicks); Pause key -> `coop_middle_pause_key`; spell hotkey refused while paused |
 | `wmap_ui.c` | town map draws live pings (blinking cross); `wmap_ui_coop_town_refresh()` |
+| **M4** | |
+| `tig_net.h` | protocol 56 |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 170; `PacketCoopNpcStats` + skills (0x120); new dialog-session API |
+| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_TOWNMAP_FOG`; NPC stats fill / apply of skills; `coop_lite_barter_partner_ok` / `coop_lite_follower_exchange` -> `coop_middle_shared_follower_ok`; Packet81 and `INVEN_LAYOUT` accept moves inside a follower's pack; the PT36/PT41 dialog block now keeps 8 sessions (see below); map opened ends all client dialogs |
+| `multiplayer.c` | dispatch of `PACKET_COOP_TOWNMAP_FOG` |
+| `dialog.c` | conditions `in` / `ni` and action `in` -> `coop_middle_find_party_item` (+ `coop_middle_quest_handed_over`) |
+| `script.c` | `SCT_OBJ_HAS_ITEM_NAMED`, `SAT_TRANSFER_ITEM`, `SAT_DESTROY_ITEM_NAMED` -> the same |
+| `townmap.c` | `townmap_coop_fog()` / `townmap_coop_fog_touched()` (the known-tile bit array) |
+| `dialog_ui.c` | `sub_567420` returns a client PC's own entry on the host; party checks by slot; the choose hook gets the slot; a client's dialog never cuts the host's voice line |
+| `inven_ui.c` | follower (free) barter mode also for a shared follower |
+| `coop_middle_ui.c` | Ctrl+LMB on a teammate's follower opens the follower exchange |
 
-The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pings, pause, difficulty, quest pocket, town map fog, parallel dialogs, ...) was reverted in one commit before M1. Ideas from it come back stage by stage in the Middle files. **Parallel dialogs are dropped for now** and can return as a separate stage.
+The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pings, pause, difficulty, quest pocket, town map fog, parallel dialogs, ...) was reverted in one commit before M1. Ideas from it come back stage by stage in the Middle files. Parallel dialogs came back as M4.
 
 ## M1: session rules (`CoopRules`, `PACKET_COOP_RULES`)
 
@@ -70,6 +82,8 @@ typedef struct CoopRules {
 | 3 | `COOP_RULE_DIRECT_TRADE` (M2) | **on** | `trade` (`direct_trade`) |
 | 4 | `COOP_RULE_CLIENT_PAUSE` (M3) | off | `pause` (`client_pause`) |
 | 5 | `COOP_RULE_NO_FRIENDLY_FIRE_AOE` (M3) | **on** | `ff` (`no_ff_aoe`; M1-M2 spelling `noffaoe` still read) |
+| 6 | `COOP_RULE_SHARED_QUEST_ITEMS` (M4) | **on** | `qitems` (`shared_quest_items`) |
+| 7 | `COOP_RULE_SHARED_FOLLOWERS` (M4) | **on** | `sfol` (`shared_followers`) |
 | - | `enemy_hp_pct` (M3) | 100 | `hp` (`enemy_hp_pct`) |
 | - | `xp_mult_pct` (M3) | 100 | `xp` (`xp_mult_pct`) |
 
@@ -237,6 +251,37 @@ typedef struct PacketCoopPing {
 - **`/gather` (host only):** the host must be alive and out of combat; cooldown 30 s. Every connected client that passes the same checks is moved. Line: `[Co-op] <Host> gathered the party.`
 - **Refusals** go to the asker only, as a system line in their own language: dead, other map, combat, enemy fighting you, `N s` cooldown, `/gather` is host-only, nobody to gather, or the host using `/tp`.
 
+## M4: shared quest items (`COOP_RULE_SHARED_QUEST_ITEMS`, host only)
+
+- `coop_middle_find_party_item(asker, key, match, &owner)`: the asker's own pack first (vanilla lookup). Then, on the host with the rule on and the asker a party PC, every other slot that `coop_middle_quest_pocket_eligible` accepts: connected, alive, on this map (`coop_lite_loc_in_map`), within `COOP_SHARED_QUEST_RADIUS` (30) tiles. In an ally's pack the backpack (location < 1000) wins over worn items (1000..1008).
+- Checks: dialog `in` / `ni` (after the PC's own followers) and script "has item named". Takes: dialog action `in` and script "transfer item" / "destroy item named". The item leaves the owner's pack (the vanilla transfer unequips it), the owner's pack is resynced (`coop_lite_host_sync_slot_inven`) and everybody gets `[Quest] <Item> handed over from <Owner>` / `[Квест] <Item> передан из рюкзака <Owner>`.
+- Single player and clients: the vanilla lookup only.
+
+## M4: town map fog (`PACKET_COOP_TOWNMAP_FOG` = 169)
+
+- Storage (`townmap.c`): one bit per town-map tile, the k-state of one town map at a time, saved as `Save/Current/<name>.tmf`; only the local PC marks tiles. `townmap_coop_fog()` gives the array (loading it), `townmap_coop_fog_touched()` marks it for saving.
+- Packet: `{type, townmap_id, offset, len <= 1024, flags (REPLACE 0x1), data[1024]}`, 0x410 bytes, sent as header + `len`. `coop_middle_townmap_fog_valid` checks the size, type, id > 0, len, flags and `offset + len <= 65536`.
+- Every 1.5 s each side takes the FNV-1a signature of its current town map's fog (`townmap_get` of the local PC's sector).
+  - Host: changed 1 KB chunks go to everyone (OR). A full REPLACE snapshot goes to a slot after its SESSION_SYNC, and to everyone on a town-map change and after a map change / load.
+  - Client: after a town-map change, a resync or a session reset it sends nothing until the host's first packet for that town map. Then its changed chunks go to the host, which ORs them in and relays them to the others.
+- `coop_middle_fog_merge` returns the newly opened bits; when it is > 0 an open town map (`WMAP_UI_MODE_TOWN`) is redrawn.
+
+## M4: parallel dialogs
+
+- The PT36/PT41 single dialog context is now `CoopDialogSession coop_dlg_sessions[8]` (in `coop_lite.c`): session 0 is the host's own dialog, session N a client's dialog that runs headless on the host.
+- On the host, `dialog_ui.c` gives every client PC its own `DialogUiEntry` (the engine always had 8, `sub_567420` was pinned to entry 0), so each session has its own `DialogState`; `dialog.c` keeps no per-conversation globals. The current session is kept in a context index that is saved / restored around each START / CHOOSE step.
+- A client clicks a story NPC (START):
+  - NPC free -> its own session (same distance checks as PT41; the leader must still be near).
+  - NPC busy (another session talks to it) -> the client is attached to that session as a spectator and may vote. The host clicking an NPC a client talks to watches that session in the viewer panel.
+- Routing (`coop_middle_dialog_route`): own session, else the attached one, else the host's, else the most recent client session. Votes go to the session the voter is routed to. The seq counter is global, so the client's stale check works across sessions.
+- Closing a session (leave, end, speaker disconnect) sends CLOSE (or EXCHANGE) to its viewers only; a map change, load or session reset closes all 8.
+
+## M4: shared followers (`COOP_RULE_SHARED_FOLLOWERS`)
+
+- 4a: `PacketCoopNpcStats` (166) also carries `basic_skills[12]`, `tech_skills[4]`, `spell_tech[16]` (size 0xA0 -> 0x120, in the host's signature, applied on clients).
+- 4b: a move inside a follower's pack (Packet81 `from == to == follower`, or `INVEN_LAYOUT` for the follower) is applied for the leader, or for any party player with the rule, when it has that follower's window open. The sender and everyone with that follower open get the pack, and NPC_POS re-sends the follower (worn items).
+- 4c: with the rule, any living party player within 6 tiles may open the free follower exchange with any party follower: `coop_lite_barter_partner_ok`, `COOP_DIALOG_ACT_EXCHANGE`, the client's exchange open, and Ctrl+LMB on a teammate's follower. The leader keeps the follower (no re-binding on the client).
+
 ## Launcher
 
 `arcanum-coop-launcher.ini`:
@@ -249,14 +294,17 @@ rest_vote=1
 direct_trade=1
 client_pause=0
 no_ff_aoe=1
+shared_quest_items=1
+shared_followers=1
 enemy_hp_pct=100
 xp_mult_pct=100
 ```
 
-Host mode shows two rows (disabled in Join mode):
+Host mode shows three rows (disabled in Join mode):
 
 - **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
-- M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200).
+- M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200);
+- M4: **Shared quest items**, **Shared followers**.
 
 An odd ini value lands on the nearest step below it. At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
 
@@ -313,6 +361,21 @@ CoopMiddle: command C from slot S
 CoopMiddle: command from slot S refused (reason R, N s)
 CoopMiddle: regroup slot S -> X,Y
 CoopMiddle: /gather moved N player(s)
+CoopMiddle: quest item K (mode M) for slot A found in slot B's pack: '<item>' (loc L)
+CoopMiddle: quest item '<item>' handed over from slot B (<name>)
+CoopMiddle: town map T fog snapshot sent to everyone|slot S (N bytes)
+CoopMiddle: town map T fog synced from the host                (client)
+CoopMiddle: town map T fog: N tile(s) opened by a client|the party   (1/10 s)
+CoopMiddle: town map fog packet dropped (size N)
+CoopMiddle: dialogs: slot S watches slot O's dialog (NPC busy)
+CoopMiddle: dialogs: the host watches slot O's dialog
+CoopMiddle: dialogs: slot S's dialog closed (map change / load)
+CoopLite: dialog: slot S votes option N (session O)
+CoopMiddle: followers: slot S moved an item inside a follower's pack to loc L: done|refused
+CoopMiddle: followers: slot S rearranged a follower's pack (N moved, R refused)
+CoopMiddle: followers: slot S layout for a follower it may not manage
+CoopMiddle: followers: exchange window with '<name>' requested
+[CHAT] [Quest] ...
 [CHAT] [Co-op] ...
 ```
 
@@ -322,7 +385,7 @@ CoopMiddle: /gather moved N player(s)
 
 1. `coop_rules_default` / `coop_rules_sanitize`: bounds, unknown bits, reserved bits kept, `reserved[]` zeroed.
 2. `coop_rules_format_env` <-> `coop_rules_parse_env` round trip for every flag combination, ini aliases, partial, garbage, overlong and out-of-range strings, truncated output.
-3. `PACKET_COOP_RULES`: size 32, type 167 < type limit, min size, role `CLIENT_APPLY`, `coop_lite_packet_allowed` (host -> client only), version check, `TIG_NET_PROTOCOL == 55`.
+3. `PACKET_COOP_RULES`: size 32, type 167 < type limit, min size, role `CLIENT_APPLY`, `coop_lite_packet_allowed` (host -> client only), version check, `TIG_NET_PROTOCOL == 56`.
 4. `coop_middle_split_gold`: 1..8 players, no loss (`each * n + rem == amount`), carry, too little to split, overflow saturation.
 5. `coop_middle_loot_feed_worthy` (keys, scrolls, written, quest, unique, cost 250 pass; junk, cheap potions, ammo, gold, non-items fail), the 5/s limiter with the collapse count and ms-clock wrap, and the EN/RU line formats.
 6. `COOP_CTRL_REST_ASK` / `COOP_CTRL_REST_REFUSE` in `coop_lite_party_ctrl_valid` (modes, reasons, `b == 0`, Lite ops unchanged, unknown ops refused), the 5 s ask limit.
@@ -333,8 +396,13 @@ CoopMiddle: /gather moved N player(s)
 10. M3 rules: pause / ff defaults and active bits, `pause` / `ff` / ini aliases / old `noffaoe`, hp / xp keys, long aliases, clamps, launcher steps round trip, describe EN/RU.
 11. M3 scaling: `coop_middle_scale_enemy_damage` at 100 / 150 / 200 / 300, the remainder series (6 + 7 + 7, 300 hits lose nothing), minimum 1, 0 for <= 0, bad remainder, NULL; `coop_middle_scale_xp` at 100 / 125 / 150 / 250, floor, <= 0, `INT_MAX` overflow.
 12. M3 commands: `coop_middle_parse_cmd` (`/tp`, `/TP  `, `/stuck`, `/gather`, `/tp all`; plain text, `/unknown`, extra words, overlong not caught), cooldown seconds (round up, wrap), EN/RU regroup / refusal / pause-drop lines.
-13. M3 pings: id 168 < limit 169, size 24, offsets, min size, role `BOTH`, direction, `coop_middle_ping_valid` (size, type, kind 0..1, slot 0..7), 1/s rate limit.
-14. M3 pause: `COOP_CTRL_PAUSE` in `coop_lite_party_ctrl_valid` (`a` 0/1, `b` 0..7, short packet), 2 s rate limit, `TIG_NET_PROTOCOL == 55`, stub hooks are no-ops.
+13. M3 pings: id 168 < limit 170, size 24, offsets, min size, role `BOTH`, direction, `coop_middle_ping_valid` (size, type, kind 0..1, slot 0..7), 1/s rate limit.
+14. M3 pause: `COOP_CTRL_PAUSE` in `coop_lite_party_ctrl_valid` (`a` 0/1, `b` 0..7, short packet), 2 s rate limit, `TIG_NET_PROTOCOL == 56`, stub hooks are no-ops.
+15. M4 rules: bits 0x40 / 0x80, on by default, always in the string (also when off), `qitems` / `sfol` and ini aliases, describe EN/RU not cut off.
+16. M4 quest items: `coop_middle_quest_pocket_eligible` (radius 30, rule off, not host, self, disconnected, dead, other map, unknown distance, bad slots), backpack / worn rank, EN/RU `[Quest]` line, stubbed lookup.
+17. M4 fog: id 169 < limit 170, size 0x410, offsets, role `BOTH`, min size, `coop_middle_townmap_fog_valid` (short / long, flags, id, len 0 / > 1024, offset cap, no wrap, type), `coop_middle_fog_merge` (OR count, idempotent, REPLACE), FNV-1a.
+18. M4 dialogs: `coop_middle_dialog_route` (own > attached > host > recent, gone sessions, bad input).
+19. M4 followers: `coop_middle_follower_access_ok` (leader always, range 6, rule off, not a party follower, dead), `PacketCoopNpcStats` 0x120 with the skill offsets, the old 0xA0 size refused, min size.
 
 ## Not done / risks (M1)
 
@@ -362,3 +430,11 @@ CoopMiddle: /gather moved N player(s)
 - Enemy damage scaling divides the final HP damage only. Fatigue and poison damage to enemies are not scaled.
 - A danger ping is detected on the hovered object or on objects on the cursor tile. A hostile NPC standing next to that tile gives a normal ping.
 - `/tp` decides "same map" from the client PC's location on the host (`coop_lite_loc_in_map`). A client that is still loading has no PC there yet and gets "dead / not here".
+
+## Not done / risks (M4)
+
+- **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
+- Quest items: the lookup by name covers what the game checks by name (dialog `in`/`ni`, script "has item named" / transfer / destroy). Only these by-name lookups (`item_find_by_name`) are hooked; `COOP_QITEM_MATCH_PROTO` is in the API but unused by the hooks. Dialog `ri` is the NPC "remove item" order (opens an inventory window), not a quest take, so it has no hook.
+- Fog: the client applies host packets for any valid town map (the game keeps one town map's array in memory, so this swaps the cached array and saves the old one). A client that changes town map at the same moment as the host can wait for the next snapshot (SESSION_SYNC or map change) before it sends its own bits.
+- Dialogs: the leader-distance rule of PT41 (`coop_lite_party_talk_check`) is kept, so a client's story dialog still needs the host nearby, but two or more dialogs can now run at once. The client keeps one viewer panel: it shows the routed session only. Headless dialogs play no voice while the host is in its own dialog.
+- Followers: `spell_tech[16]` carries the 16 spell colleges as the spec asks; tech degrees (`OBJ_F_CRITTER_SPELL_TECH_IDX` 17..24) are not in the packet. The client does not send a follower's grid layout (`INVEN_LAYOUT`); its follower-window moves arrive as Packet81, and the host also accepts a follower layout if one comes. With the rule on, Ctrl+LMB on a teammate's follower opens the exchange instead of the vanilla Ctrl action.
