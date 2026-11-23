@@ -104,6 +104,9 @@ void gamelib_set_overlay_draw_func(void (*func)(GameDrawInfo* draw_info));
    overlay drawn at a fixed screen spot can invalidate its shifted copy. */
 void gamelib_set_overlay_scroll_func(void (*func)(int dx, int dy));
 void gamelib_overlay_scrolled(int dx, int dy);
+/* Coop Middle: second overlay, drawn before the chat one. */
+void gamelib_set_overlay2_draw_func(void (*func)(GameDrawInfo* draw_info));
+void gamelib_set_overlay2_scroll_func(void (*func)(int dx, int dy));
 bool gamelib_draw(void);
 void gamelib_renderlock_acquire(void);
 void gamelib_renderlock_release(void);
