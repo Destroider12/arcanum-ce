@@ -81,6 +81,11 @@
 #define IDC_LOBBY_INPUT 126
 #define IDC_LOBBY_SEND 127
 #define IDC_LOBBY_LABEL 128
+#define IDC_RULES 129 /* Coop Middle: host rules */
+#define IDC_RULE_HP 220
+#define IDC_RULE_XP 221
+#define IDC_RULE_OK 222
+#define IDC_RULE_CHECK0 230 /* + index in g_rule_checks */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -115,6 +120,8 @@ static DWORD g_restart_ticks[3]; /* host auto-restarts, crash-loop guard */
 static bool g_autoload_next;
 static long g_lobby_log_off; /* PT77: byte offset into the game log */
 static bool g_lobby_on;
+
+static void rules_env(char* out, size_t size); /* Coop Middle */
 
 static HWND item(int id)
 {
@@ -541,7 +548,7 @@ static void lobby_poll(void)
     size_t n;
     char* line;
     char* nl;
-    char players[1024];
+    char players[2048];
     size_t poff = 0;
 
     if (g_game == NULL || !g_lobby_on) {
@@ -593,6 +600,21 @@ static void lobby_poll(void)
     }
     if (players[0] == '\0') {
         snprintf(players, sizeof(players), "(waiting for game...)");
+    }
+    /* Coop Middle: the host's rules (written by the game, first line). */
+    lobby_path(path, sizeof(path), "lobby_rules.txt");
+    f = fopen(path, "rb");
+    if (f != NULL) {
+        if (fgets(buf, sizeof(buf), f) != NULL) {
+            size_t len;
+
+            buf[strcspn(buf, "\r\n")] = '\0';
+            len = strlen(players);
+            if (buf[0] != '\0' && len + strlen(buf) + 8 < sizeof(players)) {
+                snprintf(players + len, sizeof(players) - len, "\r\n\r\n%s", buf);
+            }
+        }
+        fclose(f);
     }
     if (GetWindowTextLengthA(item(IDC_PLAYERS)) != (int)strlen(players)
         || GetWindowTextA(item(IDC_PLAYERS), buf, sizeof(buf)) <= 0
@@ -756,6 +778,12 @@ static void start_game(void)
         SetEnvironmentVariableA("ARCANUM_LOG_FILE", NULL); /* the role log path above wins */
     }
     SetEnvironmentVariableA("ARCANUM_COOP_NAME", name);
+    {
+        char rules[256];
+
+        rules_env(rules, sizeof(rules));
+        SetEnvironmentVariableA("ARCANUM_COOP_RULES", host ? rules : NULL); /* Coop Middle */
+    }
     SetEnvironmentVariableA("ARCANUM_COOP_TRANSPORT", steam ? "steam" : "direct");
     SetEnvironmentVariableA("ARCANUM_COOP_STEAM_HOST", !host && steam ? steam_id : NULL);
     SetEnvironmentVariableA("ARCANUM_COOP_AUTOLOAD", host && g_autoload_next ? "latest" : NULL);
@@ -2038,6 +2066,173 @@ static void upd_on_msg(WPARAM ready, char* text)
     EnableWindow(item(IDC_UPD_GO), g_upd_ready && g_game == NULL);
 }
 
+/* ---- Coop Middle: host rules ([rules] in the ini -> ARCANUM_COOP_RULES) ---- */
+
+static const struct {
+    const char* key;
+    const char* label;
+    int def;
+} g_rule_checks[] = {
+    { "ff", "Area spells hit teammates (friendly fire)", 1 },
+    { "gold", "Split found gold evenly", 0 },
+    { "pause", "Clients may pause the game", 0 },
+    { "rest", "Clients may ask the host to rest", 1 },
+    { "tp", "/tp to the host and /gather", 1 },
+    { "tpconfirm", "/tp needs the host's OK (Y/N)", 0 },
+    { "quest", "Shared quest items (teammates within 25 tiles)", 1 },
+    { "fog", "Shared town map", 1 },
+    { "feed", "Loot feed in chat", 1 },
+    { "pings", "Pings (middle click)", 1 },
+};
+#define RULE_CHECK_COUNT ((int)(sizeof(g_rule_checks) / sizeof(g_rule_checks[0])))
+static HWND g_rules_wnd;
+
+/* "hp=35,xp=125,ff=0,..." for the game (host only). */
+static void rules_env(char* out, size_t size)
+{
+    size_t n;
+    int i;
+
+    snprintf(out, size, "hp=%d,xp=%d,tpcd=%d", GetPrivateProfileIntA("rules", "hp", 0, g_ini),
+        GetPrivateProfileIntA("rules", "xp", 100, g_ini), GetPrivateProfileIntA("rules", "tpcd", 30, g_ini));
+    for (i = 0; i < RULE_CHECK_COUNT; i++) {
+        n = strlen(out);
+        if (n + 1 >= size) {
+            break;
+        }
+        snprintf(out + n, size - n, ",%s=%d", g_rule_checks[i].key,
+            GetPrivateProfileIntA("rules", g_rule_checks[i].key, g_rule_checks[i].def, g_ini) ? 1 : 0);
+    }
+}
+
+static HWND rules_make(HWND parent, const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
+{
+    HWND h_ = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
+        (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+
+    SendMessageA(h_, WM_SETFONT, (WPARAM)g_font, TRUE);
+    return h_;
+}
+
+static void rules_create_controls(HWND w)
+{
+    static const int hp_values[] = { 0, 35, 50 };
+    static const int xp_values[] = { 100, 125, 150 };
+    HWND combo;
+    int hp = GetPrivateProfileIntA("rules", "hp", 0, g_ini);
+    int xp = GetPrivateProfileIntA("rules", "xp", 100, g_ini);
+    int i;
+    int y = 12;
+
+    rules_make(w, "STATIC", "Enemy HP per extra player:", 0, 12, y + 3, 170, 20, 0);
+    combo = rules_make(w, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 190, y, 150, 120, IDC_RULE_HP);
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "off");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "+35%");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "+50%");
+    SendMessageA(combo, CB_SETCURSEL, 0, 0);
+    for (i = 0; i < 3; i++) {
+        if (hp == hp_values[i]) {
+            SendMessageA(combo, CB_SETCURSEL, i, 0);
+        }
+    }
+    y += 30;
+    rules_make(w, "STATIC", "Shared XP multiplier:", 0, 12, y + 3, 170, 20, 0);
+    combo = rules_make(w, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 190, y, 150, 120, IDC_RULE_XP);
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "x1.0");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "x1.25");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM) "x1.5");
+    SendMessageA(combo, CB_SETCURSEL, 0, 0);
+    for (i = 0; i < 3; i++) {
+        if (xp == xp_values[i]) {
+            SendMessageA(combo, CB_SETCURSEL, i, 0);
+        }
+    }
+    y += 34;
+    for (i = 0; i < RULE_CHECK_COUNT; i++) {
+        rules_make(w, "BUTTON", g_rule_checks[i].label, WS_TABSTOP | BS_AUTOCHECKBOX, 12, y, 330, 20, IDC_RULE_CHECK0 + i);
+        SendMessageA(GetDlgItem(w, IDC_RULE_CHECK0 + i), BM_SETCHECK,
+            GetPrivateProfileIntA("rules", g_rule_checks[i].key, g_rule_checks[i].def, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+        y += 22;
+    }
+    y += 8;
+    rules_make(w, "STATIC", "Applied when the host starts. Clients see them in chat and here.", 0, 12, y, 330, 34, 0);
+    rules_make(w, "BUTTON", "Save", WS_TABSTOP | BS_DEFPUSHBUTTON, 250, y + 38, 90, 28, IDC_RULE_OK);
+}
+
+static void rules_save(HWND w)
+{
+    static const char* hp_values[] = { "0", "35", "50" };
+    static const char* xp_values[] = { "100", "125", "150" };
+    int i;
+    LRESULT sel;
+
+    sel = SendMessageA(GetDlgItem(w, IDC_RULE_HP), CB_GETCURSEL, 0, 0);
+    WritePrivateProfileStringA("rules", "hp", hp_values[sel >= 0 && sel < 3 ? sel : 0], g_ini);
+    sel = SendMessageA(GetDlgItem(w, IDC_RULE_XP), CB_GETCURSEL, 0, 0);
+    WritePrivateProfileStringA("rules", "xp", xp_values[sel >= 0 && sel < 3 ? sel : 0], g_ini);
+    for (i = 0; i < RULE_CHECK_COUNT; i++) {
+        WritePrivateProfileStringA("rules", g_rule_checks[i].key,
+            SendMessageA(GetDlgItem(w, IDC_RULE_CHECK0 + i), BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
+    }
+}
+
+static LRESULT CALLBACK rules_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE:
+        rules_create_controls(hwnd);
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_RULE_OK) {
+            rules_save(hwnd);
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_rules_wnd = NULL;
+        EnableWindow(g_wnd, TRUE);
+        SetForegroundWindow(g_wnd);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static void rules_open(void)
+{
+    static bool registered;
+    RECT r = { 0, 0, 356, 0 };
+    RECT owner;
+
+    if (g_rules_wnd != NULL) {
+        SetForegroundWindow(g_rules_wnd);
+        return;
+    }
+    if (!registered) {
+        WNDCLASSA wc;
+
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = rules_proc;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "ArcanumCoopRules";
+        RegisterClassA(&wc);
+        registered = true;
+    }
+    r.bottom = 12 + 30 + 34 + RULE_CHECK_COUNT * 22 + 8 + 38 + 28 + 12;
+    AdjustWindowRect(&r, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE);
+    GetWindowRect(g_wnd, &owner);
+    g_rules_wnd = CreateWindowExA(WS_EX_DLGMODALFRAME, "ArcanumCoopRules", "Co-op rules (host)",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, owner.left + 40, owner.top + 60, r.right - r.left,
+        r.bottom - r.top, g_wnd, NULL, GetModuleHandleA(NULL), NULL);
+    if (g_rules_wnd != NULL) {
+        EnableWindow(g_wnd, FALSE); /* modal */
+    }
+}
+
 static HWND make(const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
 {
     HWND h_ = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_wnd,
@@ -2067,7 +2262,8 @@ static void create_controls(void)
     make("STATIC", "Local IP: ?", 0, 12, 182, 300, 20, IDC_LOCALIP);
     make("STATIC", "Public IP: (looking up via UPnP...)", 0, 12, 204, 300, 20, IDC_PUBIP);
     make("BUTTON", "Copy", WS_TABSTOP, 330, 190, 100, 26, IDC_COPY);
-    make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 200, 20, IDC_WINDOWED);
+    make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 100, 20, IDC_WINDOWED);
+    make("BUTTON", "Rules...", WS_TABSTOP, 114, 230, 100, 26, IDC_RULES);
     make("BUTTON", "Check port", WS_TABSTOP, 220, 230, 100, 26, IDC_CHECK);
     make("BUTTON", "Add firewall rule", WS_TABSTOP, 326, 230, 104, 26, IDC_FIREWALL);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
@@ -2146,6 +2342,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_JOIN:
             refresh();
             break;
+        case IDC_RULES:
+            rules_open();
+            return 0;
         case IDC_CHECK:
             start_check(true);
             break;
