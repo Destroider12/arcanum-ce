@@ -3,9 +3,12 @@
  * gold split, loot feed filter / limiter, REST_ASK / REST_REFUSE ops.
  * Coop Middle M2 (protocol 54): trade partner / transfer rules and lines,
  * SLOT_STATUS pack / get / badge priority, Alt label deoverlap.
+ * Coop Middle M3 (protocol 55): pause / ff / hp / xp rules, damage and XP
+ * scaling, /tp /stuck /gather parse + lines, PACKET_COOP_PING, PAUSE op.
  * Headless (no engine); also run under ASan/UBSan (nbuild-asan).
  */
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,7 +62,7 @@ static void test_rules_default_sanitize(void)
 
     coop_rules_default(&r);
     CHECK(r.version == 1u);
-    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
+    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
@@ -112,7 +115,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -129,11 +132,12 @@ static void test_rules_env(void)
     /* the launcher's own form, with ini aliases and spaces */
     n = coop_rules_parse_env(&r, " gold_split = 1 ; loot_feed=0, rest_vote=on ");
     CHECK(n == 3);
-    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
+    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
-    CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE));
+    CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
+        | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -186,7 +190,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 54);
+    CHECK(TIG_NET_PROTOCOL == 55);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -443,7 +447,7 @@ static void test_trade(void)
     }
     coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", "Bob|Sword", false, tiny, sizeof(tiny));
     CHECK(strlen(tiny) < sizeof(tiny));
-    CHECK(COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_TRADE_GOLD);
+    CHECK(COOP_MID_CHAT_KIND_MAX >= COOP_MID_CHAT_TRADE_GOLD);
 
     /* stubbed game side */
     CHECK(!coop_middle_trade_local_is(42));
@@ -591,6 +595,280 @@ static void test_labels(void)
     CHECK(coop_middle_labels_deoverlap(r, 1, 0, 600) == 1 && r[0].y == 584);
 }
 
+/* 10. M3 rules: the new active bits, keys, hp / xp */
+static void test_m3_rules(void)
+{
+    CoopRules r;
+    char text[128];
+    char desc[320];
+    int n;
+
+    coop_rules_default(&r);
+    CHECK((r.flags & COOP_RULE_CLIENT_PAUSE) == 0); /* host only by default */
+    CHECK((r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0); /* ff on by default */
+    CHECK((COOP_RULE_ACTIVE_MASK & COOP_RULE_CLIENT_PAUSE) && (COOP_RULE_ACTIVE_MASK & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    CHECK(COOP_RULE_ACTIVE_MASK == COOP_RULE_KNOWN_MASK);
+
+    n = coop_rules_parse_env(&r, "pause=1,ff=0");
+    CHECK(n == 2 && (r.flags & COOP_RULE_CLIENT_PAUSE) && !(r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    n = coop_rules_parse_env(&r, "client_pause=on,no_ff_aoe=off");
+    CHECK(n == 2 && (r.flags & COOP_RULE_CLIENT_PAUSE) && !(r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    n = coop_rules_parse_env(&r, "noffaoe=0"); /* the M1-M2 spelling still reads */
+    CHECK(n == 1 && !(r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, "ff=0") != NULL && strstr(text, "pause=0") != NULL && strstr(text, "noffaoe") == NULL);
+
+    /* hp / xp: keys, long aliases, clamps, launcher steps */
+    n = coop_rules_parse_env(&r, "hp=200,xp=150");
+    CHECK(n == 2 && r.enemy_hp_pct == 200 && r.xp_mult_pct == 150);
+    n = coop_rules_parse_env(&r, "enemy_hp_pct=250,xp_mult_pct=125");
+    CHECK(n == 2 && r.enemy_hp_pct == 250 && r.xp_mult_pct == 125);
+    coop_rules_parse_env(&r, "hp=301,xp=251");
+    CHECK(r.enemy_hp_pct == 300 && r.xp_mult_pct == 250);
+    coop_rules_parse_env(&r, "hp=99,xp=0");
+    CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
+    {
+        static const int hp[] = { 100, 150, 200, 250, 300 };
+        static const int xp[] = { 100, 125, 150, 200 };
+        CoopRules back;
+        int i;
+
+        for (i = 0; i < 5; i++) {
+            coop_rules_default(&r);
+            r.enemy_hp_pct = (uint16_t)hp[i];
+            r.xp_mult_pct = (uint16_t)xp[i % 4];
+            r.flags |= COOP_RULE_CLIENT_PAUSE;
+            coop_rules_format_env(&r, text, sizeof(text));
+            CHECK(coop_rules_parse_env(&back, text) == 8);
+            CHECK(coop_rules_equal(&r, &back));
+        }
+    }
+    coop_rules_default(&r);
+    r.flags |= COOP_RULE_CLIENT_PAUSE;
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strstr(desc, "client pause on") != NULL && strstr(desc, "no friendly fire on") != NULL);
+    CHECK(strstr(desc, "reserved") == NULL);
+    coop_rules_describe(&r, true, desc, sizeof(desc));
+    CHECK(strstr(desc, "пауза клиентов вкл") != NULL);
+}
+
+/* 11. M3 enemy damage / XP scaling */
+static void test_m3_scaling(void)
+{
+    int rem;
+    int sum;
+    int i;
+
+    /* 100%: unchanged */
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(10, 100, &rem) == 10 && rem == 0);
+    CHECK(coop_middle_scale_enemy_damage(1, 100, &rem) == 1);
+    /* 150 / 200 / 300 */
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(30, 150, &rem) == 20 && rem == 0);
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(30, 200, &rem) == 15 && rem == 0);
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(30, 300, &rem) == 10 && rem == 0);
+    /* the remainder carries: 10 at 150% three times = 6 + 7 + 7 = 20 */
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(10, 150, &rem) == 6 && rem == 100);
+    CHECK(coop_middle_scale_enemy_damage(10, 150, &rem) == 7 && rem == 50);
+    CHECK(coop_middle_scale_enemy_damage(10, 150, &rem) == 7 && rem == 0);
+    /* a long series loses nothing: 7 x 300 hits of 7 at 300% = 7 * 100 */
+    rem = 0;
+    sum = 0;
+    for (i = 0; i < 300; i++) {
+        sum += coop_middle_scale_enemy_damage(7, 300, &rem);
+    }
+    CHECK(sum == 700);
+    /* minimum 1, 0 for <= 0, bad remainders, NULL */
+    rem = 0;
+    CHECK(coop_middle_scale_enemy_damage(1, 300, &rem) == 1 && rem == 0);
+    CHECK(coop_middle_scale_enemy_damage(2, 300, &rem) == 1);
+    CHECK(coop_middle_scale_enemy_damage(0, 200, &rem) == 0);
+    CHECK(coop_middle_scale_enemy_damage(-5, 200, &rem) == 0);
+    rem = 99999;
+    CHECK(coop_middle_scale_enemy_damage(30, 300, &rem) == 10);
+    CHECK(coop_middle_scale_enemy_damage(30, 300, NULL) == 10);
+    CHECK(coop_middle_scale_enemy_damage(30, 50, NULL) == 30); /* < 100 = 100 */
+    CHECK(coop_middle_scale_enemy_damage(INT_MAX, 100, NULL) == INT_MAX);
+
+    /* XP */
+    CHECK(coop_middle_scale_xp(100, 100) == 100);
+    CHECK(coop_middle_scale_xp(100, 125) == 125);
+    CHECK(coop_middle_scale_xp(100, 150) == 150);
+    CHECK(coop_middle_scale_xp(100, 250) == 250);
+    CHECK(coop_middle_scale_xp(3, 125) == 3); /* floor, never below raw */
+    CHECK(coop_middle_scale_xp(1, 100) == 1);
+    CHECK(coop_middle_scale_xp(0, 250) == 0);
+    CHECK(coop_middle_scale_xp(-4, 250) == -4);
+    CHECK(coop_middle_scale_xp(INT_MAX, 250) == INT_MAX); /* overflow clamps */
+    CHECK(coop_middle_scale_xp(INT_MAX / 2, 250) == INT_MAX);
+    CHECK(coop_middle_scale_xp(1000000000, 200) == 2000000000 && coop_middle_scale_xp(1500000000, 150) == INT_MAX);
+}
+
+/* 12. M3 chat commands */
+static void test_m3_cmds(void)
+{
+    char line[256];
+    int r;
+
+    CHECK(coop_middle_parse_cmd("/tp") == COOP_CMD_TP);
+    CHECK(coop_middle_parse_cmd("/TP  ") == COOP_CMD_TP);
+    CHECK(coop_middle_parse_cmd("  /Tp") == COOP_CMD_TP);
+    CHECK(coop_middle_parse_cmd("/stuck") == COOP_CMD_STUCK);
+    CHECK(coop_middle_parse_cmd("/STUCK\t") == COOP_CMD_STUCK);
+    CHECK(coop_middle_parse_cmd("/gather") == COOP_CMD_GATHER);
+    CHECK(coop_middle_parse_cmd("/tp all") == COOP_CMD_GATHER);
+    CHECK(coop_middle_parse_cmd("/TP   ALL ") == COOP_CMD_GATHER);
+    CHECK(coop_middle_parse_cmd("tp") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("hello /tp") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/unknown") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/tp me") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/tp all now") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/tpx") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd(NULL) == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == COOP_CMD_NONE);
+    CHECK(!coop_middle_try_chat_command(1, "/tp")); /* stub build: no host */
+
+    /* cooldown 30 s */
+    CHECK(coop_middle_cooldown_left_s(false, 0, 5000, COOP_CMD_COOLDOWN_MS) == 0);
+    CHECK(coop_middle_cooldown_left_s(true, 1000, 1000, COOP_CMD_COOLDOWN_MS) == 30);
+    CHECK(coop_middle_cooldown_left_s(true, 1000, 1001, COOP_CMD_COOLDOWN_MS) == 30);
+    CHECK(coop_middle_cooldown_left_s(true, 1000, 30000, COOP_CMD_COOLDOWN_MS) == 1);
+    CHECK(coop_middle_cooldown_left_s(true, 1000, 31000, COOP_CMD_COOLDOWN_MS) == 0);
+    CHECK(coop_middle_cooldown_left_s(true, 0xFFFFF000u, 0x00001000u, COOP_CMD_COOLDOWN_MS) == 22); /* wrap */
+
+    /* lines */
+    coop_middle_feed_format(COOP_MID_CHAT_REGROUP, "Ann", "0", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Co-op] Ann regrouped to the host.") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_REGROUP, "Ann", "0", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Кооп] Ann телепортировался к хосту.") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_REGROUP, "Host", "1", false, line, sizeof(line));
+    CHECK(strstr(line, "gathered") != NULL);
+    coop_middle_feed_format(COOP_MID_CHAT_CMD_REFUSE, "", "5 12", false, line, sizeof(line));
+    CHECK(strstr(line, "12 s") != NULL);
+    for (r = 0; r <= COOP_TP_REFUSE_MAX + 1; r++) {
+        char what[16];
+
+        snprintf(what, sizeof(what), "%d 3", r);
+        coop_middle_feed_format(COOP_MID_CHAT_CMD_REFUSE, "", what, false, line, sizeof(line));
+        CHECK(line[0] != '\0');
+        coop_middle_feed_format(COOP_MID_CHAT_CMD_REFUSE, "", what, true, line, sizeof(line));
+        CHECK(line[0] != '\0');
+    }
+    coop_middle_feed_format(COOP_MID_CHAT_CMD_REFUSE, "", "garbage", false, line, sizeof(line));
+    CHECK(line[0] != '\0');
+    coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
+    CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
+    CHECK(COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_PAUSE_DROP);
+}
+
+/* 13. M3 pings: packet, role, validity, rate limit */
+static void test_m3_ping(void)
+{
+    PacketCoopPing p;
+    bool have = false;
+    unsigned int last = 0;
+
+    CHECK(PACKET_COOP_PING == 168 && PACKET_COOP_PING < PACKET_COOP_TYPE_LIMIT);
+    CHECK(PACKET_COOP_TYPE_LIMIT == 169);
+    CHECK(sizeof(PacketCoopPing) == 24);
+    CHECK(offsetof(PacketCoopPing, kind) == 0x0C && offsetof(PacketCoopPing, loc) == 0x10);
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_PING) == sizeof(PacketCoopPing));
+    CHECK(coop_lite_mp_packet_role(PACKET_COOP_PING) == COOP_MP_PKT_BOTH);
+    CHECK(coop_lite_packet_allowed(PACKET_COOP_PING, true, 3)); /* client -> host */
+    CHECK(coop_lite_packet_allowed(PACKET_COOP_PING, false, 0)); /* host -> client */
+    CHECK(!coop_lite_packet_allowed(PACKET_COOP_PING, false, 2)); /* never from another client */
+
+    memset(&p, 0, sizeof(p));
+    p.type = PACKET_COOP_PING;
+    p.slot = 0;
+    p.map = 5;
+    p.kind = COOP_PING_KIND_LOOK;
+    p.loc = ((int64_t)100 << 32) | 200;
+    CHECK(coop_middle_ping_valid(&p, (int)sizeof(p)));
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p) - 1));
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p) + 8));
+    CHECK(!coop_middle_ping_valid(NULL, (int)sizeof(p)));
+    p.kind = COOP_PING_KIND_DANGER;
+    CHECK(coop_middle_ping_valid(&p, (int)sizeof(p)));
+    p.kind = 2;
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p)));
+    p.kind = -1;
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p)));
+    p.kind = 0;
+    p.slot = 8;
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p)));
+    p.slot = 7;
+    CHECK(coop_middle_ping_valid(&p, (int)sizeof(p)));
+    p.type = PACKET_COOP_RULES;
+    CHECK(!coop_middle_ping_valid(&p, (int)sizeof(p)));
+
+    /* 1 ping / s per slot */
+    CHECK(coop_middle_rate_admit(&have, &last, 5000, COOP_PING_RATE_MS));
+    CHECK(!coop_middle_rate_admit(&have, &last, 5999, COOP_PING_RATE_MS));
+    CHECK(last == 5000);
+    CHECK(coop_middle_rate_admit(&have, &last, 6000, COOP_PING_RATE_MS));
+    CHECK(!coop_middle_rate_admit(NULL, &last, 9000, COOP_PING_RATE_MS));
+    CHECK(COOP_PING_MAX == 16 && COOP_PING_LIFE_MS == 4500u && COOP_PING_SOUND_RANGE == 40);
+    {
+        CoopPingView v[4];
+
+        CHECK(coop_middle_pings_get(v, 4, 0) == 0); /* stub build */
+    }
+}
+
+/* 14. M3 pause op in coop_lite_party_ctrl_valid, protocol 55 */
+static void test_m3_pause(void)
+{
+    PacketCoopPartyCtrl c;
+    bool have = false;
+    unsigned int last = 0;
+    int b;
+
+    CHECK(TIG_NET_PROTOCOL == 55);
+    CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_PARTY_CTRL;
+    c.op = COOP_CTRL_PAUSE;
+    for (b = 0; b < 8; b++) {
+        c.a = 1;
+        c.b = b;
+        CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+        c.a = 0;
+        CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    }
+    c.a = 2;
+    c.b = 0;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = -1;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = 1;
+    c.b = 8;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.b = -1;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.b = 0;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c) - 4));
+
+    /* the client's 2 s rate limit */
+    CHECK(coop_middle_rate_admit(&have, &last, 100, COOP_PAUSE_RATE_MS));
+    CHECK(!coop_middle_rate_admit(&have, &last, 2099, COOP_PAUSE_RATE_MS));
+    CHECK(coop_middle_rate_admit(&have, &last, 2100, COOP_PAUSE_RATE_MS));
+
+    /* stubs: never paused, orders never blocked, no-op hooks */
+    CHECK(!coop_middle_is_paused() && coop_middle_paused_by() == -1);
+    CHECK(!coop_middle_orders_blocked(true));
+    CHECK(!coop_middle_pause_key());
+    CHECK(coop_middle_host_enemy_damage(123, 40) == 40);
+    CHECK(!coop_middle_host_ff_block(1, 2));
+    CHECK(coop_middle_host_scale_xp(77) == 77);
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -602,11 +880,16 @@ int main(void)
     test_trade();
     test_status();
     test_labels();
+    test_m3_rules();
+    test_m3_scaling();
+    test_m3_cmds();
+    test_m3_ping();
+    test_m3_pause();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
     }
     printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops, "
-           "trade, status badges, label deoverlap)\n");
+           "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause)\n");
     return 0;
 }
