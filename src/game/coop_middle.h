@@ -3,6 +3,8 @@
 
 /*
  * Coop Middle M1 (protocol 53): gold split, loot feed, client rest request.
+ * Coop Middle M2 (protocol 54): direct trade, status badges (+ the UI-only
+ * Alt loot labels and F9 net HUD in ui/coop_middle_ui.c).
  *
  * All Middle logic lives in coop_middle.c (and coop_rules.c). coop_lite.c and
  * the engine files only call the hooks below, so Coop Lite bugfixes merge in
@@ -47,6 +49,16 @@ extern "C" {
 #define COOP_MID_CHAT_LOOT 1 /* name = player, text = item */
 #define COOP_MID_CHAT_GOLD 2 /* name = player, text = "total each" */
 #define COOP_MID_CHAT_MORE 3 /* name = "", text = count of collapsed lines */
+#define COOP_MID_CHAT_TRADE 4 /* M2: name = giver, text = "receiver|item" */
+#define COOP_MID_CHAT_TRADE_GOLD 5 /* M2: name = giver, text = "receiver|amount" */
+#define COOP_MID_CHAT_KIND_MAX 5
+
+/* M2 direct trade: a free give between two players, in the pickpocket
+   (STEAL) inventory window. COOP_BARTER_OPEN_TRADE extends Lite's
+   PacketCoopBarter kinds (0..4); COOP_TARGET_TRADE its target kinds (0..2). */
+#define COOP_BARTER_OPEN_TRADE 5
+#define COOP_TARGET_TRADE 3
+#define COOP_TRADE_RANGE 6 /* tiles */
 
 #define COOP_LOOT_FEED_COST 250 /* equipment at or above this is worth a line */
 #define COOP_LOOT_FEED_PER_SEC 5
@@ -102,6 +114,16 @@ const char* coop_middle_rest_refuse_text(int reason, bool ru);
 bool coop_middle_party_ctrl_valid(const PacketCoopPartyCtrl* pkt);
 bool coop_middle_rest_ask_allowed(bool have_last, unsigned int last_ms, unsigned int now_ms);
 
+/* M2 trade partner: the rule is on, the partner is the PC of another
+   active slot, both alive, within COOP_TRADE_RANGE tiles (dist < 0 =
+   different map / unknown). */
+bool coop_middle_trade_partner_ok(bool rule_on, int self_slot, int partner_slot, bool partner_is_pc,
+    bool partner_active, bool self_dead, bool partner_dead, int dist);
+/* M2: a Packet81 inside a TRADE session: giving from your own pack
+   (flags 0x01, optionally with COOP_XFER_PLANT) is allowed, taking from the
+   teammate never. Other kinds: false (Lite decides those). */
+bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_target);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -143,6 +165,27 @@ typedef struct CoopMiddleTake {
 
 void coop_middle_take_begin(CoopMiddleTake* t, int64_t from, int64_t item, int64_t to, int qty);
 void coop_middle_take_done(CoopMiddleTake* t, bool ok);
+
+/* M2: ui/coop_middle_ui.c's per-frame tick (game code cannot call UI). */
+void coop_middle_set_ui_tick(void (*fn)(unsigned int now_ms));
+
+/* M2 trade (game side). */
+bool coop_middle_trade_live(int64_t pc, int64_t partner);
+/* Host: a client asked for COOP_BARTER_OPEN_TRADE on `target`. */
+bool coop_middle_host_trade_open(int slot, int64_t pc, int64_t target);
+/* Host: a give inside a TRADE session landed (Lite's gift branch). qty is
+   the gold amount for gold, the count for ammo, 1 otherwise. */
+void coop_middle_trade_given(int64_t giver, int64_t receiver, const char* item_name, int type, int qty);
+/* This machine's trade window: begin before inven_ui_open, end when closed. */
+void coop_middle_trade_local_begin(int64_t partner);
+void coop_middle_trade_local_end(void);
+bool coop_middle_trade_local_is(int64_t partner);
+/* Client inven_ui_open: OPEN_TRADE for the trade partner, else `kind`. */
+int coop_middle_trade_barter_kind(int64_t target, int kind);
+/* Inventory window drag from the partner's pack: true = refused (notice). */
+bool coop_middle_trade_refuse_take(int64_t partner);
+/* Host's own give in its trade window: true = done here (vanilla skipped). */
+bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item);
 
 /* ---- bridge: small helpers coop_lite.c exports for Middle (game only) ---- */
 void coop_lite_mid_notice(const char* str, bool good);

@@ -378,6 +378,77 @@ static void test_rest_ops(void)
     CHECK(coop_middle_rules()->flags == COOP_RULE_DEFAULT_FLAGS);
 }
 
+/* 7. M2 direct trade: partner rule, transfer rule, trade lines */
+static void test_trade(void)
+{
+    char line[256];
+    char tiny[12];
+
+    CHECK(COOP_BARTER_OPEN_TRADE > COOP_BARTER_OPEN_STEAL);
+    CHECK(COOP_TARGET_TRADE != COOP_TARGET_NONE && COOP_TARGET_TRADE != COOP_TARGET_LOOT
+        && COOP_TARGET_TRADE != COOP_TARGET_STEAL);
+
+    /* partner: rule, PC of another active slot, both alive, <= 6 tiles */
+    CHECK(coop_middle_trade_partner_ok(true, 0, 1, true, true, false, false, 0));
+    CHECK(coop_middle_trade_partner_ok(true, 2, 5, true, true, false, false, COOP_TRADE_RANGE));
+    CHECK(coop_middle_trade_partner_ok(true, 3, 0, true, true, false, false, 3)); /* client -> host */
+    CHECK(!coop_middle_trade_partner_ok(true, 2, 5, true, true, false, false, COOP_TRADE_RANGE + 1));
+    CHECK(!coop_middle_trade_partner_ok(true, 2, 5, true, true, false, false, -1)); /* other map */
+    CHECK(!coop_middle_trade_partner_ok(false, 0, 1, true, true, false, false, 1)); /* rule off */
+    CHECK(!coop_middle_trade_partner_ok(true, 1, 1, true, true, false, false, 1)); /* self */
+    CHECK(!coop_middle_trade_partner_ok(true, 0, 1, false, true, false, false, 1)); /* NPC */
+    CHECK(!coop_middle_trade_partner_ok(true, 0, 1, true, false, false, false, 1)); /* disconnected */
+    CHECK(!coop_middle_trade_partner_ok(true, 0, 1, true, true, true, false, 1)); /* self dead */
+    CHECK(!coop_middle_trade_partner_ok(true, 0, 1, true, true, false, true, 1)); /* partner dead */
+    CHECK(!coop_middle_trade_partner_ok(true, -1, 1, true, true, false, false, 1));
+    CHECK(!coop_middle_trade_partner_ok(true, 0, 8, true, true, false, false, 1));
+
+    /* transfer: give always, take never */
+    CHECK(coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x01u | COOP_XFER_PLANT, false));
+    CHECK(coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x01u, false));
+    CHECK(!coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x01u | COOP_XFER_STEAL, true));
+    CHECK(!coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x01u, true));
+    CHECK(!coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x01u | COOP_XFER_STEAL, false));
+    CHECK(!coop_middle_trade_transfer_ok(COOP_TARGET_TRADE, 0x03u, false));
+    CHECK(!coop_middle_trade_transfer_ok(COOP_TARGET_STEAL, 0x01u | COOP_XFER_PLANT, false));
+    /* Lite's rule routes the TRADE kind to Middle, the others are unchanged */
+    CHECK(coop_lite_target_transfer_ok(COOP_TARGET_TRADE, 0x01u | COOP_XFER_PLANT, false, false));
+    CHECK(!coop_lite_target_transfer_ok(COOP_TARGET_TRADE, 0x01u | COOP_XFER_STEAL, true, false));
+    CHECK(coop_lite_target_transfer_ok(COOP_TARGET_STEAL, 0x01u | COOP_XFER_STEAL, true, false));
+    CHECK(!coop_lite_target_transfer_ok(COOP_TARGET_NONE, 0x01u, false, false));
+
+    /* lines */
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", "Bob|Sword", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Trade] Ann gave Sword to Bob") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", "Bob|Sword", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Обмен] Ann передал Sword игроку Bob") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE_GOLD, "Ann", "Bob|150", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Trade] Ann gave 150 gold to Bob") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE_GOLD, "Ann", "Bob|150", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Обмен] Ann передал 150 золота игроку Bob") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE, "", "Sword", false, line, sizeof(line)); /* no separator */
+    CHECK(strcmp(line, "[Trade] Player gave Sword to player") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", "|", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Trade] Ann gave ? to player") == 0);
+    {
+        char longs[300];
+
+        memset(longs, 'x', sizeof(longs) - 1);
+        longs[sizeof(longs) - 1] = '\0';
+        longs[200] = '|';
+        coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", longs, false, line, sizeof(line));
+        CHECK(strlen(line) < sizeof(line));
+    }
+    coop_middle_feed_format(COOP_MID_CHAT_TRADE, "Ann", "Bob|Sword", false, tiny, sizeof(tiny));
+    CHECK(strlen(tiny) < sizeof(tiny));
+    CHECK(COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_TRADE_GOLD);
+
+    /* stubbed game side */
+    CHECK(!coop_middle_trade_local_is(42));
+    CHECK(coop_middle_trade_barter_kind(42, COOP_BARTER_OPEN_STEAL) == COOP_BARTER_OPEN_STEAL);
+    CHECK(!coop_middle_trade_refuse_take(42));
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -386,6 +457,7 @@ int main(void)
     test_split_gold();
     test_loot_feed();
     test_rest_ops();
+    test_trade();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;

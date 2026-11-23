@@ -4,6 +4,7 @@
 
 #include "game/broadcast.h"
 #include "game/coop_lite.h"
+#include "ui/coop_middle_ui.h"
 #include "game/location.h"
 #include "game/critter.h"
 #include "game/hrp.h"
@@ -877,6 +878,16 @@ bool follower_ui_message_filter(TigMessage* msg)
     case TIG_MESSAGE_MOUSE:
         if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP && follower_ui_visible) {
             tig_window_handle_t window_handle;
+
+            /* Coop Middle M2: RMB on a teammate portrait = direct trade. */
+            if (tig_window_get_at_position(msg->data.mouse.x, msg->data.mouse.y, &window_handle) == TIG_OK) {
+                for (index = 0; index < follower_ui_team_count; index++) {
+                    if (window_handle == follower_ui_team_windows[index]) {
+                        sub_444130(&follower_ui_team[index]);
+                        return coop_middle_ui_trade_try(follower_ui_team[index].obj, true);
+                    }
+                }
+            }
 
             // Determine which portrait slot (if any) was right-clicked.
             for (index = 0; index < FOLLOWER_UI_SLOTS; index++) {

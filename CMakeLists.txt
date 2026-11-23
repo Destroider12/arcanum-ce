@@ -275,6 +275,7 @@ set(SRCS
     "src/ui/broadcast_ui.c"
     "src/ui/broadcast_ui.h"
     "src/ui/coop_chat_ui.c"
+    "src/ui/coop_middle_ui.c"
     "src/ui/coop_chat_ui.h"
     "src/ui/charedit_ui.c"
     "src/ui/charedit_ui.h"

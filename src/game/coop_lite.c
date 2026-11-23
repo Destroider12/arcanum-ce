@@ -9317,7 +9317,7 @@ bool coop_lite_target_transfer_ok(int kind, unsigned int flags, bool from_target
         }
         return flags == (0x01u | COOP_XFER_PLANT);
     default:
-        return false;
+        return coop_middle_trade_transfer_ok(kind, flags, from_target); /* Coop Middle: TRADE */
     }
 }
 
@@ -9379,6 +9379,15 @@ static int coop_lite_target_kind_of(int64_t pc, int64_t target)
         (int)location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(target, OBJ_F_LOCATION)));
 }
 
+/* Coop Middle: a TRADE session lives by Middle's partner rule. */
+static bool coop_lite_target_still_ok(int64_t pc, int64_t target, int kind)
+{
+    if (kind == COOP_TARGET_TRADE) {
+        return coop_middle_trade_live(pc, target);
+    }
+    return coop_lite_target_kind_of(pc, target) == kind;
+}
+
 static int64_t coop_lite_target_obj(int slot)
 {
     if (slot <= 0 || slot >= 8 || !coop_barter[slot].target_valid) {
@@ -9404,7 +9413,7 @@ static void coop_lite_host_barter_watch(unsigned int now_ms)
             coop_lite_barter_end(slot, "partner gone, dead or too far");
         }
         if (coop_barter[slot].target_valid
-            && coop_lite_target_kind_of(sub_4A2B60(slot), coop_lite_target_obj(slot)) != coop_barter[slot].target_kind) {
+            && !coop_lite_target_still_ok(sub_4A2B60(slot), coop_lite_target_obj(slot), coop_barter[slot].target_kind)) {
             coop_lite_barter_end(slot, "target gone, changed (died / locked) or too far");
         }
     }
@@ -11448,6 +11457,19 @@ void coop_lite_handle_barter(PacketCoopBarter* pkt)
         coop_lite_host_sync_slot_inven(slot);
         return;
     }
+    if (pkt->kind == COOP_BARTER_OPEN_TRADE) {
+        /* Coop Middle M2: direct trade window with another player. */
+        int64_t target = coop_lite_get_oid_obj(pkt->npc_oid);
+
+        coop_barter[slot].valid = false;
+        coop_barter[slot].target_valid = coop_middle_host_trade_open(slot, pc, target);
+        coop_barter[slot].target_kind = COOP_TARGET_TRADE;
+        if (coop_barter[slot].target_valid) {
+            coop_barter[slot].target = obj_get_id(target);
+        }
+        coop_lite_host_sync_slot_inven(slot);
+        return;
+    }
     if (pkt->kind == COOP_BARTER_OPEN_LOOT || pkt->kind == COOP_BARTER_OPEN_STEAL) {
         /* PT18: loot (container, any corpse) / pickpocket (living critter,
            NPC or PC) window. Inventory, not dialog: no merchant rule. */
@@ -11579,7 +11601,7 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
     if (item != OBJ_HANDLE_NULL) {
         object_examine(item, pc, iname);
     }
-    if (coop_lite_target_kind_of(pc, target) != kind
+    if (!coop_lite_target_still_ok(pc, target, kind)
         || item == OBJ_HANDLE_NULL
         || !item_parent(item, &parent) || parent != from
         || qty <= 0
@@ -11646,7 +11668,12 @@ static void coop_lite_host_target_transfer(int slot, int64_t pc, int64_t target,
             ok = item_transfer(item, to);
         }
         result = ok ? "given" : "failed";
-        coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_SKILL_FAILED);
+        if (kind != COOP_TARGET_TRADE || !ok) {
+            coop_lite_host_slot_notice(slot, ok ? COOP_PARTY_STEAL_OK : COOP_PARTY_SKILL_FAILED);
+        }
+        if (ok && kind == COOP_TARGET_TRADE) {
+            coop_middle_trade_given(pc, target, iname, t, t == OBJ_TYPE_GOLD || t == OBJ_TYPE_AMMO ? qty : 1); /* Coop Middle */
+        }
     } else {
         SkillInvocation si;
         int effectiveness;

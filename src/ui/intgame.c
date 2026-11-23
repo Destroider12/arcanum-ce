@@ -4,6 +4,7 @@
 
 #include "game/coop_lite.h"
 #include "game/coop_middle.h"
+#include "ui/coop_middle_ui.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -3309,6 +3310,9 @@ void sub_54ED30(TargetDescriptor* td)
     if (!td->is_loc && td->obj == pc_obj) {
         intgame_coop_click_trace("on own PC, ignored");
         return;
+    }
+    if (!td->is_loc && tig_kb_get_modifier(SDL_KMOD_CTRL) && coop_middle_ui_trade_try(td->obj, false)) {
+        return; /* Coop Middle M2: Ctrl+LMB on another player = trade */
     }
     intgame_coop_click_trace("object type %d, combat mode %d, auto attack %d",
         target_type, combat_critter_is_combat_mode_active(pc_obj), combat_auto_attack_get(pc_obj));

@@ -1,6 +1,7 @@
 /*
  * Coop Middle M1 (protocol 53): gold split, loot feed, client rest request,
  * and the host -> client session rules (PACKET_COOP_RULES).
+ * Coop Middle M2 (protocol 54): direct trade, status badges.
  *
  * Pure helpers first (headless tests), then the game side, compiled out
  * under COOP_LITE_TEST_STUBS (no-op stubs at the end).
@@ -145,6 +146,31 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
     case COOP_MID_CHAT_MORE:
         snprintf(out, sz, ru ? "[Лут] ... и ещё %s" : "[Loot] ... and %s more", what);
         break;
+    case COOP_MID_CHAT_TRADE:
+    case COOP_MID_CHAT_TRADE_GOLD: {
+        /* what = "receiver|item" (or "receiver|amount") */
+        char to[64];
+        const char* bar = strchr(what, '|');
+        const char* thing = bar != NULL ? bar + 1 : what;
+        size_t n = bar != NULL ? (size_t)(bar - what) : 0;
+
+        if (n >= sizeof(to)) {
+            n = sizeof(to) - 1;
+        }
+        memcpy(to, what, n);
+        to[n] = '\0';
+        if (to[0] == '\0') {
+            snprintf(to, sizeof(to), "%s", ru ? "игрок" : "player");
+        }
+        if (kind == COOP_MID_CHAT_TRADE_GOLD) {
+            snprintf(out, sz, ru ? "[Обмен] %s передал %d золота игроку %s" : "[Trade] %s gave %d gold to %s",
+                who, atoi(thing), to);
+        } else {
+            snprintf(out, sz, ru ? "[Обмен] %s передал %s игроку %s" : "[Trade] %s gave %s to %s",
+                who, thing[0] != '\0' ? thing : "?", to);
+        }
+        break;
+    }
     default:
         out[0] = '\0';
         break;
@@ -191,6 +217,23 @@ bool coop_middle_rest_ask_allowed(bool have_last, unsigned int last_ms, unsigned
     return !have_last || (unsigned int)(now_ms - last_ms) >= COOP_REST_ASK_INTERVAL_MS;
 }
 
+bool coop_middle_trade_partner_ok(bool rule_on, int self_slot, int partner_slot, bool partner_is_pc,
+    bool partner_active, bool self_dead, bool partner_dead, int dist)
+{
+    return rule_on && partner_is_pc && partner_active
+        && self_slot >= 0 && self_slot < 8 && partner_slot >= 0 && partner_slot < 8 && partner_slot != self_slot
+        && !self_dead && !partner_dead
+        && dist >= 0 && dist <= COOP_TRADE_RANGE;
+}
+
+bool coop_middle_trade_transfer_ok(int kind, unsigned int flags, bool from_target)
+{
+    if (kind != COOP_TARGET_TRADE || from_target) {
+        return false;
+    }
+    return flags == 0x01u || flags == (0x01u | COOP_XFER_PLANT);
+}
+
 /* ---- game side ------------------------------------------------------------ */
 
 #ifndef COOP_LITE_TEST_STUBS
@@ -198,6 +241,7 @@ bool coop_middle_rest_ask_allowed(bool have_last, unsigned int last_ms, unsigned
 #include "game/combat.h"
 #include "game/critter.h"
 #include "game/item.h"
+#include "game/location.h"
 #include "game/obj.h"
 #include "game/obj_flags.h"
 #include "game/multiplayer.h"
@@ -400,13 +444,17 @@ void coop_middle_handle_rules(PacketCoopRules* pkt)
 
 /* ---- loot feed + gold split ---- */
 
-static void coop_mid_feed_send(int kind, int slot, const char* who, const char* what)
+/* A host system line to everyone (to_a < 0) or only to slots to_a / to_b
+   (the host's own slot 0 shows it locally). */
+static void coop_mid_sys_line(int kind, int slot, const char* who, const char* what, int to_a, int to_b)
 {
     PacketCoopChat pkt;
     char line[256];
 
-    coop_middle_feed_format(kind, who, what, coop_lite_lang_ru(), line, sizeof(line));
-    coop_lite_mid_chat_line(line);
+    if (to_a < 0 || to_a == 0 || to_b == 0) {
+        coop_middle_feed_format(kind, who, what, coop_lite_lang_ru(), line, sizeof(line));
+        coop_lite_mid_chat_line(line);
+    }
     memset(&pkt, 0, sizeof(pkt));
     pkt.type = PACKET_COOP_CHAT;
     pkt.slot = slot >= 0 && slot < 8 ? slot : 0;
@@ -421,9 +469,23 @@ static void coop_mid_feed_send(int kind, int slot, const char* who, const char* 
     {
         int depth = tig_net_local_suspend_pause();
 
-        tig_net_send_app_all(&pkt, sizeof(pkt));
+        if (to_a < 0) {
+            tig_net_send_app_all(&pkt, sizeof(pkt));
+        } else {
+            if (to_a > 0 && to_a < 8) {
+                tig_net_send_app(&pkt, sizeof(pkt), to_a);
+            }
+            if (to_b > 0 && to_b < 8 && to_b != to_a) {
+                tig_net_send_app(&pkt, sizeof(pkt), to_b);
+            }
+        }
         tig_net_local_suspend_resume(depth);
     }
+}
+
+static void coop_mid_feed_send(int kind, int slot, const char* who, const char* what)
+{
+    coop_mid_sys_line(kind, slot, who, what, -1, -1);
 }
 
 static void coop_mid_feed(int kind, int slot, const char* who, const char* what)
@@ -443,7 +505,7 @@ bool coop_middle_client_chat(const PacketCoopChat* pkt)
         return false;
     }
     kind = pkt->reserved & 0xFFFF;
-    if (kind < COOP_MID_CHAT_LOOT || kind > COOP_MID_CHAT_MORE) {
+    if (kind < COOP_MID_CHAT_LOOT || kind > COOP_MID_CHAT_KIND_MAX) {
         return true; /* a newer Middle line we do not know: drop it */
     }
     coop_middle_feed_format(kind, pkt->name, pkt->text, coop_lite_lang_ru(), line, sizeof(line));
@@ -841,6 +903,164 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
     return true;
 }
 
+/* ---- M2: direct trade ---- */
+
+/* This machine's open trade window (the partner PC), host or client. */
+static bool coop_trade_local;
+static int64_t coop_trade_local_partner;
+
+bool coop_middle_trade_live(int64_t pc, int64_t partner)
+{
+    int self_slot = coop_mid_slot_of(pc);
+    int partner_slot = coop_mid_slot_of(partner);
+    bool active;
+    int64_t a;
+    int64_t b;
+    int dist = -1;
+
+    if (pc == OBJ_HANDLE_NULL || partner == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled()) {
+        return false;
+    }
+    if ((obj_field_int32_get(partner, OBJ_F_FLAGS) & (OF_OFF | OF_DESTROYED)) != 0) {
+        return false;
+    }
+    /* The host knows who is connected; a client trusts the PC list (the
+       host checks again). */
+    active = partner_slot == 0 || !tig_net_is_host() || tig_net_client_is_active(partner_slot);
+    a = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    b = obj_field_int64_get(partner, OBJ_F_LOCATION);
+    dist = (int)location_dist(a, b);
+    return coop_middle_trade_partner_ok(coop_middle_rule_on(COOP_RULE_DIRECT_TRADE), self_slot, partner_slot,
+        obj_field_int32_get(partner, OBJ_F_TYPE) == OBJ_TYPE_PC, active,
+        critter_is_dead(pc), critter_is_dead(partner), dist);
+}
+
+bool coop_middle_host_trade_open(int slot, int64_t pc, int64_t target)
+{
+    int other = coop_mid_slot_of(target);
+    bool ok = coop_mid_session_host() && coop_middle_trade_live(pc, target);
+
+    tig_debug_printf("CoopMiddle: trade: slot %d asked to open a trade window with slot %d: %s\n", slot, other,
+        ok ? "opened" : (coop_middle_rule_on(COOP_RULE_DIRECT_TRADE) ? "refused (not a live player in range)"
+                                                                      : "refused (rule off)"));
+    return ok;
+}
+
+void coop_middle_trade_given(int64_t giver, int64_t receiver, const char* item_name, int type, int qty)
+{
+    int from_slot = coop_mid_slot_of(giver);
+    int to_slot = coop_mid_slot_of(receiver);
+    char who[64];
+    char to[64];
+    char what[160];
+    char* p;
+    int kind;
+
+    if (!coop_mid_session_host() || from_slot < 0 || to_slot < 0) {
+        return;
+    }
+    coop_mid_pc_name(from_slot, giver, who, sizeof(who));
+    coop_mid_pc_name(to_slot, receiver, to, sizeof(to));
+    for (p = to; *p != '\0'; p++) {
+        if (*p == '|') {
+            *p = '/'; /* the separator below */
+        }
+    }
+    if (type == OBJ_TYPE_GOLD) {
+        kind = COOP_MID_CHAT_TRADE_GOLD;
+        snprintf(what, sizeof(what), "%s|%d", to, qty);
+    } else {
+        kind = COOP_MID_CHAT_TRADE;
+        if (type == OBJ_TYPE_AMMO && qty > 1) {
+            snprintf(what, sizeof(what), "%s|%d %s", to, qty, item_name != NULL ? item_name : "");
+        } else {
+            snprintf(what, sizeof(what), "%s|%s", to, item_name != NULL && item_name[0] != '\0' ? item_name : "?");
+        }
+    }
+    tig_debug_printf("CoopMiddle: trade: slot %d gave '%s' (type %d, qty %d) to slot %d\n", from_slot,
+        item_name != NULL ? item_name : "", type, qty, to_slot);
+    if (coop_middle_rule_on(COOP_RULE_LOOT_FEED)) {
+        coop_mid_sys_line(kind, from_slot, who, what, -1, -1);
+    } else {
+        coop_mid_sys_line(kind, from_slot, who, what, from_slot, to_slot);
+    }
+}
+
+void coop_middle_trade_local_begin(int64_t partner)
+{
+    coop_trade_local = partner != OBJ_HANDLE_NULL;
+    coop_trade_local_partner = partner;
+}
+
+void coop_middle_trade_local_end(void)
+{
+    if (coop_trade_local) {
+        tig_debug_printf("CoopMiddle: trade: window closed\n");
+    }
+    coop_trade_local = false;
+    coop_trade_local_partner = OBJ_HANDLE_NULL;
+}
+
+bool coop_middle_trade_local_is(int64_t partner)
+{
+    return coop_trade_local && partner != OBJ_HANDLE_NULL && partner == coop_trade_local_partner;
+}
+
+int coop_middle_trade_barter_kind(int64_t target, int kind)
+{
+    return coop_middle_trade_local_is(target) ? COOP_BARTER_OPEN_TRADE : kind;
+}
+
+bool coop_middle_trade_refuse_take(int64_t partner)
+{
+    if (!coop_middle_trade_local_is(partner)) {
+        return false;
+    }
+    coop_lite_mid_notice(coop_lite_lang_ru() ? "Взять можно только то, что игрок передаст сам."
+                                             : "You can only receive what your teammate gives you.",
+        false);
+    return true;
+}
+
+bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item)
+{
+    char iname[128];
+    int type;
+    int qty = 1;
+    bool ok;
+    int slot;
+
+    if (!coop_mid_session_host() || !coop_middle_trade_local_is(partner) || item == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (!coop_middle_trade_live(pc, partner)) {
+        coop_lite_mid_notice(coop_lite_lang_ru() ? "Подойдите ближе для обмена." : "Move closer to trade.", false);
+        return true;
+    }
+    iname[0] = '\0';
+    object_examine(item, pc, iname);
+    type = obj_field_int32_get(item, OBJ_F_TYPE);
+    if (type == OBJ_TYPE_GOLD) {
+        qty = item_gold_get(item);
+        ok = item_gold_transfer(pc, partner, qty, item);
+    } else if (type == OBJ_TYPE_AMMO) {
+        qty = obj_field_int32_get(item, OBJ_F_AMMO_QUANTITY);
+        ok = item_ammo_transfer(pc, partner, qty, obj_field_int32_get(item, OBJ_F_AMMO_TYPE), item);
+    } else {
+        ok = item_transfer(item, partner);
+    }
+    slot = coop_mid_slot_of(partner);
+    if (slot > 0) {
+        coop_lite_host_sync_slot_inven(slot);
+    }
+    if (ok) {
+        coop_middle_trade_given(pc, partner, iname, type, qty);
+    } else {
+        tig_debug_printf("CoopMiddle: trade: host give of '%s' failed\n", iname);
+    }
+    return true;
+}
+
 /* ---- lifecycle ---- */
 
 void coop_middle_session_reset(void)
@@ -862,6 +1082,8 @@ void coop_middle_session_reset(void)
     coop_mid_drops_next = 0;
     memset(coop_mid_stash, 0, sizeof(coop_mid_stash));
     coop_mid_stash_next = 0;
+    coop_trade_local = false;
+    coop_trade_local_partner = OBJ_HANDLE_NULL;
 }
 
 void coop_middle_slot_gone(int slot)
@@ -877,11 +1099,21 @@ void coop_middle_map_changed(void)
     memset(coop_mid_stash, 0, sizeof(coop_mid_stash)); /* containers of the old map */
 }
 
+static void (*coop_mid_ui_tick)(unsigned int now_ms);
+
+void coop_middle_set_ui_tick(void (*fn)(unsigned int now_ms))
+{
+    coop_mid_ui_tick = fn;
+}
+
 void coop_middle_tick(unsigned int now_ms)
 {
     int more;
 
     coop_mid_now_ms = now_ms;
+    if (coop_mid_ui_tick != NULL) {
+        coop_mid_ui_tick(now_ms);
+    }
     if (!coop_mid_session_host()) {
         return;
     }
@@ -920,6 +1152,7 @@ const CoopRules* coop_middle_rules(void)
 bool coop_middle_rule_on(uint32_t flag) { return (coop_middle_rules()->flags & flag) != 0; }
 void coop_middle_session_reset(void) { }
 void coop_middle_tick(unsigned int now_ms) { (void)now_ms; }
+void coop_middle_set_ui_tick(void (*fn)(unsigned int now_ms)) { (void)fn; }
 void coop_middle_host_slot_synced(int slot) { (void)slot; }
 void coop_middle_slot_gone(int slot) { (void)slot; }
 void coop_middle_map_changed(void) { }
@@ -940,5 +1173,21 @@ void coop_middle_take_begin(CoopMiddleTake* t, int64_t from, int64_t item, int64
     }
 }
 void coop_middle_take_done(CoopMiddleTake* t, bool ok) { (void)t; (void)ok; }
+bool coop_middle_trade_live(int64_t pc, int64_t partner) { (void)pc; (void)partner; return false; }
+bool coop_middle_host_trade_open(int slot, int64_t pc, int64_t target) { (void)slot; (void)pc; (void)target; return false; }
+void coop_middle_trade_given(int64_t giver, int64_t receiver, const char* item_name, int type, int qty)
+{
+    (void)giver;
+    (void)receiver;
+    (void)item_name;
+    (void)type;
+    (void)qty;
+}
+void coop_middle_trade_local_begin(int64_t partner) { (void)partner; }
+void coop_middle_trade_local_end(void) { }
+bool coop_middle_trade_local_is(int64_t partner) { (void)partner; return false; }
+int coop_middle_trade_barter_kind(int64_t target, int kind) { (void)target; return kind; }
+bool coop_middle_trade_refuse_take(int64_t partner) { (void)partner; return false; }
+bool coop_middle_host_trade_give(int64_t pc, int64_t partner, int64_t item) { (void)pc; (void)partner; (void)item; return false; }
 
 #endif /* COOP_LITE_TEST_STUBS */

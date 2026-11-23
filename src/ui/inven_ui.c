@@ -504,7 +504,8 @@ bool inven_ui_open(int64_t pc_obj, int64_t target_obj, int mode)
         } else if (mode == INVEN_UI_MODE_LOOT || mode == INVEN_UI_MODE_STEAL) {
             /* PT18: the host checks the target and sends its inventory. */
             coop_lite_client_request_barter(pc_obj, target_obj,
-                mode == INVEN_UI_MODE_LOOT ? COOP_BARTER_OPEN_LOOT : COOP_BARTER_OPEN_STEAL);
+                mode == INVEN_UI_MODE_LOOT ? COOP_BARTER_OPEN_LOOT
+                                           : coop_middle_trade_barter_kind(target_obj, COOP_BARTER_OPEN_STEAL));
         }
         /* Same open-time prep the host does, so the stock looks right
            before the host's sync lands. Local only. */
@@ -2381,6 +2382,10 @@ bool sub_575100(bool* a1)
         return true;
     }
 
+    if (coop_middle_host_trade_give(inven_ui_pc_obj, qword_682C78, v1)) {
+        return true; /* Coop Middle M2: direct trade */
+    }
+
     /* PT53: host PC gives to a co-op teammate: a plain host-side transfer,
        no pickpocket animation, and the window stays open for more gifts. */
     if (tig_net_is_coop_enabled() && tig_net_is_host()
@@ -2408,6 +2413,10 @@ bool sub_575180(bool* a1)
 
     v1 = inven_ui_drag_item_obj;
     sub_575770();
+
+    if (coop_middle_trade_refuse_take(qword_682C78)) {
+        return true; /* Coop Middle M2: a trade only gives */
+    }
 
     if (coop_lite_client_opens_inven_locally(inven_ui_mode, inven_ui_pc_obj)) {
         coop_lite_client_request_steal(inven_ui_pc_obj, qword_682C78, v1, false);
