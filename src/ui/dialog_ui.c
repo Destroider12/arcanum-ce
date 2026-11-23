@@ -116,6 +116,7 @@ void dialog_ui_reset(void)
         dialog_ui_local_pc_dialog_active = false;
     }
     coop_lite_host_dialog_closed();
+    coop_lite_dialog_sessions_close_all(false); /* M4: every client session */
     dialog_ui_coop_view_close();
 
     for (index = 0; index < MAX_ENTRIES; index++) {
@@ -134,7 +135,13 @@ bool dialog_ui_is_in_dialog(int64_t obj)
 // 0x567420
 DialogUiEntry* sub_567420(int64_t obj)
 {
-    int index = 0;
+    /* Coop Middle M4: on the host each client PC has its own entry (the
+       engine always had 8; this was pinned to 0), so dialogs run in parallel. */
+    int index = coop_lite_dialog_entry_slot(obj);
+
+    if (index < 0 || index >= MAX_ENTRIES) {
+        index = 0;
+    }
 
     return &(stru_66DAB8[index]);
 }
@@ -154,11 +161,11 @@ void dialog_ui_start_dialog(int64_t pc_obj, int64_t npc_obj, int script_num, int
      * other players' followers, citizens — just barks.
      */
     talk_policy = coop_lite_can_talk(npc_obj, pc_obj);
-    party = pc_obj != OBJ_HANDLE_NULL && pc_obj == coop_lite_party_dialog_pc();
+    party = pc_obj != OBJ_HANDLE_NULL && coop_lite_dialog_party_slot(pc_obj) > 0;
     if (party) {
         talk_policy = COOP_TALK_ALLOW; /* PT41: host runs a client's story dialog */
-    } else if (coop_lite_party_dialog_pc() != OBJ_HANDLE_NULL) {
-        /* single dialog entry: busy with a client's party dialog */
+    } else if (pc_obj != OBJ_HANDLE_NULL && player_is_local_pc_obj(pc_obj) && coop_lite_host_dialog_npc_busy(npc_obj)) {
+        /* M4: a client talks to this NPC; the host watches that dialog */
         dialog_ui_float_line(npc_obj, pc_obj, "(Another player is talking.)", -1);
         return;
     }
@@ -421,7 +428,9 @@ bool dialog_ui_process_option(DialogUiEntry* entry, int option)
         TB_EXPIRE_DEFAULT,
         entry->state.options[option]);
     tb_remove(entry->state.npc_obj);
-    dialog_ui_speech_stop();
+    if (is_pc || !dialog_ui_local_pc_dialog_active) {
+        dialog_ui_speech_stop(); /* M4: a client's step never cuts the host's own voice line */
+    }
     sub_413130(&(entry->state), option);
 
     switch (entry->state.field_17E8) {
@@ -622,7 +631,7 @@ void dialog_ui_display(DialogUiEntry* entry)
         for (index = 0; index < entry->state.num_options; index++) {
             intgame_dialog_set_option(index, dialog_ui_option_label(entry, index));
         }
-    } else if (entry->state.pc_obj == coop_lite_party_dialog_pc()) {
+    } else if (coop_lite_dialog_party_slot(entry->state.pc_obj) > 0) {
         dialog_ui_coop_publish(entry);
     }
 }
@@ -667,9 +676,11 @@ void dialog_ui_notify_object_destroyed(int64_t obj)
     int index;
 
     for (index = 0; index < 8; index++) {
-        if (stru_66DAB8[index].state.pc_obj == obj
-            || stru_66DAB8[index].state.npc_obj == obj) {
-            dialog_ui_end_dialog(obj, 0);
+        if (stru_66DAB8[index].field_1850
+            && (stru_66DAB8[index].state.pc_obj == obj
+                || stru_66DAB8[index].state.npc_obj == obj)) {
+            /* M4: end that entry's dialog (by its PC: entries are per PC) */
+            dialog_ui_end_dialog(stru_66DAB8[index].state.pc_obj, 0);
         }
     }
 }
@@ -686,6 +697,9 @@ void dialog_ui_speech_start(int64_t npc_obj, int64_t pc_obj, int speech_id)
 
     if (speech_id == -1) {
         return;
+    }
+    if (dialog_ui_local_pc_dialog_active && pc_obj != OBJ_HANDLE_NULL && !player_is_local_pc_obj(pc_obj)) {
+        return; /* Coop Middle M4: a client's parallel dialog stays silent while the host talks */
     }
 
     dialog_ui_speech_stop();
@@ -773,7 +787,7 @@ static void dialog_ui_coop_publish(DialogUiEntry* entry)
     int index;
 
     if (!tig_net_is_coop_enabled() || !tig_net_is_host()
-        || (!player_is_local_pc_obj(entry->state.pc_obj) && entry->state.pc_obj != coop_lite_party_dialog_pc())) {
+        || (!player_is_local_pc_obj(entry->state.pc_obj) && coop_lite_dialog_party_slot(entry->state.pc_obj) <= 0)) {
         return;
     }
     npc_name[0] = '\0';
@@ -783,7 +797,8 @@ static void dialog_ui_coop_publish(DialogUiEntry* entry)
     for (index = 0; index < 5; index++) {
         options[index] = entry->state.options[index];
     }
-    coop_lite_host_dialog_state(npc_name, entry->state.reply, entry->state.num_options, options);
+    coop_lite_host_dialog_state_for(entry->state.pc_obj, entry->state.npc_obj, npc_name, entry->state.reply,
+        entry->state.num_options, options);
 }
 
 /* Host: a client's vote changed the counts; redraw the option list. */
@@ -1174,11 +1189,15 @@ static tig_font_handle_t cdv_font_make(int r, int g, int b)
 }
 
 /* Host: the speaking client's answer (validated by coop_lite). */
-static bool dialog_ui_party_choose(int option)
+static bool dialog_ui_party_choose(int slot, int option)
 {
-    DialogUiEntry* entry = sub_567420(OBJ_HANDLE_NULL);
+    DialogUiEntry* entry;
 
-    if (!entry->field_1850 || entry->state.pc_obj != coop_lite_party_dialog_pc()
+    if (slot < 1 || slot >= MAX_ENTRIES) {
+        return false;
+    }
+    entry = &(stru_66DAB8[slot]);
+    if (!entry->field_1850 || coop_lite_dialog_party_slot(entry->state.pc_obj) != slot
         || option < 0 || option >= entry->state.num_options) {
         return false;
     }

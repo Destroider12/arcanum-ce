@@ -66,6 +66,26 @@ bool coop_middle_ui_trade_try(int64_t target, bool from_portrait)
         return false;
     }
     pc = player_get_local_pc_obj();
+    if (pc != OBJ_HANDLE_NULL && target != pc && obj_field_int32_get(target, OBJ_F_TYPE) == OBJ_TYPE_NPC
+        && critter_leader_get(target) != OBJ_HANDLE_NULL && critter_leader_get(target) != pc
+        && coop_lite_is_teammate_pc(critter_leader_get(target))) {
+        /* M4 shared followers: Ctrl+click on a teammate's follower opens
+           the free follower exchange (host-validated, 6 tiles). */
+        if (!coop_middle_rule_on(COOP_RULE_SHARED_FOLLOWERS) || inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
+            return false;
+        }
+        if (!coop_middle_shared_follower_ok(pc, target)) {
+            coop_mid_ui_notice("Move closer to the follower.", "Подойдите ближе к спутнику.", false);
+            return true;
+        }
+        name[0] = '\0';
+        object_examine(target, pc, name);
+        if (!inven_ui_open(pc, target, INVEN_UI_MODE_BARTER)) {
+            coop_mid_ui_notice("You cannot trade right now.", "Сейчас обмен невозможен.", false);
+        }
+        tig_debug_printf("CoopMiddle: followers: exchange window with '%s' requested\n", name);
+        return true;
+    }
     if (pc == OBJ_HANDLE_NULL || target == pc || obj_field_int32_get(target, OBJ_F_TYPE) != OBJ_TYPE_PC
         || !coop_lite_is_teammate_pc(target) || inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
         return false;

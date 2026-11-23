@@ -25,6 +25,7 @@
 #include "game/timeevent.h"
 #include "game/ui.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/obj_pool.h"
 
 typedef enum GeneratedDialog {
@@ -1541,8 +1542,9 @@ bool sub_4150D0(DialogState* a1, char* a2)
                         node = node->next;
                     }
                     object_list_destroy(&followers);
-                    if (node == NULL) {
-                        return false;
+                    if (node == NULL
+                        && coop_middle_find_party_item(a1->pc_obj, value, COOP_QITEM_MATCH_NAME, NULL) == OBJ_HANDLE_NULL) {
+                        return false; /* Coop Middle M4: or a nearby player's pack */
                     }
                 }
             }
@@ -1705,6 +1707,9 @@ bool sub_4150D0(DialogState* a1, char* a2)
                 object_list_destroy(&followers);
                 if (node != NULL) {
                     return false;
+                }
+                if (coop_middle_find_party_item(a1->pc_obj, value, COOP_QITEM_MATCH_NAME, NULL) != OBJ_HANDLE_NULL) {
+                    return false; /* Coop Middle M4 */
                 }
             }
             break;
@@ -2016,6 +2021,7 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
             int64_t item_obj;
             int64_t substitute_inventory_obj;
             int64_t parent_obj;
+            int64_t quest_owner = OBJ_HANDLE_NULL;
 
             if (value < 0) {
                 value = -value;
@@ -2050,6 +2056,10 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
                     }
                     object_list_destroy(&followers);
                 }
+                if (item_obj == OBJ_HANDLE_NULL) {
+                    /* Coop Middle M4: a nearby player's pack (host, rule on) */
+                    item_obj = coop_middle_find_party_item(a1->pc_obj, value, COOP_QITEM_MATCH_NAME, &quest_owner);
+                }
 
                 if (item_obj != OBJ_HANDLE_NULL) {
                     item_transfer(item_obj, a1->npc_obj);
@@ -2061,6 +2071,9 @@ bool sub_415BA0(DialogState* a1, char* a2, int a3)
                         } else {
                             object_destroy(item_obj);
                         }
+                    }
+                    if (quest_owner != OBJ_HANDLE_NULL && quest_owner != a1->pc_obj) {
+                        coop_middle_quest_handed_over(quest_owner);
                     }
                 }
             }

@@ -30,6 +30,7 @@
 #include "game/reputation.h"
 #include "game/rumor.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/script_name.h"
 #include "game/scroll.h"
 #include "game/sector.h"
@@ -899,7 +900,8 @@ int script_execute_condition(ScriptCondition* condition, int line, ScriptState* 
         name = script_get_value(condition->op_type[1], condition->op_value[1], state);
         matched = 0;
         for (index = 0; index < cnt; index++) {
-            if (item_find_by_name(objs[index], name) != OBJ_HANDLE_NULL) {
+            /* Coop Middle M4: a party PC also "has" what a nearby player carries. */
+            if (coop_middle_find_party_item(objs[index], name, COOP_QITEM_MATCH_NAME, NULL) != OBJ_HANDLE_NULL) {
                 matched++;
             }
         }
@@ -1908,9 +1910,13 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
         int name = script_get_value(action->op_type[0], action->op_value[0], state);
         int64_t from_obj = script_get_obj(action->op_type[1], action->op_value[1], state);
         int64_t to_obj = script_get_obj(action->op_type[2], action->op_value[2], state);
-        int64_t item_obj = item_find_by_name(from_obj, name);
+        int64_t quest_owner = OBJ_HANDLE_NULL;
+        int64_t item_obj = coop_middle_find_party_item(from_obj, name, COOP_QITEM_MATCH_NAME, &quest_owner); /* Coop Middle M4 */
         if (item_obj != OBJ_HANDLE_NULL) {
             item_transfer(item_obj, to_obj);
+            if (quest_owner != OBJ_HANDLE_NULL && quest_owner != from_obj) {
+                coop_middle_quest_handed_over(quest_owner);
+            }
         }
         return NEXT;
     }
@@ -2746,9 +2752,13 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
     case SAT_DESTROY_ITEM_NAMED: {
         int name = script_get_value(action->op_type[0], action->op_value[0], state);
         int64_t obj = script_get_obj(action->op_type[1], action->op_value[1], state);
-        int64_t item_obj = item_find_by_name(obj, name);
+        int64_t quest_owner = OBJ_HANDLE_NULL;
+        int64_t item_obj = coop_middle_find_party_item(obj, name, COOP_QITEM_MATCH_NAME, &quest_owner); /* Coop Middle M4 */
         if (item_obj != OBJ_HANDLE_NULL) {
             object_destroy(item_obj);
+            if (quest_owner != OBJ_HANDLE_NULL && quest_owner != obj) {
+                coop_middle_quest_handed_over(quest_owner);
+            }
         }
         return NEXT;
     }

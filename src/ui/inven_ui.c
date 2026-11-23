@@ -1048,7 +1048,8 @@ bool inven_ui_create(int64_t pc_obj, int64_t target_obj, int mode)
     dword_681440 = -1;
 
     if (inven_ui_mode == INVEN_UI_MODE_BARTER
-        && critter_leader_get(qword_682C78) == pc_obj) {
+        && (critter_leader_get(qword_682C78) == pc_obj
+            || coop_middle_shared_follower_ok(pc_obj, qword_682C78))) { /* Coop Middle M4 */
         dword_6810FC = 1;
         if (critter_follower_next(qword_682C78) != qword_682C78) {
             button_data.flags = TIG_BUTTON_MOMENTARY;

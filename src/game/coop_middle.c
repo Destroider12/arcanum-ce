@@ -220,6 +220,9 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
     case COOP_MID_CHAT_PAUSE_DROP:
         snprintf(out, sz, ru ? "[Кооп] %s отключился - пауза снята." : "[Co-op] %s left - pause lifted.", who);
         break;
+    case COOP_MID_CHAT_QUEST:
+        snprintf(out, sz, ru ? "[Квест] %s передан из рюкзака %s" : "[Quest] %s handed over from %s", what, who);
+        break;
     default:
         out[0] = '\0';
         break;
@@ -540,6 +543,106 @@ bool coop_middle_ping_valid(const PacketCoopPing* pkt, int size)
         && pkt->kind >= 0 && pkt->kind <= COOP_PING_KIND_MAX && pkt->slot >= 0 && pkt->slot < 8;
 }
 
+/* ---- M4 pure ---- */
+
+bool coop_middle_quest_pocket_eligible(bool rule_on, bool is_host, int asker_slot, int ally_slot, bool ally_active,
+    bool ally_dead, bool same_map, int dist)
+{
+    return rule_on && is_host && asker_slot >= 0 && asker_slot < 8 && ally_slot >= 0 && ally_slot < 8
+        && ally_slot != asker_slot && ally_active && !ally_dead && same_map && dist >= 0
+        && dist <= COOP_SHARED_QUEST_RADIUS;
+}
+
+int coop_middle_quest_item_rank(int inventory_location)
+{
+    if (inventory_location >= 0 && inventory_location < 1000) {
+        return 0;
+    }
+    if (inventory_location >= 1000 && inventory_location <= 1008) {
+        return 1;
+    }
+    return -1;
+}
+
+bool coop_middle_townmap_fog_valid(const PacketCoopTownmapFog* pkt, int size)
+{
+    if (pkt == NULL || size < COOP_TOWNMAP_FOG_HDR || size > (int)sizeof(PacketCoopTownmapFog)
+        || pkt->type != PACKET_COOP_TOWNMAP_FOG) {
+        return false;
+    }
+    if (pkt->townmap_id <= 0 || pkt->len == 0 || pkt->len > COOP_TOWNMAP_FOG_CHUNK
+        || (pkt->flags & ~COOP_TOWNMAP_FOG_F_REPLACE) != 0) {
+        return false;
+    }
+    if (size < COOP_TOWNMAP_FOG_HDR + (int)pkt->len) {
+        return false;
+    }
+    return (uint64_t)pkt->offset + pkt->len <= COOP_TOWNMAP_FOG_MAX_BYTES;
+}
+
+int coop_middle_fog_merge(uint8_t* dst, const uint8_t* src, size_t len, bool replace)
+{
+    int opened = 0;
+    size_t i;
+
+    if (dst == NULL || src == NULL) {
+        return 0;
+    }
+    for (i = 0; i < len; i++) {
+        uint8_t now = replace ? src[i] : (uint8_t)(dst[i] | src[i]);
+        uint8_t fresh = (uint8_t)(now & ~dst[i]);
+
+        while (fresh != 0) {
+            opened += fresh & 1u;
+            fresh >>= 1;
+        }
+        dst[i] = now;
+    }
+    return opened;
+}
+
+uint32_t coop_middle_fnv1a(const uint8_t* data, size_t len)
+{
+    uint32_t h = 2166136261u;
+    size_t i;
+
+    for (i = 0; data != NULL && i < len; i++) {
+        h = (h ^ data[i]) * 16777619u;
+    }
+    return h;
+}
+
+int coop_middle_dialog_route(int viewer_slot, const bool active[8], int watch_slot, int recent_slot)
+{
+    if (active == NULL || viewer_slot < 0 || viewer_slot >= 8) {
+        return -1;
+    }
+    if (active[viewer_slot]) {
+        return viewer_slot;
+    }
+    if (watch_slot >= 0 && watch_slot < 8 && active[watch_slot]) {
+        return watch_slot;
+    }
+    if (active[0]) {
+        return 0;
+    }
+    if (recent_slot >= 1 && recent_slot < 8 && active[recent_slot]) {
+        return recent_slot;
+    }
+    return -1;
+}
+
+bool coop_middle_follower_access_ok(bool rule_on, bool is_leader, bool leader_in_party, bool alive, int dist)
+{
+    if (!alive) {
+        return false;
+    }
+    if (is_leader) {
+        return true;
+    }
+    return rule_on && leader_in_party && dist >= 0 && dist <= COOP_SHARED_FOLLOWER_RANGE;
+}
+
 #ifndef COOP_LITE_TEST_STUBS
 
 #include "game/combat.h"
@@ -554,11 +657,15 @@ bool coop_middle_ping_valid(const PacketCoopPing* pkt, int size)
 #include "game/obj_id.h"
 #include "game/object.h"
 #include "game/player.h"
+#include "game/proto.h"
+#include "game/sector.h"
 #include "game/stat.h"
+#include "game/townmap.h"
 #include "tig/debug.h"
 #include "tig/memory.h"
 #include "ui/mainmenu_ui.h"
 #include "ui/sleep_ui.h"
+#include "ui/wmap_ui.h"
 
 _Static_assert(COOP_MID_T_WEAPON == OBJ_TYPE_WEAPON && COOP_MID_T_AMMO == OBJ_TYPE_AMMO
         && COOP_MID_T_ARMOR == OBJ_TYPE_ARMOR && COOP_MID_T_GOLD == OBJ_TYPE_GOLD
@@ -577,6 +684,7 @@ static bool coop_mid_host_rules_ready;
 static CoopRules coop_mid_rx_rules;
 static bool coop_mid_rx_valid;
 static unsigned int coop_mid_now_ms;
+static unsigned int coop_fog_slot_pending; /* M4 host: town map fog REPLACE snapshot to these slots */
 
 /* Host: one rest request at a time. */
 static bool coop_rest_active;
@@ -628,8 +736,8 @@ const CoopRules* coop_middle_rules(void)
     }
     if (!coop_mid_host_rules_ready) {
         const char* env = coop_lite_env("ARCANUM_COOP_RULES");
-        char text[128];
-        char desc[256];
+        char text[160];
+        char desc[512];
         int used = coop_rules_parse_env(&coop_mid_host_rules, env);
 
         coop_mid_host_rules_ready = true;
@@ -730,6 +838,7 @@ void coop_middle_host_slot_synced(int slot)
     tig_net_send_app(&pkt, sizeof(pkt), slot);
     coop_rules_format_env(&pkt.rules, text, sizeof(text));
     tig_debug_printf("CoopMiddle: rules sent to slot %d: %s\n", slot, text);
+    coop_fog_slot_pending |= 1u << slot; /* M4: town map fog snapshot on the next fog tick */
     if (coop_rest_active && coop_rest_slot == slot) {
         coop_rest_active = false; /* a rejoin starts clean */
         coop_lite_mid_prompt(NULL);
@@ -742,8 +851,8 @@ void coop_middle_host_slot_synced(int slot)
 
 void coop_middle_handle_rules(PacketCoopRules* pkt)
 {
-    char text[128];
-    char line[256];
+    char text[160];
+    char line[512];
 
     if (!tig_net_is_active()) {
         return;
@@ -2046,6 +2155,383 @@ bool coop_middle_try_chat_command(int sender_slot, const char* text)
 
 /* ---- lifecycle ---- */
 
+/* ---- M4: shared quest items (host) ---- */
+
+static struct {
+    bool armed;
+    int64_t owner;
+    char item[64];
+} coop_qitem_last;
+
+static bool coop_qitem_match(int64_t item, int key, int mode)
+{
+    if (mode == COOP_QITEM_MATCH_PROTO) {
+        return sub_49B290(item) == key;
+    }
+    return obj_field_int32_get(item, OBJ_F_NAME) == key;
+}
+
+/* Backpack first, then worn (never the hidden / internal locations). */
+static int64_t coop_qitem_in_pack(int64_t pc, int key, int mode)
+{
+    int64_t best = OBJ_HANDLE_NULL;
+    int best_rank = 2;
+    int cnt;
+    int i;
+
+    cnt = obj_field_int32_get(pc, OBJ_F_CRITTER_INVENTORY_NUM);
+    for (i = 0; i < cnt; i++) {
+        int64_t item = obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        int rank;
+
+        if (item == OBJ_HANDLE_NULL || !coop_qitem_match(item, key, mode)) {
+            continue;
+        }
+        rank = coop_middle_quest_item_rank(item_inventory_location_get(item));
+        if (rank >= 0 && rank < best_rank) {
+            best = item;
+            best_rank = rank;
+            if (rank == 0) {
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+int64_t coop_middle_find_party_item(int64_t asker_pc, int proto_or_name_key, int match_mode, int64_t* owner_out)
+{
+    int64_t item;
+    int64_t asker_loc;
+    int asker_slot;
+    bool rule;
+    bool host;
+    int slot;
+
+    if (owner_out != NULL) {
+        *owner_out = OBJ_HANDLE_NULL;
+    }
+    coop_qitem_last.armed = false;
+    if (asker_pc == OBJ_HANDLE_NULL) {
+        return OBJ_HANDLE_NULL;
+    }
+    item = match_mode == COOP_QITEM_MATCH_NAME ? item_find_by_name(asker_pc, proto_or_name_key)
+                                               : coop_qitem_in_pack(asker_pc, proto_or_name_key, match_mode);
+    if (item != OBJ_HANDLE_NULL) {
+        if (owner_out != NULL) {
+            *owner_out = asker_pc;
+        }
+        return item;
+    }
+    host = coop_mid_session_host(); /* single player: vanilla lookup only */
+    rule = host && coop_middle_rule_on(COOP_RULE_SHARED_QUEST_ITEMS);
+    asker_slot = host ? coop_mid_slot_of(asker_pc) : -1;
+    if (!rule || !host || asker_slot < 0) {
+        return OBJ_HANDLE_NULL;
+    }
+    asker_loc = obj_field_int64_get(asker_pc, OBJ_F_LOCATION);
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t loc;
+        int64_t d;
+        bool dead;
+
+        if (slot == asker_slot || pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+        d = location_dist(asker_loc, loc);
+        dead = critter_is_dead(pc) || (obj_field_int32_get(pc, OBJ_F_FLAGS) & (OF_OFF | OF_DESTROYED)) != 0;
+        if (!coop_middle_quest_pocket_eligible(rule, host, asker_slot, slot,
+                slot == 0 || tig_net_client_is_active(slot), dead, coop_lite_loc_in_map(loc),
+                d >= 0 && d <= INT_MAX ? (int)d : -1)) {
+            continue;
+        }
+        item = coop_qitem_in_pack(pc, proto_or_name_key, match_mode);
+        if (item != OBJ_HANDLE_NULL) {
+            char name[128];
+
+            name[0] = '\0';
+            object_examine(item, pc, name);
+            coop_qitem_last.armed = true;
+            coop_qitem_last.owner = pc;
+            snprintf(coop_qitem_last.item, sizeof(coop_qitem_last.item), "%s", name[0] != '\0' ? name : "?");
+            if (owner_out != NULL) {
+                *owner_out = pc;
+            }
+            tig_debug_printf("CoopMiddle: quest item %d (mode %d) for slot %d found in slot %d's pack: '%s' (loc %d)\n",
+                proto_or_name_key, match_mode, asker_slot, slot, coop_qitem_last.item,
+                item_inventory_location_get(item));
+            return item;
+        }
+    }
+    return OBJ_HANDLE_NULL;
+}
+
+void coop_middle_quest_handed_over(int64_t owner_pc)
+{
+    char name[64];
+    int slot;
+
+    if (!coop_qitem_last.armed || owner_pc == OBJ_HANDLE_NULL || coop_qitem_last.owner != owner_pc
+        || !coop_mid_session_host()) {
+        return;
+    }
+    coop_qitem_last.armed = false;
+    slot = coop_mid_slot_of(owner_pc);
+    if (slot > 0) {
+        coop_lite_host_sync_slot_inven(slot);
+    }
+    coop_mid_pc_name(slot >= 0 ? slot : 0, owner_pc, name, sizeof(name));
+    tig_debug_printf("CoopMiddle: quest item '%s' handed over from slot %d (%s)\n", coop_qitem_last.item, slot, name);
+    coop_mid_sys_line(COOP_MID_CHAT_QUEST, slot >= 0 ? slot : 0, name, coop_qitem_last.item, -1, -1);
+}
+
+/* ---- M4: shared followers ---- */
+
+bool coop_middle_shared_follower_ok(int64_t pc, int64_t npc)
+{
+    int64_t leader;
+    int64_t d;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled() || pc == OBJ_HANDLE_NULL || npc == OBJ_HANDLE_NULL
+        || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC || coop_mid_slot_of(pc) < 0) {
+        return false;
+    }
+    leader = critter_leader_get(npc);
+    if (leader == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    d = location_dist(obj_field_int64_get(pc, OBJ_F_LOCATION), obj_field_int64_get(npc, OBJ_F_LOCATION));
+    return coop_middle_follower_access_ok(coop_middle_rule_on(COOP_RULE_SHARED_FOLLOWERS), leader == pc,
+        coop_mid_slot_of(leader) >= 0, !critter_is_dead(npc) && !critter_is_dead(pc),
+        d >= 0 && d <= INT_MAX ? (int)d : -1);
+}
+
+/* ---- M4: town map fog ---- */
+
+static int coop_fog_tm; /* the local PC's town map, 0 = none */
+static int coop_fog_synced_tm; /* client: the host's first packet for this town map arrived */
+static uint8_t* coop_fog_shadow; /* what was last sent / received */
+static int coop_fog_shadow_size;
+static uint32_t coop_fog_sig;
+static bool coop_fog_have_ms;
+static unsigned int coop_fog_ms;
+static bool coop_fog_resend_all; /* host: REPLACE snapshot to everyone */
+static unsigned int coop_fog_log_ms;
+
+static void coop_fog_forget(void)
+{
+    if (coop_fog_shadow != NULL) {
+        FREE(coop_fog_shadow);
+        coop_fog_shadow = NULL;
+    }
+    coop_fog_shadow_size = 0;
+    coop_fog_sig = 0;
+    coop_fog_tm = 0;
+}
+
+static void coop_fog_reset(void)
+{
+    coop_fog_forget();
+    coop_fog_synced_tm = 0;
+    coop_fog_have_ms = false;
+    coop_fog_resend_all = false;
+    coop_fog_slot_pending = 0;
+}
+
+static int coop_fog_local_townmap(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+
+    if (pc == OBJ_HANDLE_NULL || !map_is_valid() || map_is_clearing_objects()) {
+        return 0;
+    }
+    return townmap_get(sector_id_from_loc(obj_field_int64_get(pc, OBJ_F_LOCATION)));
+}
+
+/* to_slot: >= 1 one client, -1 every client but `except`; a client always
+   sends to the host. */
+static void coop_fog_send(int to_slot, int except, int tm, const uint8_t* buf, int size, bool replace, int only_off)
+{
+    PacketCoopTownmapFog pkt;
+    int off;
+    int depth;
+
+    depth = tig_net_local_suspend_pause();
+    for (off = 0; off < size; off += COOP_TOWNMAP_FOG_CHUNK) {
+        int len = size - off < COOP_TOWNMAP_FOG_CHUNK ? size - off : COOP_TOWNMAP_FOG_CHUNK;
+        int n;
+        int s;
+
+        if (only_off >= 0 && off != only_off) {
+            continue;
+        }
+        memset(&pkt, 0, COOP_TOWNMAP_FOG_HDR);
+        pkt.type = PACKET_COOP_TOWNMAP_FOG;
+        pkt.townmap_id = tm;
+        pkt.offset = (uint32_t)off;
+        pkt.len = (uint16_t)len;
+        pkt.flags = replace ? COOP_TOWNMAP_FOG_F_REPLACE : 0;
+        memcpy(pkt.data, buf + off, (size_t)len);
+        n = COOP_TOWNMAP_FOG_HDR + len;
+        if (!tig_net_is_host()) {
+            tig_net_send_app_all(&pkt, n);
+        } else if (to_slot >= 1 && to_slot < 8) {
+            tig_net_send_app(&pkt, n, to_slot);
+        } else {
+            for (s = 1; s < 8; s++) {
+                if (s != except && tig_net_client_is_active(s)) {
+                    tig_net_send_app(&pkt, n, s);
+                }
+            }
+        }
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static void coop_fog_shadow_take(const uint8_t* buf, int size)
+{
+    if (coop_fog_shadow == NULL || coop_fog_shadow_size != size) {
+        if (coop_fog_shadow != NULL) {
+            FREE(coop_fog_shadow);
+        }
+        coop_fog_shadow = (uint8_t*)MALLOC((size_t)size);
+        coop_fog_shadow_size = size;
+    }
+    memcpy(coop_fog_shadow, buf, (size_t)size);
+    coop_fog_sig = coop_middle_fnv1a(buf, (size_t)size);
+}
+
+static void coop_fog_tick(unsigned int now_ms)
+{
+    uint8_t* buf;
+    uint32_t sig;
+    bool host;
+    int size;
+    int tm;
+    int off;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()
+        || !coop_middle_rate_admit(&coop_fog_have_ms, &coop_fog_ms, now_ms, COOP_TOWNMAP_FOG_TICK_MS)) {
+        return;
+    }
+    host = tig_net_is_host();
+    tm = coop_fog_local_townmap();
+    if (tm != coop_fog_tm) {
+        coop_fog_forget();
+        coop_fog_tm = tm;
+        if (host && tm > 0) {
+            coop_fog_resend_all = true;
+        }
+    }
+    if (tm <= 0) {
+        return;
+    }
+    buf = townmap_coop_fog(tm, &size);
+    if (buf == NULL || size <= 0) {
+        return;
+    }
+    if (host) {
+        if (coop_fog_resend_all) {
+            coop_fog_resend_all = false;
+            coop_fog_slot_pending = 0;
+            coop_fog_send(-1, -1, tm, buf, size, true, -1);
+            coop_fog_shadow_take(buf, size);
+            tig_debug_printf("CoopMiddle: town map %d fog snapshot sent to everyone (%d bytes)\n", tm, size);
+            return;
+        }
+        if (coop_fog_slot_pending != 0) {
+            int s;
+
+            for (s = 1; s < 8; s++) {
+                if ((coop_fog_slot_pending & (1u << s)) != 0 && tig_net_client_is_active(s)) {
+                    coop_fog_send(s, -1, tm, buf, size, true, -1);
+                    tig_debug_printf("CoopMiddle: town map %d fog snapshot sent to slot %d (%d bytes)\n", tm, s, size);
+                }
+            }
+            coop_fog_slot_pending = 0;
+        }
+    } else if (coop_fog_synced_tm != tm) {
+        /* Not before the host's first packet for this town map. */
+        coop_fog_shadow_take(buf, size);
+        return;
+    }
+    if (coop_fog_shadow == NULL || coop_fog_shadow_size != size) {
+        coop_fog_shadow_take(buf, size);
+        return;
+    }
+    sig = coop_middle_fnv1a(buf, (size_t)size);
+    if (sig == coop_fog_sig) {
+        return;
+    }
+    for (off = 0; off < size; off += COOP_TOWNMAP_FOG_CHUNK) {
+        int len = size - off < COOP_TOWNMAP_FOG_CHUNK ? size - off : COOP_TOWNMAP_FOG_CHUNK;
+
+        if (memcmp(buf + off, coop_fog_shadow + off, (size_t)len) != 0) {
+            coop_fog_send(-1, -1, tm, buf, size, false, off);
+        }
+    }
+    coop_fog_shadow_take(buf, size);
+}
+
+void coop_middle_handle_townmap_fog(PacketCoopTownmapFog* pkt)
+{
+    uint8_t* buf;
+    bool host;
+    bool replace;
+    int sender = -1;
+    int size;
+    int opened;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return;
+    }
+    if (!coop_middle_townmap_fog_valid(pkt, tig_net_last_message_size())) {
+        tig_debug_printf("CoopMiddle: town map fog packet dropped (size %d)\n", tig_net_last_message_size());
+        return;
+    }
+    host = tig_net_is_host();
+    replace = (pkt->flags & COOP_TOWNMAP_FOG_F_REPLACE) != 0;
+    if (host) {
+        sender = sub_52A530();
+        if (sender < 1 || sender >= 8) {
+            return;
+        }
+        replace = false; /* clients only ever add bits */
+    }
+    buf = townmap_coop_fog(pkt->townmap_id, &size);
+    if (buf == NULL || (int64_t)pkt->offset + pkt->len > size) {
+        return;
+    }
+    opened = coop_middle_fog_merge(buf + pkt->offset, pkt->data, pkt->len, replace);
+    if (opened > 0 || replace) {
+        townmap_coop_fog_touched();
+    }
+    if (pkt->townmap_id == coop_fog_tm && coop_fog_shadow != NULL && coop_fog_shadow_size == size) {
+        /* Received bits are not ours to send back. */
+        memcpy(coop_fog_shadow + pkt->offset, buf + pkt->offset, pkt->len);
+        coop_fog_sig = coop_middle_fnv1a(coop_fog_shadow, (size_t)size);
+    }
+    if (!host && coop_fog_synced_tm != pkt->townmap_id) {
+        coop_fog_synced_tm = pkt->townmap_id;
+        tig_debug_printf("CoopMiddle: town map %d fog synced from the host\n", pkt->townmap_id);
+    }
+    if (host && opened > 0) {
+        coop_fog_send(-1, sender, pkt->townmap_id, buf, (int)(pkt->offset + pkt->len), false, (int)pkt->offset);
+    }
+    if (opened > 0) {
+        if (coop_fog_log_ms == 0 || (unsigned int)(coop_mid_now_ms - coop_fog_log_ms) >= 10000u) {
+            coop_fog_log_ms = coop_mid_now_ms != 0 ? coop_mid_now_ms : 1;
+            tig_debug_printf("CoopMiddle: town map %d fog: %d tile(s) opened by %s\n", pkt->townmap_id, opened,
+                host ? "a client" : "the party");
+        }
+        if (wmap_ui_is_town_mode()) {
+            wmap_ui_coop_town_refresh();
+        }
+    }
+}
+
 void coop_middle_session_reset(void)
 {
     int i;
@@ -2074,6 +2560,8 @@ void coop_middle_session_reset(void)
     memset(coop_ping_have, 0, sizeof(coop_ping_have));
     memset(coop_dmg_rem, 0, sizeof(coop_dmg_rem));
     coop_dmg_logged = false;
+    coop_qitem_last.armed = false; /* M4 */
+    coop_fog_reset();
 }
 
 void coop_middle_slot_gone(int slot)
@@ -2114,6 +2602,13 @@ void coop_middle_map_changed(void)
     coop_pings_clear();
     memset(coop_dmg_rem, 0, sizeof(coop_dmg_rem));
     coop_dmg_logged = false;
+    /* M4: the host re-sends its town map fog; a client waits for it. */
+    coop_fog_forget();
+    coop_fog_synced_tm = 0;
+    coop_fog_have_ms = false;
+    if (coop_mid_session_host()) {
+        coop_fog_resend_all = true;
+    }
 }
 
 static void (*coop_mid_ui_tick)(unsigned int now_ms);
@@ -2134,6 +2629,7 @@ void coop_middle_tick(unsigned int now_ms)
     if (tig_net_is_active() && !tig_net_is_host() && tig_net_is_coop_enabled()) {
         coop_status_client_tick(now_ms);
     }
+    coop_fog_tick(now_ms); /* M4, both sides */
     if (!coop_mid_session_host()) {
         return;
     }
@@ -2189,6 +2685,19 @@ int coop_middle_slot_of_pc(int64_t obj) { (void)obj; return -1; }
 void coop_middle_host_slot_synced(int slot) { (void)slot; }
 void coop_middle_slot_gone(int slot) { (void)slot; }
 void coop_middle_map_changed(void) { }
+int64_t coop_middle_find_party_item(int64_t asker_pc, int proto_or_name_key, int match_mode, int64_t* owner_out)
+{
+    (void)asker_pc;
+    (void)proto_or_name_key;
+    (void)match_mode;
+    if (owner_out != NULL) {
+        *owner_out = 0;
+    }
+    return 0;
+}
+void coop_middle_quest_handed_over(int64_t owner_pc) { (void)owner_pc; }
+void coop_middle_handle_townmap_fog(PacketCoopTownmapFog* pkt) { (void)pkt; }
+bool coop_middle_shared_follower_ok(int64_t pc, int64_t npc) { (void)pc; (void)npc; return false; }
 void coop_middle_handle_rules(PacketCoopRules* pkt) { (void)pkt; }
 bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt) { (void)pkt; return false; }
 bool coop_middle_client_rest_ask(int mode) { (void)mode; return false; }

@@ -37,5 +37,10 @@ bool townmap_mark_visited(int64_t loc);
 bool townmap_set_known(int map, bool known);
 bool townmap_tile_blit_info(int map, int index, TigVideoBufferBlitInfo* vb_blit_info);
 bool townmap_is_waitable(int map);
+/* Coop Middle M4: the known-tile bit array of a town map (loaded on demand,
+   NULL when the map has none); call _touched after writing into it so the
+   next flush saves it. */
+uint8_t* townmap_coop_fog(int map, int* size_out);
+void townmap_coop_fog_touched(void);
 
 #endif /* ARCANUM_GAME_TOWNMAP_H_ */

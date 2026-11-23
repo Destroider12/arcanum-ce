@@ -8,6 +8,8 @@
  * Coop Middle M3 (protocol 55): shared tactical pause, enemy damage / XP
  * scaling, no party friendly fire, map pings (PACKET_COOP_PING), /tp
  * /stuck /gather.
+ * Coop Middle M4 (protocol 56): shared quest items, town map fog sync
+ * (PACKET_COOP_TOWNMAP_FOG), parallel dialogs, shared followers.
  *
  * All Middle logic lives in coop_middle.c (and coop_rules.c). coop_lite.c and
  * the engine files only call the hooks below, so Coop Lite bugfixes merge in
@@ -72,7 +74,8 @@ extern "C" {
 #define COOP_MID_CHAT_REGROUP 6 /* M3: name = player, text = "0" (/tp, /stuck) or "1" (/gather) */
 #define COOP_MID_CHAT_CMD_REFUSE 7 /* M3: name = "", text = "reason seconds" (COOP_TP_REFUSE_*) */
 #define COOP_MID_CHAT_PAUSE_DROP 8 /* M3: name = the pauser who left, text = "-" */
-#define COOP_MID_CHAT_KIND_MAX 8
+#define COOP_MID_CHAT_QUEST 9 /* M4: name = owner, text = item */
+#define COOP_MID_CHAT_KIND_MAX 9
 
 /* M3 chat commands (pure parse; the host runs them, never relayed). */
 #define COOP_CMD_NONE 0
@@ -225,6 +228,63 @@ int coop_middle_cooldown_left_s(bool have_last, unsigned int last_ms, unsigned i
 /* M3: PACKET_COOP_PING wire check: exact size, type, kind, slot 0..7. */
 bool coop_middle_ping_valid(const PacketCoopPing* pkt, int size);
 
+/* ---- M4 ---- */
+
+/* Shared quest items: radius around the asker, in tiles. */
+#define COOP_SHARED_QUEST_RADIUS 30
+#define COOP_QITEM_MATCH_NAME 0 /* OBJ_F_NAME (dialog "in"/"ni", script "has item named") */
+#define COOP_QITEM_MATCH_PROTO 1 /* prototype number */
+/* M4: may the asker's quest check look into this ally's pack? Host only,
+   rule on, another live, connected, living slot on the same map within
+   COOP_SHARED_QUEST_RADIUS (dist < 0 = unknown = no). */
+bool coop_middle_quest_pocket_eligible(bool rule_on, bool is_host, int asker_slot, int ally_slot, bool ally_active,
+    bool ally_dead, bool same_map, int dist);
+/* M4: preference of an item at inventory location loc in an ally's pack:
+   0 = backpack (loc < 1000), 1 = worn (1000..1008), -1 = not usable. */
+int coop_middle_quest_item_rank(int inventory_location);
+
+/* M4 town map fog: the town map's known-tile bit array (townmap.c kstate,
+   saved as Save/Current/<name>.tmf), in chunks. */
+#define PACKET_COOP_TOWNMAP_FOG 169
+#define COOP_TOWNMAP_FOG_CHUNK 1024
+#define COOP_TOWNMAP_FOG_F_REPLACE 0x1 /* host -> client snapshot: overwrite, not OR */
+#define COOP_TOWNMAP_FOG_MAX_BYTES 65536 /* sanity cap on offset + len */
+#define COOP_TOWNMAP_FOG_TICK_MS 1500u
+typedef struct PacketCoopTownmapFog {
+    /* 0000 */ int type;
+    /* 0004 */ int townmap_id;
+    /* 0008 */ uint32_t offset;
+    /* 000C */ uint16_t len; /* <= COOP_TOWNMAP_FOG_CHUNK */
+    /* 000E */ uint16_t flags;
+    /* 0010 */ uint8_t data[COOP_TOWNMAP_FOG_CHUNK];
+} PacketCoopTownmapFog;
+_Static_assert(offsetof(PacketCoopTownmapFog, townmap_id) == 0x04, "PacketCoopTownmapFog.townmap_id");
+_Static_assert(offsetof(PacketCoopTownmapFog, offset) == 0x08, "PacketCoopTownmapFog.offset");
+_Static_assert(offsetof(PacketCoopTownmapFog, len) == 0x0C, "PacketCoopTownmapFog.len");
+_Static_assert(offsetof(PacketCoopTownmapFog, flags) == 0x0E, "PacketCoopTownmapFog.flags");
+_Static_assert(offsetof(PacketCoopTownmapFog, data) == 0x10, "PacketCoopTownmapFog.data");
+_Static_assert(sizeof(PacketCoopTownmapFog) == 0x10 + COOP_TOWNMAP_FOG_CHUNK, "PacketCoopTownmapFog size");
+#define COOP_TOWNMAP_FOG_HDR ((int)offsetof(PacketCoopTownmapFog, data))
+/* Wire check: header + len bytes (size may be the full struct), type,
+   townmap_id > 0, len 1..CHUNK, known flags, offset + len within the cap. */
+bool coop_middle_townmap_fog_valid(const PacketCoopTownmapFog* pkt, int size);
+/* dst |= src (or dst = src with replace); returns the bits newly set in
+   dst (replace: bits set now that were clear before). */
+int coop_middle_fog_merge(uint8_t* dst, const uint8_t* src, size_t len, bool replace);
+/* FNV-1a 32 over len bytes (fog change signature). */
+uint32_t coop_middle_fnv1a(const uint8_t* data, size_t len);
+
+/* M4 parallel dialogs: which session (= owner slot) a viewer gets.
+   active[s]: slot s's session is open (0 = the host's own dialog).
+   Own session first, then the attached one (watch), then the host's, then
+   the most recent client session; -1 = nothing to show. */
+int coop_middle_dialog_route(int viewer_slot, const bool active[8], int watch_slot, int recent_slot);
+
+/* M4 shared followers: may `slot` manage / barter with a follower?
+   The leader always may; with the rule, any party player within range. */
+#define COOP_SHARED_FOLLOWER_RANGE 6
+bool coop_middle_follower_access_ok(bool rule_on, bool is_leader, bool leader_in_party, bool alive, int dist);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -311,6 +371,18 @@ int coop_middle_host_enemy_damage(int64_t target, int dam);
 /* True: this hit is party on party with the rule on (zero it, no aggro). */
 bool coop_middle_host_ff_block(int64_t attacker, int64_t target);
 int coop_middle_host_scale_xp(int xp);
+
+/* M4 shared quest items (host). Looks for the item in the asker's pack,
+   then in eligible allies' packs (backpack before worn). *owner_out gets
+   the pack it was found in. Remembers an ally hit for _handed_over. */
+int64_t coop_middle_find_party_item(int64_t asker_pc, int proto_or_name_key, int match_mode, int64_t* owner_out);
+/* After a remove / transfer of the item found in owner_pc (an ally):
+   resync that player's pack and say "[Quest] <item> handed over from <owner>". */
+void coop_middle_quest_handed_over(int64_t owner_pc);
+/* M4 town map fog. */
+void coop_middle_handle_townmap_fog(PacketCoopTownmapFog* pkt);
+/* M4 shared followers (both sides; rules as the host sent them). */
+bool coop_middle_shared_follower_ok(int64_t pc, int64_t npc);
 
 /* M3 pings. */
 void coop_middle_handle_ping(PacketCoopPing* pkt);

@@ -53,7 +53,7 @@ extern "C" {
 #define PACKET_COOP_PROJECTILE_FX 164 /* PT77z: host -> clients missile flight visual */
 #define PACKET_COOP_AREA_KNOWN 165 /* PT78: known world-map areas, both ways (union) */
 #define PACKET_COOP_NPC_STATS 166 /* PT79: host party-follower build (level, stats, hp/fatigue pts) -> clients */
-#define PACKET_COOP_TYPE_LIMIT 169 /* exclusive upper bound (168 = Coop Middle M3 PACKET_COOP_PING) */
+#define PACKET_COOP_TYPE_LIMIT 170 /* exclusive upper bound (168 = M3 PACKET_COOP_PING, 169 = M4 PACKET_COOP_TOWNMAP_FOG) */
 
 /* PC position broadcast interval (ms). */
 #define COOP_LITE_PC_POS_INTERVAL_MS 33u /* PT31: was 50; finer sampling of the engine's steps */
@@ -700,6 +700,9 @@ void coop_lite_area_session_reset(void); /* PT79 */
 /* PT79 (review 1.4): a party follower's base build as the host has it
    (levelled NPCs: max hp, carry weight, portrait). Host -> clients. */
 #define COOP_NPC_STATS_COUNT 28 /* STAT_COUNT */
+#define COOP_NPC_BASIC_SKILLS 12 /* BASIC_SKILL_COUNT */
+#define COOP_NPC_TECH_SKILLS 4 /* TECH_SKILL_COUNT */
+#define COOP_NPC_SPELL_TECH 16 /* COLLEGE_COUNT: spell college levels (M4 spec) */
 typedef struct PacketCoopNpcStats {
     /* 0000 */ int type;
     /* 0004 */ int reserved;
@@ -709,8 +712,16 @@ typedef struct PacketCoopNpcStats {
     /* 0094 */ int hp_adj;
     /* 0098 */ int fatigue_pts;
     /* 009C */ int fatigue_adj;
+    /* Coop Middle M4 (protocol 56): the follower's skills, so a client's
+       character sheet / skill checks match the host. */
+    /* 00A0 */ int32_t basic_skills[COOP_NPC_BASIC_SKILLS]; /* OBJ_F_CRITTER_BASIC_SKILL_IDX */
+    /* 00D0 */ int32_t tech_skills[COOP_NPC_TECH_SKILLS]; /* OBJ_F_CRITTER_TECH_SKILL_IDX */
+    /* 00E0 */ int32_t spell_tech[COOP_NPC_SPELL_TECH]; /* OBJ_F_CRITTER_SPELL_TECH_IDX */
 } PacketCoopNpcStats;
-COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0xA0, "PacketCoopNpcStats size");
+COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, basic_skills) == 0xA0, "PacketCoopNpcStats.basic_skills");
+COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, tech_skills) == 0xD0, "PacketCoopNpcStats.tech_skills");
+COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, spell_tech) == 0xE0, "PacketCoopNpcStats.spell_tech");
+COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0x120, "PacketCoopNpcStats size");
 bool coop_lite_npc_stats_valid(const PacketCoopNpcStats* pkt, int size);
 void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt);
 
@@ -1949,7 +1960,7 @@ bool coop_lite_party_choose_ok(int speaker, int slot, unsigned int line, unsigne
     int num_options);
 /* Client: story NPC talk -> START to the host. true: handled (sent or rate-limited). */
 bool coop_lite_client_party_talk(int64_t npc_obj, int64_t pc_obj);
-/* Host: the client PC running a party dialog, OBJ_HANDLE_NULL when none. */
+/* Host: the client PC whose party dialog step runs now, OBJ_HANDLE_NULL when none. */
 int64_t coop_lite_party_dialog_pc(void);
 /* PT80 host: the party dialog speaker picked "let's trade" with its own follower. */
 void coop_lite_party_dialog_exchange(int64_t pc_obj, int64_t npc_obj);
@@ -1960,7 +1971,7 @@ void coop_lite_host_npc_party_end(int64_t pc_obj);
 /* PT80: a follower barter (exchange) is free; true when npc follows pc. */
 bool coop_lite_follower_exchange(int64_t pc_obj, int64_t npc_obj);
 void coop_lite_party_dialog_ended(int64_t pc_obj);
-void coop_lite_set_party_choose_hook(bool (*choose)(int option));
+void coop_lite_set_party_choose_hook(bool (*choose)(int slot, int option));
 /* Client viewer: leave the party dialog (speaker only). */
 bool coop_lite_client_dialog_leave(void);
 /* Bytes to put on the wire for `pkt` (header only for close / vote). */
@@ -1986,6 +1997,18 @@ void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt);
 void coop_lite_host_dialog_state(const char* npc_name, const char* reply, int num_options, const char* const* options);
 void coop_lite_host_dialog_closed(void);
 int coop_lite_host_dialog_vote_count(int option); /* votes shown next to an option */
+/* Coop Middle M4 parallel dialogs (host). The session of pc_obj (local PC
+   = 0, a client PC with a running party dialog = its slot) publishes. */
+void coop_lite_host_dialog_state_for(int64_t pc_obj, int64_t npc_obj, const char* npc_name, const char* reply,
+    int num_options, const char* const* options);
+/* Slot whose headless party dialog uses pc_obj, -1 none. */
+int coop_lite_dialog_party_slot(int64_t pc_obj);
+/* dialog_ui entry index for obj: a client PC's slot on the host, else 0. */
+int coop_lite_dialog_entry_slot(int64_t obj);
+/* The host clicked an NPC a client is talking to: true = now watching it. */
+bool coop_lite_host_dialog_npc_busy(int64_t npc_obj);
+/* Map change / load / reset: end every client session. */
+void coop_lite_dialog_sessions_close_all(bool end_entries);
 /* Client (viewer UI): vote for an option, again to clear. false: refused. */
 bool coop_lite_client_dialog_vote(int option);
 /* UI side registers: show/refresh the panel, close it, refresh the host's markers. */

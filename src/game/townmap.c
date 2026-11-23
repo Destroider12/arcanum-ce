@@ -594,6 +594,30 @@ void townmap_kstate_reset(void)
     townmap_kstate_map = 0;
 }
 
+/* Coop Middle M4 (fog sync, coop_middle.c). */
+uint8_t* townmap_coop_fog(int map, int* size_out)
+{
+    TownMapInfo tmi;
+
+    if (size_out != NULL) {
+        *size_out = 0;
+    }
+    /* A net-supplied id must name a real town map before kstate swaps. */
+    if (map == TOWNMAP_NONE || map < 0 || map > townmap_count() || !townmap_info(map, &tmi)
+        || !townmap_kstate_load(map) || townmap_kstate == NULL || townmap_kstate_map != map) {
+        return NULL;
+    }
+    if (size_out != NULL) {
+        *size_out = townmap_kstate_size;
+    }
+    return townmap_kstate;
+}
+
+void townmap_coop_fog_touched(void)
+{
+    townmap_kstate_modified = true;
+}
+
 /**
  * Internal helper that sets all tiles k-state to the specified value.
  *

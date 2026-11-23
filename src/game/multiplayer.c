@@ -1228,6 +1228,9 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_PING: /* Coop Middle M3 */
         coop_middle_handle_ping((PacketCoopPing*)msg);
         break;
+    case PACKET_COOP_TOWNMAP_FOG: /* Coop Middle M4 */
+        coop_middle_handle_townmap_fog((PacketCoopTownmapFog*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;
