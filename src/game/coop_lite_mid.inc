@@ -1846,7 +1846,16 @@ int64_t coop_lite_mid_pocket_find(int64_t pc, int name)
         }
         item = item_find_by_name(mate, name);
         if (item != OBJ_HANDLE_NULL) {
-            tig_debug_printf("CoopLite: MID quest pocket: item %d found on slot %d\n", name, slot);
+            static int last_name;
+            static unsigned int last_ms;
+            unsigned int now = coop_mid_now();
+
+            /* Scripts may ask every heartbeat: log a name once per 10 s. */
+            if (name != last_name || coop_lite_interval_elapsed(last_ms, now, 10000u)) {
+                last_name = name;
+                last_ms = now;
+                tig_debug_printf("CoopLite: MID quest pocket: item %d found on slot %d\n", name, slot);
+            }
             return item;
         }
     }

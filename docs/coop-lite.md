@@ -3781,3 +3781,243 @@ Tests: `tig_net_transport` checks the log budget (first 20, then every
 1000th). nbuild ctest 16/16, ASan ctest 16/16, win64 exe + launcher built.
 
 Not tested in play.
+
+## Coop Middle (protocol 53)
+
+The "middle" roadmap: party-play comfort features. Every item was checked
+against the code first; one was skipped (3c, reason below). Everything new
+rides two packets:
+
+- `PACKET_COOP_MID` 167 (0xA0 bytes, role BOTH): one multiplexed packet,
+  `op` + ints `a..d`, a location, an OID and a 96-byte text. The direction is
+  checked per op (`coop_lite_mid_op_ok`): RULES / LOOT / GOLD_SPLIT only
+  host -> client, GOLD_GIVE only client -> host, the rest both ways. A
+  client's packet is stamped with its real slot by the host; everything is
+  rate limited with the PT52k "act" bucket (STATUS excepted, it is tiny).
+- `PACKET_COOP_TOWNMAP` 168 (0x210 bytes, role BOTH): a town map's known
+  tile bits (up to 4096 tiles).
+- `PacketCoopNpcStats` grows by the follower's basic / tech skills and spell
+  colleges (0x144 bytes) - see 3d.
+
+The game-side code lives in `src/game/coop_lite_mid.inc` (included at the
+end of `coop_lite.c`, so it shares its statics); the overlay is
+`src/ui/coop_mid_ui.c`. Pure helpers are tested in `coop_lite_policy_test`
+(`test_coop_mid`).
+
+### Host rules (2d)
+
+`CoopRules { flags, hp_scale_pct, xp_mult_pct, tp_cooldown_s }`. The host
+reads `ARCANUM_COOP_RULES` ("key=value,...": `hp=0|35|50`, `xp=100|125|150`,
+`ff`, `gold`, `pause`, `rest`, `tp`, `tpconfirm`, `quest`, `fog`, `feed`,
+`pings` = 0/1, `tpcd` seconds; unknown keys ignored, values clamped). The
+defaults keep vanilla balance: friendly fire on, gold split off, client
+pause off, rest requests on, /tp on (30 s cooldown, no confirm), quest
+pocket / shared fog / loot feed / pings on, HP and XP unchanged.
+
+Rules go to each client in a RULES op on the first tick after its slot is
+active (not inside the tig_net WELCOME, so the transport core is untouched),
+and the client prints them once in the chat log (`/rules` repeats them).
+Both host and client write `lobby_rules.txt` next to `lobby_players.txt`;
+the launcher shows its first line under the player list. The launcher has
+a **Rules...** button (host settings, `[rules]` in
+`arcanum-coop-launcher.ini`) and passes them as `ARCANUM_COOP_RULES` when
+it starts a host.
+
+### 1a. Alt: loot labels
+
+Hold **Alt** in the main view: names over ground items, containers and dead
+NPCs that still carry something, within 18 tiles (max 48 labels). Purely
+local (`object_list_vicinity` + `object_examine`), nothing is sent. Drawn by
+the Coop Middle overlay (a second gamelib overlay; colour-keyed iso-sized
+buffer, re-rendered only when dirty, repainted ~10/s while shown). Alt alone
+does nothing in vanilla (it is only a modifier on clicks). Co-op sessions
+only (the overlay is driven by the co-op tick).
+
+### 1b. Loot feed
+
+Host, once a second: scans each present slot PC's pack; an item OID never
+seen before is classified (`coop_lite_loot_kind`): key, schematic (written
+subtype 5), quest item (`OIF_WONT_SELL` / `OIF_NO_DROP`), valuable (worth >=
+500); hidden (`OIF_NO_DISPLAY`) and gold are skipped. A new PC handle is a
+baseline (no lines for what it already carries). At most 4 lines per scan.
+The line `[Loot] Name picked up: X (key)` is sent as a LOOT op and printed
+by each receiver in its own language. OIDs are kept in a 4096-entry hash
+set (forgotten and re-baselined when 3/4 full). Rule `feed`.
+
+### 1c. Direct trade with a teammate
+
+**Ctrl+click** a teammate's PC or **right-click** their portrait (PT74
+column): opens the pickpocket window in "give" mode (`INVEN_UI_MODE_STEAL`
++ a flag). Dropping your item into their pack is the existing PT45/PT53
+gift (no roll, host-authoritative, both resynced); taking out of their
+pack is refused with a notice while the flag is set. Range 3 tiles. Quick
+gold: **`/gold N [name]`** (name prefix; no name = the only other player);
+the host moves the gold and everyone gets a `[Gold]` line.
+
+### 1d. Portrait marks
+
+Letters over the teammate portraits: **I** inventory/trade window open,
+**D** in a dialog (both reported by each player in a STATUS op, 4 bits per
+slot packed by the host, every change / 5 s), **C** combat mode, **P**
+poisoned, **Z** unconscious, **X** dead (computed locally from synced
+state; X hides the rest).
+
+### 1e. Rest vote
+
+A client's rest key (S / the sleep button) used to say "only the leader
+can rest". With rule `rest` it now asks the host (REST op, one ask per
+10 s, not in combat). The host gets a notice + chat line "X asks to rest.
+Y - rest, N - refuse"; **Y** opens the host's own rest window (the PT27
+host rest already heals hurt clients), **N** refuses; no answer in 30 s =
+refused. The answer is shown to the client.
+
+### 1f. Gold split
+
+Rule `gold` (off by default). Host only. Gold reaching a present party PC
+from the ground, a container, a corpse, or a dialog / script reward
+(`item_transfer_ex` of a gold object and `item_gold_transfer`, outermost
+call only) is queued and split on the next tick (never inside the
+transfer): every living present player gets `amount / n`, the finder keeps
+the remainder. Not split: merchants, pickpocketing a living NPC, gifts and
+trades between players. Everyone gets `[Gold] X found N - split k ways`.
+
+### 2a. Pings
+
+**Middle click** in the main view: a PING op (tile + map), at most one per
+second per player (host relay drops faster ones). Everyone on that map sees
+a pulsing ring in the pinger's colour for 5 s (host gold, then blue, green,
+pink, orange, violet, cyan, white), hears a soft click and gets a `[Ping]`
+chat line; the open town map shows a blinking dot (redrawn ~4/s while a
+ping is live). Rule `pings`.
+
+### 2b. Shared pause
+
+**Pause** key or `/pause`. The host toggles it; a client asks, allowed with
+rule `pause` (off by default). A PAUSE op tells everyone; each peer stops
+game and anim time in `timeevent_ping` (real time, UI, chat and network
+keep running) and shows a banner "PAUSED (name) - press Pause to resume".
+Refused while a travel / follow is pending; lifted by the host when a
+client joins, a travel starts or the host rests (those run on game time).
+
+### 2c. Difficulty
+
+- Enemy HP (`hp=35|50`): `object_hp_max` of every critter that is not a PC
+  or a PC's follower gets +pct per extra connected player (counted every
+  tick; same count on host and clients, so bars agree). Max HP moves when a
+  player joins / leaves; damage stays, so a wounded enemy can drop to <= 0
+  HP on a leave without dying until it is hit again (rare, acceptable).
+- XP (`xp=125|150`): applied in `coop_lite_host_share_xp` when XP is shared
+  with at least one teammate (a solo kill stays vanilla).
+- Area friendly fire (`ff=0`): `MTComponentDamage` skips a party member
+  (PC or follower) hit by a party caster's area spell when it is not the
+  spell's aimed target. Host only (damage is the host's).
+
+### 2e. /tp and /gather
+
+`/tp` (client): ask to be moved next to the host. Gate
+(`coop_lite_tp_gate`): rule `tp`, nobody involved in combat, per-player
+cooldown `tpcd` (default 30 s) or, with `tpconfirm`, the host's Y/N. The
+host answers with a TP op carrying `coop_lite_follow_loc_for_slot(host
+loc, slot)` and the map; the client moves its own PC (PC_POS carries it to
+everyone), so the host never fights the client's position. Different map =
+ignored (cross-map moves stay with the PT47 travel). `/gather` (host): the
+same for every client not in combat, plus a `[Gather]` line.
+
+### 2f. Net HUD
+
+**F9**: top-left line `Ping 42 ms | Loss 0 | Players 3 | Sync OK`. Ping /
+loss come from the ENet peer (`tig_net_peer_stats`, parsed from the PT
+diag peer description; host shows the worst client); Steam shows `-`.
+Sync = no travel / follow pending.
+
+### 3a. Shared quest pocket
+
+Rule `quest`. Host only. When a dialog or script checks / takes an item by
+name and the speaking PC (and its followers) do not have it, a living
+teammate within 25 tiles who carries it counts: dialog `IN` / `NI`
+conditions and the take action, script "has item named", "transfer item",
+"destroy item named". An item taken from a teammate resyncs that player's
+pack at once (INVEN_SYNC). Log `quest pocket: item N found on slot S` (at
+most once per 10 s per item).
+
+### 3b. Shared town map fog
+
+Rule `fog`. Each peer marks town map tiles for remote PCs moving in loaded
+sectors (object.c move path, the same `townmap_mark_visited` as the local
+PC). Every 2 s each peer sends the known-bit array of its current town map
+when it changed; the host ORs what it gets and re-sends the union to all.
+Bits are saved with the game as usual (k-state).
+
+### 3c. Parallel party dialogs per slot - skipped
+
+`dialog_ui` keeps one global `DialogUiEntry` (`sub_567420` ignores its
+argument), and the PT36 dialog view / vote protocol is single-instance on
+the host. Parallel dialogs would mean rewriting the story-dialog core that
+is stable now; the risk is not worth it. Unchanged: "(Another player is
+talking.)".
+
+### 3d. Followers
+
+- Skills: `PacketCoopNpcStats` now carries the 12 basic skills, 4 tech
+  skills and 25 spell / tech college values, so a client's character
+  window for its follower shows real numbers (values checked 0..255).
+- Own follower: a client's moves inside its follower's pack (equip slot <->
+  backpack in the exchange window, `from == to == npc`) are applied by the
+  host like the PC's own moves.
+- Sharing: `/share on|off` lets teammates trade with your followers. The
+  host keeps a mask per slot and broadcasts it (FOLLOWER_SHARE op). A
+  teammate Ctrl+clicks your follower: give/take window (steal mode) where
+  the host does a free exchange instead of the pickpocket roll; without
+  `/share on` the click shows a notice and nothing opens.
+
+### Keys and commands
+
+| Key / command | Action |
+| --- | --- |
+| hold **Alt** | loot / container names |
+| **middle click** | ping |
+| **Pause**, `/pause` | shared pause |
+| **F9** | net HUD |
+| **Y** / **N** | host: answer a rest / tp request |
+| **Ctrl+click** teammate, **right click** portrait | give window |
+| **Ctrl+click** teammate's follower | exchange (owner's `/share on`) |
+| `/tp`, `/gather` | move to the host / host gathers everyone |
+| `/gold N [name]` | give gold |
+| `/rules`, `/help`, `/share on\|off` | show rules, list commands, follower sharing |
+
+### New log lines
+
+`CoopLite: MID rules: ... (from ARCANUM_COOP_RULES|defaults)`,
+`MID rules sent to slot N`, `MID host rules: ...` (client),
+`MID loot slot N kind K: name`, `MID gold split slot N found A, S each to
+K player(s)`, `MID gold give slot A -> slot B: N`, `MID rest request sent`,
+`MID host answered rest|tp to slot N: yes|no`, `MID prompt expired`,
+`MID tp slot N -> x,y [(gather)]`, `MID tp own PC to x,y`, `MID tp ignored
+(no PC / other map)`, `MID ping slot=N at x,y map=M`, `MID pause on|off by
+slot N`, `MID pause lifted (travel / rest started)`, `MID net HUD on|off`,
+`MID area damage on a teammate skipped (friendly fire off)`, `MID quest
+pocket: ...`, `MID town map M: N byte(s) gained from a teammate`, `MID slot
+N follower share on|off`, `MID inven: slot N moves an item inside its
+follower's pack`, `MID host takes from|gives to a follower's pack`, `MID
+direct trade window opened|closed`, `MID chat command N`, `MID op N dropped
+(wrong direction)`, plus `[CHAT] [Loot] ...` / `[Gold]` / `[Ping]` /
+`[Pause]` / `[Gather]` lines.
+
+### Risks / not tested in play
+
+- Nothing here was played yet; native tests cover the pure helpers only.
+- Pause freezes anim time on every peer: anything that waits on animations
+  while paused waits until resume (travel and rest lift the pause).
+- HP scaling changes every enemy's max HP when the player count changes.
+- The overlay redraws the iso view ~10 times a second while Alt is held or
+  a ping is up (software renderer cost on big windows).
+- Gold split relies on the explicit transfer paths; a script that creates
+  gold in a pack some other way is not split.
+- The loot feed also announces a valuable item bought from a merchant
+  (it is new to that player).
+
+Tests: `coop_lite_policy_test` / `test_coop_mid` (rules parse / format /
+clamp, HP / XP math, packet sizes / ids / roles / validation, op
+directions, bit union, status packing / letters, loot classifier, chat
+commands, /tp gate, gold share, HUD format, NPC stats size). nbuild ctest
+16/16, win64 `arcanum-ce.exe` + launcher compile.
