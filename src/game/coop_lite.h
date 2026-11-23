@@ -1330,6 +1330,8 @@ bool coop_lite_should_carry_slot(int slot, int mover_slot, bool bound);
 #define COOP_PARTY_WMAP_CLOSE 15 /* PT26: host left the world map */
 #define COOP_PARTY_SKILL_FAILED 16 /* PT40: your pick lock / disarm attempt failed */
 #define COOP_PARTY_TALK_REFUSED 17 /* PT41: party dialog refused (leader too far / busy) */
+#define COOP_PARTY_PDLG_REFUSED 18 /* parallel dialogs: talk refused (too far / combat) */
+#define COOP_PARTY_PDLG_ENDED 19 /* parallel dialogs: your talk was ended (combat / too far / map) */
 
 /* Notice kinds shown as a green (good-news) float rather than red. */
 bool coop_lite_party_notice_is_good(int kind);
@@ -2071,7 +2073,8 @@ int coop_lite_handle_list_clear(int64_t* list, int n, int64_t h);
 #define COOP_RULE_SHARED_FOG 0x0080u /* town map fog shared between players */
 #define COOP_RULE_LOOT_FEED 0x0100u /* "[Loot] X picked up: Y" chat lines */
 #define COOP_RULE_PINGS 0x0200u /* middle-click pings */
-#define COOP_RULE_ALL 0x03FFu
+#define COOP_RULE_PDLG 0x0400u /* protocol 54: parallel (per-player) dialogs */
+#define COOP_RULE_ALL 0x07FFu
 
 typedef struct CoopRules {
     unsigned int flags;
@@ -2253,5 +2256,96 @@ bool coop_lite_mid_follower_trade_ok(int64_t pc, int64_t npc);
 /* Host's own give / take window on a follower it may exchange with: a plain
    transfer instead of the pickpocket roll (true = done here). */
 bool coop_lite_mid_host_follower_exchange(int64_t pc, int64_t npc, int64_t item, bool take);
+
+/* ---- Coop Middle: parallel dialogs (protocol 54) ------------------------
+ *
+ * With the host rule "pdlg" every player has an own dialog: the host keeps
+ * one engine dialog per slot (dialog_ui entry = slot), runs it with that
+ * slot's PC (its stats, quests, gold, reputation) and sends the lines /
+ * options only to that player (PACKET_COOP_DIALOG_STATE, votes[7] = speaker,
+ * votes[6] = COOP_DIALOG_FLAG_PDLG). A second player who talks to the SAME
+ * NPC joins that dialog as a spectator (PT36 view + votes, Esc leaves).
+ * The host's own dialog (slot 0) is shown only to such spectators. Without
+ * the rule the PT36 / PT41 single party dialog runs as before.
+ */
+#define COOP_DIALOG_ACT_UI 3 /* host -> speaker: CLOSE + open a window. Header + NPC OID (24 bytes in
+                                npc_name); votes[0] = dialog code (3 barter, 8 identify, 9 repair),
+                                votes[1] = 1 for the follower exchange, votes[7] = speaker 1..7 */
+#define COOP_DIALOG_FLAGS_AT 6 /* STATE open: votes[6] = flags */
+#define COOP_DIALOG_FLAG_PDLG 0x1u /* a private parallel dialog: spectators may leave with Esc */
+#define COOP_PDLG_MAX_DIST 12 /* tiles between the speaker and the NPC before the talk ends */
+
+/* Host: one dialog per speaking slot (0 = the host's own). */
+typedef struct CoopPdlgSession {
+    bool open; /* the engine dialog runs (entry = slot) */
+    bool pending; /* a start is sanctioned; the engine may open it */
+    bool end_pending; /* end from the tick (asked while its answer was being processed) */
+    int64_t pc;
+    int64_t npc;
+    unsigned int spectators; /* bit per client slot 1..7 */
+    unsigned int line; /* unique per published line (stale answers are refused) */
+    int map;
+    int close_action; /* COOP_DIALOG_ACT_CLOSE / COOP_DIALOG_ACT_UI */
+    int ui_code;
+    bool ui_follower;
+    int64_t ui_npc;
+    unsigned int choose_ms;
+    unsigned int sent_seq[8];
+    CoopDialogVotes votes;
+    PacketCoopDialogState tx;
+} CoopPdlgSession;
+
+#define COOP_PDLG_START_NEW 0 /* run a new dialog for the slot */
+#define COOP_PDLG_START_JOIN 1 /* the NPC talks to another slot: watch that dialog */
+#define COOP_PDLG_START_RESEND 2 /* already talking to this NPC: send the state again */
+#define COOP_PDLG_START_BAD 3
+
+#define COOP_PDLG_END_KEEP 0
+#define COOP_PDLG_END_LEFT 1 /* the speaker disconnected */
+#define COOP_PDLG_END_GONE 2 /* PC / NPC gone, dead or unconscious */
+#define COOP_PDLG_END_COMBAT 3
+#define COOP_PDLG_END_FAR 4
+#define COOP_PDLG_END_MAP 5
+
+/* Pure (tests). `s` is an array of 8 sessions indexed by speaker slot. */
+void coop_pdlg_sessions_reset(CoopPdlgSession* s);
+/* Speaker slot whose open / pending dialog is with `npc` (not `except`), else -1. */
+int coop_pdlg_find_npc(const CoopPdlgSession* s, int64_t npc, int except);
+/* Speaker slot whose dialog `slot` watches, else -1. */
+int coop_pdlg_spectating(const CoopPdlgSession* s, int slot);
+/* What a client START (slot 1..7, NPC) does; *other = the speaker to join. */
+int coop_pdlg_start_decision(const CoopPdlgSession* s, int slot, int64_t npc, int* other);
+/* Client slots that get speaker `speaker`'s dialog (bit per slot). */
+unsigned int coop_pdlg_recipients(const CoopPdlgSession* s, int speaker);
+/* Remove `slot` as a spectator everywhere (and its votes); true if it watched. */
+bool coop_pdlg_drop_spectator(CoopPdlgSession* s, int slot);
+/* Dialog codes (DialogState.field_17E8) a remote speaker opens on its side. */
+bool coop_pdlg_ui_code_ok(int code);
+/* Why a remote speaker's dialog has to end now (COOP_PDLG_END_*). */
+int coop_pdlg_end_reason(bool speaker_active, bool alive, bool in_combat, int dist, bool same_map);
+void coop_dialog_fill_ui(PacketCoopDialogState* pkt, unsigned int seq, int speaker, int code, bool follower,
+    const unsigned char* oid24);
+
+/* Game side. */
+bool coop_lite_pdlg_on(void); /* host: parallel dialogs active for this session */
+int coop_lite_pdlg_entry_index(int64_t pc_obj); /* dialog_ui entry for a new dialog (0..7) */
+bool coop_lite_pdlg_allowed(int64_t pc_obj); /* host: a sanctioned remote PC dialog */
+int64_t coop_lite_pdlg_npc_busy(int64_t npc_obj, int64_t pc_obj); /* PC of another session with npc */
+/* dialog_ui (host): any PC's dialog shows a new line / ended. */
+void coop_lite_host_dialog_publish(int64_t pc_obj, int64_t npc_obj, const char* npc_name, const char* reply,
+    int num_options, const char* const* options);
+void coop_lite_host_dialog_end_pc(int64_t pc_obj);
+/* A remote speaker's answer opened a window (barter / identify / repair). */
+bool coop_lite_pdlg_ui_request(int64_t pc_obj, int64_t npc_obj, int code);
+void coop_lite_pdlg_map_closing(void); /* map.c: before the map's objects go away */
+void coop_lite_pdlg_reset_all(void); /* dialog_ui_reset */
+void coop_lite_pdlg_session_reset(void);
+/* dialog_ui registers: run a remote speaker's answer; drop an entry whose
+   objects are gone (no engine calls). */
+void coop_lite_set_pdlg_hooks(bool (*choose)(int64_t pc_obj, int option), void (*drop)(int64_t pc_obj));
+/* Client viewer. */
+bool coop_lite_client_dialog_speaker(void); /* I answer in the open panel */
+bool coop_lite_client_dialog_private(void); /* the open panel is a parallel dialog */
+void coop_lite_client_pdlg_ui_tick(void);
 
 #endif /* ARCANUM_GAME_COOP_LITE_H_ */

@@ -3282,6 +3282,9 @@ int coop_dialog_wire_size(const PacketCoopDialogState* pkt)
     if (pkt->kind == COOP_DIALOG_KIND_STATE && pkt->action == COOP_DIALOG_ACT_OPEN) {
         return (int)sizeof(*pkt);
     }
+    if (pkt->kind == COOP_DIALOG_KIND_STATE && pkt->action == COOP_DIALOG_ACT_UI) {
+        return COOP_DIALOG_HDR_SIZE + 24; /* protocol 54: + NPC OID */
+    }
     return COOP_DIALOG_HDR_SIZE;
 }
 
@@ -3324,6 +3327,14 @@ bool coop_dialog_packet_valid(const PacketCoopDialogState* pkt, int size, bool f
         return size == COOP_DIALOG_HDR_SIZE && pkt->num_options == 0
             && pkt->votes[COOP_DIALOG_SPEAKER_AT] >= 1 && pkt->votes[COOP_DIALOG_SPEAKER_AT] <= 7;
     }
+    if (pkt->action == COOP_DIALOG_ACT_UI) {
+        /* protocol 54: CLOSE + a window on the speaker's side */
+        return size == COOP_DIALOG_HDR_SIZE + 24 && pkt->num_options == 0
+            && pkt->votes[COOP_DIALOG_SPEAKER_AT] >= 1 && pkt->votes[COOP_DIALOG_SPEAKER_AT] <= 7
+            && coop_pdlg_ui_code_ok(pkt->votes[0]) && pkt->votes[1] <= 1
+            && (pkt->votes[1] == 0 || pkt->votes[0] == 3) && pkt->votes[2] == 0 && pkt->votes[3] == 0
+            && pkt->votes[4] == 0 && pkt->votes[5] == 0 && pkt->votes[6] == 0;
+    }
     if (pkt->action != COOP_DIALOG_ACT_OPEN || size != (int)sizeof(*pkt)
         || pkt->num_options > COOP_DIALOG_MAX_OPTIONS) {
         return false;
@@ -3340,6 +3351,12 @@ bool coop_dialog_packet_valid(const PacketCoopDialogState* pkt, int size, bool f
     for (i = 0; i < 8; i++) {
         if (i == COOP_DIALOG_SPEAKER_AT) {
             if (pkt->votes[i] > 7) {
+                return false;
+            }
+            continue;
+        }
+        if (i == COOP_DIALOG_FLAGS_AT) { /* protocol 54 */
+            if ((pkt->votes[i] & ~COOP_DIALOG_FLAG_PDLG) != 0) {
                 return false;
             }
             continue;
@@ -8104,6 +8121,7 @@ void coop_lite_ping(unsigned int now_ms)
             coop_lite_dev_inven_dump_tick(now_ms);
             coop_lite_client_dev_loot_tick(now_ms);
             coop_lite_client_exchange_tick(); /* PT80 */
+            coop_lite_client_pdlg_ui_tick(); /* protocol 54 */
             coop_lite_client_world_req_tick(now_ms);
             coop_lite_client_pickup_tick(now_ms);
             coop_lite_client_layout_tick(now_ms); /* PT53 */
@@ -9275,6 +9293,12 @@ void coop_lite_party_notice_text(int kind, unsigned int countdown_ms, bool local
     case COOP_PARTY_TALK_REFUSED:
         snprintf(buf, size, "%s", "Для разговора лидер группы должен быть рядом и свободен. / The party leader must be close by (and free) to talk.");
         break;
+    case COOP_PARTY_PDLG_REFUSED:
+        snprintf(buf, size, "%s", "Сейчас поговорить не получится (далеко или идёт бой). / You cannot talk right now (too far away, or in combat).");
+        break;
+    case COOP_PARTY_PDLG_ENDED:
+        snprintf(buf, size, "%s", "Разговор прерван (бой, вы отошли или смена карты). / Your conversation was cut short (combat, you walked away, or a map change).");
+        break;
     case COOP_PARTY_REST_BEGIN:
         snprintf(buf, size, "%s", local_is_host ? "" : "Лидер группы отдыхает — время идёт для всех. / The party leader rests - time passes for everyone.");
         break;
@@ -10382,6 +10406,15 @@ void coop_lite_handle_story_sync(PacketCoopStorySync* pkt)
 
 /* ---- PT36: dialog viewer + voting, game side ------------------------------- */
 
+/* Coop Middle parallel dialogs (coop_lite_pdlg.inc, protocol 54). */
+static void coop_pdlg_host_closed(void);
+static int coop_pdlg_host_vote_count(int option);
+static bool coop_pdlg_npc_begin(int64_t pc_obj, int64_t npc_obj);
+static void coop_pdlg_npc_end(int64_t pc_obj);
+static void coop_pdlg_host_rx(const PacketCoopDialogState* pkt);
+static void coop_pdlg_client_ui(const PacketCoopDialogState* pkt);
+static bool coop_pdlg_host_tick(unsigned int now_ms);
+
 static CoopDialogVotes coop_dialog_votes;
 static PacketCoopDialogState coop_dialog_tx; /* what the host last published */
 static unsigned int coop_dialog_seq;
@@ -10510,7 +10543,7 @@ static void coop_dialog_host_republish(void)
 
 void coop_lite_host_dialog_state(const char* npc_name, const char* reply, int num_options, const char* const* options)
 {
-    if (!tig_net_is_active() || !tig_net_is_host()) {
+    if (!tig_net_is_active() || !tig_net_is_host() || coop_lite_pdlg_on()) {
         return;
     }
     coop_dialog_votes_ensure();
@@ -10523,6 +10556,10 @@ void coop_lite_host_dialog_state(const char* npc_name, const char* reply, int nu
 
 void coop_lite_host_dialog_closed(void)
 {
+    if (coop_lite_pdlg_on()) {
+        coop_pdlg_host_closed(); /* parallel dialogs: the host's own (slot 0) */
+        return;
+    }
     if (!tig_net_is_active() || !tig_net_is_host() || !coop_dialog_votes.open) {
         return;
     }
@@ -10628,6 +10665,9 @@ bool coop_lite_host_npc_party_begin(int64_t pc_obj, int64_t npc_obj)
         || pc_obj == OBJ_HANDLE_NULL || npc_obj == OBJ_HANDLE_NULL) {
         return false;
     }
+    if (coop_lite_pdlg_on()) {
+        return coop_pdlg_npc_begin(pc_obj, npc_obj); /* parallel dialogs */
+    }
     slot = coop_lite_slot_of_obj(pc_obj);
     if (slot < 1 || slot >= 8 || !tig_net_client_is_active(slot)) {
         return false;
@@ -10658,6 +10698,10 @@ bool coop_lite_host_npc_party_begin(int64_t pc_obj, int64_t npc_obj)
 
 void coop_lite_host_npc_party_end(int64_t pc_obj)
 {
+    if (coop_lite_pdlg_on()) {
+        coop_pdlg_npc_end(pc_obj);
+        return;
+    }
     if (coop_party_slot > 0 && coop_party_pc == pc_obj && !coop_dialog_votes.open) {
         tig_debug_printf("CoopLite: party dialog: slot %d got no dialog (NPC start)\n", coop_party_slot);
         coop_party_slot = -1;
@@ -10724,7 +10768,8 @@ bool coop_lite_client_dialog_leave(void)
     PacketCoopDialogState pkt;
     int depth;
 
-    if (!coop_lite_is_client_role() || !coop_dialog_is_speaker()) {
+    /* protocol 54: a watcher of a parallel dialog may leave it too */
+    if (!coop_lite_is_client_role() || !(coop_dialog_is_speaker() || coop_lite_client_dialog_private())) {
         return false;
     }
     coop_dialog_fill_choose(&pkt, coop_dialog_view.line, -1);
@@ -10738,6 +10783,9 @@ int coop_lite_host_dialog_vote_count(int option)
 {
     unsigned char tally[COOP_DIALOG_MAX_OPTIONS];
 
+    if (coop_lite_pdlg_on()) {
+        return coop_pdlg_host_vote_count(option);
+    }
     if (!coop_dialog_votes.open || option < 0 || option >= COOP_DIALOG_MAX_OPTIONS) {
         return 0;
     }
@@ -10753,7 +10801,9 @@ static void coop_lite_host_dialog_tick(unsigned int now_ms)
     int depth;
     bool changed = false;
 
-    (void)now_ms;
+    if (coop_pdlg_host_tick(now_ms)) {
+        return; /* parallel dialogs (protocol 54) replace the single party dialog */
+    }
     if (coop_party_slot > 0 && !tig_net_client_is_active(coop_party_slot)) {
         int64_t pc = coop_party_pc;
 
@@ -10825,6 +10875,10 @@ void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt)
             tig_debug_printf("CoopLite: dialog: bad vote from slot %d dropped\n", sub_52A530());
             return;
         }
+        if (coop_lite_pdlg_on()) {
+            coop_pdlg_host_rx(pkt);
+            return;
+        }
         if (pkt->kind == COOP_DIALOG_KIND_START) {
             coop_lite_host_handle_party_start(pkt);
         } else if (pkt->kind == COOP_DIALOG_KIND_CHOOSE) {
@@ -10843,6 +10897,10 @@ void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt)
     }
     coop_dialog_rx_seen = true;
     coop_dialog_rx_seq = pkt->seq;
+    if (pkt->action == COOP_DIALOG_ACT_UI) {
+        coop_pdlg_client_ui(pkt); /* protocol 54 */
+        return;
+    }
     if (pkt->action == COOP_DIALOG_ACT_CLOSE || pkt->action == COOP_DIALOG_ACT_EXCHANGE) {
         if (coop_dialog_view.open && coop_dialog_close_hook != NULL) {
             coop_dialog_close_hook();
@@ -10862,7 +10920,13 @@ void coop_lite_handle_dialog_state(PacketCoopDialogState* pkt)
             size_t n = strlen(coop_dialog_view.npc_name);
 
             snprintf(coop_dialog_view.npc_name + n, sizeof(coop_dialog_view.npc_name) - n, "%s",
-                " - you answer (Esc: leave)");
+                coop_lite_client_dialog_private() ? (coop_lite_lang_ru() ? " - отвечаете вы" : " - you answer")
+                                                  : " - you answer (Esc: leave)");
+        } else if (coop_lite_client_dialog_private()) {
+            size_t n = strlen(coop_dialog_view.npc_name);
+
+            snprintf(coop_dialog_view.npc_name + n, sizeof(coop_dialog_view.npc_name) - n, "%s",
+                coop_lite_lang_ru() ? " - вы смотрите" : " - watching");
         }
     }
     if (coop_dialog_show_hook != NULL) {
@@ -20291,6 +20355,7 @@ static void coop_lite_session_reset_extra(void)
 {
     coop_lite_area_session_reset(); /* PT79 */
     coop_lite_mid_session_reset(); /* Coop Middle */
+    coop_lite_pdlg_session_reset(); /* parallel dialogs */
     coop_inv_owner_cnt = 0;
     coop_inv_entry_cnt = 0;
     coop_inv_overflow = false;
@@ -23038,3 +23103,4 @@ void coop_lite_lobby_tick(unsigned int now_ms) { (void)now_ms; }
 #endif /* COOP_LITE_TEST_STUBS */
 
 #include "game/coop_lite_mid.inc"
+#include "game/coop_lite_pdlg.inc"

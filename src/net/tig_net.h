@@ -32,8 +32,10 @@ extern "C" {
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
 /* 53: Coop Middle - PACKET_COOP_MID 167, PACKET_COOP_TOWNMAP 168, follower
-   skills in PACKET_COOP_NPC_STATS (bigger layout). */
-#define TIG_NET_PROTOCOL 53
+   skills in PACKET_COOP_NPC_STATS (bigger layout).
+   54: parallel dialogs - PACKET_COOP_DIALOG_STATE ACT_UI, votes[6] flags,
+   rule bit "pdlg". */
+#define TIG_NET_PROTOCOL 54
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

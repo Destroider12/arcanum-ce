@@ -2436,7 +2436,7 @@ static int test_coop_mid(void)
         } \
     } while (0)
 
-    MID_CHECK(TIG_NET_PROTOCOL == 53, "protocol 53");
+    MID_CHECK(TIG_NET_PROTOCOL >= 53, "protocol 53+");
     MID_CHECK(PACKET_COOP_MID == 167 && PACKET_COOP_TOWNMAP == 168 && PACKET_COOP_TYPE_LIMIT == 169, "packet ids");
     MID_CHECK(sizeof(PacketCoopMid) == 0xA0 && sizeof(PacketCoopTownmap) == 0x210, "packet sizes");
     MID_CHECK(coop_lite_packet_allowed(PACKET_COOP_MID, true, 1) && coop_lite_packet_allowed(PACKET_COOP_MID, false, 0),

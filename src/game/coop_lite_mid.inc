@@ -23,7 +23,7 @@ void coop_lite_rules_default(CoopRules* r)
     }
     memset(r, 0, sizeof(*r));
     r->flags = COOP_RULE_FF_AOE | COOP_RULE_REST_VOTE | COOP_RULE_TP | COOP_RULE_QUEST_POCKET
-        | COOP_RULE_SHARED_FOG | COOP_RULE_LOOT_FEED | COOP_RULE_PINGS;
+        | COOP_RULE_SHARED_FOG | COOP_RULE_LOOT_FEED | COOP_RULE_PINGS | COOP_RULE_PDLG;
     r->hp_scale_pct = 0;
     r->xp_mult_pct = 100;
     r->tp_cooldown_s = 30;
@@ -66,6 +66,7 @@ static const struct {
     { "fog", COOP_RULE_SHARED_FOG },
     { "feed", COOP_RULE_LOOT_FEED },
     { "pings", COOP_RULE_PINGS },
+    { "pdlg", COOP_RULE_PDLG },
 };
 
 int coop_lite_rules_parse(const char* text, CoopRules* r)
@@ -205,14 +206,15 @@ void coop_lite_rules_describe(const CoopRules* r, bool ru, char* out, size_t out
     snprintf(out, out_size,
         ru ? "Правила: HP врагов +%d%% за игрока, опыт x%d.%02d, урон по своим от площадных: %s, "
              "деление золота: %s, пауза клиентов: %s, отдых по запросу: %s, /tp: %s, "
-             "общие квестовые предметы: %s, общий туман карты: %s, лента лута: %s, метки: %s"
+             "общие квестовые предметы: %s, общий туман карты: %s, лента лута: %s, метки: %s, "
+             "раздельные диалоги: %s"
            : "Rules: enemy HP +%d%% per extra player, XP x%d.%02d, area friendly fire %s, "
              "gold split %s, client pause %s, rest requests %s, /tp %s, "
-             "shared quest items %s, shared town map %s, loot feed %s, pings %s",
+             "shared quest items %s, shared town map %s, loot feed %s, pings %s, parallel dialogs %s",
         r->hp_scale_pct, r->xp_mult_pct / 100, r->xp_mult_pct % 100,
         COOP_YN(COOP_RULE_FF_AOE), COOP_YN(COOP_RULE_GOLD_SPLIT), COOP_YN(COOP_RULE_CLIENT_PAUSE),
         COOP_YN(COOP_RULE_REST_VOTE), tp, COOP_YN(COOP_RULE_QUEST_POCKET), COOP_YN(COOP_RULE_SHARED_FOG),
-        COOP_YN(COOP_RULE_LOOT_FEED), COOP_YN(COOP_RULE_PINGS));
+        COOP_YN(COOP_RULE_LOOT_FEED), COOP_YN(COOP_RULE_PINGS), COOP_YN(COOP_RULE_PDLG));
 #undef COOP_YN
 }
 
@@ -814,7 +816,7 @@ static bool coop_mid_in_combat(int64_t pc)
 
 static void coop_mid_rules_write_lobby(void)
 {
-    char line[512];
+    char line[768];
     char path[260];
     unsigned int sig = 2166136261u;
     const unsigned char* b = (const unsigned char*)coop_lite_rules();
@@ -1991,7 +1993,7 @@ bool coop_lite_mid_chat_command(const char* text)
 {
     int amount = 0;
     char arg[64];
-    char line[512];
+    char line[768];
     int cmd;
     bool ru = coop_lite_lang_ru();
     bool host = tig_net_is_host();
@@ -2122,7 +2124,7 @@ static void coop_mid_host_rx(PacketCoopMid* pkt, int slot)
 
 static void coop_mid_client_rx(PacketCoopMid* pkt)
 {
-    char line[512];
+    char line[768];
     bool ru = coop_lite_lang_ru();
 
     switch (pkt->op) {
