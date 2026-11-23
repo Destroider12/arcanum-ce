@@ -2083,6 +2083,7 @@ static const struct {
     { "fog", "Shared town map", 1 },
     { "feed", "Loot feed in chat", 1 },
     { "pings", "Pings (middle click)", 1 },
+    { "pdlg", "Parallel dialogs (each player talks on their own)", 1 },
 };
 #define RULE_CHECK_COUNT ((int)(sizeof(g_rule_checks) / sizeof(g_rule_checks[0])))
 static HWND g_rules_wnd;
