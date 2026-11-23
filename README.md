@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 53`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 54`** (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -55,9 +55,9 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Known world-map locations:** areas discovered by any player are shared with the whole party (sent on join and when new ones are found).
 - Animation and combat state of PCs and NPCs.
 
-### Coop Middle (party comfort, protocol 53)
+### Coop Middle (party comfort, protocol 54)
 
-- **Host rules** (launcher **Rules...** button): enemy HP per extra player (off / +35% / +50%), shared XP multiplier (x1 / x1.25 / x1.5), area friendly fire, gold split, client pause, rest requests, `/tp` (cooldown or host OK), shared quest items, shared town map, loot feed, pings. Clients see them in chat (`/rules`) and in the launcher lobby.
+- **Host rules** (launcher **Rules...** button): enemy HP per extra player (off / +35% / +50%), shared XP multiplier (x1 / x1.25 / x1.5), area friendly fire, gold split, client pause, rest requests, `/tp` (cooldown or host OK), shared quest items, shared town map, loot feed, pings, parallel dialogs. Clients see them in chat (`/rules`) and in the launcher lobby.
 - **Hold Alt:** names over loot, containers and lootable corpses nearby.
 - **Loot feed:** `[Loot] Name picked up: X` for keys, quest items, schematics and valuables.
 - **Give window:** Ctrl+click a teammate (or right-click their portrait) to hand items over; `/gold N [name]` gives gold.
@@ -71,6 +71,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Shared quest pocket:** dialogs and scripts see quest items carried by a teammate within 25 tiles.
 - **Shared town map:** explored town map tiles are shared.
 - **Followers:** skills shown in the character window, rearranging a follower's pack, and `/share on` lets teammates trade with your followers.
+- **Parallel dialogs** (rule `pdlg`, on by default; branch `coop-middle`, protocol 54): every player talks to NPCs on their own, at the same time. A client's dialog runs on the host with that client's PC and shows only on that client's screen (answer with 1-5 or a click, Esc leaves). A second player who talks to the same NPC watches and votes. With `pdlg=0` the old shared party dialog is used.
 
 ### Travel
 
@@ -138,7 +139,7 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 | `ARCANUM_COOP_AUTOJOIN` | `1`: join right away with the rejoin token (used by the launcher's Reconnect) |
 | `ARCANUM_COOP_WAIT_HOST` | `0`: turn off the client's automatic waiting for the host |
 | `ARCANUM_COOP_LANG` | `ru`: Russian co-op messages (default English) |
-| `ARCANUM_COOP_RULES` | host rules, e.g. `hp=35,xp=125,ff=0,gold=1,pause=1,rest=1,tp=1,tpconfirm=0,quest=1,fog=1,feed=1,pings=1,tpcd=30` (the launcher's Rules... button sets it) |
+| `ARCANUM_COOP_RULES` | host rules, e.g. `hp=35,xp=125,ff=0,gold=1,pause=1,rest=1,tp=1,tpconfirm=0,quest=1,fog=1,feed=1,pings=1,pdlg=1,tpcd=30` (the launcher's Rules... button sets it) |
 | `ARCANUM_COOP_NO_CHAR_BUNDLE`, `ARCANUM_COOP_NO_OBJ_BLOB`, `ARCANUM_COOP_NO_WORLD_STATE`, `ARCANUM_COOP_WORLD_TRACE` | debugging switches (turn off parts of the sync / add tracing). Not for normal play. |
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.

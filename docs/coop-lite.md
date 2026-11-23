@@ -3948,13 +3948,10 @@ PC). Every 2 s each peer sends the known-bit array of its current town map
 when it changed; the host ORs what it gets and re-sends the union to all.
 Bits are saved with the game as usual (k-state).
 
-### 3c. Parallel party dialogs per slot - skipped
+### 3c. Parallel party dialogs per slot
 
-`dialog_ui` keeps one global `DialogUiEntry` (`sub_567420` ignores its
-argument), and the PT36 dialog view / vote protocol is single-instance on
-the host. Parallel dialogs would mean rewriting the story-dialog core that
-is stable now; the risk is not worth it. Unchanged: "(Another player is
-talking.)".
+Skipped in protocol 53, done in protocol 54 (branch `coop-middle`): see
+"Coop Middle: parallel dialogs (protocol 54)" below.
 
 ### 3d. Followers
 
@@ -4021,3 +4018,133 @@ clamp, HP / XP math, packet sizes / ids / roles / validation, op
 directions, bit union, status packing / letters, loot classifier, chat
 commands, /tp gate, gold share, HUD format, NPC stats size). nbuild ctest
 16/16, win64 `arcanum-ce.exe` + launcher compile.
+
+## Coop Middle: parallel dialogs (protocol 54)
+
+Branch `coop-middle`. Host rule `pdlg` (launcher: **Parallel dialogs**,
+default on). With it every player talks to NPCs on their own: the host and
+any number of clients can be in different dialogs at the same time. With
+`pdlg=0` the PT36 / PT41 single party dialog runs exactly as before.
+
+### Design
+
+- **Engine state per slot.** `dialog_ui` always had 8 `DialogUiEntry`
+  slots (the original multiplayer design) but `sub_567420` returned entry 0
+  for everybody. It now returns the entry of a running dialog of that PC,
+  else (rule on, host) the entry of the PC's slot: the host's own dialog is
+  entry 0, client slot N is entry N. `DialogState` (lines, options, the
+  dialog file, the NPC talk mark) is per entry, so the dialog engine
+  (`dialog.c`) needs no change: it never had globals per conversation.
+- **Effects.** A client's dialog runs on the host with that client's PC as
+  the speaker: checks use its stats; quests, gold, items, reputation, doors
+  and scripts apply to it and sync with the existing PT41 paths.
+- **Sessions** (`src/game/coop_lite_pdlg.inc`). The host keeps
+  `CoopPdlgSession coop_pdlg[8]` by speaker slot: open / pending, PC, NPC,
+  spectators (bit per slot), the current line id, votes and the last
+  packet. A line goes only to the speaker and the spectators
+  (`PACKET_COOP_DIALOG_STATE`, `votes[7]` = speaker, `votes[6]` =
+  `COOP_DIALOG_FLAG_PDLG`). The host's own dialog goes to its spectators
+  only. All packets take the same `coop_dialog_seq`, so each client sees
+  one increasing sequence whichever dialog it is in.
+- **Latch.** The host turns parallel mode on once its rules are loaded
+  (`CoopMid: parallel dialogs on`) while no PT41 party dialog runs, and off
+  at session reset. It does not use `tig_net_is_host()`, which reads false
+  under local suspension.
+- **Client UI.** The speaker answers in the co-op panel. In parallel mode
+  the panel is bigger (3/5 of the width, up to 14 text lines). The speaker
+  answers with **1-5** or a click and leaves with **Esc**. A spectator
+  votes (click / V) and also leaves with **Esc**. The client still talks to
+  merchants locally as before.
+
+### Cases
+
+| Case | What happens |
+| --- | --- |
+| Client talks to a free NPC | START -> host: session pending -> `object_script_execute(pc, npc, SAP_DIALOG)` -> entry N opens -> lines to that client |
+| Second player talks to the SAME NPC | client: joins as spectator (view + votes, Esc leaves); host: refused with a float line "(I'm talking to someone else right now.)" |
+| Speaker clicks another NPC | old dialog ends, the new one starts (or it joins as spectator) |
+| Same NPC again | the current line is resent |
+| Combat (speaker's combat mode, TB combat) | the host ends the client's dialog; the client gets "Your conversation was cut short ..." |
+| NPC attacked / scared | the engine already ends the dialog of the NPC's talker (ai.c) - now the right entry |
+| Speaker walks away (> 12 tiles) or dies | dialog ended (spectators beyond 12 tiles stop watching) |
+| Disconnect | the speaker's dialog ends; a spectator is dropped (its vote too) |
+| Map change | `map_close` ends every client dialog before objects go; if the change came from that client's own answer, the tick ends it after |
+| Barter / identify / repair from the dialog | the dialog closes with `ACT_UI` (code + NPC OID); the client opens the window itself (host-validated as before); a follower barter goes the PT80 exchange path |
+| Character sheet / world map / schematics from a client's dialog | not opened (it would change only the client's copy); dialog closed |
+| NPC starts a dialog with a client (PT81) | becomes that client's own dialog (5 s per slot, never cuts a running one, not in combat) |
+| Load / reset | every session is closed (CLOSE to speakers and spectators) |
+| Stale NPC talk mark (save made during a client's talk) | cleared when someone else starts talking to it |
+
+The host's own dialog window, voice and options do not wait on client
+dialogs, and the reverse is also true. A client's NPC voice is not played
+on the host.
+
+### Wire (protocol 54)
+
+- `COOP_DIALOG_ACT_UI 3` (host -> speaker): header + NPC OID (24 bytes in
+  `npc_name`), `votes[0]` = dialog code 3 / 8 / 9, `votes[1]` = follower
+  exchange (only with 3), `votes[7]` = speaker 1..7; all other bytes zero.
+- Open line: `votes[6]` may carry `COOP_DIALOG_FLAG_PDLG` (other bits refused).
+- Client -> host stays START / VOTE / CHOOSE. A spectator's CHOOSE -1 = leave.
+- Rule bit `COOP_RULE_PDLG 0x400`, key `pdlg`.
+
+### Log lines (host unless noted)
+
+```
+CoopMid: parallel dialogs on (rule pdlg, protocol 54)
+CoopMid: pdlg: slot N starts a dialog
+CoopMid: pdlg: slot N talks to 'NAME' (own dialog)
+CoopMid: pdlg: slot N answers K
+CoopMid: pdlg: slot N watches slot M's dialog (same NPC)
+CoopMid: pdlg: slot N votes K in slot M's dialog
+CoopMid: pdlg: slot N stops watching slot M's dialog
+CoopMid: pdlg: slot N walked away from slot M's dialog
+CoopMid: pdlg: slot N asked again - dialog resent
+CoopMid: pdlg: slot N leaves its dialog for another NPC
+CoopMid: pdlg: slot N got no dialog (bark / refused by the NPC)
+CoopMid: pdlg: slot N talk refused (too far | combat | NPC busy | PC or NPC not found / dead)
+CoopMid: pdlg: an NPC starts a dialog with slot N
+CoopMid: pdlg: slot N dialog ended by the host (combat | too far | map change | PC or NPC gone | speaker left)
+CoopMid: pdlg: slot N leaves the dialog into window C
+CoopMid: pdlg: slot N dialog closed (W watching)
+CoopMid: pdlg: slot N dialog dropped (objects gone)
+CoopMid: pdlg: host dialog gone - watchers released
+CoopMid: pdlg: stale answer from slot N dropped
+DialogUI: NPC busy in another player's dialog
+DialogUI: stale NPC talk mark cleared
+DialogUI: entry N busy - dialog not started
+DialogUI: parallel dialog window C stays on the host - dialog closed
+CoopMid: pdlg: opening window C with 'NAME'          (client)
+CoopMid: pdlg: window C - NPC not found here, not opened   (client)
+```
+
+### Limits / risks
+
+- Not tested in play yet. It needs a 2-3 player session: two clients at
+  two story NPCs at once, plus the host in its own dialog.
+- A client's dialog is shown in the co-op panel, not the classic dialog
+  bar. Long NPC lines show their last 14 lines. Option text is cut with
+  "..." to the panel width.
+- Script effects that assume "the" player (a few scripts read the local
+  PC instead of the speaker) act on the host, as they did with PT41.
+- Two dialogs whose scripts touch the same global (a quest state, a door)
+  run one after the other on the host. This is deterministic, but the
+  second one sees the result of the first.
+- A save taken while a client talks keeps the NPC's talk mark; it is
+  cleared on the next talk with that NPC.
+- Merchants are still talked to on the client (local, story options
+  filtered), as before.
+- Fallback: `pdlg=0` in the launcher Rules (or `ARCANUM_COOP_RULES`).
+
+### Tests
+
+`coop_dialog_test` (`test_pdlg`) covers:
+- rule default, parse and round trip;
+- the session table: find by NPC, pending counts as busy, start decisions
+  (new / join / resend / bad), recipients, spectator drop with its vote;
+- window codes and end reasons;
+- `ACT_UI` codec and strict validation, the `votes[6]` flag, and the
+  spectator leave packet.
+
+The host / engine path has no headless harness (it needs the game data).
+`ctest -j1`: 16/16.
