@@ -44,14 +44,15 @@ void coop_rules_sanitize(CoopRules* r)
 static const struct {
     const char* key;
     const char* alias; /* launcher ini name */
+    const char* legacy; /* older spelling, still read */
     uint32_t flag;
 } coop_rules_keys[] = {
-    { "gold", "gold_split", COOP_RULE_GOLD_SPLIT },
-    { "loot", "loot_feed", COOP_RULE_LOOT_FEED },
-    { "rest", "rest_vote", COOP_RULE_REST_VOTE },
-    { "trade", "direct_trade", COOP_RULE_DIRECT_TRADE },
-    { "pause", "client_pause", COOP_RULE_CLIENT_PAUSE },
-    { "noffaoe", "no_ff_aoe", COOP_RULE_NO_FRIENDLY_FIRE_AOE },
+    { "gold", "gold_split", NULL, COOP_RULE_GOLD_SPLIT },
+    { "loot", "loot_feed", NULL, COOP_RULE_LOOT_FEED },
+    { "rest", "rest_vote", NULL, COOP_RULE_REST_VOTE },
+    { "trade", "direct_trade", NULL, COOP_RULE_DIRECT_TRADE },
+    { "pause", "client_pause", NULL, COOP_RULE_CLIENT_PAUSE },
+    { "ff", "no_ff_aoe", "noffaoe", COOP_RULE_NO_FRIENDLY_FIRE_AOE }, /* M1-M2 wrote "noffaoe" */
 };
 
 #define COOP_RULES_KEY_COUNT ((int)(sizeof(coop_rules_keys) / sizeof(coop_rules_keys[0])))
@@ -133,18 +134,19 @@ int coop_rules_parse_env(CoopRules* r, const char* env_str)
         if (!coop_rules_value(val, &v)) {
             continue;
         }
-        if (strcmp(key, "hp") == 0) {
+        if (strcmp(key, "hp") == 0 || strcmp(key, "enemy_hp_pct") == 0) {
             r->enemy_hp_pct = (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v));
             used++;
             continue;
         }
-        if (strcmp(key, "xp") == 0) {
+        if (strcmp(key, "xp") == 0 || strcmp(key, "xp_mult_pct") == 0) {
             r->xp_mult_pct = (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v));
             used++;
             continue;
         }
         for (i = 0; i < COOP_RULES_KEY_COUNT; i++) {
-            if (strcmp(key, coop_rules_keys[i].key) == 0 || strcmp(key, coop_rules_keys[i].alias) == 0) {
+            if (strcmp(key, coop_rules_keys[i].key) == 0 || strcmp(key, coop_rules_keys[i].alias) == 0
+                || (coop_rules_keys[i].legacy != NULL && strcmp(key, coop_rules_keys[i].legacy) == 0)) {
                 if (v != 0) {
                     r->flags |= coop_rules_keys[i].flag;
                 } else {
@@ -177,7 +179,7 @@ int coop_rules_format_env(const CoopRules* r, char* out, size_t sz)
         coop_rules_sanitize(&s);
     }
     for (i = 0; i < COOP_RULES_KEY_COUNT; i++) {
-        /* Active keys always; reserved M3 keys only when set (compact). */
+        /* Active keys always; future reserved keys only when set (compact). */
         if ((coop_rules_keys[i].flag & COOP_RULE_ACTIVE_MASK) == 0 && (s.flags & coop_rules_keys[i].flag) == 0) {
             continue;
         }
@@ -202,7 +204,6 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
     CoopRules s;
     const char* on = ru ? "вкл" : "on";
     const char* off = ru ? "выкл" : "off";
-    char extra[96];
 
     if (out == NULL || sz == 0) {
         return;
@@ -213,26 +214,28 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
         s = *r;
         coop_rules_sanitize(&s);
     }
-    extra[0] = '\0';
-    if ((s.flags & ~COOP_RULE_ACTIVE_MASK) != 0) {
-        snprintf(extra, sizeof(extra), ru ? "; на будущее:%s%s" : "; reserved:%s%s",
-            (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? " pause" : "",
-            (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? " noffaoe" : "");
-    }
     if (ru) {
-        snprintf(out, sz, "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, HP врагов %u%%, опыт %u%%%s",
+        snprintf(out, sz,
+            "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, пауза клиентов %s, "
+            "без огня по своим %s, HP врагов %u%%, опыт %u%%",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
             (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
-            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, extra);
+            (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? on : off,
+            (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? on : off,
+            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
     } else {
-        snprintf(out, sz, "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, enemy HP %u%%, XP %u%%%s",
+        snprintf(out, sz,
+            "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, client pause %s, no friendly fire %s, "
+            "enemy HP %u%%, XP %u%%",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
             (s.flags & COOP_RULE_DIRECT_TRADE) != 0 ? on : off,
-            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, extra);
+            (s.flags & COOP_RULE_CLIENT_PAUSE) != 0 ? on : off,
+            (s.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0 ? on : off,
+            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
     }
 }
 

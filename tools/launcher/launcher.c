@@ -38,6 +38,10 @@
  * feed, Rest vote), kept in [rules] gold_split / loot_feed / rest_vote of the
  * ini (defaults 0, 1, 1) and passed to the host as ARCANUM_COOP_RULES.
  * Coop Middle M2: a fourth one, Direct trade ([rules] direct_trade, default 1).
+ * Coop Middle M3: a second row - Client pause ([rules] client_pause, default
+ * 0), No friendly fire ([rules] no_ff_aoe, default 1), Enemy HP % ([rules]
+ * enemy_hp_pct 100/150/200/250/300) and XP % ([rules] xp_mult_pct
+ * 100/125/150/200), all in the same ARCANUM_COOP_RULES string.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -93,6 +97,10 @@
 #define IDC_RULE_LOOT 131
 #define IDC_RULE_REST 132
 #define IDC_RULE_TRADE 133 /* Coop Middle M2 */
+#define IDC_RULE_PAUSE 134 /* Coop Middle M3 */
+#define IDC_RULE_NOFF 135
+#define IDC_RULE_HP 136
+#define IDC_RULE_XP 137
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -182,6 +190,10 @@ static void refresh(void)
     EnableWindow(item(IDC_RULE_LOOT), host);
     EnableWindow(item(IDC_RULE_REST), host);
     EnableWindow(item(IDC_RULE_TRADE), host);
+    EnableWindow(item(IDC_RULE_PAUSE), host);
+    EnableWindow(item(IDC_RULE_NOFF), host);
+    EnableWindow(item(IDC_RULE_HP), host);
+    EnableWindow(item(IDC_RULE_XP), host);
 }
 
 static void find_local_ip(void)
@@ -277,6 +289,33 @@ static void copy_address(void)
     }
 }
 
+/* Coop Middle M3: the percentage choices (index = combo position). */
+static const int k_rule_hp[] = { 100, 150, 200, 250, 300 };
+static const int k_rule_xp[] = { 100, 125, 150, 200 };
+#define RULE_HP_COUNT ((int)(sizeof(k_rule_hp) / sizeof(k_rule_hp[0])))
+#define RULE_XP_COUNT ((int)(sizeof(k_rule_xp) / sizeof(k_rule_xp[0])))
+
+/* The nearest choice at or below pct (an odd ini value lands on a step). */
+static int rule_pct_index(const int* table, int count, int pct)
+{
+    int i;
+    int best = 0;
+
+    for (i = 0; i < count; i++) {
+        if (table[i] <= pct) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+static int rule_pct(int id, const int* table, int count)
+{
+    LRESULT sel = SendMessageA(item(id), CB_GETCURSEL, 0, 0);
+
+    return sel >= 0 && sel < count ? table[sel] : table[0];
+}
+
 static void load_settings(void)
 {
     char buf[128];
@@ -301,6 +340,14 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "rest_vote", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_TRADE), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "direct_trade", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_PAUSE), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "client_pause", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_NOFF), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "no_ff_aoe", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
+        rule_pct_index(k_rule_hp, RULE_HP_COUNT, GetPrivateProfileIntA("rules", "enemy_hp_pct", 100, g_ini)), 0);
+    SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL,
+        rule_pct_index(k_rule_xp, RULE_XP_COUNT, GetPrivateProfileIntA("rules", "xp_mult_pct", 100, g_ini)), 0);
 }
 
 static bool rule_checked(int id)
@@ -314,11 +361,15 @@ static void rules_env(char* out, size_t sz)
     CoopRules r;
 
     coop_rules_default(&r);
-    r.flags &= ~(COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE);
+    r.flags &= ~COOP_RULE_ACTIVE_MASK;
     r.flags |= (rule_checked(IDC_RULE_GOLD) ? COOP_RULE_GOLD_SPLIT : 0u)
         | (rule_checked(IDC_RULE_LOOT) ? COOP_RULE_LOOT_FEED : 0u)
         | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u)
-        | (rule_checked(IDC_RULE_TRADE) ? COOP_RULE_DIRECT_TRADE : 0u);
+        | (rule_checked(IDC_RULE_TRADE) ? COOP_RULE_DIRECT_TRADE : 0u)
+        | (rule_checked(IDC_RULE_PAUSE) ? COOP_RULE_CLIENT_PAUSE : 0u)
+        | (rule_checked(IDC_RULE_NOFF) ? COOP_RULE_NO_FRIENDLY_FIRE_AOE : 0u);
+    r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
+    r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
     coop_rules_format_env(&r, out, sz);
 }
 
@@ -340,6 +391,12 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "loot_feed", rule_checked(IDC_RULE_LOOT) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "rest_vote", rule_checked(IDC_RULE_REST) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "direct_trade", rule_checked(IDC_RULE_TRADE) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "client_pause", rule_checked(IDC_RULE_PAUSE) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "no_ff_aoe", rule_checked(IDC_RULE_NOFF) ? "1" : "0", g_ini);
+    snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
+    WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
+    snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT));
+    WritePrivateProfileStringA("rules", "xp_mult_pct", buf, g_ini);
 }
 
 static bool file_exists(const char* path)
@@ -2131,8 +2188,28 @@ static void create_controls(void)
     make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 172, 262, 76, 20, IDC_RULE_LOOT);
     make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 250, 262, 80, 20, IDC_RULE_REST);
     make("BUTTON", "Direct trade", WS_TABSTOP | BS_AUTOCHECKBOX, 332, 262, 92, 20, IDC_RULE_TRADE);
+    /* Coop Middle M3: second rules row. */
+    make("BUTTON", "Client pause", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 288, 90, 20, IDC_RULE_PAUSE);
+    make("BUTTON", "No friendly fire", WS_TABSTOP | BS_AUTOCHECKBOX, 182, 288, 108, 20, IDC_RULE_NOFF);
+    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 292, 286, 68, 140, IDC_RULE_HP);
+    {
+        char label[24];
+        int i;
+
+        for (i = 0; i < RULE_HP_COUNT; i++) {
+            snprintf(label, sizeof(label), "HP %d%%", k_rule_hp[i]);
+            SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
+        }
+        SendMessageA(combo, CB_SETCURSEL, 0, 0);
+        combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 362, 286, 68, 140, IDC_RULE_XP);
+        for (i = 0; i < RULE_XP_COUNT; i++) {
+            snprintf(label, sizeof(label), "XP %d%%", k_rule_xp[i]);
+            SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
+        }
+        SendMessageA(combo, CB_SETCURSEL, 0, 0);
+    }
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 288, 418, 124, IDC_CHECK_OUT);
+        12, 314, 418, 98, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
     make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
     make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);

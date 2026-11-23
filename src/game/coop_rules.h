@@ -30,16 +30,18 @@ extern "C" {
 #define COOP_RULE_REST_VOTE 0x00000004u /* clients may ask the host to rest (Y / N) */
 /* M2 */
 #define COOP_RULE_DIRECT_TRADE 0x00000008u /* free give between players (trade window) */
-/* Reserved for M3: stored, sanitized and sent, no effect yet. */
-#define COOP_RULE_CLIENT_PAUSE 0x00000010u
-#define COOP_RULE_NO_FRIENDLY_FIRE_AOE 0x00000020u
+/* M3 */
+#define COOP_RULE_CLIENT_PAUSE 0x00000010u /* clients may toggle the shared pause (host always may) */
+#define COOP_RULE_NO_FRIENDLY_FIRE_AOE 0x00000020u /* party never damages party (AoE, stray hits) */
 
 #define COOP_RULE_M1_MASK (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
 /* Rules that do something (always in the env string / description). */
-#define COOP_RULE_ACTIVE_MASK (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE)
+#define COOP_RULE_ACTIVE_MASK \
+    (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE)
 #define COOP_RULE_KNOWN_MASK \
     (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE)
-#define COOP_RULE_DEFAULT_FLAGS (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE)
+#define COOP_RULE_DEFAULT_FLAGS \
+    (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE)
 
 #define COOP_RULES_HP_MIN 100
 #define COOP_RULES_HP_MAX 300
@@ -49,8 +51,8 @@ extern "C" {
 typedef struct CoopRules {
     /* 0000 */ uint32_t version; /* COOP_RULES_VERSION */
     /* 0004 */ uint32_t flags; /* COOP_RULE_* */
-    /* 0008 */ uint16_t enemy_hp_pct; /* 100..300 (M3) */
-    /* 000A */ uint16_t xp_mult_pct; /* 100..250 (M3) */
+    /* 0008 */ uint16_t enemy_hp_pct; /* 100..300: damage to enemies / pct (M3, key hp) */
+    /* 000A */ uint16_t xp_mult_pct; /* 100..250: party XP * pct (M3, key xp) */
     /* 000C */ uint32_t reserved[4]; /* zero; room to grow without a protocol bump */
 } CoopRules;
 
@@ -69,7 +71,7 @@ _Static_assert(sizeof(PacketCoopRules) == 0x20, "PacketCoopRules size");
 void coop_rules_default(CoopRules* r);
 /* Clamp the percentages, drop unknown flag bits, zero reserved, fix version. */
 void coop_rules_sanitize(CoopRules* r);
-/* "gold=1,loot=1,rest=1,hp=100,xp=100" (defaults first, unknown keys and
+/* "gold=1,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100" (defaults first, unknown keys and
    bad values ignored, result sanitized). Returns how many keys were used. */
 int coop_rules_parse_env(CoopRules* r, const char* env_str);
 /* The same compact form; always NUL-terminated. Returns the length. */
