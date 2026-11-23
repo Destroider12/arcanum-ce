@@ -1,4 +1,5 @@
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle hooks */
 
 #ifndef COOP_LITE_TEST_STUBS
 #include "game/area.h" /* PT78 */
@@ -1426,6 +1427,8 @@ void coop_lite_session_reset(void)
 {
     int i;
 
+    coop_middle_session_reset(); /* Coop Middle */
+
 #ifndef COOP_LITE_TEST_STUBS
     coop_lite_worn_reassert_reset(); /* PT34: no stale ring across sessions */
 #endif
@@ -2291,6 +2294,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_CRITTER_EFFECTS: /* PT77z host effects + light → clients */
     case PACKET_COOP_PROJECTILE_FX: /* PT77z host missile visual → clients */
     case PACKET_COOP_NPC_STATS: /* PT79 host follower build → clients */
+    case PACKET_COOP_RULES: /* Coop Middle M1: host session rules → client */
     /* Review H2: host→client effects a client must never send the host. */
     case 54: /* magictech end */
     case 71: /* party */
@@ -3509,6 +3513,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopAreaKnown);
     case PACKET_COOP_NPC_STATS:
         return sizeof(PacketCoopNpcStats);
+    case PACKET_COOP_RULES: /* Coop Middle M1 */
+        return sizeof(PacketCoopRules);
     case PACKET_COOP_HOTBAR:
         return sizeof(PacketCoopHotbar);
     case PACKET_COOP_DIALOG_STATE:
@@ -4729,6 +4735,7 @@ static bool coop_lite_host_spawn_client(int slot)
     /* Per-slot: only this client may apply it. */
     tig_net_send_app(&sync, sizeof(sync), slot);
     coop_lite_host_area_send_slot(slot); /* PT81 */
+    coop_middle_host_slot_synced(slot); /* Coop Middle: session rules */
     coop_pending_offers[slot].valid = false;
     coop_layout_seq_applied[slot] = 0; /* PT54: a (re)joined client numbers its layouts from 1 */
     coop_lite_host_vitals_force(); /* PT54: host PC alive/dead + HP to the (re)joined client */
@@ -8005,6 +8012,7 @@ void coop_lite_ping(unsigned int now_ms)
     coop_obj_now_ms = now_ms;
     coop_lite_world_hooks_refresh();
     coop_travel_tick(now_ms);
+    coop_middle_tick(now_ms); /* Coop Middle */
 #ifndef COOP_LITE_TEST_STUBS
     int slot;
     int64_t obj;
@@ -9453,6 +9461,7 @@ static int coop_lite_stack_qty(int64_t item)
  */
 void coop_lite_mark_player_drop(int64_t item)
 {
+    coop_middle_note_player_drop(item); /* Coop Middle: never split a player's gold */
     /* PT18 (user decision + Argon #3 pt 3): vanilla again — NPCs may take
        what players drop. Only the dev item tests keep their piles. */
     if (coop_lite_env("ARCANUM_DEV_GOLD_PILE") == NULL && coop_lite_env("ARCANUM_DEV_CLIENT_ITEMS") == NULL) {
@@ -10895,7 +10904,7 @@ bool coop_lite_client_dialog_vote(int option)
 
 static unsigned int coop_victim_watch_ms;
 
-static void coop_lite_host_sync_slot_inven(int slot);
+void coop_lite_host_sync_slot_inven(int slot); /* also Coop Middle */
 
 static void coop_lite_host_victim_watch(unsigned int now_ms)
 {
@@ -11028,7 +11037,7 @@ static void coop_lite_host_send_inven_batch(int slot, const int64_t* owners, int
 }
 
 /* Host: re-send what a slot's barter window shows. */
-static void coop_lite_host_sync_slot_inven(int slot)
+void coop_lite_host_sync_slot_inven(int slot)
 {
     int64_t owners[4];
     int n = 0;
@@ -11162,7 +11171,7 @@ static void coop_lite_host_dev_give_weapon_tick(unsigned int now_ms)
    inventory)? A client could drag store goods to the barter window's drop
    slot (refused on the host, but the item lay on ITS ground) and pick that
    copy up: the pickup (Packet28) looted the store chest in reach for free. */
-static bool coop_lite_container_is_store(int64_t container, int64_t pc)
+bool coop_lite_container_is_store(int64_t container, int64_t pc) /* also Coop Middle */
 {
     ObjectList npcs;
     ObjectNode* node;
@@ -11257,8 +11266,10 @@ void coop_lite_host_handle_item_op(int type, void* msg)
     bool ground_stack = false;
     ObjectID picked_oid;
     const char* what = "?";
+    CoopMiddleTake mid_take; /* Coop Middle: gold split / loot feed */
 
     memset(&picked_oid, 0, sizeof(picked_oid));
+    memset(&mid_take, 0, sizeof(mid_take));
     if (msg == NULL || !tig_net_is_host()) {
         return;
     }
@@ -11330,6 +11341,9 @@ void coop_lite_host_handle_item_op(int type, void* msg)
             extra = parent;
         }
         /* parent == pc: rearrange / equip (inventory_location). */
+        if (was_on_ground || extra != OBJ_HANDLE_NULL) {
+            coop_middle_take_begin(&mid_take, extra, item, pc, 0); /* Coop Middle */
+        }
         ok = item_transfer_ex(item, pc, pkt->inventory_location);
         break;
     }
@@ -11356,6 +11370,7 @@ void coop_lite_host_handle_item_op(int type, void* msg)
         break;
     }
     multiplayer_unlock();
+    coop_middle_take_done(&mid_take, ok); /* Coop Middle */
 
     {
         int64_t w = item_wield_get(pc, ITEM_INV_LOC_WEAPON);
@@ -15107,6 +15122,7 @@ int coop_lite_pose_map_key(int map, uint16_t gen)
 
 void coop_lite_on_map_opened(void)
 {
+    coop_middle_map_changed(); /* Coop Middle */
     if (tig_net_is_host()) {
 #ifndef COOP_LITE_TEST_STUBS
         int slot;
@@ -20279,7 +20295,8 @@ int coop_lite_travel_untold(int told_mask, int present_mask)
 bool coop_lite_party_ctrl_valid(const PacketCoopPartyCtrl* pkt, int size)
 {
     return pkt != NULL && pkt->type == PACKET_COOP_PARTY_CTRL && size >= (int)sizeof(PacketCoopPartyCtrl)
-        && pkt->op >= COOP_CTRL_TRAVEL_START && pkt->op <= COOP_CTRL_SPELL_END;
+        && ((pkt->op >= COOP_CTRL_TRAVEL_START && pkt->op <= COOP_CTRL_SPELL_END)
+            || coop_middle_party_ctrl_valid(pkt)); /* Coop Middle: REST_ASK / REST_REFUSE */
 }
 
 /* PT57 */
@@ -20426,6 +20443,7 @@ void coop_lite_pt52_slot_gone(int slot)
 {
     if (slot > 0 && slot < 8) {
         coop_lite_pt61_slot_gone(slot);
+        coop_middle_slot_gone(slot); /* Coop Middle */
         if (coop_treq_active && coop_treq_slot == slot) {
             coop_treq_active = false; /* PT57: the asker left */
             coop_travel_hide();
@@ -20657,6 +20675,9 @@ void coop_lite_handle_party_ctrl(PacketCoopPartyCtrl* pkt)
 
     if (!tig_net_is_active() || !coop_lite_party_ctrl_valid(pkt, tig_net_last_message_size())) {
         return;
+    }
+    if (coop_middle_handle_party_ctrl(pkt)) {
+        return; /* Coop Middle: rest request */
     }
     if (tig_net_is_host()) {
         slot = sub_52A530();
@@ -22790,6 +22811,40 @@ void coop_lite_chat_submit(const char* text)
     coop_chat_net_send(text, true, true);
 }
 
+/* ---- Coop Middle bridge: small exports for coop_middle.c (logic lives there) ---- */
+void coop_lite_mid_notice(const char* str, bool good)
+{
+    coop_lite_show_notice(str, good ? TF_TYPE_WHITE : TF_TYPE_RED);
+}
+
+void coop_lite_mid_prompt(const char* text)
+{
+    if (text == NULL) {
+        coop_travel_hide();
+    } else if (coop_travel_show_hook != NULL) {
+        coop_travel_show_hook(text);
+    }
+}
+
+bool coop_lite_mid_prompt_busy(void)
+{
+    return coop_treq_active || coop_sreq_load_active || coop_travel_active;
+}
+
+void coop_lite_mid_chat_line(const char* line)
+{
+    unsigned int now = coop_obj_now_ms != 0 ? coop_obj_now_ms : (unsigned int)(SDL_GetTicksNS() / 1000000u);
+
+    if (line == NULL || line[0] == '\0') {
+        return;
+    }
+    tig_debug_printf("[CHAT] %s\n", line);
+    if (coop_chat_on_line_hook != NULL) {
+        coop_chat_on_line_hook(line);
+    }
+    coop_chat_log_activity(now);
+}
+
 void coop_lite_handle_chat(PacketCoopChat* pkt)
 {
     PacketCoopChat out;
@@ -22832,6 +22887,9 @@ void coop_lite_handle_chat(PacketCoopChat* pkt)
     /* Client receives host relay. */
     if (!coop_lite_chat_valid(pkt, tig_net_last_message_size())) {
         return;
+    }
+    if (coop_middle_client_chat(pkt)) {
+        return; /* Coop Middle: host system line (loot feed) */
     }
     if (pkt->slot == sub_529520()) {
         coop_chat_log_activity(now);

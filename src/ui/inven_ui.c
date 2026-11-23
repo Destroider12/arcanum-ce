@@ -10,6 +10,7 @@
 #include "game/item.h"
 #include "game/mes.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/mp_utils.h"
 #include "net/tig_net.h"
 #include "game/multiplayer.h"
@@ -4239,7 +4240,9 @@ bool sub_578EA0(Packet81* pkt)
     bool error;
     unsigned int item_type;
     int worth;
+    CoopMiddleTake mid_take;
 
+    memset(&mid_take, 0, sizeof(mid_take));
     qty = pkt->field_60;
     flags = pkt->field_8;
     cost = pkt->field_5C;
@@ -4264,6 +4267,12 @@ bool sub_578EA0(Packet81* pkt)
 
     if (qty == 0) {
         return true;
+    }
+
+    /* Coop Middle (host): loot from a container / corpse into a PC, or a
+       PC's gold into a container. Not drops, gambling or buying. */
+    if ((flags & 0x1E) == 0) {
+        coop_middle_take_begin(&mid_take, v1, v2, v3, qty);
     }
 
     if (v6 != OBJ_HANDLE_NULL
@@ -4491,6 +4500,7 @@ bool sub_578EA0(Packet81* pkt)
         snprintf(byte_68241C, sizeof(byte_68241C), byte_682804, gold_amt);
     }
 
+    coop_middle_take_done(&mid_take, !error); /* Coop Middle */
     return true;
 }
 

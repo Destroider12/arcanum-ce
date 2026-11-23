@@ -3,6 +3,7 @@
 #include "game/obj_pool.h"
 
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -2515,12 +2516,12 @@ bool sub_54B5D0(TigMessage* msg)
                 }
                 return true;
             case SDL_SCANCODE_Y:
-                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(true) || coop_lite_travel_key())) {
+                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(true) || coop_lite_travel_key() || coop_middle_rest_key(true))) {
                     return true; /* PT50: travel ready / host go now */
                 }
                 break;
             case SDL_SCANCODE_N:
-                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(false) || coop_lite_travel_refuse_key())) {
+                if (!mainmenu_ui_is_active() && (coop_lite_save_req_key(false) || coop_lite_travel_refuse_key() || coop_middle_rest_key(false))) {
                     return true; /* PT57: host refuses a client's travel request */
                 }
                 break;

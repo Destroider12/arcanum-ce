@@ -31,7 +31,8 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 52
+#define TIG_NET_PROTOCOL 53 /* Coop Middle M1 (Coop Lite 1.0 stays on 52): PACKET_COOP_RULES,
+                               REST_ASK / REST_REFUSE party ctrl ops, loot feed chat lines */
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

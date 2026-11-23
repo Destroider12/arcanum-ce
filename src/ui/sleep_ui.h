@@ -12,5 +12,6 @@ void sleep_ui_close(void);
 bool sleep_ui_is_active(void);
 bool sleep_ui_process_callback(TimeEvent* timeevent);
 bool sleep_ui_dev_until_healed(void);
+bool sleep_ui_coop_rest(bool until_healed); /* Coop Middle */
 
 #endif /* ARCANUM_UI_SLEEP_UI_H_ */

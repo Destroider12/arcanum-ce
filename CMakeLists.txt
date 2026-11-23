@@ -63,6 +63,10 @@ set(SRCS
     "src/game/combat.c"
     "src/game/combat.h"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
+    "src/game/coop_rules.h"
+    "src/game/coop_middle.h"
     "src/game/coop_menu.c"
     "src/game/coop_menu_sys.c"
     "src/game/coop_lite.h"
@@ -427,6 +431,8 @@ add_executable(coop_lite_policy_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_policy_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -442,12 +448,39 @@ if(WIN32)
 endif()
 add_test(NAME coop_lite_policy COMMAND coop_lite_policy_test)
 
+# Coop Middle M1: rules contract, gold split, loot feed filter, rest ops.
+add_executable(coop_middle_test
+    "tests/coop_middle_test.c"
+    "src/net/coop_upnp.c"
+    "src/net/tig_net.c"
+    "src/net/tig_net_enet.c"
+    "src/net/tig_net_steam.c"
+    "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
+)
+target_include_directories(coop_middle_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+)
+target_link_libraries(coop_middle_test PRIVATE enet)
+target_compile_definitions(coop_middle_test PRIVATE
+    TIG_NET_TEST_STUB_DEBUG=1
+    COOP_LITE_TEST_STUBS=1
+)
+if(WIN32)
+    target_link_libraries(coop_middle_test PRIVATE ws2_32 winmm)
+endif()
+add_test(NAME coop_middle COMMAND coop_middle_test)
+
 add_executable(coop_story_test
     "tests/coop_story_test.c"
     "src/net/tig_net.c"
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_story_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -469,6 +502,8 @@ add_executable(coop_dialog_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_dialog_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -499,6 +534,8 @@ add_executable(coop_lite_dialog_filter_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_dialog_filter_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -521,6 +558,8 @@ add_executable(coop_lite_session_sync_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_session_sync_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -542,6 +581,8 @@ add_executable(coop_lite_net_hardening_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_net_hardening_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -567,6 +608,8 @@ add_executable(coop_lite_rx_fuzz_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_rx_fuzz_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -590,6 +633,8 @@ add_executable(coop_lite_fuzz8_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_fuzz8_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -612,6 +657,8 @@ add_executable(coop_lite_net8_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_net8_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -633,6 +680,8 @@ add_executable(coop_lite_stress8_test
     "src/net/tig_net_enet.c"
     "src/net/tig_net_steam.c"
     "src/game/coop_lite.c"
+    "src/game/coop_rules.c"
+    "src/game/coop_middle.c"
 )
 target_include_directories(coop_lite_stress8_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -735,7 +784,8 @@ add_test(NAME tig_net_transport COMMAND tig_net_transport_test)
 
 # PT58: co-op launcher (Win32 GUI, Windows builds only).
 if(WIN32)
-    add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c")
+    add_executable(arcanum-coop-launcher WIN32 "tools/launcher/launcher.c" "src/game/coop_rules.c")
+    target_include_directories(arcanum-coop-launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(arcanum-coop-launcher PRIVATE ws2_32 comctl32 shell32 wininet bcrypt)
     # PT62: build sha + protocol go into the bug report.
     file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/net/tig_net.h" COOP_PROTO_LINE REGEX "^#define TIG_NET_PROTOCOL ")

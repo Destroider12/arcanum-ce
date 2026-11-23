@@ -6,6 +6,7 @@
 #include "game/ai.h"
 #include "game/animfx.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
@@ -8112,10 +8113,14 @@ bool sub_42AA70(int64_t source_obj, int64_t target_obj)
         int item_type = obj_field_int32_get(target_obj, OBJ_F_TYPE);
         int item_proto = sub_49B290(target_obj);
         ObjectID item_oid = obj_get_id(target_obj);
+        CoopMiddleTake mid_take; /* Coop Middle: gold split / loot feed */
 
+        coop_middle_take_begin(&mid_take, OBJ_HANDLE_NULL, from_ground ? target_obj : OBJ_HANDLE_NULL, source_obj, 0);
         if (!item_transfer(target_obj, source_obj)) {
+            coop_middle_take_done(&mid_take, false);
             return false;
         }
+        coop_middle_take_done(&mid_take, true);
         if (from_ground) {
             /* PT17b: clients drop their copy now (not at the next world
                state); a PC's pickup makes the item NPC-takeable again. */

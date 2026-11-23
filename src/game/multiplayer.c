@@ -8,6 +8,7 @@
 #include "game/background.h"
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/effect.h"
@@ -1220,6 +1221,9 @@ void multiplayer_handle_message(void* msg)
         break;
     case PACKET_COOP_NPC_STATS:
         coop_lite_handle_npc_stats((PacketCoopNpcStats*)msg);
+        break;
+    case PACKET_COOP_RULES: /* Coop Middle M1 */
+        coop_middle_handle_rules((PacketCoopRules*)msg);
         break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);

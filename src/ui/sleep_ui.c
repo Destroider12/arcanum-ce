@@ -2,6 +2,7 @@
 
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/critter.h"
 #include "game/gfade.h"
 #include "game/hrp.h"
@@ -252,6 +253,11 @@ void sleep_ui_toggle(int64_t bed_obj)
     // Close sleep UI if it's currently visible.
     if (sleep_ui_active) {
         sleep_ui_close();
+        return;
+    }
+
+    // Coop Middle: a client asks the host to rest (Y / N) when the rule allows.
+    if (coop_middle_client_rest_ask(bed_obj != OBJ_HANDLE_NULL ? COOP_REST_MODE_NIGHT : COOP_REST_MODE_HEALED)) {
         return;
     }
 
@@ -755,6 +761,28 @@ void sleep_ui_notify_leader_sleeping(void)
     }
 
     object_list_destroy(&objects);
+}
+
+/* Coop Middle: the host accepted a client's rest request. Open the sleep
+   window (if needed) and press "Until Healed" (or "8 Hours" when asked for
+   a night, or in wait-only towns), as the host would. */
+bool sleep_ui_coop_rest(bool until_healed)
+{
+    TigMessage msg;
+    int option;
+
+    if (!sleep_ui_active) {
+        sleep_ui_toggle(OBJ_HANDLE_NULL);
+    }
+    if (!sleep_ui_active) {
+        return false;
+    }
+    option = until_healed && !sleep_ui_wait_mode ? SLEEP_UI_OPTION_UNTIL_HEALED : SLEEP_UI_OPTION_EIGHT_HOURS;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = TIG_MESSAGE_BUTTON;
+    msg.data.button.state = TIG_BUTTON_STATE_RELEASED;
+    msg.data.button.button_handle = sleep_ui_buttons[option].button_handle;
+    return sleep_ui_message_filter(&msg);
 }
 
 /* PT27 dev trigger "rest-healed": press "Until Healed" in the open sleep
