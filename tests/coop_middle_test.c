@@ -62,7 +62,8 @@ static void test_rules_default_sanitize(void)
 
     coop_rules_default(&r);
     CHECK(r.version == 1u);
-    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
@@ -109,13 +110,13 @@ static void test_rules_env(void)
     CoopRules back;
     char text[128];
     char small[8];
-    char desc[256];
+    char desc[512];
     unsigned int mask;
     int n;
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,hp=100,xp=100") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -132,12 +133,13 @@ static void test_rules_env(void)
     /* the launcher's own form, with ini aliases and spaces */
     n = coop_rules_parse_env(&r, " gold_split = 1 ; loot_feed=0, rest_vote=on ");
     CHECK(n == 3);
-    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+    CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
     CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
-        | COOP_RULE_NO_FRIENDLY_FIRE_AOE));
+        | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -190,7 +192,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 55);
+    CHECK(TIG_NET_PROTOCOL == 56);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -639,7 +641,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 8);
+            CHECK(coop_rules_parse_env(&back, text) == 10);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -764,7 +766,7 @@ static void test_m3_cmds(void)
     CHECK(line[0] != '\0');
     coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
     CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
-    CHECK(COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_PAUSE_DROP);
+    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_QUEST);
 }
 
 /* 13. M3 pings: packet, role, validity, rate limit */
@@ -775,7 +777,7 @@ static void test_m3_ping(void)
     unsigned int last = 0;
 
     CHECK(PACKET_COOP_PING == 168 && PACKET_COOP_PING < PACKET_COOP_TYPE_LIMIT);
-    CHECK(PACKET_COOP_TYPE_LIMIT == 169);
+    CHECK(PACKET_COOP_TYPE_LIMIT == 170);
     CHECK(sizeof(PacketCoopPing) == 24);
     CHECK(offsetof(PacketCoopPing, kind) == 0x0C && offsetof(PacketCoopPing, loc) == 0x10);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_PING) == sizeof(PacketCoopPing));
@@ -830,7 +832,7 @@ static void test_m3_pause(void)
     unsigned int last = 0;
     int b;
 
-    CHECK(TIG_NET_PROTOCOL == 55);
+    CHECK(TIG_NET_PROTOCOL == 56);
     CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
     memset(&c, 0, sizeof(c));
     c.type = PACKET_COOP_PARTY_CTRL;
@@ -869,6 +871,175 @@ static void test_m3_pause(void)
     CHECK(coop_middle_host_scale_xp(77) == 77);
 }
 
+/* 15. M4 rules: qitems / sfol, always in the string, aliases */
+static void test_m4_rules(void)
+{
+    CoopRules r;
+    CoopRules back;
+    char text[160];
+    char desc[512];
+    int n;
+
+    CHECK(COOP_RULE_SHARED_QUEST_ITEMS == 0x40u && COOP_RULE_SHARED_FOLLOWERS == 0x80u);
+    CHECK((COOP_RULE_ACTIVE_MASK & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS))
+        == (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
+    CHECK(COOP_RULE_KNOWN_MASK == COOP_RULE_ACTIVE_MASK);
+    coop_rules_default(&r);
+    r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
+    CHECK(coop_rules_parse_env(&back, text) == 10 && coop_rules_equal(&r, &back));
+    n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
+    CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
+    n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
+    CHECK(n == 2 && (r.flags & COOP_RULE_SHARED_QUEST_ITEMS) != 0 && (r.flags & COOP_RULE_SHARED_FOLLOWERS) != 0);
+    coop_rules_default(&r);
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strstr(desc, "shared quest items on") != NULL && strstr(desc, "shared followers on") != NULL);
+    CHECK(strstr(desc, "XP 100%") != NULL); /* nothing cut off */
+    coop_rules_describe(&r, true, desc, sizeof(desc));
+    CHECK(strstr(desc, "общие квестовые предметы вкл") != NULL && strstr(desc, "общие спутники вкл") != NULL);
+    CHECK(strstr(desc, "опыт 100%") != NULL);
+}
+
+/* 16. M4 shared quest items: who may be searched, pack order, chat line */
+static void test_m4_quest_items(void)
+{
+    char line[256];
+    int64_t owner = 123;
+
+    CHECK(COOP_SHARED_QUEST_RADIUS == 30);
+    CHECK(coop_middle_quest_pocket_eligible(true, true, 1, 0, true, false, true, 0));
+    CHECK(coop_middle_quest_pocket_eligible(true, true, 0, 3, true, false, true, 30));
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 3, true, false, true, 31)); /* too far */
+    CHECK(!coop_middle_quest_pocket_eligible(false, true, 0, 3, true, false, true, 1)); /* rule off */
+    CHECK(!coop_middle_quest_pocket_eligible(true, false, 0, 3, true, false, true, 1)); /* not the host */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 2, 2, true, false, true, 0)); /* self */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 3, false, false, true, 1)); /* disconnected */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 3, true, true, true, 1)); /* dead */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 3, true, false, false, 1)); /* other map */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 3, true, false, true, -1)); /* unknown distance */
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, -1, 3, true, false, true, 1));
+    CHECK(!coop_middle_quest_pocket_eligible(true, true, 0, 8, true, false, true, 1));
+    CHECK(coop_middle_quest_item_rank(0) == 0 && coop_middle_quest_item_rank(999) == 0);
+    CHECK(coop_middle_quest_item_rank(1000) == 1 && coop_middle_quest_item_rank(1008) == 1);
+    CHECK(coop_middle_quest_item_rank(1009) == -1 && coop_middle_quest_item_rank(-1) == -1);
+    coop_middle_feed_format(COOP_MID_CHAT_QUEST, "Bob", "Golden key", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Quest] Golden key handed over from Bob") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_QUEST, "Bob", "Golden key", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Квест] Golden key передан из рюкзака Bob") == 0);
+    /* test build: the game lookup is stubbed (no item, owner cleared) */
+    CHECK(coop_middle_find_party_item(1, 5, COOP_QITEM_MATCH_NAME, &owner) == 0 && owner == 0);
+}
+
+/* 17. M4 town map fog: packet layout, validity, merge, signature */
+static void test_m4_fog(void)
+{
+    static PacketCoopTownmapFog p;
+    uint8_t dst[4] = { 0x01, 0x00, 0xF0, 0xFF };
+    uint8_t src[4] = { 0x03, 0x80, 0x0F, 0x00 };
+    uint8_t a[3] = { 1, 2, 3 };
+    uint8_t b[3] = { 1, 2, 4 };
+
+    CHECK(PACKET_COOP_TOWNMAP_FOG == 169 && PACKET_COOP_TOWNMAP_FOG < PACKET_COOP_TYPE_LIMIT);
+    CHECK(sizeof(PacketCoopTownmapFog) == 0x410 && COOP_TOWNMAP_FOG_HDR == 0x10);
+    CHECK(offsetof(PacketCoopTownmapFog, offset) == 8 && offsetof(PacketCoopTownmapFog, len) == 12
+        && offsetof(PacketCoopTownmapFog, flags) == 14);
+    CHECK(coop_lite_mp_packet_role(PACKET_COOP_TOWNMAP_FOG) == COOP_MP_PKT_BOTH);
+    CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_TOWNMAP_FOG) == (size_t)COOP_TOWNMAP_FOG_HDR + 1);
+    memset(&p, 0, sizeof(p));
+    p.type = PACKET_COOP_TOWNMAP_FOG;
+    p.townmap_id = 7;
+    p.offset = 0;
+    p.len = 100;
+    CHECK(coop_middle_townmap_fog_valid(&p, COOP_TOWNMAP_FOG_HDR + 100));
+    CHECK(coop_middle_townmap_fog_valid(&p, (int)sizeof(p))); /* full struct is fine too */
+    CHECK(!coop_middle_townmap_fog_valid(&p, COOP_TOWNMAP_FOG_HDR + 99)); /* short */
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p) + 1));
+    CHECK(!coop_middle_townmap_fog_valid(NULL, COOP_TOWNMAP_FOG_HDR + 100));
+    p.flags = COOP_TOWNMAP_FOG_F_REPLACE;
+    CHECK(coop_middle_townmap_fog_valid(&p, COOP_TOWNMAP_FOG_HDR + 100));
+    p.flags = 0x2;
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p))); /* unknown flag */
+    p.flags = 0;
+    p.townmap_id = 0;
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+    p.townmap_id = 7;
+    p.len = 0;
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+    p.len = COOP_TOWNMAP_FOG_CHUNK + 1;
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+    p.len = COOP_TOWNMAP_FOG_CHUNK;
+    p.offset = COOP_TOWNMAP_FOG_MAX_BYTES - COOP_TOWNMAP_FOG_CHUNK;
+    CHECK(coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+    p.offset = 0xFFFFFFF0u; /* no wrap-around */
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+    p.type = PACKET_COOP_PING;
+    p.offset = 0;
+    CHECK(!coop_middle_townmap_fog_valid(&p, (int)sizeof(p)));
+
+    CHECK(coop_middle_fog_merge(dst, src, 4, false) == 1 + 1 + 4); /* 0x02, 0x80, 0x0F */
+    CHECK(dst[0] == 0x03 && dst[1] == 0x80 && dst[2] == 0xFF && dst[3] == 0xFF);
+    CHECK(coop_middle_fog_merge(dst, src, 4, false) == 0); /* idempotent */
+    CHECK(coop_middle_fog_merge(dst, src, 4, true) == 0); /* replace clears, opens nothing */
+    CHECK(dst[0] == 0x03 && dst[2] == 0x0F && dst[3] == 0x00);
+    CHECK(coop_middle_fog_merge(dst, b, 0, false) == 0 && coop_middle_fog_merge(NULL, src, 4, false) == 0);
+    CHECK(coop_middle_fnv1a(a, 3) != coop_middle_fnv1a(b, 3));
+    CHECK(coop_middle_fnv1a(a, 0) == 2166136261u && coop_middle_fnv1a(NULL, 5) == 2166136261u);
+}
+
+/* 18. M4 parallel dialogs: routing */
+static void test_m4_dialog_route(void)
+{
+    bool act[8] = { false, false, false, false, false, false, false, false };
+
+    CHECK(coop_middle_dialog_route(1, act, -1, -1) == -1);
+    act[0] = true; /* the host talks */
+    CHECK(coop_middle_dialog_route(1, act, -1, -1) == 0);
+    CHECK(coop_middle_dialog_route(0, act, 3, 3) == 0); /* the host's own dialog first */
+    act[2] = true; /* slot 2 talks in parallel */
+    CHECK(coop_middle_dialog_route(2, act, -1, 2) == 2); /* own session */
+    CHECK(coop_middle_dialog_route(2, act, 0, 2) == 2); /* own beats attached */
+    CHECK(coop_middle_dialog_route(3, act, 2, 2) == 2); /* attached (NPC was busy) */
+    CHECK(coop_middle_dialog_route(3, act, -1, 2) == 0); /* default: the host's */
+    CHECK(coop_middle_dialog_route(3, act, 5, 2) == 0); /* attached session gone */
+    act[0] = false;
+    CHECK(coop_middle_dialog_route(3, act, -1, 2) == 2); /* else the most recent */
+    CHECK(coop_middle_dialog_route(0, act, -1, 2) == 2); /* the host watches it */
+    CHECK(coop_middle_dialog_route(3, act, -1, 0) == -1); /* recent must be a client */
+    CHECK(coop_middle_dialog_route(8, act, -1, 2) == -1 && coop_middle_dialog_route(-1, act, -1, 2) == -1);
+    CHECK(coop_middle_dialog_route(1, NULL, -1, 2) == -1);
+}
+
+/* 19. M4 shared followers: access, NPC stats packet with skills */
+static void test_m4_followers(void)
+{
+    CHECK(COOP_SHARED_FOLLOWER_RANGE == 6);
+    CHECK(coop_middle_follower_access_ok(false, true, true, true, 50)); /* the leader always */
+    CHECK(coop_middle_follower_access_ok(true, false, true, true, 6));
+    CHECK(!coop_middle_follower_access_ok(true, false, true, true, 7));
+    CHECK(!coop_middle_follower_access_ok(false, false, true, true, 1)); /* rule off */
+    CHECK(!coop_middle_follower_access_ok(true, false, false, true, 1)); /* not a party follower */
+    CHECK(!coop_middle_follower_access_ok(true, true, true, false, 1)); /* dead */
+    CHECK(!coop_middle_follower_access_ok(true, false, true, true, -1));
+    CHECK(sizeof(PacketCoopNpcStats) == 0x120);
+    CHECK(offsetof(PacketCoopNpcStats, basic_skills) == 0xA0 && offsetof(PacketCoopNpcStats, tech_skills) == 0xD0
+        && offsetof(PacketCoopNpcStats, spell_tech) == 0xE0);
+    CHECK(COOP_NPC_BASIC_SKILLS == 12 && COOP_NPC_TECH_SKILLS == 4 && COOP_NPC_SPELL_TECH == 16);
+    {
+        static PacketCoopNpcStats s;
+
+        memset(&s, 0, sizeof(s));
+        s.type = PACKET_COOP_NPC_STATS;
+        s.stats[17] = 5;
+        s.basic_skills[3] = 4;
+        s.spell_tech[15] = 2;
+        CHECK(coop_lite_npc_stats_valid(&s, (int)sizeof(s)));
+        CHECK(!coop_lite_npc_stats_valid(&s, 0xA0)); /* the protocol-55 size is refused */
+        CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_NPC_STATS) == sizeof(PacketCoopNpcStats));
+    }
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -885,11 +1056,17 @@ int main(void)
     test_m3_cmds();
     test_m3_ping();
     test_m3_pause();
+    test_m4_rules();
+    test_m4_quest_items();
+    test_m4_fog();
+    test_m4_dialog_route();
+    test_m4_followers();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
     }
     printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops, "
-           "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause)\n");
+           "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause, "
+           "M4 rules / quest items / town map fog / dialog routing / followers)\n");
     return 0;
 }
