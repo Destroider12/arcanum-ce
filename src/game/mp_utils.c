@@ -1,5 +1,6 @@
 #include "game/mp_utils.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* M5: distance-filtered sounds on map 1 */
 
 #include "game/a_name.h"
 #include "game/anim.h"
@@ -496,7 +497,8 @@ void mp_gsound_play_sfx_on_obj(int sound_id, int loops, int64_t obj)
         pkt.sound_id = sound_id;
         pkt.loops = loops;
         pkt.oid = obj_get_id(obj);
-        tig_net_send_app_all(&pkt, sizeof(pkt));
+        coop_middle_send_app_near(&pkt, sizeof(pkt), 106,
+            obj != OBJ_HANDLE_NULL ? obj_field_int64_get(obj, OBJ_F_LOCATION) : 0, 0); /* M5 */
     }
 }
 

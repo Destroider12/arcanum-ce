@@ -31,12 +31,14 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 56 /* Coop Middle M4 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55):
+#define TIG_NET_PROTOCOL 57 /* Coop Middle M5 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55, M4 56):
                                M1 PACKET_COOP_RULES + REST_ASK / REST_REFUSE + loot feed;
                                M2 COOP_BARTER_OPEN_TRADE, COOP_CTRL_SLOT_STATUS, trade chat lines;
                                M3 PACKET_COOP_PING (168), COOP_CTRL_PAUSE, /tp chat lines;
                                M4 PACKET_COOP_TOWNMAP_FOG (169), PacketCoopNpcStats + skills
-                               (0x120), [Quest] chat line, per-slot dialog routing */
+                               (0x120), [Quest] chat line, per-slot dialog routing;
+                               M5 PACKET_COOP_OVERWORLD_TRAVEL (170), COOP_CTRL_SLEEP_VOTE /
+                               SLEEP_STATE, addressed NPC_POS */
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,
@@ -112,6 +114,7 @@ bool tig_net_kick_slot(int slot); /* PT77n: host drops a stale slot now */
 /* Unreliable+sequenced pose traffic on its own channel (review M7). */
 void tig_net_send_pose_all(void* data, int size);
 void tig_net_send_pose_except(void* data, int size, int client_id);
+void tig_net_send_pose(void* data, int size, int client_id); /* Coop Middle M5: one slot */
 /* Client: mark another client's slot as present (host roster, review H3). */
 void tig_net_set_remote_slot_present(int slot, bool present);
 bool tig_net_client_is_waiting(int client_id);

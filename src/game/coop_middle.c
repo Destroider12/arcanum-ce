@@ -16,6 +16,15 @@
 #include <string.h>
 
 #include "net/tig_net.h"
+#ifndef COOP_LITE_TEST_STUBS
+#include "game/location.h" /* M5: LOCATION_GET_X / SECTOR_MAKE in the pure part */
+#include "game/sector.h"
+#else
+#define LOCATION_MAKE(x, y) ((int64_t)((x) & 0xFFFFFFFF) | (((int64_t)(y) & 0xFFFFFFFF) << 32))
+#define LOCATION_GET_X(l) ((int64_t)((l) & 0xFFFFFFFF))
+#define LOCATION_GET_Y(l) ((int64_t)(((l) >> 32) & 0xFFFFFFFF))
+#define SECTOR_MAKE(a, b) ((a) | ((b) << 26))
+#endif
 
 _Static_assert(PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT, "PACKET_COOP_RULES inside the coop range");
 _Static_assert(PACKET_COOP_RULES > PACKET_COOP_NPC_STATS, "PACKET_COOP_RULES after the Lite types");
@@ -266,6 +275,17 @@ bool coop_middle_party_ctrl_valid(const PacketCoopPartyCtrl* pkt)
     }
     if (pkt->op == COOP_CTRL_PAUSE) {
         return (pkt->a == 0 || pkt->a == 1) && pkt->b >= 0 && pkt->b < 8;
+    }
+    if (pkt->op == COOP_CTRL_SLEEP_VOTE) { /* M5 */
+        return pkt->a >= COOP_SLEEP_MODE_CANCEL && pkt->a <= COOP_SLEEP_MODE_MAX && pkt->b == 0;
+    }
+    if (pkt->op == COOP_CTRL_SLEEP_STATE) {
+        int mode = (pkt->a >> 8) & 0xFF;
+        int initiator = pkt->b & 0xFF;
+        int living = (pkt->b >> 8) & 0xFF;
+
+        return pkt->a >= 0 && (pkt->a >> 16) == 0 && mode <= COOP_SLEEP_MODE_MAX && pkt->b >= 0
+            && (pkt->b >> 16) == 0 && (initiator < 8 || initiator == 0xFF) && living <= 8;
     }
     return false;
 }
@@ -643,8 +663,331 @@ bool coop_middle_follower_access_ok(bool rule_on, bool is_leader, bool leader_in
     return rule_on && leader_in_party && dist >= 0 && dist <= COOP_SHARED_FOLLOWER_RANGE;
 }
 
+/* ---- M5 pure ---- */
+
+int coop_middle_keep_sector_margin(int active_remote_slots, int free_cache_slots)
+{
+    if (active_remote_slots <= COOP_KEEP_FULL_MAX_REMOTE || free_cache_slots >= COOP_KEEP_FREE_MIN) {
+        return 0;
+    }
+    return COOP_KEEP_MARGIN;
+}
+
+int coop_middle_keep_ids(int64_t loc, int margin, int64_t* ids, int max)
+{
+    int64_t x;
+    int64_t y;
+    int64_t sx;
+    int64_t sy;
+    int64_t ox;
+    int64_t oy;
+    int dxs[2];
+    int dys[2];
+    int nx = 1;
+    int ny = 1;
+    int i;
+    int j;
+    int n = 0;
+
+    if (margin <= 0) {
+        return coop_lite_keep_ids(loc, ids, max);
+    }
+    if (ids == NULL || max <= 0) {
+        return 0;
+    }
+    x = LOCATION_GET_X(loc);
+    y = LOCATION_GET_Y(loc);
+    sx = x >> 6;
+    sy = y >> 6;
+    ox = x & 63;
+    oy = y & 63;
+    dxs[0] = 0;
+    dys[0] = 0;
+    if (ox < margin) {
+        dxs[nx++] = -1;
+    } else if (63 - ox < margin) {
+        dxs[nx++] = 1;
+    }
+    if (oy < margin) {
+        dys[ny++] = -1;
+    } else if (63 - oy < margin) {
+        dys[ny++] = 1;
+    }
+    for (j = 0; j < ny; j++) {
+        for (i = 0; i < nx; i++) {
+            int64_t cx = sx + dxs[i];
+            int64_t cy = sy + dys[j];
+
+            if (cx < 0 || cy < 0) {
+                continue;
+            }
+            if (n >= max) {
+                return n;
+            }
+            ids[n++] = SECTOR_MAKE(cx, cy);
+        }
+    }
+    return n;
+}
+
+bool coop_middle_loc_within(int64_t a, int64_t b, int radius)
+{
+    int64_t dx;
+    int64_t dy;
+
+    if (a == 0 || b == 0 || radius < 0) {
+        return false;
+    }
+    dx = (int64_t)LOCATION_GET_X(a) - (int64_t)LOCATION_GET_X(b);
+    dy = (int64_t)LOCATION_GET_Y(a) - (int64_t)LOCATION_GET_Y(b);
+    return dx >= -radius && dx <= radius && dy >= -radius && dy <= radius;
+}
+
+int coop_middle_interest_radius(int packet_type, bool start_map)
+{
+    if (packet_type == PACKET_COOP_NPC_POS) {
+        return COOP_IM_NPC_RADIUS;
+    }
+    if (!start_map) {
+        return 0;
+    }
+    switch (packet_type) {
+    case PACKET_COOP_DOOR_STATE:
+        return COOP_IM_DOOR_RADIUS;
+    case PACKET_COOP_TRAP_FX:
+    case PACKET_COOP_PROJECTILE_FX:
+    case 106: /* sounds */
+    case 77: /* spell eye candy */
+        return COOP_IM_FX_RADIUS;
+    default:
+        return 0;
+    }
+}
+
+bool coop_middle_overworld_pkt_valid(const PacketCoopOverworldTravel* pkt, int size, bool from_host)
+{
+    if (pkt == NULL || size != (int)sizeof(PacketCoopOverworldTravel) || pkt->type != PACKET_COOP_OVERWORLD_TRAVEL
+        || pkt->slot < 0 || pkt->slot >= 8 || (pkt->flags & ~COOP_OWT_F_MASK) != 0) {
+        return false;
+    }
+    switch (pkt->op) {
+    case COOP_OWT_START:
+        return !from_host && pkt->loc != 0 && pkt->flags == 0;
+    case COOP_OWT_CANCEL:
+        return !from_host && pkt->flags == 0;
+    case COOP_OWT_PROGRESS:
+        return from_host;
+    case COOP_OWT_ARRIVED:
+        return from_host && pkt->loc != 0 && (pkt->flags & COOP_OWT_F_MOVING) == 0;
+    case COOP_OWT_REFUSED:
+        return from_host && pkt->world_x >= 1 && pkt->world_x <= COOP_OWT_REFUSE_MAX && pkt->flags == 0;
+    default:
+        return false;
+    }
+}
+
+int coop_middle_owt_advance(int* x, int* y, int tx, int ty, int steps)
+{
+    int used = 0;
+
+    if (x == NULL || y == NULL) {
+        return 0;
+    }
+    while (used < steps && (*x != tx || *y != ty)) {
+        *x += *x < tx ? 1 : (*x > tx ? -1 : 0);
+        *y += *y < ty ? 1 : (*y > ty ? -1 : 0);
+        used++;
+    }
+    return used;
+}
+
+void coop_middle_sleep_reset(CoopSleepState* st)
+{
+    if (st != NULL) {
+        st->ready_mask = 0;
+        st->mode = 0;
+        st->initiator = -1;
+    }
+}
+
+int coop_middle_sleep_count(uint8_t mask)
+{
+    int n = 0;
+
+    while (mask != 0) {
+        n += mask & 1u;
+        mask >>= 1;
+    }
+    return n;
+}
+
+static int coop_sleep_lowest(uint8_t mask)
+{
+    int s;
+
+    for (s = 0; s < 8; s++) {
+        if ((mask & (1u << s)) != 0) {
+            return s;
+        }
+    }
+    return -1;
+}
+
+int coop_middle_sleep_step(CoopSleepState* st, uint8_t living_mask, int ev, int slot, int mode)
+{
+    uint8_t bit;
+    uint8_t before;
+
+    if (st == NULL) {
+        return COOP_SLEEP_RES_NONE;
+    }
+    bit = slot >= 0 && slot < 8 ? (uint8_t)(1u << slot) : 0;
+    before = st->ready_mask;
+    switch (ev) {
+    case COOP_SLEEP_EV_VOTE:
+        if (bit == 0 || (living_mask & bit) == 0 || mode < 1 || mode > COOP_SLEEP_MODE_MAX) {
+            return COOP_SLEEP_RES_REFUSED;
+        }
+        if (coop_middle_sleep_count(living_mask) == 1) {
+            coop_middle_sleep_reset(st);
+            return COOP_SLEEP_RES_SOLO;
+        }
+        if (st->initiator < 0 || st->ready_mask == 0) {
+            st->initiator = slot;
+            st->mode = (uint8_t)mode;
+        }
+        st->ready_mask |= bit;
+        break;
+    case COOP_SLEEP_EV_CANCEL:
+        st->ready_mask &= (uint8_t)~bit;
+        break;
+    case COOP_SLEEP_EV_CHECK:
+        break;
+    default:
+        return COOP_SLEEP_RES_NONE;
+    }
+    st->ready_mask &= living_mask;
+    if (st->ready_mask == 0) {
+        if (st->initiator >= 0) {
+            coop_middle_sleep_reset(st);
+            return COOP_SLEEP_RES_CLEARED;
+        }
+        return COOP_SLEEP_RES_NONE;
+    }
+    if (st->initiator < 0 || (st->ready_mask & (1u << st->initiator)) == 0) {
+        st->initiator = coop_sleep_lowest(st->ready_mask); /* the mode stays */
+    }
+    if ((st->ready_mask & living_mask) == living_mask) {
+        return COOP_SLEEP_RES_EXECUTE;
+    }
+    return st->ready_mask != before || ev == COOP_SLEEP_EV_VOTE ? COOP_SLEEP_RES_WAIT : COOP_SLEEP_RES_NONE;
+}
+
+int coop_middle_sleep_minutes(int mode, int hour, int minute)
+{
+    int now;
+    int target;
+    int d;
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return -1;
+    }
+    now = hour * 60 + minute;
+    switch (mode) {
+    case COOP_SLEEP_MODE_MORNING:
+    case COOP_SLEEP_MODE_EVENING:
+        target = mode == COOP_SLEEP_MODE_MORNING ? 8 * 60 : 20 * 60;
+        d = (target - now + 24 * 60) % (24 * 60);
+        return d == 0 ? 24 * 60 : d;
+    case COOP_SLEEP_MODE_8H:
+        return 8 * 60;
+    case COOP_SLEEP_MODE_1H:
+        return 60;
+    case COOP_SLEEP_MODE_2H:
+        return 2 * 60;
+    case COOP_SLEEP_MODE_4H:
+        return 4 * 60;
+    case COOP_SLEEP_MODE_24H:
+        return 24 * 60;
+    default:
+        return -1;
+    }
+}
+
+int coop_middle_sleep_mode_from_ui(int hours_value)
+{
+    switch (hours_value) {
+    case 1:
+        return COOP_SLEEP_MODE_1H;
+    case 2:
+        return COOP_SLEEP_MODE_2H;
+    case 4:
+        return COOP_SLEEP_MODE_4H;
+    case 8:
+        return COOP_SLEEP_MODE_8H;
+    case 24:
+        return COOP_SLEEP_MODE_24H;
+    case -1:
+        return COOP_SLEEP_MODE_MORNING;
+    case -2:
+        return COOP_SLEEP_MODE_EVENING;
+    case -3:
+        return COOP_SLEEP_MODE_HEALED;
+    default:
+        return 0;
+    }
+}
+
+static const char* coop_sleep_mode_name(int mode, bool ru)
+{
+    switch (mode) {
+    case COOP_SLEEP_MODE_MORNING:
+        return ru ? "до утра" : "until morning";
+    case COOP_SLEEP_MODE_EVENING:
+        return ru ? "до вечера" : "until evening";
+    case COOP_SLEEP_MODE_HEALED:
+        return ru ? "до исцеления" : "until healed";
+    case COOP_SLEEP_MODE_8H:
+        return ru ? "8 часов" : "8 hours";
+    case COOP_SLEEP_MODE_1H:
+        return ru ? "1 час" : "1 hour";
+    case COOP_SLEEP_MODE_2H:
+        return ru ? "2 часа" : "2 hours";
+    case COOP_SLEEP_MODE_4H:
+        return ru ? "4 часа" : "4 hours";
+    case COOP_SLEEP_MODE_24H:
+        return ru ? "сутки" : "24 hours";
+    default:
+        return "?";
+    }
+}
+
+const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int living, const char* name, int mode,
+    bool ru)
+{
+    if (out == NULL || sz == 0) {
+        return out;
+    }
+    if (ru) {
+        snprintf(out, sz, "Сон: готовы %d/%d (%s: %s). Y - спать вместе, N - отмена", ready, living,
+            name != NULL ? name : "?", coop_sleep_mode_name(mode, true));
+    } else {
+        snprintf(out, sz, "Sleep: %d/%d ready (%s: %s). Y = join sleep, N = cancel", ready, living,
+            name != NULL ? name : "?", coop_sleep_mode_name(mode, false));
+    }
+    return out;
+}
+
+
 #ifndef COOP_LITE_TEST_STUBS
 
+#include "game/anim.h"
+#include "game/area.h"
+#include "game/gfade.h"
+#include "game/obj_pool.h"
+#include "game/random.h"
+#include "game/timeevent.h"
+#include "ui/wmap_rnd.h"
 #include "game/combat.h"
 #include "game/critter.h"
 #include "game/gsound.h"
@@ -698,6 +1041,7 @@ static unsigned int coop_rest_asked_ms;
 static CoopFeedLimiter coop_feed;
 
 static bool coop_status_handle(const PacketCoopPartyCtrl* pkt); /* M2 */
+static bool coop_sleep_handle(const PacketCoopPartyCtrl* pkt); /* M5 */
 static void coop_status_host_tick(unsigned int now_ms);
 static void coop_status_client_tick(unsigned int now_ms);
 static bool coop_pause_handle(const PacketCoopPartyCtrl* pkt); /* M3 */
@@ -1319,6 +1663,9 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
     }
     if (pkt != NULL && pkt->op == COOP_CTRL_PAUSE) {
         return coop_pause_handle(pkt); /* M3 */
+    }
+    if (pkt != NULL && (pkt->op == COOP_CTRL_SLEEP_VOTE || pkt->op == COOP_CTRL_SLEEP_STATE)) {
+        return coop_sleep_handle(pkt); /* M5 */
     }
     if (pkt == NULL || (pkt->op != COOP_CTRL_REST_ASK && pkt->op != COOP_CTRL_REST_REFUSE)) {
         return false;
@@ -2532,6 +2879,1125 @@ void coop_middle_handle_townmap_fog(PacketCoopTownmapFog* pkt)
     }
 }
 
+/* ---- M5: interest management ---- */
+
+static int coop_im_remote_count(void)
+{
+    int n = 0;
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        if (sub_4A2B60(slot) != OBJ_HANDLE_NULL) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static bool coop_im_start_map(void)
+{
+    int start = map_by_type(MAP_TYPE_START_MAP);
+
+    return start > 0 && map_is_valid() && map_current_map() == start;
+}
+
+static int coop_im_margin_logged = -1;
+
+int coop_middle_keep_sector_set(int64_t loc, int64_t* ids, int max)
+{
+    int capacity = 0;
+    int locked = 0;
+    int others;
+    int remote;
+    int free_proj;
+    int margin;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return coop_lite_keep_ids(loc, ids, max);
+    }
+    sector_cache_coop_stats(&capacity, &locked);
+    remote = coop_im_remote_count();
+    /* Free slots if every remote slot held its full 3x3: it does not depend
+       on the window used now, so the choice does not flap. */
+    others = locked - coop_lite_mid_keep_locked();
+    free_proj = capacity - (others > 0 ? others : 0) - 9 * remote;
+    margin = coop_middle_keep_sector_margin(remote, free_proj);
+    if (margin != coop_im_margin_logged) {
+        coop_im_margin_logged = margin;
+        tig_debug_printf("CoopMiddle: sector keep window %s (remote %d, cache %d, locked %d, free if 3x3 %d)\n",
+            margin == 0 ? "3x3" : "adaptive 2x2", remote, capacity, locked, free_proj);
+    }
+    return coop_middle_keep_ids(loc, margin, ids, max);
+}
+
+bool coop_middle_slot_in_range(int slot, int64_t loc, int radius)
+{
+    int64_t pc;
+
+    if (slot < 0 || slot >= 8 || loc == 0) {
+        return false;
+    }
+    pc = sub_4A2B60(slot);
+    return pc != OBJ_HANDLE_NULL && coop_middle_loc_within(obj_field_int64_get(pc, OBJ_F_LOCATION), loc, radius);
+}
+
+unsigned int coop_middle_slots_in_range(int64_t loc, int radius)
+{
+    unsigned int mask = 0;
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        if (coop_middle_slot_in_range(slot, loc, radius)) {
+            mask |= 1u << slot;
+        }
+    }
+    return mask;
+}
+
+void coop_middle_send_app_near(void* data, int size, int packet_type, int64_t loc_a, int64_t loc_b)
+{
+    int radius;
+    int slot;
+
+    if (!coop_mid_session_host() || (loc_a == 0 && loc_b == 0)) {
+        tig_net_send_app_all(data, size);
+        return;
+    }
+    radius = coop_middle_interest_radius(packet_type, coop_im_start_map());
+    if (radius <= 0) {
+        tig_net_send_app_all(data, size);
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        if (!tig_net_client_is_active(slot)) {
+            continue;
+        }
+        if ((loc_a != 0 && coop_middle_slot_in_range(slot, loc_a, radius))
+            || (loc_b != 0 && coop_middle_slot_in_range(slot, loc_b, radius))) {
+            tig_net_send_app(data, size, slot);
+        }
+    }
+}
+
+/* ---- M5: free world map (map 1) ---- */
+
+#define COOP_OWT_HIDE_MAX 9
+#define COOP_OWT_HIDE_FLAGS (OF_OFF | OF_INVULNERABLE)
+
+typedef struct CoopOwtHidden {
+    int count;
+    ObjectID oid[COOP_OWT_HIDE_MAX];
+    unsigned int added[COOP_OWT_HIDE_MAX]; /* flags we set (restored on landing) */
+} CoopOwtHidden;
+
+typedef struct CoopOwtTransit {
+    bool active;
+    int x; /* sector coords */
+    int y;
+    int tx;
+    int ty;
+    int64_t dest;
+    unsigned int step_ms;
+    unsigned int progress_ms;
+    int roll_in; /* steps to the next encounter roll */
+    CoopOwtHidden hid;
+} CoopOwtTransit;
+
+typedef struct CoopOwtMarker {
+    bool valid;
+    int x;
+    int y;
+    bool moving;
+    unsigned int ms;
+    unsigned int enc_ms; /* 0 = no encounter */
+} CoopOwtMarker;
+
+static CoopOwtTransit coop_owt[8]; /* host */
+static CoopOwtMarker coop_owt_mark[8]; /* both sides */
+static unsigned int coop_owt_serial;
+static unsigned int coop_owt_markers_ms; /* host: last all-slot sweep */
+static unsigned int coop_owt_local_ms; /* host: own trip progress */
+static int coop_owt_local_roll; /* host: own trip, steps to the next roll */
+static bool coop_owt_client_active; /* client: own trip asked / running */
+static unsigned int coop_owt_client_sent_ms;
+static int64_t coop_owt_client_dest;
+static CoopOwtHidden coop_owt_remote_hid[8]; /* client: other players hidden while they travel */
+
+static bool coop_owt_rule(void)
+{
+    return tig_net_is_active() && tig_net_is_coop_enabled() && coop_middle_rule_on(COOP_RULE_FREE_OVERWORLD);
+}
+
+bool coop_middle_overworld_free(void)
+{
+    return coop_owt_rule() && coop_im_start_map();
+}
+
+bool coop_middle_overworld_solo_hop(int dest_map)
+{
+    return coop_mid_session_host() && coop_middle_overworld_free() && dest_map == map_by_type(MAP_TYPE_START_MAP);
+}
+
+bool coop_middle_overworld_freeze_time(void)
+{
+    return coop_middle_overworld_free();
+}
+
+static int coop_owt_roll_steps(void)
+{
+    return random_between(COOP_OWT_ENC_MIN_STEPS, COOP_OWT_ENC_MAX_STEPS);
+}
+
+static int64_t coop_owt_sector_loc(int x, int y)
+{
+    return LOCATION_MAKE((int64_t)x * 64 + 32, (int64_t)y * 64 + 32);
+}
+
+static void coop_owt_hide_obj(CoopOwtHidden* h, int64_t obj)
+{
+    unsigned int cur;
+    unsigned int add;
+
+    if (obj == OBJ_HANDLE_NULL || h->count >= COOP_OWT_HIDE_MAX) {
+        return;
+    }
+    cur = (unsigned int)obj_field_int32_get(obj, OBJ_F_FLAGS);
+    add = COOP_OWT_HIDE_FLAGS & ~cur;
+    h->oid[h->count] = obj_get_id(obj);
+    h->added[h->count] = add;
+    h->count++;
+    if (add != 0) {
+        multiplayer_lock();
+        sub_424070(obj, 3, false, true); /* stop its walk / attack */
+        object_flags_set(obj, add);
+        multiplayer_unlock();
+    }
+}
+
+/* PC + its followers (OIDs, so a vanished object is skipped later). */
+static void coop_owt_hide(CoopOwtHidden* h, int64_t pc)
+{
+    ObjectList objects;
+    ObjectNode* node;
+
+    h->count = 0;
+    coop_owt_hide_obj(h, pc);
+    object_list_all_followers(pc, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        coop_owt_hide_obj(h, node->obj);
+    }
+    object_list_destroy(&objects);
+}
+
+static void coop_owt_unhide(CoopOwtHidden* h)
+{
+    int i;
+
+    for (i = 0; i < h->count; i++) {
+        int64_t obj = obj_pool_perm_lookup(h->oid[i]);
+
+        if (obj != OBJ_HANDLE_NULL && h->added[i] != 0) {
+            multiplayer_lock();
+            object_flags_unset(obj, h->added[i]);
+            multiplayer_unlock();
+        }
+    }
+    h->count = 0;
+}
+
+static void coop_owt_mark_set(int slot, int x, int y, int flags)
+{
+    CoopOwtMarker* m;
+
+    if (slot < 0 || slot >= 8) {
+        return;
+    }
+    m = &coop_owt_mark[slot];
+    if (!m->valid || m->x != x || m->y != y || m->moving != ((flags & COOP_OWT_F_MOVING) != 0)
+        || (flags & COOP_OWT_F_ENCOUNTER) != 0) {
+        coop_owt_serial++;
+    }
+    m->valid = true;
+    m->x = x;
+    m->y = y;
+    m->moving = (flags & COOP_OWT_F_MOVING) != 0;
+    m->ms = coop_mid_now_ms != 0 ? coop_mid_now_ms : 1;
+    if ((flags & COOP_OWT_F_ENCOUNTER) != 0) {
+        m->enc_ms = m->ms;
+    }
+}
+
+static void coop_owt_send(int op, int slot, int flags, int64_t loc, int x, int y, int to_slot)
+{
+    PacketCoopOverworldTravel pkt;
+    int depth;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_OVERWORLD_TRAVEL;
+    pkt.op = op;
+    pkt.slot = slot;
+    pkt.flags = flags;
+    pkt.loc = loc;
+    pkt.world_x = x;
+    pkt.world_y = y;
+    depth = tig_net_local_suspend_pause();
+    if (to_slot >= 0) {
+        tig_net_send_app(&pkt, sizeof(pkt), to_slot);
+    } else {
+        tig_net_send_app_all(&pkt, sizeof(pkt));
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+/* Host: a slot's marker to everyone (and our own table). */
+static void coop_owt_publish(int slot, int x, int y, int flags)
+{
+    coop_owt_mark_set(slot, x, y, flags);
+    coop_owt_send(COOP_OWT_PROGRESS, slot, flags, coop_owt_sector_loc(x, y), x, y, -1);
+}
+
+static bool coop_owt_targeted(int64_t pc)
+{
+    int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    LocRect rect;
+    ObjectList objects;
+    ObjectNode* node;
+    bool hit = false;
+
+    rect.x1 = LOCATION_GET_X(loc) - COOP_OWT_ENEMY_RANGE;
+    rect.x2 = LOCATION_GET_X(loc) + COOP_OWT_ENEMY_RANGE;
+    rect.y1 = LOCATION_GET_Y(loc) - COOP_OWT_ENEMY_RANGE;
+    rect.y2 = LOCATION_GET_Y(loc) + COOP_OWT_ENEMY_RANGE;
+    object_list_rect(&rect, OBJ_TM_NPC, &objects);
+    for (node = objects.head; node != NULL && !hit; node = node->next) {
+        if (!critter_is_dead(node->obj) && !coop_lite_party_no_fight(pc, node->obj)) {
+            hit = obj_field_handle_get(node->obj, OBJ_F_NPC_COMBAT_FOCUS) == pc;
+        }
+    }
+    object_list_destroy(&objects);
+    return hit;
+}
+
+static void coop_sleep_slot_left(int slot, const char* why); /* M5 sleep: drop a slot's readiness */
+
+/* Host: end slot's trip. move: put the PC (and followers) at loc. */
+static void coop_owt_finish(int slot, int64_t loc, bool move, bool encounter, const char* why)
+{
+    CoopOwtTransit* t = &coop_owt[slot];
+    int64_t pc = sub_4A2B60(slot);
+    int64_t at = loc;
+    int flags = encounter ? COOP_OWT_F_ENCOUNTER : 0;
+
+    if (!t->active) {
+        return;
+    }
+    t->active = false;
+    coop_owt_unhide(&t->hid);
+    if (move && pc != OBJ_HANDLE_NULL && loc != 0 && coop_lite_loc_in_map(loc)) {
+        ObjectList objects;
+        ObjectNode* node;
+        int k = 0;
+
+        coop_lite_mid_keep(slot, loc); /* load the landing sectors first */
+        at = coop_lite_follow_loc_for_slot(loc, slot);
+        coop_lite_mid_move_pc(slot, pc, at); /* epoch bump + PC_POS FORCE to the owner */
+        object_list_all_followers(pc, &objects);
+        for (node = objects.head; node != NULL; node = node->next) {
+            multiplayer_lock();
+            sub_424070(node->obj, 3, false, true);
+            sub_43E770(node->obj, coop_lite_follow_loc_for_slot(at, 1 + (k++ % 7)), 0, 0);
+            multiplayer_unlock();
+        }
+        object_list_destroy(&objects);
+    } else if (pc != OBJ_HANDLE_NULL) {
+        at = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    }
+    if (at == 0) {
+        at = coop_owt_sector_loc(t->x, t->y);
+    }
+    coop_owt_mark_set(slot, (int)(LOCATION_GET_X(at) >> 6), (int)(LOCATION_GET_Y(at) >> 6), flags);
+    coop_owt_send(COOP_OWT_ARRIVED, slot, flags, at, (int)(LOCATION_GET_X(at) >> 6), (int)(LOCATION_GET_Y(at) >> 6), -1);
+    tig_debug_printf("CoopMiddle: world map trip of slot %d ended (%s) at %d,%d%s\n", slot, why,
+        (int)LOCATION_GET_X(at), (int)LOCATION_GET_Y(at), encounter ? " - random encounter" : "");
+}
+
+static void coop_owt_refuse(int slot, int reason)
+{
+    coop_owt_send(COOP_OWT_REFUSED, slot, 0, 0, reason, 0, slot);
+    tig_debug_printf("CoopMiddle: world map trip of slot %d refused (reason %d)\n", slot, reason);
+}
+
+static bool coop_sleep_executing;
+
+static void coop_owt_host_start(int slot, int64_t dest)
+{
+    CoopOwtTransit* t = &coop_owt[slot];
+    int64_t pc = sub_4A2B60(slot);
+    int64_t loc;
+    int reason = 0;
+
+    if (!coop_middle_rule_on(COOP_RULE_FREE_OVERWORLD)) {
+        reason = COOP_OWT_REFUSE_RULE;
+    } else if (!coop_im_start_map()) {
+        reason = COOP_OWT_REFUSE_MAP;
+    } else if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !tig_net_client_is_active(slot)) {
+        reason = COOP_OWT_REFUSE_DEAD;
+    } else if (!t->active && (combat_critter_is_combat_mode_active(pc) || coop_owt_targeted(pc))) {
+        reason = COOP_OWT_REFUSE_COMBAT;
+    } else if (!coop_lite_loc_in_map(dest)) {
+        reason = COOP_OWT_REFUSE_DEST;
+    } else if (coop_lite_mid_prompt_busy() || coop_sleep_executing) {
+        reason = COOP_OWT_REFUSE_BUSY;
+    }
+    if (reason != 0) {
+        coop_owt_refuse(slot, reason);
+        return;
+    }
+    t->tx = (int)(LOCATION_GET_X(dest) >> 6);
+    t->ty = (int)(LOCATION_GET_Y(dest) >> 6);
+    t->dest = dest;
+    if (t->active) {
+        tig_debug_printf("CoopMiddle: world map trip of slot %d re-routed to %d,%d\n", slot,
+            (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest));
+        return;
+    }
+    loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    t->active = true;
+    t->x = (int)(LOCATION_GET_X(loc) >> 6);
+    t->y = (int)(LOCATION_GET_Y(loc) >> 6);
+    t->step_ms = coop_mid_now_ms;
+    t->progress_ms = coop_mid_now_ms;
+    t->roll_in = coop_owt_roll_steps();
+    coop_owt_hide(&t->hid, pc); /* IN_TRANSIT: off + invulnerable, PC and own followers */
+    coop_sleep_slot_left(slot, "world map trip");
+    coop_owt_publish(slot, t->x, t->y, COOP_OWT_F_MOVING);
+    tig_debug_printf("CoopMiddle: world map trip of slot %d: %d,%d -> %d,%d (%d object(s) in transit)\n", slot,
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest),
+        t->hid.count);
+}
+
+static void coop_owt_host_tick(unsigned int now_ms)
+{
+    int slot;
+    bool free_map = coop_middle_overworld_free();
+
+    for (slot = 1; slot < 8; slot++) {
+        CoopOwtTransit* t = &coop_owt[slot];
+        unsigned int steps;
+        bool done = false;
+
+        if (!t->active) {
+            continue;
+        }
+        if (!free_map || !tig_net_client_is_active(slot) || sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
+            coop_owt_finish(slot, 0, false, false, "rule / map / player gone");
+            continue;
+        }
+        steps = (unsigned int)(now_ms - t->step_ms) / COOP_OWT_STEP_MS;
+        if (steps > 64) {
+            steps = 64; /* a long frame: do not jump across the map */
+        }
+        t->step_ms += steps * COOP_OWT_STEP_MS;
+        while (steps-- > 0 && !done) {
+            if (coop_middle_owt_advance(&t->x, &t->y, t->tx, t->ty, 1) == 0) {
+                break;
+            }
+            if (--t->roll_in <= 0) {
+                int64_t at = coop_owt_sector_loc(t->x, t->y);
+
+                t->roll_in = coop_owt_roll_steps();
+                if (wmap_rnd_coop_check(at)) {
+                    coop_owt_finish(slot, at, true, true, "random encounter");
+                    done = true;
+                }
+            }
+        }
+        if (done) {
+            continue;
+        }
+        if (t->x == t->tx && t->y == t->ty) {
+            coop_owt_finish(slot, t->dest, true, false, "arrived");
+            continue;
+        }
+        if ((unsigned int)(now_ms - t->progress_ms) >= COOP_OWT_PROGRESS_MS) {
+            t->progress_ms = now_ms;
+            coop_owt_publish(slot, t->x, t->y, COOP_OWT_F_MOVING);
+        }
+    }
+    if (!free_map) {
+        return;
+    }
+    /* The host's own trip (vanilla loop, clock frozen). */
+    {
+        int x;
+        int y;
+
+        if (wmap_ui_coop_local_sector(&x, &y)) {
+            if ((unsigned int)(now_ms - coop_owt_local_ms) >= COOP_OWT_PROGRESS_MS) {
+                coop_owt_local_ms = now_ms;
+                coop_owt_publish(0, x, y, COOP_OWT_F_MOVING);
+            }
+        }
+    }
+    /* Everyone else's spot, once a second. */
+    if ((unsigned int)(now_ms - coop_owt_markers_ms) >= COOP_OWT_MARKERS_MS && coop_im_remote_count() > 0) {
+        int x;
+        int y;
+
+        coop_owt_markers_ms = now_ms;
+        for (slot = 0; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+            int64_t loc;
+
+            if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || coop_owt[slot].active
+                || (slot == 0 && wmap_ui_coop_local_sector(&x, &y))) {
+                continue;
+            }
+            loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+            coop_owt_publish(slot, (int)(LOCATION_GET_X(loc) >> 6), (int)(LOCATION_GET_Y(loc) >> 6), 0);
+        }
+    }
+}
+
+bool coop_middle_overworld_local_step(int64_t loc)
+{
+    if (!coop_middle_overworld_free() || loc == 0) {
+        return false;
+    }
+    if (coop_owt_local_roll <= 0) {
+        coop_owt_local_roll = coop_owt_roll_steps();
+    }
+    if (--coop_owt_local_roll > 0) {
+        return false;
+    }
+    coop_owt_local_roll = coop_owt_roll_steps();
+    if (!wmap_rnd_coop_check(loc)) {
+        return false;
+    }
+    if (coop_mid_session_host()) {
+        coop_owt_publish(0, (int)(LOCATION_GET_X(loc) >> 6), (int)(LOCATION_GET_Y(loc) >> 6), COOP_OWT_F_ENCOUNTER);
+    }
+    tig_debug_printf("CoopMiddle: random encounter on the host's own world map trip at %d,%d\n",
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+    return true;
+}
+
+bool coop_middle_owt_client_propose(int64_t dest_loc)
+{
+    if (!tig_net_is_active() || tig_net_is_host() || !coop_middle_overworld_free()) {
+        return false;
+    }
+    if (dest_loc == 0) {
+        return true; /* no route: nothing to do, never alone */
+    }
+    if (coop_owt_client_active && coop_owt_client_dest == dest_loc
+        && (unsigned int)(coop_mid_now_ms - coop_owt_client_sent_ms) < 1000u) {
+        return true;
+    }
+    coop_owt_client_active = true;
+    coop_owt_client_dest = dest_loc;
+    coop_owt_client_sent_ms = coop_mid_now_ms;
+    coop_owt_send(COOP_OWT_START, sub_529520(), 0, dest_loc, (int)(LOCATION_GET_X(dest_loc) >> 6),
+        (int)(LOCATION_GET_Y(dest_loc) >> 6), 0);
+    tig_debug_printf("CoopMiddle: world map trip to %d,%d asked\n", (int)LOCATION_GET_X(dest_loc),
+        (int)LOCATION_GET_Y(dest_loc));
+    return true;
+}
+
+void coop_middle_owt_client_closed(void)
+{
+    if (!coop_owt_client_active || !tig_net_is_active() || tig_net_is_host()) {
+        return;
+    }
+    coop_owt_send(COOP_OWT_CANCEL, sub_529520(), 0, 0, 0, 0, 0);
+    tig_debug_printf("CoopMiddle: world map closed during the trip - stop asked\n");
+}
+
+bool coop_middle_owt_in_transit(int slot)
+{
+    if (slot < 0 || slot >= 8) {
+        return false;
+    }
+    if (tig_net_is_active() && tig_net_is_host()) {
+        return coop_owt[slot].active;
+    }
+    if (slot == sub_529520()) {
+        return coop_owt_client_active;
+    }
+    return coop_owt_mark[slot].valid && coop_owt_mark[slot].moving
+        && (unsigned int)(coop_mid_now_ms - coop_owt_mark[slot].ms) < COOP_OWT_MARKER_LIFE_MS;
+}
+
+bool coop_middle_owt_local_in_transit(void)
+{
+    if (!tig_net_is_active()) {
+        return false;
+    }
+    return tig_net_is_host() ? wmap_ui_is_moving() : coop_owt_client_active;
+}
+
+void coop_middle_owt_abort_all(const char* why)
+{
+    int slot;
+
+    if (!coop_mid_session_host()) {
+        return;
+    }
+    for (slot = 1; slot < 8; slot++) {
+        if (coop_owt[slot].active) {
+            coop_owt_finish(slot, 0, false, false, why != NULL ? why : "aborted");
+        }
+    }
+}
+
+static void coop_owt_client_remote(int slot, bool moving)
+{
+    CoopOwtHidden* h = &coop_owt_remote_hid[slot];
+    int64_t pc = sub_4A2B60(slot);
+
+    if (moving && h->count == 0 && pc != OBJ_HANDLE_NULL) {
+        coop_owt_hide(h, pc);
+    } else if (!moving && h->count > 0) {
+        coop_owt_unhide(h);
+    }
+}
+
+static const char* coop_owt_refuse_text(int reason, bool ru)
+{
+    switch (reason) {
+    case COOP_OWT_REFUSE_COMBAT:
+        return ru ? "Нельзя отправиться в путь: вы в бою." : "Can't travel: you are in combat.";
+    case COOP_OWT_REFUSE_DEAD:
+        return ru ? "Нельзя отправиться в путь." : "Can't travel now.";
+    case COOP_OWT_REFUSE_DEST:
+        return ru ? "Туда не попасть." : "That place can't be reached.";
+    case COOP_OWT_REFUSE_BUSY:
+        return ru ? "Сейчас нельзя: идёт общий переход или сон." : "Not now: a party move or sleep is running.";
+    default:
+        return ru ? "Свободная карта мира сейчас недоступна." : "The free world map is off here.";
+    }
+}
+
+void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt)
+{
+    bool host;
+    int local;
+
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
+        return;
+    }
+    host = tig_net_is_host();
+    if (!coop_middle_overworld_pkt_valid(pkt, tig_net_last_message_size(), !host)) {
+        tig_debug_printf("CoopMiddle: world map travel packet dropped (bad op / size)\n");
+        return;
+    }
+    if (host) {
+        int sender = sub_52A530();
+
+        if (sender <= 0 || sender >= 8 || pkt->slot != sender) {
+            tig_debug_printf("CoopMiddle: world map travel op %d from slot %d dropped (slot %d)\n", pkt->op, sender,
+                pkt->slot);
+            return;
+        }
+        if (pkt->op == COOP_OWT_START) {
+            coop_owt_host_start(sender, pkt->loc);
+        } else if (coop_owt[sender].active) {
+            CoopOwtTransit* t = &coop_owt[sender];
+            int64_t at = coop_owt_sector_loc(t->x, t->y);
+            int area = area_get_nearest_area_in_range(at, true);
+
+            if (area > 0) {
+                at = area_get_location(area); /* vanilla stop: the nearest known place */
+            }
+            coop_owt_finish(sender, at, true, false, "stopped");
+        }
+        return;
+    }
+    local = sub_529520();
+    switch (pkt->op) {
+    case COOP_OWT_PROGRESS:
+        coop_owt_mark_set(pkt->slot, pkt->world_x, pkt->world_y, pkt->flags);
+        if (pkt->slot == local) {
+            if ((pkt->flags & COOP_OWT_F_MOVING) != 0 && coop_owt_client_active) {
+                wmap_ui_coop_marker_set(pkt->world_x, pkt->world_y);
+            }
+        } else {
+            coop_owt_client_remote(pkt->slot, (pkt->flags & COOP_OWT_F_MOVING) != 0);
+        }
+        break;
+    case COOP_OWT_ARRIVED:
+        coop_owt_mark_set(pkt->slot, pkt->world_x, pkt->world_y, pkt->flags);
+        if (pkt->slot == local) {
+            coop_owt_client_active = false; /* before the close: no CANCEL */
+            if (wmap_ui_is_created()) {
+                wmap_ui_close();
+            }
+            coop_lite_mid_center_local();
+            if ((pkt->flags & COOP_OWT_F_ENCOUNTER) != 0) {
+                coop_lite_mid_notice(coop_lite_lang_ru() ? "Засада в пути!" : "Ambushed on the road!", false);
+            }
+        } else {
+            coop_owt_client_remote(pkt->slot, false);
+            if ((pkt->flags & COOP_OWT_F_ENCOUNTER) != 0) {
+                char name[64];
+                char text[160];
+
+                coop_middle_slot_name(pkt->slot, name, sizeof(name));
+                snprintf(text, sizeof(text), coop_lite_lang_ru() ? "%s попал в засаду - красная метка на карте мира."
+                                                                 : "%s was ambushed - red mark on the world map.",
+                    name);
+                coop_lite_mid_notice(text, false);
+            }
+        }
+        tig_debug_printf("CoopMiddle: slot %d landed from the world map at %d,%d%s\n", pkt->slot,
+            (int)LOCATION_GET_X(pkt->loc), (int)LOCATION_GET_Y(pkt->loc),
+            (pkt->flags & COOP_OWT_F_ENCOUNTER) != 0 ? " (encounter)" : "");
+        break;
+    case COOP_OWT_REFUSED:
+        if (pkt->slot == local) {
+            coop_owt_client_active = false;
+            coop_lite_mid_notice(coop_owt_refuse_text(pkt->world_x, coop_lite_lang_ru()), false);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+int coop_middle_world_markers(CoopWorldMarker* out, int max)
+{
+    int n = 0;
+    int slot;
+    int local;
+
+    if (out == NULL || max <= 0 || !coop_owt_rule()) {
+        return 0;
+    }
+    local = tig_net_is_host() ? 0 : sub_529520();
+    for (slot = 0; slot < 8 && n < max; slot++) {
+        CoopOwtMarker* m = &coop_owt_mark[slot];
+        bool enc;
+
+        if (slot == local || !m->valid) {
+            continue;
+        }
+        enc = m->enc_ms != 0 && (unsigned int)(coop_mid_now_ms - m->enc_ms) < COOP_OWT_ENCOUNTER_MARK_MS;
+        if (!enc && (unsigned int)(coop_mid_now_ms - m->ms) >= COOP_OWT_MARKER_LIFE_MS) {
+            continue;
+        }
+        out[n].slot = slot;
+        out[n].world_x = m->x;
+        out[n].world_y = m->y;
+        out[n].moving = m->moving;
+        out[n].encounter = enc;
+        n++;
+    }
+    return n;
+}
+
+unsigned int coop_middle_world_markers_serial(void)
+{
+    return coop_owt_serial;
+}
+
+static void coop_owt_reset(bool unhide)
+{
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        if (unhide) {
+            coop_owt_unhide(&coop_owt[slot].hid);
+            coop_owt_unhide(&coop_owt_remote_hid[slot]);
+        }
+        coop_owt_remote_hid[slot].count = 0;
+    }
+    memset(coop_owt, 0, sizeof(coop_owt));
+    memset(coop_owt_mark, 0, sizeof(coop_owt_mark));
+    coop_owt_serial++;
+    coop_owt_client_active = false;
+    coop_owt_local_roll = 0;
+}
+
+/* ---- M5: unified sleep ---- */
+
+static CoopSleepState coop_sleep; /* host */
+static int64_t coop_sleep_loc[8]; /* host: where each ready PC stood */
+static unsigned int coop_sleep_regen_ms;
+static unsigned int coop_sleep_state_ms;
+static int coop_sleep_pending_mode; /* host: run in the tick (0 = none) */
+static bool coop_sleep_rx_valid; /* client: last SLEEP_STATE */
+static int coop_sleep_rx_a;
+static int coop_sleep_rx_b;
+
+bool coop_middle_unified_sleep_on(void)
+{
+    return tig_net_is_active() && tig_net_is_coop_enabled() && coop_middle_rule_on(COOP_RULE_UNIFIED_SLEEP);
+}
+
+/* Living, connected players (a PC on a world map trip counts: it blocks). */
+static uint8_t coop_sleep_living(void)
+{
+    uint8_t mask = 0;
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc != OBJ_HANDLE_NULL && (slot == 0 || tig_net_client_is_active(slot)) && !critter_is_dead(pc)) {
+            mask |= (uint8_t)(1u << slot);
+        }
+    }
+    return mask;
+}
+
+static void coop_sleep_broadcast(void)
+{
+    PacketCoopPartyCtrl pkt;
+    uint8_t living = coop_sleep_living();
+    int depth;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_CTRL;
+    pkt.op = COOP_CTRL_SLEEP_STATE;
+    pkt.a = (int)coop_sleep.ready_mask | ((int)coop_sleep.mode << 8);
+    pkt.b = (coop_sleep.initiator >= 0 ? coop_sleep.initiator : 0xFF) | (coop_middle_sleep_count(living) << 8);
+    depth = tig_net_local_suspend_pause();
+    tig_net_send_app_all(&pkt, sizeof(pkt));
+    tig_net_local_suspend_resume(depth);
+    coop_sleep_state_ms = coop_mid_now_ms;
+}
+
+static bool coop_sleep_pc_busy(int slot, int64_t pc)
+{
+    return combat_turn_based_is_active() || combat_critter_is_combat_mode_active(pc) || coop_owt[slot].active
+        || (slot == 0 ? wmap_ui_is_moving() : false);
+}
+
+static void coop_sleep_apply(int res, const char* why)
+{
+    if (res == COOP_SLEEP_RES_EXECUTE) {
+        coop_sleep_pending_mode = coop_sleep.mode;
+        tig_debug_printf("CoopMiddle: unified sleep: everyone ready (%s) - sleeping, mode %d\n", why, coop_sleep.mode);
+        coop_middle_sleep_reset(&coop_sleep);
+        coop_sleep_broadcast();
+    } else if (res == COOP_SLEEP_RES_WAIT || res == COOP_SLEEP_RES_CLEARED) {
+        tig_debug_printf("CoopMiddle: unified sleep: ready 0x%02x mode %d (%s)\n", coop_sleep.ready_mask, coop_sleep.mode,
+            why);
+        coop_sleep_broadcast();
+    }
+}
+
+static void coop_sleep_slot_left(int slot, const char* why)
+{
+    if (!coop_mid_session_host() || coop_sleep.initiator < 0 || (coop_sleep.ready_mask & (1u << slot)) == 0) {
+        return;
+    }
+    coop_sleep_apply(coop_middle_sleep_step(&coop_sleep, coop_sleep_living(), COOP_SLEEP_EV_CANCEL, slot, 0), why);
+}
+
+/* Host: slot votes (true = taken over; false = vanilla sleep for a lone host). */
+static bool coop_sleep_host_vote(int slot, int mode)
+{
+    int64_t pc = sub_4A2B60(slot);
+    int res;
+    bool ru = coop_lite_lang_ru();
+
+    if (coop_sleep_executing || coop_sleep_pending_mode != 0) {
+        return true;
+    }
+    if (mode == COOP_SLEEP_MODE_CANCEL) {
+        coop_sleep_slot_left(slot, "N / cancel");
+        return true;
+    }
+    if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc)) {
+        return true;
+    }
+    if (coop_sleep_pc_busy(slot, pc)) {
+        if (slot == 0) {
+            coop_lite_mid_notice(ru ? "Сейчас спать нельзя." : "You can't sleep now.", false);
+        }
+        tig_debug_printf("CoopMiddle: unified sleep: slot %d busy (combat / travel)\n", slot);
+        return true;
+    }
+    res = coop_middle_sleep_step(&coop_sleep, coop_sleep_living(), COOP_SLEEP_EV_VOTE, slot, mode);
+    if (res == COOP_SLEEP_RES_SOLO) {
+        if (slot == 0) {
+            return false; /* the host plays alone: vanilla sleep */
+        }
+        coop_sleep_pending_mode = mode; /* the only living player is a client */
+        return true;
+    }
+    if (res == COOP_SLEEP_RES_REFUSED) {
+        return true;
+    }
+    coop_sleep_loc[slot] = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    coop_sleep_apply(res, "vote");
+    return true;
+}
+
+bool coop_middle_sleep_choose(int hours_value)
+{
+    int mode;
+    bool ru;
+
+    if (!coop_middle_unified_sleep_on()) {
+        return false;
+    }
+    mode = coop_middle_sleep_mode_from_ui(hours_value);
+    if (mode == 0) {
+        return false;
+    }
+    if (tig_net_is_host()) {
+        return coop_sleep_host_vote(0, mode);
+    }
+    ru = coop_lite_lang_ru();
+    if (coop_owt_client_active) {
+        coop_lite_mid_notice(ru ? "Сейчас спать нельзя." : "You can't sleep now.", false);
+        return true;
+    }
+    coop_mid_ctrl_send(COOP_CTRL_SLEEP_VOTE, mode, 0);
+    coop_lite_mid_notice(ru ? "Вы готовы ко сну - ждём остальных." : "You are ready to sleep - waiting for the others.",
+        true);
+    tig_debug_printf("CoopMiddle: unified sleep vote sent (mode %d)\n", mode);
+    return true;
+}
+
+bool coop_middle_sleep_key(bool yes)
+{
+    if (!coop_middle_unified_sleep_on()) {
+        return false;
+    }
+    if (tig_net_is_host()) {
+        if (coop_sleep.initiator < 0) {
+            return false;
+        }
+        if (!yes) {
+            coop_sleep_slot_left(0, "host pressed N");
+        } else if ((coop_sleep.ready_mask & 1u) == 0) {
+            coop_sleep_host_vote(0, coop_sleep.mode);
+        }
+        return true;
+    }
+    if (!coop_sleep_rx_valid || (coop_sleep_rx_a & 0xFF) == 0) {
+        return false;
+    }
+    coop_mid_ctrl_send(COOP_CTRL_SLEEP_VOTE, yes ? (coop_sleep_rx_a >> 8) & 0xFF : COOP_SLEEP_MODE_CANCEL, 0);
+    return true;
+}
+
+static bool coop_sleep_handle(const PacketCoopPartyCtrl* pkt)
+{
+    if (tig_net_is_host()) {
+        int slot = sub_52A530();
+
+        if (pkt->op != COOP_CTRL_SLEEP_VOTE || slot <= 0 || slot >= 8) {
+            tig_debug_printf("CoopMiddle: sleep op %d from slot %d dropped (wrong direction)\n", pkt->op, slot);
+            return true;
+        }
+        if (!coop_middle_rule_on(COOP_RULE_UNIFIED_SLEEP)) {
+            return true;
+        }
+        coop_sleep_host_vote(slot, pkt->a);
+        return true;
+    }
+    if (pkt->op != COOP_CTRL_SLEEP_STATE) {
+        return true;
+    }
+    coop_sleep_rx_valid = true;
+    coop_sleep_rx_a = pkt->a;
+    coop_sleep_rx_b = pkt->b;
+    return true;
+}
+
+bool coop_middle_sleep_banner(char* out, size_t sz)
+{
+    int ready;
+    int living;
+    int initiator;
+    int mode;
+    char name[64];
+
+    if (out == NULL || sz == 0 || !coop_middle_unified_sleep_on()) {
+        return false;
+    }
+    if (tig_net_is_host()) {
+        if (coop_sleep.initiator < 0 || coop_sleep.ready_mask == 0) {
+            return false;
+        }
+        ready = coop_middle_sleep_count(coop_sleep.ready_mask);
+        living = coop_middle_sleep_count(coop_sleep_living());
+        initiator = coop_sleep.initiator;
+        mode = coop_sleep.mode;
+    } else {
+        if (!coop_sleep_rx_valid || (coop_sleep_rx_a & 0xFF) == 0) {
+            return false;
+        }
+        ready = coop_middle_sleep_count((uint8_t)(coop_sleep_rx_a & 0xFF));
+        living = (coop_sleep_rx_b >> 8) & 0xFF;
+        initiator = coop_sleep_rx_b & 0xFF;
+        mode = (coop_sleep_rx_a >> 8) & 0xFF;
+    }
+    coop_middle_slot_name(initiator < 8 ? initiator : 0, name, sizeof(name));
+    coop_middle_sleep_banner_text(out, sz, ready, living, name, mode, coop_lite_lang_ru());
+    return true;
+}
+
+static void coop_sleep_heal_hours(int hours)
+{
+    int64_t pc = player_get_local_pc_obj();
+
+    if (pc != OBJ_HANDLE_NULL && !critter_is_dead(pc)) {
+        ObjectList objects;
+        ObjectNode* node;
+
+        critter_resting_heal(pc, hours);
+        object_list_all_followers(pc, &objects);
+        for (node = objects.head; node != NULL; node = node->next) {
+            critter_resting_heal(node->obj, hours);
+        }
+        object_list_destroy(&objects);
+    }
+    coop_lite_host_rest_heal(hours); /* every other living PC and its followers (+ vitals) */
+}
+
+static void coop_sleep_advance(int minutes)
+{
+    DateTime dt;
+
+    sub_45A950(&dt, (unsigned int)minutes * 60000u);
+    timeevent_inc_datetime(&dt);
+}
+
+static void coop_sleep_fade(bool out)
+{
+    FadeData fade;
+
+    memset(&fade, 0, sizeof(fade));
+    fade.flags = out ? 0 : FADE_IN;
+    fade.duration = 2.0f;
+    fade.steps = 48;
+    fade.color = tig_color_make(0, 0, 0);
+    gfade_run(&fade);
+}
+
+static void coop_sleep_execute(int mode)
+{
+    int64_t host_pc = player_get_local_pc_obj();
+    int minutes;
+    int hours = 0;
+
+    coop_sleep_executing = true;
+    if (sleep_ui_is_active()) {
+        sleep_ui_close();
+    }
+    coop_lite_host_rest_begin(); /* REST_BEGIN: clients fade out */
+    coop_sleep_fade(true);
+    if (mode == COOP_SLEEP_MODE_HEALED) {
+        do {
+            coop_sleep_advance(60);
+            coop_sleep_heal_hours(1);
+            hours++;
+        } while (hours < COOP_SLEEP_HEAL_CAP_HOURS
+            && ((host_pc != OBJ_HANDLE_NULL && !critter_is_dead(host_pc) && object_hp_damage_get(host_pc) > 0)
+                || coop_lite_host_rest_anyone_hurt()));
+    } else {
+        minutes = coop_middle_sleep_minutes(mode, datetime_current_hour(), datetime_current_minute());
+        if (minutes <= 0) {
+            minutes = 8 * 60;
+        }
+        if (minutes % 60 != 0) {
+            coop_sleep_advance(minutes % 60);
+        }
+        for (hours = 0; hours < minutes / 60; hours++) {
+            coop_sleep_advance(60);
+        }
+        if (hours > 0) {
+            coop_sleep_heal_hours(hours);
+        }
+    }
+    coop_lite_host_rest_end(); /* game time + vitals, then REST_END */
+    coop_sleep_fade(false);
+    coop_sleep_executing = false;
+    tig_debug_printf("CoopMiddle: unified sleep done: mode %d, %d h healed, now day %d %02d:%02d\n", mode, hours,
+        datetime_current_day(), datetime_current_hour(), datetime_current_minute());
+}
+
+static void coop_sleep_host_tick(unsigned int now_ms)
+{
+    uint8_t living;
+    int slot;
+
+    if (coop_sleep_pending_mode != 0) {
+        int mode = coop_sleep_pending_mode;
+
+        coop_sleep_pending_mode = 0;
+        coop_sleep_execute(mode);
+        return;
+    }
+    if (coop_sleep.initiator < 0) {
+        return;
+    }
+    if (!coop_middle_rule_on(COOP_RULE_UNIFIED_SLEEP)) {
+        coop_middle_sleep_reset(&coop_sleep);
+        coop_sleep_broadcast();
+        return;
+    }
+    living = coop_sleep_living();
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        const char* why = NULL;
+
+        if ((coop_sleep.ready_mask & (1u << slot)) == 0 || pc == OBJ_HANDLE_NULL || (living & (1u << slot)) == 0) {
+            continue;
+        }
+        if (coop_sleep_pc_busy(slot, pc)) {
+            why = "combat / travel";
+        } else if (obj_field_int64_get(pc, OBJ_F_LOCATION) != coop_sleep_loc[slot]) {
+            why = "moved";
+        } else if ((coop_middle_slot_status(slot) & COOP_STATUS_DIALOG) != 0
+            || (slot == 0 && (coop_status_local & COOP_STATUS_DIALOG) != 0)) {
+            why = "dialog";
+        }
+        if (why != NULL) {
+            coop_sleep_apply(coop_middle_sleep_step(&coop_sleep, living, COOP_SLEEP_EV_CANCEL, slot, 0), why);
+            if (coop_sleep.initiator < 0) {
+                return;
+            }
+        }
+    }
+    coop_sleep_apply(coop_middle_sleep_step(&coop_sleep, living, COOP_SLEEP_EV_CHECK, -1, 0), "check");
+    if (coop_sleep.initiator < 0) {
+        return;
+    }
+    if ((unsigned int)(now_ms - coop_sleep_regen_ms) >= COOP_SLEEP_REGEN_MS) {
+        coop_sleep_regen_ms = now_ms;
+        for (slot = 0; slot < 8; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+            int dmg;
+
+            if ((coop_sleep.ready_mask & (1u << slot)) == 0 || pc == OBJ_HANDLE_NULL || coop_sleep_pc_busy(slot, pc)) {
+                continue;
+            }
+            dmg = critter_fatigue_damage_get(pc);
+            if (dmg > 0) {
+                critter_fatigue_damage_set(pc, dmg > COOP_SLEEP_REGEN_FATIGUE ? dmg - COOP_SLEEP_REGEN_FATIGUE : 0);
+            }
+        }
+    }
+    if ((unsigned int)(now_ms - coop_sleep_state_ms) >= 2000u) {
+        coop_sleep_broadcast(); /* late joiners, lost packets */
+    }
+}
+
+static void coop_sleep_reset_all(void)
+{
+    coop_middle_sleep_reset(&coop_sleep);
+    coop_sleep_pending_mode = 0;
+    coop_sleep_rx_valid = false;
+    coop_sleep_rx_a = 0;
+    coop_sleep_rx_b = 0;
+}
+
 void coop_middle_session_reset(void)
 {
     int i;
@@ -2562,10 +4028,28 @@ void coop_middle_session_reset(void)
     coop_dmg_logged = false;
     coop_qitem_last.armed = false; /* M4 */
     coop_fog_reset();
+    coop_owt_reset(true); /* M5 */
+    coop_sleep_reset_all();
+    coop_sleep_executing = false;
+    coop_im_margin_logged = -1;
 }
 
 void coop_middle_slot_gone(int slot)
 {
+    if (slot > 0 && slot < 8) {
+        /* M5: a traveller that left comes back on the map; no sleep wait for it. */
+        if (coop_mid_session_host() && coop_owt[slot].active) {
+            coop_owt_finish(slot, 0, false, false, "disconnected");
+        }
+        coop_owt_unhide(&coop_owt_remote_hid[slot]);
+        coop_owt_mark[slot].valid = false;
+        coop_owt_serial++;
+        if (coop_mid_session_host() && coop_sleep.initiator >= 0) {
+            coop_sleep_apply(coop_middle_sleep_step(&coop_sleep, (uint8_t)(coop_sleep_living() & ~(1u << slot)),
+                                 COOP_SLEEP_EV_CHECK, -1, 0),
+                "player left");
+        }
+    }
     if (slot > 0 && slot < 8) {
         coop_status_client[slot] = 0;
     }
@@ -2609,6 +4093,13 @@ void coop_middle_map_changed(void)
     if (coop_mid_session_host()) {
         coop_fog_resend_all = true;
     }
+    /* M5: trips end with the map; a sleep round does not survive it. */
+    coop_owt_reset(true);
+    if (coop_mid_session_host() && coop_sleep.initiator >= 0) {
+        coop_middle_sleep_reset(&coop_sleep);
+        coop_sleep_broadcast();
+    }
+    coop_sleep_rx_valid = false;
 }
 
 static void (*coop_mid_ui_tick)(unsigned int now_ms);
@@ -2663,6 +4154,8 @@ void coop_middle_tick(unsigned int now_ms)
             coop_rest_end(COOP_REST_REFUSE_TIMEOUT, "no answer");
         }
     }
+    coop_owt_host_tick(now_ms); /* M5 */
+    coop_sleep_host_tick(now_ms);
 }
 
 #else /* COOP_LITE_TEST_STUBS */
@@ -2751,5 +4244,32 @@ void coop_middle_slot_name(int slot, char* out, size_t sz)
     }
 }
 bool coop_middle_try_chat_command(int sender_slot, const char* text) { (void)sender_slot; (void)text; return false; }
+/* M5 */
+int coop_middle_keep_sector_set(int64_t loc, int64_t* ids, int max) { return coop_lite_keep_ids(loc, ids, max); }
+bool coop_middle_slot_in_range(int slot, int64_t loc, int radius) { (void)slot; (void)loc; (void)radius; return true; }
+unsigned int coop_middle_slots_in_range(int64_t loc, int radius) { (void)loc; (void)radius; return 0xFEu; }
+void coop_middle_send_app_near(void* data, int size, int packet_type, int64_t loc_a, int64_t loc_b)
+{
+    (void)packet_type;
+    (void)loc_a;
+    (void)loc_b;
+    tig_net_send_app_all(data, size);
+}
+bool coop_middle_overworld_free(void) { return false; }
+bool coop_middle_overworld_solo_hop(int dest_map) { (void)dest_map; return false; }
+bool coop_middle_overworld_freeze_time(void) { return false; }
+bool coop_middle_overworld_local_step(int64_t loc) { (void)loc; return false; }
+bool coop_middle_owt_client_propose(int64_t dest_loc) { (void)dest_loc; return false; }
+void coop_middle_owt_client_closed(void) { }
+bool coop_middle_owt_in_transit(int slot) { (void)slot; return false; }
+bool coop_middle_owt_local_in_transit(void) { return false; }
+void coop_middle_owt_abort_all(const char* why) { (void)why; }
+void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt) { (void)pkt; }
+int coop_middle_world_markers(CoopWorldMarker* out, int max) { (void)out; (void)max; return 0; }
+unsigned int coop_middle_world_markers_serial(void) { return 0; }
+bool coop_middle_unified_sleep_on(void) { return false; }
+bool coop_middle_sleep_choose(int hours_value) { (void)hours_value; return false; }
+bool coop_middle_sleep_key(bool yes) { (void)yes; return false; }
+bool coop_middle_sleep_banner(char* out, size_t sz) { (void)out; (void)sz; return false; }
 
 #endif /* COOP_LITE_TEST_STUBS */

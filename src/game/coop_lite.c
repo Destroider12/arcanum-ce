@@ -2319,6 +2319,7 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_AREA_KNOWN: /* PT78: client set -> host, union -> all */
     case PACKET_COOP_PING: /* Coop Middle M3: client ping -> host, stamped -> all */
     case PACKET_COOP_TOWNMAP_FOG: /* Coop Middle M4: client new bits -> host, snapshot / relay -> clients */
+    case PACKET_COOP_OVERWORLD_TRAVEL: /* Coop Middle M5: client start / cancel -> host, progress -> all (op-checked) */
         return COOP_MP_PKT_BOTH;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
@@ -3519,6 +3520,8 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopRules);
     case PACKET_COOP_PING: /* Coop Middle M3 */
         return sizeof(PacketCoopPing);
+    case PACKET_COOP_OVERWORLD_TRAVEL: /* Coop Middle M5 */
+        return sizeof(PacketCoopOverworldTravel);
     case PACKET_COOP_TOWNMAP_FOG: /* Coop Middle M4: header + len bytes */
         return COOP_TOWNMAP_FOG_HDR + 1;
     case PACKET_COOP_HOTBAR:
@@ -4993,7 +4996,7 @@ static CoopSectorKeep coop_sector_keep[8];
 
 static int coop_lite_keep_set(int64_t loc, int64_t* ids)
 {
-    return coop_lite_keep_ids(loc, ids, 9);
+    return coop_middle_keep_sector_set(loc, ids, 9); /* Coop Middle M5: 3x3, or 2x2 when the cache is tight */
 }
 
 static void coop_lite_keep_sector(int slot, int64_t loc)
@@ -6222,30 +6225,52 @@ static unsigned int coop_lite_npc_list_group(int lead, bool* scanned, ObjectList
     return members;
 }
 
+/* Coop Middle M5: client slots whose PC is within the NPC_POS radius. */
 static unsigned int coop_lite_npc_slots_in_range(int64_t npc)
 {
-    unsigned int mask = 0;
-    int slot;
-    int64_t loc;
-
     if (npc == OBJ_HANDLE_NULL) {
         return 0;
     }
-    loc = obj_field_int64_get(npc, OBJ_F_LOCATION);
-    for (slot = 0; slot < 8; slot++) {
-        int64_t pc = sub_4A2B60(slot);
+    return coop_middle_slots_in_range(obj_field_int64_get(npc, OBJ_F_LOCATION),
+        coop_middle_interest_radius(PACKET_COOP_NPC_POS, false));
+}
 
-        if (pc != OBJ_HANDLE_NULL && location_dist(loc, obj_field_int64_get(pc, OBJ_F_LOCATION)) <= COOP_NPC_POS_RADIUS) {
-            mask |= 1u << slot;
+/* Coop Middle M5: NPC_POS is addressed - one batch per client slot. */
+static PacketCoopNpcPos coop_npc_out[8];
+
+static void coop_lite_npc_out_flush(int slot)
+{
+    PacketCoopNpcPos* p = &coop_npc_out[slot];
+
+    if (p->count > 0) {
+        p->type = PACKET_COOP_NPC_POS;
+        tig_net_send_pose(p, (int)coop_lite_batch_size(p->count, COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)),
+            slot);
+        p->count = 0;
+    }
+}
+
+static void coop_lite_npc_out_add(const PacketCoopNpcPosEntry* e, unsigned int mask)
+{
+    int slot;
+
+    coop_diag.npc_tx++;
+    for (slot = 1; slot < 8; slot++) {
+        PacketCoopNpcPos* p = &coop_npc_out[slot];
+
+        if ((mask & (1u << slot)) == 0) {
+            continue;
+        }
+        p->entries[p->count++] = *e;
+        if (p->count == COOP_NPC_POS_MAX) {
+            coop_lite_npc_out_flush(slot);
         }
     }
-    return mask;
 }
 
 /* Host: NPCs around every PC — position, art (animation frame) and death. */
 static void coop_lite_host_send_npc_pos(unsigned int now_ms)
 {
-    PacketCoopNpcPos pkt;
     ObjectList objects;
     ObjectNode* node;
     int slot;
@@ -6255,6 +6280,7 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
     int64_t done[COOP_NPC_DEDUPE];
     CoopNpcCacheEntry* kf_cache[COOP_NPC_KEYFRAME_QUEUE];
     PacketCoopNpcPosEntry kf_entry[COOP_NPC_KEYFRAME_QUEUE];
+    unsigned int kf_mask[COOP_NPC_KEYFRAME_QUEUE];
     int kf_cnt = 0;
     int done_cnt = 0;
     int k;
@@ -6283,16 +6309,15 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
         return;
     }
 
-    memset(&pkt, 0, sizeof(pkt));
-    pkt.type = PACKET_COOP_NPC_POS;
     for (slot = 0; slot < 8; slot++) {
-        unsigned int members;
-
+        coop_npc_out[slot].count = 0;
+    }
+    for (slot = 0; slot < 8; slot++) {
         pc = sub_4A2B60(slot);
         if (pc == OBJ_HANDLE_NULL || scanned[slot]) {
             continue;
         }
-        members = coop_lite_npc_list_group(slot, scanned, &objects); /* PT79 */
+        (void)coop_lite_npc_list_group(slot, scanned, &objects); /* PT79 */
         for (node = objects.head; node != NULL; node = node->next) {
             if (node->obj == OBJ_HANDLE_NULL) {
                 continue; /* outside every member's square */
@@ -6311,7 +6336,9 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
             coop_lite_fill_npc_entry(&e, node->obj);
             c = coop_lite_npc_cache_slot(node->obj);
             {
-                unsigned int in_range = coop_lite_npc_slots_in_range(node->obj) | (members & 0xFFu);
+                /* M5: only the slots that see it get it; a slot entering
+                   range has a 0 bit and gets the state on this tick. */
+                unsigned int in_range = coop_lite_npc_slots_in_range(node->obj);
                 bool unchanged;
 
                 if (c->obj != node->obj) {
@@ -6326,40 +6353,31 @@ static void coop_lite_host_send_npc_pos(unsigned int now_ms)
                     unsigned int keyframe = anim_is_idle(node->obj) ? COOP_NPC_KEYFRAME_IDLE_MS
                                                                      : COOP_NPC_KEYFRAME_MS;
 
-                    if (coop_lite_interval_elapsed(c->sent_ms, now_ms, keyframe)
+                    if (in_range != 0 && coop_lite_interval_elapsed(c->sent_ms, now_ms, keyframe)
                         && kf_cnt < COOP_NPC_KEYFRAME_QUEUE) {
                         kf_cache[kf_cnt] = c;
+                        kf_mask[kf_cnt] = in_range;
                         kf_entry[kf_cnt++] = e;
                     }
                     continue;
                 }
+                /* State changed (seen mask reset): everyone in range now. */
                 c->last = e;
                 c->sent_ms = now_ms;
                 c->seen_by_slot = (uint8_t)in_range;
-            }
-            pkt.entries[pkt.count++] = e;
-            coop_diag.npc_tx++;
-            if (pkt.count == COOP_NPC_POS_MAX) {
-                tig_net_send_pose_all(&pkt, (int)coop_lite_batch_size(pkt.count,
-                    COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)));
-                pkt.count = 0;
+                if (in_range != 0) {
+                    coop_lite_npc_out_add(&e, in_range);
+                }
             }
         }
         object_list_destroy(&objects);
     }
     for (k = 0; k < kf_cnt; k++) {
         kf_cache[k]->sent_ms = now_ms;
-        pkt.entries[pkt.count++] = kf_entry[k];
-        coop_diag.npc_tx++;
-        if (pkt.count == COOP_NPC_POS_MAX) {
-            tig_net_send_pose_all(&pkt, (int)coop_lite_batch_size(pkt.count,
-                COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)));
-            pkt.count = 0;
-        }
+        coop_lite_npc_out_add(&kf_entry[k], kf_mask[k]);
     }
-    if (pkt.count > 0) {
-        tig_net_send_pose_all(&pkt, (int)coop_lite_batch_size(pkt.count,
-            COOP_NPC_POS_MAX, sizeof(PacketCoopNpcPosEntry)));
+    for (slot = 1; slot < 8; slot++) {
+        coop_lite_npc_out_flush(slot);
     }
 }
 
@@ -6884,7 +6902,9 @@ static void coop_lite_host_wmap_tick(unsigned int now_ms)
 {
     /* PT61: only the world map dims the clients; the location (town) map,
        looking or planning a route on it, does not. */
-    bool open = wmap_ui_is_created() && !wmap_ui_is_town_mode();
+    /* Coop Middle M5: with the free world map on map 1 the host travels
+       alone - no dim, no PT73 spectator for the clients. */
+    bool open = wmap_ui_is_created() && !wmap_ui_is_town_mode() && !coop_middle_overworld_free();
 
     if (open && (!coop_host_wmap_open || coop_lite_interval_elapsed(coop_host_wmap_ms, now_ms, 3000u))) {
         PacketCoopPartyState pkt;
@@ -7196,6 +7216,9 @@ int coop_lite_party_carry_list(int64_t mover, int64_t* objs, int max)
         if (!coop_lite_follow_armed) {
             return 0; /* spawn / load placement, nobody to carry yet */
         }
+        /* Coop Middle M5: a party move lands every world map trip first
+           (the PCs are carried as they are). */
+        coop_middle_owt_abort_all("party travels");
         mover_slot = 0;
     } else {
         if (!coop_follow_carry_pending) {
@@ -17882,7 +17905,7 @@ static void coop_lite_wall_send(const uint8_t* oid, int slot, bool to_all)
         pkt.e.of_flags = (unsigned int)obj_field_int32_get(wall, OBJ_F_FLAGS) & COOP_WORLD_WALL_OF_MASK;
     }
     if (to_all) {
-        tig_net_send_app_all(&pkt, sizeof(pkt));
+        coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_DOOR_STATE, pkt.e.loc, 0); /* M5 */
     } else {
         tig_net_send_app(&pkt, sizeof(pkt), slot);
     }
@@ -18064,7 +18087,7 @@ void coop_lite_host_object_destroyed(int64_t obj)
     pkt.e.loc = obj_field_int64_get(obj, OBJ_F_LOCATION);
     pkt.e.reserved[1] = COOP_WORLD_OBJ_GONE;
     depth = tig_net_local_suspend_pause();
-    tig_net_send_app_all(&pkt, sizeof(pkt));
+    coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_DOOR_STATE, pkt.e.loc, 0); /* M5 */
     tig_net_local_suspend_resume(depth);
     objid_id_to_str(oid_str, oid);
     tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host at %d,%d - sent to clients now (slot %d)\n",
@@ -18148,7 +18171,7 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
             if (portal != OBJ_HANDLE_NULL) {
                 pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
             }
-            tig_net_send_app_all(&pkt, sizeof(pkt));
+            coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_DOOR_STATE, pkt.e.loc, 0); /* M5 */
             memcpy(&id, coop_door_pend[i], sizeof(id));
             objid_id_to_str(oid_str, id);
             tig_debug_printf("CoopLite: object: %s (%s) destroyed on the host - sent to clients (slot %d)\n", oid_str,
@@ -18172,7 +18195,7 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
             pkt.e.kind_flags = (unsigned int)obj_field_int32_get(portal, OBJ_F_SCENERY_FLAGS);
             pkt.e.hp_damage = obj_field_int32_get(portal, OBJ_F_HP_DAMAGE);
             pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
-            tig_net_send_app_all(&pkt, sizeof(pkt));
+            coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_DOOR_STATE, pkt.e.loc, 0); /* M5 */
             if ((pkt.e.kind_flags & OSCF_BUSTED) != 0 || (flags & OF_OFF) != 0) {
                 memcpy(&id, coop_door_pend[i], sizeof(id));
                 objid_id_to_str(oid_str, id);
@@ -18196,7 +18219,7 @@ static void coop_lite_host_door_flush_tick(unsigned int now_ms)
         pkt.e.hp_damage = obj_field_int32_get(portal, OBJ_F_HP_DAMAGE); /* PT60 */
         pkt.e.loc = obj_field_int64_get(portal, OBJ_F_LOCATION);
         pkt.e.reserved[0] = trap_type(portal) != TRAP_TYPE_INVALID ? COOP_WORLD_TRAP_ARMED : 0u;
-        tig_net_send_app_all(&pkt, sizeof(pkt));
+        coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_DOOR_STATE, pkt.e.loc, 0); /* M5 */
         coop_lite_door_log(coop_door_pend[i], portal, pkt.slot, "host sent");
     }
     tig_net_local_suspend_resume(depth);
@@ -18622,7 +18645,7 @@ void coop_lite_host_projectile_fx(int64_t src_loc, int64_t dst_loc, unsigned int
     pkt.missile_art_id = missile_art_id;
     pkt.src_loc = src_loc;
     pkt.dst_loc = dst_loc;
-    tig_net_send_app_all(&pkt, sizeof(pkt));
+    coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_PROJECTILE_FX, src_loc, dst_loc); /* M5 */
 }
 
 void coop_lite_handle_projectile_fx(PacketCoopProjectileFx* pkt)
@@ -20957,7 +20980,9 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
     /* PT52: start from what the clients reported (BUSY/IDLE); everyone near
        and free -> no panel, travel right away. */
     for (slot = 0; slot < 8; slot++) {
-        coop_travel_state[slot] = coop_client_busy[slot] ? COOP_TRAVEL_BUSY : COOP_TRAVEL_IDLE;
+        /* Coop Middle M5: a world map trip counts as busy (wait, or Y lands it). */
+        coop_travel_state[slot] = coop_client_busy[slot] || coop_middle_owt_in_transit(slot) ? COOP_TRAVEL_BUSY
+                                                                                            : COOP_TRAVEL_IDLE;
     }
     {
         int ready;
@@ -21232,6 +21257,9 @@ bool coop_lite_client_worldmap_propose(int64_t loc)
     if (!tig_net_is_coop_enabled() || !tig_net_is_active() || tig_net_is_host()
         || !coop_lite_client_in_session || coop_client_tp_auth > 0) {
         return false;
+    }
+    if (coop_middle_owt_client_propose(loc)) {
+        return true; /* Coop Middle M5: own trip on map 1 (host runs it) */
     }
     map = map_by_type(MAP_TYPE_START_MAP);
     /* No destination / no overworld map: still do not walk the route alone. */
@@ -22889,7 +22917,10 @@ void coop_lite_host_trap_fx(int64_t trap, int64_t triggerer, int base, const int
         }
     }
     depth = tig_net_local_suspend_pause();
-    tig_net_send_app_all(&pkt, sizeof(pkt));
+    coop_middle_send_app_near(&pkt, sizeof(pkt), PACKET_COOP_TRAP_FX, /* M5 */
+        trap != OBJ_HANDLE_NULL ? obj_field_int64_get(trap, OBJ_F_LOCATION)
+                                : (triggerer != OBJ_HANDLE_NULL ? obj_field_int64_get(triggerer, OBJ_F_LOCATION) : 0),
+        0);
     tig_net_local_suspend_resume(depth);
     tig_debug_printf("CoopLite: PT61 trap fired (fx base %d, %d victims) - visuals sent to clients\n", base, pkt.count);
 }
@@ -23305,6 +23336,37 @@ void coop_lite_mid_move_pc(int slot, int64_t pc, int64_t loc)
            owner COOP_PC_POS_FORCE (and the pose to the others). */
         coop_lite_pose_order_bump(&coop_pose_rx[slot]);
         coop_pose_force_active[slot] = true;
+    }
+}
+
+/* M5: sector locks held by the per-slot keep windows (sum, may count a
+   shared sector twice). */
+int coop_lite_mid_keep_locked(void)
+{
+    int n = 0;
+    int slot;
+
+    for (slot = 0; slot < 8; slot++) {
+        if (coop_sector_keep[slot].valid && map_is_valid() && coop_sector_keep[slot].map == map_current_map()) {
+            n += coop_sector_keep[slot].count;
+        }
+    }
+    return n;
+}
+
+/* M5: lock the sectors around loc for slot (before moving its PC there). */
+void coop_lite_mid_keep(int slot, int64_t loc)
+{
+    coop_lite_keep_sector(slot, loc);
+}
+
+/* M5: camera on the local PC (a client landed from the world map). */
+void coop_lite_mid_center_local(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+
+    if (pc != OBJ_HANDLE_NULL) {
+        location_origin_set(obj_field_int64_get(pc, OBJ_F_LOCATION));
     }
 }
 

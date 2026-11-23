@@ -237,13 +237,33 @@ bool sector_init(GameInitInfo* init_info)
 
     /* PT23: coop keeps sectors around every remote PC locked. PT79 (review
        2.1): 3x3 per remote PC is 63 locked sectors with 8 players, plus the
-       view's own - 64 ran out ("lack of unlocked slots"). 96 leaves room
-       without keeping a much larger LRU of resident objects (engine max 128). */
-    if (!sector_cache_init(tig_net_is_coop_enabled() ? 96 : 16)) {
+       view's own - 64 ran out ("lack of unlocked slots"). Coop Middle M5:
+       the engine max 128, with an adaptive keep window for 5-8 spread-out
+       players (coop_middle_keep_sector_margin). */
+    if (!sector_cache_init(tig_net_is_coop_enabled() ? 128 : 16)) {
         return false;
     }
 
     return true;
+}
+
+/* Coop Middle M5: cache capacity and how many cached sectors are locked. */
+void sector_cache_coop_stats(int* capacity, int* locked)
+{
+    unsigned int index;
+    int n = 0;
+
+    for (index = 0; index < sector_cache_size; index++) {
+        if (sector_cache_entries[sector_cache_indexes[index]].refcount > 0) {
+            n++;
+        }
+    }
+    if (capacity != NULL) {
+        *capacity = (int)sector_cache_capacity;
+    }
+    if (locked != NULL) {
+        *locked = n;
+    }
 }
 
 // 0x4CF0D0

@@ -33,5 +33,9 @@ bool wmap_ui_is_spectating(void);
 /* Host: party marker on the open world map (false otherwise). */
 bool wmap_ui_world_coords_get(int* x, int* y);
 bool wmap_ui_is_moving(void);
+/* Coop Middle M5 (free world map). */
+void wmap_ui_coop_marker_set(int world_x, int world_y);
+bool wmap_ui_coop_local_sector(int* world_x, int* world_y);
+void wmap_ui_coop_refresh(void);
 
 #endif /* ARCANUM_UI_WMAP_UI_H_ */

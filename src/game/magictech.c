@@ -10,6 +10,7 @@
 #include "game/area.h"
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* M5: eye candy only to nearby players on map 1 */
 #include "net/tig_net.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
@@ -2533,7 +2534,7 @@ void MTComponentEyeCandy_ProcFunc(void)
                 pkt.oid = obj_get_id(stru_5E6D28.target_obj);
                 pkt.fx_id = magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell;
                 pkt.mt_id = mt_id;
-                tig_net_send_app_all(&pkt, sizeof(pkt));
+                tig_net_send_app_all(&pkt, sizeof(pkt)); /* removals always go to everyone (M5) */
             }
         }
     } else {
@@ -2562,7 +2563,9 @@ void MTComponentEyeCandy_ProcFunc(void)
             pkt.oid = obj_get_id(stru_5E6D28.target_obj);
             pkt.fx_id = magictech_cur_component->data.eye_candy.num + 6 * magictech_cur_run_info->spell;
             pkt.mt_id = magictech_cur_run_info->id;
-            tig_net_send_app_all(&pkt, sizeof(pkt));
+            coop_middle_send_app_near(&pkt, sizeof(pkt), 77,
+                stru_5E6D28.target_obj != OBJ_HANDLE_NULL ? obj_field_int64_get(stru_5E6D28.target_obj, OBJ_F_LOCATION) : 0,
+                0); /* M5 */
         }
 
         if ((magictech_cur_run_info->flags & MAGICTECH_RUN_0x40) == 0) {

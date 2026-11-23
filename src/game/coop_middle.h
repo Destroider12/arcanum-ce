@@ -10,6 +10,9 @@
  * /stuck /gather.
  * Coop Middle M4 (protocol 56): shared quest items, town map fog sync
  * (PACKET_COOP_TOWNMAP_FOG), parallel dialogs, shared followers.
+ * Coop Middle M5 (protocol 57): interest management (sector keep window,
+ * addressed NPC_POS, distance-filtered doors / effects on map 1), free world
+ * map travel on map 1 (PACKET_COOP_OVERWORLD_TRAVEL), unified sleep.
  *
  * All Middle logic lives in coop_middle.c (and coop_rules.c). coop_lite.c and
  * the engine files only call the hooks below, so Coop Lite bugfixes merge in
@@ -285,6 +288,121 @@ int coop_middle_dialog_route(int viewer_slot, const bool active[8], int watch_sl
 #define COOP_SHARED_FOLLOWER_RANGE 6
 bool coop_middle_follower_access_ok(bool rule_on, bool is_leader, bool leader_in_party, bool alive, int dist);
 
+/* ---- M5 ---- */
+
+/* Interest management. The co-op sector cache is 128 (engine cap). Remote
+   slots keep the 3x3 around their PC (PT77y) while there are <= 4 of them or
+   >= 36 cache slots would stay free; otherwise the adaptive window: the PC's
+   sector plus the neighbours within COOP_KEEP_MARGIN tiles (1..4 sectors). */
+#define COOP_SECTOR_CACHE_COOP 128
+#define COOP_KEEP_FULL_MAX_REMOTE 4
+#define COOP_KEEP_FREE_MIN 36
+#define COOP_KEEP_MARGIN 32
+/* 0 = full 3x3, else the margin in tiles of the adaptive window. */
+int coop_middle_keep_sector_margin(int active_remote_slots, int free_cache_slots);
+/* Sector ids to keep around loc (margin 0 = 3x3), skipping negative ids. */
+int coop_middle_keep_ids(int64_t loc, int margin, int64_t* ids, int max);
+/* Square (Chebyshev) tile distance test used by every M5 range check. */
+bool coop_middle_loc_within(int64_t a, int64_t b, int radius);
+#define COOP_IM_NPC_RADIUS 44 /* NPC_POS goes to slots whose PC is this close */
+#define COOP_IM_DOOR_RADIUS 96 /* DOOR_STATE (doors, scenery, walls) on map 1 */
+#define COOP_IM_FX_RADIUS 56 /* TRAP_FX, PROJECTILE_FX, 106 sounds, 77 eye candy on map 1 */
+/* Radius for a host packet type (0 = everyone). Only map 1 filters; the
+   NPC_POS radius applies on every map. */
+int coop_middle_interest_radius(int packet_type, bool start_map);
+
+/* Free world map (COOP_RULE_FREE_OVERWORLD, map 1 only). */
+#define PACKET_COOP_OVERWORLD_TRAVEL 170
+#define COOP_OWT_START 1 /* client -> host: start a trip to loc (world_x / world_y = target sector) */
+#define COOP_OWT_CANCEL 2 /* client -> host: stop now, land where the marker is */
+#define COOP_OWT_PROGRESS 3 /* host -> all: a slot's marker on the world map */
+#define COOP_OWT_ARRIVED 4 /* host -> all: landed at loc (flags: encounter) */
+#define COOP_OWT_REFUSED 5 /* host -> client: world_x = COOP_OWT_REFUSE_* */
+#define COOP_OWT_F_MOVING 0x1
+#define COOP_OWT_F_ENCOUNTER 0x2
+#define COOP_OWT_F_MASK 0x3
+#define COOP_OWT_REFUSE_RULE 1
+#define COOP_OWT_REFUSE_MAP 2
+#define COOP_OWT_REFUSE_DEAD 3
+#define COOP_OWT_REFUSE_COMBAT 4
+#define COOP_OWT_REFUSE_DEST 5
+#define COOP_OWT_REFUSE_BUSY 6 /* a party map change / sleep is running */
+#define COOP_OWT_REFUSE_MAX 6
+#define COOP_OWT_STEP_MS 62u /* vanilla: one sector per world map step */
+#define COOP_OWT_PROGRESS_MS 150u
+#define COOP_OWT_MARKERS_MS 1000u
+#define COOP_OWT_MARKER_LIFE_MS 3500u
+#define COOP_OWT_ENCOUNTER_MARK_MS 15000u
+#define COOP_OWT_ENEMY_RANGE 15
+#define COOP_OWT_ENC_MIN_STEPS 5 /* vanilla: a roll every 300..700 game minutes = 5..11 sectors */
+#define COOP_OWT_ENC_MAX_STEPS 11
+
+typedef struct PacketCoopOverworldTravel {
+    /* 0000 */ int type; /* PACKET_COOP_OVERWORLD_TRAVEL */
+    /* 0004 */ int op; /* COOP_OWT_* */
+    /* 0008 */ int slot;
+    /* 000C */ int flags; /* COOP_OWT_F_* */
+    /* 0010 */ int64_t loc; /* target / landing tile on map 1 */
+    /* 0018 */ int world_x; /* sector x (tile x / 64) */
+    /* 001C */ int world_y;
+} PacketCoopOverworldTravel;
+
+_Static_assert(sizeof(PacketCoopOverworldTravel) == 0x20, "PacketCoopOverworldTravel size");
+_Static_assert(offsetof(PacketCoopOverworldTravel, loc) == 0x10, "PacketCoopOverworldTravel.loc");
+_Static_assert(offsetof(PacketCoopOverworldTravel, world_x) == 0x18, "PacketCoopOverworldTravel.world_x");
+
+/* from_host: the packet came from the host (PROGRESS / ARRIVED / REFUSED),
+   else from a client (START / CANCEL). */
+bool coop_middle_overworld_pkt_valid(const PacketCoopOverworldTravel* pkt, int size, bool from_host);
+/* Move (x, y) up to `steps` 8-way steps toward (tx, ty); returns the steps used. */
+int coop_middle_owt_advance(int* x, int* y, int tx, int ty, int steps);
+
+/* Unified sleep (COOP_RULE_UNIFIED_SLEEP). */
+#define COOP_CTRL_SLEEP_VOTE 9 /* client -> host: a = COOP_SLEEP_MODE_* (0 = cancel), b = 0 */
+#define COOP_CTRL_SLEEP_STATE 10 /* host -> all: a = ready_mask | agreed_mode << 8,
+                                    b = initiator_slot | living_count << 8 (initiator 0xFF = none) */
+#define COOP_SLEEP_MODE_CANCEL 0
+#define COOP_SLEEP_MODE_MORNING 1 /* until 08:00 */
+#define COOP_SLEEP_MODE_EVENING 2 /* until 20:00 */
+#define COOP_SLEEP_MODE_HEALED 3 /* until every living PC is healed (7 day cap) */
+#define COOP_SLEEP_MODE_8H 4
+#define COOP_SLEEP_MODE_1H 5 /* M5 deviation: the sleep window's other buttons */
+#define COOP_SLEEP_MODE_2H 6
+#define COOP_SLEEP_MODE_4H 7
+#define COOP_SLEEP_MODE_24H 8
+#define COOP_SLEEP_MODE_MAX 8
+#define COOP_SLEEP_HEAL_CAP_HOURS (7 * 24)
+#define COOP_SLEEP_REGEN_MS 1000u
+#define COOP_SLEEP_REGEN_FATIGUE 2
+
+typedef struct CoopSleepState {
+    uint8_t ready_mask;
+    uint8_t mode; /* the agreed mode (the initiator's) */
+    int initiator; /* -1 = no round */
+} CoopSleepState;
+
+#define COOP_SLEEP_EV_VOTE 1 /* slot is ready with `mode` */
+#define COOP_SLEEP_EV_CANCEL 2 /* slot dropped out (N, moved, combat, dialog) */
+#define COOP_SLEEP_EV_CHECK 3 /* living set changed (death, leave) */
+
+#define COOP_SLEEP_RES_NONE 0
+#define COOP_SLEEP_RES_WAIT 1 /* state changed: broadcast, keep waiting */
+#define COOP_SLEEP_RES_EXECUTE 2 /* everyone living is ready: sleep st->mode */
+#define COOP_SLEEP_RES_SOLO 3 /* one living player: vanilla sleep at once */
+#define COOP_SLEEP_RES_CLEARED 4 /* round over (nobody ready) */
+#define COOP_SLEEP_RES_REFUSED 5 /* bad vote (not a living slot, bad mode) */
+
+void coop_middle_sleep_reset(CoopSleepState* st);
+int coop_middle_sleep_step(CoopSleepState* st, uint8_t living_mask, int ev, int slot, int mode);
+/* Game minutes to sleep for a fixed mode at hh:mm (always > 0); -1 for HEALED / bad mode. */
+int coop_middle_sleep_minutes(int mode, int hour, int minute);
+/* sleep_ui's hours value (1, 2, 4, 8, 24, -1 morning, -2 evening, -3 healed) -> mode, 0 if none. */
+int coop_middle_sleep_mode_from_ui(int hours_value);
+int coop_middle_sleep_count(uint8_t mask);
+/* Banner line, EN or RU (fills out, returns out). */
+const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int living, const char* name, int mode,
+    bool ru);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -384,6 +502,49 @@ void coop_middle_handle_townmap_fog(PacketCoopTownmapFog* pkt);
 /* M4 shared followers (both sides; rules as the host sent them). */
 bool coop_middle_shared_follower_ok(int64_t pc, int64_t npc);
 
+/* M5 interest management (host). */
+int coop_middle_keep_sector_set(int64_t loc, int64_t* ids, int max); /* coop_lite_keep_sector's window */
+bool coop_middle_slot_in_range(int slot, int64_t loc, int radius);
+unsigned int coop_middle_slots_in_range(int64_t loc, int radius); /* client slots 1..7 */
+/* Host co-op send of a positional packet: on map 1 only to slots near
+   loc_a or loc_b (0 = unused), else (and outside co-op) to everyone. */
+void coop_middle_send_app_near(void* data, int size, int packet_type, int64_t loc_a, int64_t loc_b);
+
+/* M5 free world map. */
+bool coop_middle_overworld_free(void); /* rule on, co-op, current map is map 1 */
+/* Host: the local PC's same-map hop on map 1 carries nobody and sends no FOLLOW_HOST. */
+bool coop_middle_overworld_solo_hop(int dest_map);
+/* World map step on this machine: true = skip the game time advance. */
+bool coop_middle_overworld_freeze_time(void);
+/* Host's own world map step at loc; true = an encounter fired (close the map). */
+bool coop_middle_overworld_local_step(int64_t loc);
+/* Client "Travel" on the world map: true = handled (OWT_START sent / refused). */
+bool coop_middle_owt_client_propose(int64_t dest_loc);
+/* Client closed its world map while its trip runs: stop (CANCEL). */
+void coop_middle_owt_client_closed(void);
+bool coop_middle_owt_in_transit(int slot); /* host: slot; client: any slot it knows */
+bool coop_middle_owt_local_in_transit(void);
+/* Host: a party map change carries everyone: land every trip where it is. */
+void coop_middle_owt_abort_all(const char* why);
+void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt);
+typedef struct CoopWorldMarker {
+    int slot;
+    int world_x; /* sector coords */
+    int world_y;
+    bool moving;
+    bool encounter; /* red: a fight there (15 s) */
+} CoopWorldMarker;
+int coop_middle_world_markers(CoopWorldMarker* out, int max);
+unsigned int coop_middle_world_markers_serial(void); /* bumps when a marker moves */
+
+/* M5 unified sleep. */
+bool coop_middle_unified_sleep_on(void); /* co-op session with the rule */
+/* sleep_ui button (both sides): true = taken over (vote sent / counted). */
+bool coop_middle_sleep_choose(int hours_value);
+bool coop_middle_sleep_key(bool yes); /* Y / N on the banner */
+/* Banner text while a round runs (false = none). */
+bool coop_middle_sleep_banner(char* out, size_t sz);
+
 /* M3 pings. */
 void coop_middle_handle_ping(PacketCoopPing* pkt);
 /* Local trigger (MMB / Alt+RMB on the map): true when sent. */
@@ -416,6 +577,10 @@ bool coop_lite_container_is_store(int64_t container, int64_t pc);
 /* M3: host moves a slot's PC to loc (lock, stop anims, keep the sector);
    the pose tick then sends the owner a FORCE with a fresh epoch. */
 void coop_lite_mid_move_pc(int slot, int64_t pc, int64_t loc);
+/* M5 bridges. */
+int coop_lite_mid_keep_locked(void);
+void coop_lite_mid_keep(int slot, int64_t loc);
+void coop_lite_mid_center_local(void);
 
 #ifdef __cplusplus
 }

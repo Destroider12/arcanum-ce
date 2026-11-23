@@ -1466,6 +1466,7 @@ void wmap_ui_close(void)
     if (!wmap_ui_created) {
         return;
     }
+    coop_middle_owt_client_closed(); /* Coop Middle M5: closing ends an own trip */
 
     pc_obj = player_get_local_pc_obj();
     if (pc_obj != OBJ_HANDLE_NULL
@@ -4024,7 +4025,7 @@ bool wmap_ui_bkg_process_callback(TimeEvent* timeevent)
     TimeEvent next_timeevent;
     WmapCoords v8;
     WmapCoords v6;
-    int64_t loc;
+    int64_t loc = 0;
 
     (void)timeevent;
 
@@ -4070,7 +4071,17 @@ bool wmap_ui_bkg_process_callback(TimeEvent* timeevent)
 
     sub_564EE0(&v8, &(wmap_info->field_3C), &v9);
     if (!v0) {
-        timeevent_inc_datetime(&v9);
+        if (coop_middle_overworld_freeze_time()) {
+            /* Coop Middle M5 (free world map on map 1): the shared clock
+               does not jump; the random encounter roll runs per step. */
+            if (loc != 0 && coop_middle_overworld_local_step(loc)) {
+                wmap_ui_close();
+                wmap_ui_encounter_start();
+                return true;
+            }
+        } else {
+            timeevent_inc_datetime(&v9);
+        }
     }
 
     if (v1) {
@@ -4533,6 +4544,47 @@ void wmap_world_refresh_rect(TigRect* rect)
 
         sub_561490(area_get_location(area), &coords);
         sub_566D10(WMAP_NOTE_TYPE_NEW_LOC, &coords, &tmp_rect, rect, wmap_info);
+    }
+
+    /* Coop Middle M5: the other players on the world map (sector coords),
+       red and blinking when they are in a random encounter. */
+    if (tig_net_is_coop_enabled() && wmap_ui_mode == WMAP_UI_MODE_WORLD) {
+        CoopWorldMarker marks[8];
+        int marks_count = coop_middle_world_markers(marks, 8);
+        static const uint8_t slot_rgb[8][3] = {
+            { 255, 255, 255 }, { 40, 120, 255 }, { 60, 200, 80 }, { 250, 200, 60 },
+            { 200, 90, 230 }, { 60, 210, 220 }, { 250, 140, 40 }, { 170, 170, 170 },
+        };
+
+        for (int m = 0; m < marks_count; m++) {
+            TigRect mark;
+            TigRect clip;
+            int cx = dword_66D6F8 - marks[m].world_x;
+            int cy = marks[m].world_y;
+            tig_color_t color;
+
+            if (marks[m].encounter && ((coop_middle_now_ms() / 300u) & 1u) != 0) {
+                continue; /* blink */
+            }
+            color = marks[m].encounter
+                ? tig_color_make(235, 40, 30)
+                : tig_color_make(slot_rgb[marks[m].slot & 7][0], slot_rgb[marks[m].slot & 7][1],
+                    slot_rgb[marks[m].slot & 7][2]);
+            mark.x = tmp_rect.x + cx - wmap_info->field_34 - 4;
+            mark.y = tmp_rect.y + cy - wmap_info->field_38 - 4;
+            mark.width = 9;
+            mark.height = 9;
+            if (tig_rect_intersection(&mark, rect, &clip) == TIG_OK) {
+                tig_window_fill(wmap_ui_window, &clip, tig_color_make(0, 0, 0));
+            }
+            mark.x += 2;
+            mark.y += 2;
+            mark.width = 5;
+            mark.height = 5;
+            if (tig_rect_intersection(&mark, rect, &clip) == TIG_OK) {
+                tig_window_fill(wmap_ui_window, &clip, color);
+            }
+        }
     }
 
     offset_x = wmap_info->field_3C.x - wmap_note_type_info[WMAP_NOTE_TYPE_CROSS].width / 2 - wmap_info->field_34;
@@ -5248,4 +5300,39 @@ bool wmap_ui_world_coords_get(int* x, int* y)
 bool wmap_ui_is_moving(void)
 {
     return wmap_ui_created && wmap_ui_state == WMAP_UI_STATE_MOVING;
+}
+
+/* Coop Middle M5: the local marker of a host-run trip (sector coords). */
+void wmap_ui_coop_marker_set(int world_x, int world_y)
+{
+    WmapInfo* wmap_info;
+
+    if (!wmap_ui_created || wmap_ui_spectating || wmap_ui_mode != WMAP_UI_MODE_WORLD) {
+        return;
+    }
+    wmap_info = &(wmap_ui_mode_info[WMAP_UI_MODE_WORLD]);
+    wmap_info->field_3C.x = dword_66D6F8 - world_x;
+    wmap_info->field_3C.y = world_y;
+    sub_563590(&(wmap_info->field_3C), false);
+    wmap_info->refresh();
+}
+
+/* Coop Middle M5: the local world map marker while travelling (sector coords). */
+bool wmap_ui_coop_local_sector(int* world_x, int* world_y)
+{
+    if (!wmap_ui_created || wmap_ui_spectating || wmap_ui_mode != WMAP_UI_MODE_WORLD
+        || wmap_ui_state != WMAP_UI_STATE_MOVING) {
+        return false;
+    }
+    *world_x = dword_66D6F8 - wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.x;
+    *world_y = wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.y;
+    return true;
+}
+
+/* Coop Middle M5: redraw the world map (ally markers moved). */
+void wmap_ui_coop_refresh(void)
+{
+    if (wmap_ui_created && wmap_ui_mode == WMAP_UI_MODE_WORLD && wmap_ui_mode_info[WMAP_UI_MODE_WORLD].refresh != NULL) {
+        wmap_ui_mode_info[WMAP_UI_MODE_WORLD].refresh();
+    }
 }

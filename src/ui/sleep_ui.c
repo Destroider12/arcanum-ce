@@ -256,14 +256,18 @@ void sleep_ui_toggle(int64_t bed_obj)
         return;
     }
 
-    // Coop Middle: a client asks the host to rest (Y / N) when the rule allows.
-    if (coop_middle_client_rest_ask(bed_obj != OBJ_HANDLE_NULL ? COOP_REST_MODE_NIGHT : COOP_REST_MODE_HEALED)) {
-        return;
-    }
+    // Coop Middle M5: with unified sleep a client opens its own window and
+    // its choice is a vote (coop_middle_sleep_choose); else M1 / Lite.
+    if (!coop_middle_unified_sleep_on()) {
+        // Coop Middle: a client asks the host to rest (Y / N) when the rule allows.
+        if (coop_middle_client_rest_ask(bed_obj != OBJ_HANDLE_NULL ? COOP_REST_MODE_NIGHT : COOP_REST_MODE_HEALED)) {
+            return;
+        }
 
-    // PT25 co-op: only the host owns game time; a client may not rest/wait.
-    if (coop_lite_client_rest_refused()) {
-        return;
+        // PT25 co-op: only the host owns game time; a client may not rest/wait.
+        if (coop_lite_client_rest_refused()) {
+            return;
+        }
     }
 
     // Ensure the player is not unconscious.
@@ -564,6 +568,13 @@ bool sleep_ui_message_filter(TigMessage* msg)
 
     if (index >= cnt) {
         return false;
+    }
+
+    // Coop Middle M5: unified sleep - the choice is a vote; the host runs
+    // the sleep for everyone once all living players are ready.
+    if (coop_middle_sleep_choose(sleep_ui_hours[index])) {
+        sleep_ui_close();
+        return true;
     }
 
     // Clear existing sleep events.

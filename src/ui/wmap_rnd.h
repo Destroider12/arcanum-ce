@@ -14,5 +14,7 @@ bool wmap_rnd_load(GameLoadInfo* load_info);
 void wmap_rnd_disable(void);
 bool wmap_rnd_timeevent_process(TimeEvent* timeevent);
 void wmap_rnd_schedule(void);
+/* Coop Middle M5: one random encounter roll at a world map loc (spawns on a hit). */
+bool wmap_rnd_coop_check(int64_t loc);
 
 #endif /* ARCANUM_UI_WMAP_RND_H_ */

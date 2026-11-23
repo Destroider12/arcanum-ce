@@ -1441,6 +1441,11 @@ bool wmap_rnd_timeevent_process(TimeEvent* timeevent)
  *
  * 0x559640
  */
+bool wmap_rnd_coop_check(int64_t loc)
+{
+    return wmap_rnd_check(loc);
+}
+
 void wmap_rnd_schedule(void)
 {
     TimeEvent timeevent;

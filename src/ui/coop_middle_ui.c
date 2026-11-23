@@ -793,7 +793,7 @@ static void coop_mid_ui_hud_draw(GameDrawInfo* draw_info)
 static bool coop_mid_banner_shown;
 static TigRect coop_mid_banner_rect;
 static TigVideoBuffer* coop_mid_banner_vb;
-static char coop_mid_banner_text[160];
+static char coop_mid_banner_text[192];
 
 static void coop_mid_ui_banner_hide(void)
 {
@@ -806,23 +806,26 @@ static void coop_mid_ui_banner_hide(void)
 static void coop_mid_ui_banner_tick(void)
 {
     char name[64];
-    char text[160];
+    char text[192];
     TigRect rect;
     TigRect dirty;
     tig_font_handle_t font;
     int w;
     tig_color_t frame;
 
-    if (!coop_mid_ui_session() || !coop_middle_is_paused() || coop_mid_iso_window == TIG_WINDOW_HANDLE_INVALID
-        || mainmenu_ui_is_active()) {
+    /* M5: the same banner carries the unified sleep round (pause first). */
+    if (!coop_mid_ui_session() || coop_mid_iso_window == TIG_WINDOW_HANDLE_INVALID || mainmenu_ui_is_active()
+        || (!coop_middle_is_paused() && !coop_middle_sleep_banner(text, sizeof(text)))) {
         coop_mid_ui_banner_hide();
         return;
     }
-    coop_middle_slot_name(coop_middle_paused_by(), name, sizeof(name));
-    /* The game fonts have no em dash: " - " stands in for it. */
-    snprintf(text, sizeof(text), coop_lite_lang_ru() ? "ПАУЗА (%s) - нажмите Pause для продолжения"
-                                                     : "PAUSED (%s) - Press Pause to resume",
-        name);
+    if (coop_middle_is_paused()) {
+        coop_middle_slot_name(coop_middle_paused_by(), name, sizeof(name));
+        /* The game fonts have no em dash: " - " stands in for it. */
+        snprintf(text, sizeof(text), coop_lite_lang_ru() ? "ПАУЗА (%s) - нажмите Pause для продолжения"
+                                                         : "PAUSED (%s) - Press Pause to resume",
+            name);
+    }
     font = coop_mid_ui_font(240, 220, 160);
     w = coop_mid_ui_text_width(font, text) + 16;
     if (w > COOP_MID_BANNER_W_MAX) {
@@ -871,7 +874,7 @@ static void coop_mid_ui_banner_tick(void)
     tig_font_pop();
     coop_mid_banner_shown = true;
     gamelib_invalidate_rect(&coop_mid_banner_rect);
-    tig_debug_printf("CoopMiddle: pause banner: %s\n", coop_mid_banner_text);
+    tig_debug_printf("CoopMiddle: banner: %s\n", coop_mid_banner_text);
 }
 
 static void coop_mid_ui_banner_draw(GameDrawInfo* draw_info)
@@ -1202,6 +1205,34 @@ void coop_middle_ui_on_scroll(int dx, int dy)
     }
 }
 
+/* ---- M5: world map ally markers ---- */
+
+static unsigned int coop_mid_wmap_serial;
+static unsigned int coop_mid_wmap_ms;
+
+static void coop_mid_ui_wmap_tick(unsigned int now_ms)
+{
+    CoopWorldMarker marks[8];
+    int n;
+    int i;
+    bool blink = false;
+    unsigned int serial;
+
+    if (!wmap_ui_is_created() || (unsigned int)(now_ms - coop_mid_wmap_ms) < 150u) {
+        return;
+    }
+    n = coop_middle_world_markers(marks, 8);
+    for (i = 0; i < n; i++) {
+        blink = blink || marks[i].encounter;
+    }
+    serial = coop_middle_world_markers_serial();
+    if (serial != coop_mid_wmap_serial || blink) {
+        coop_mid_wmap_serial = serial;
+        coop_mid_wmap_ms = now_ms;
+        wmap_ui_coop_refresh();
+    }
+}
+
 /* ---- tick / lifecycle ---- */
 
 static void coop_mid_ui_tick(unsigned int now_ms)
@@ -1238,6 +1269,7 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     coop_mid_ui_hud_tick(now_ms);
     coop_mid_ui_banner_tick(); /* after the HUD: it sits under it */
     coop_mid_ui_pings_tick(now_ms);
+    coop_mid_ui_wmap_tick(now_ms); /* M5 */
 }
 
 bool coop_middle_ui_init(GameInitInfo* init_info)

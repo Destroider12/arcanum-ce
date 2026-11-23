@@ -1190,6 +1190,11 @@ void tig_net_send_pose_except(void* data, int size, int client_id)
     tig_net_send_raw_ex(data, size, client_id, false, true, true);
 }
 
+void tig_net_send_pose(void* data, int size, int client_id)
+{
+    tig_net_send_raw_ex(data, size, client_id, false, false, true);
+}
+
 void tig_net_set_remote_slot_present(int slot, bool present)
 {
     /* Client bookkeeping only (review H3): other clients' slots exist so

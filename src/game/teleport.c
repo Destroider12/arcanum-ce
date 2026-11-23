@@ -1,6 +1,7 @@
 #include "game/teleport.h"
 
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle M5: free world map hops */
 
 #include <stdio.h>
 
@@ -187,6 +188,7 @@ bool teleport_is_teleporting_obj(int64_t obj)
 bool teleport_process(TeleportData* teleport_data)
 {
     int map;
+    bool coop_solo_hop;
 
     if ((teleport_data->flags & TELEPORT_FADE_OUT) != 0) {
         gfade_run(&(teleport_data->fade_out));
@@ -233,6 +235,11 @@ bool teleport_process(TeleportData* teleport_data)
 
     schedule_teleport_obj_recursively(teleport_data->obj, teleport_data->loc);
 
+    /* Coop Middle M5: the host's own hop on map 1 (free world map) carries
+       only its PC and followers and sends no FOLLOW_HOST. */
+    coop_solo_hop = player_is_local_pc_obj(teleport_data->obj)
+        && coop_middle_overworld_solo_hop(teleport_data->map);
+
     /* Coop Lite: the party (other players' PCs, corpses included) travels
        with the local PC — host travel, or a client applying the host's. */
     {
@@ -240,7 +247,7 @@ bool teleport_process(TeleportData* teleport_data)
         int carry_cnt;
         int idx;
 
-        carry_cnt = coop_lite_party_carry_list(teleport_data->obj, carry, 8);
+        carry_cnt = coop_solo_hop ? 0 : coop_lite_party_carry_list(teleport_data->obj, carry, 8);
         for (idx = 0; idx < carry_cnt; idx++) {
             if (!teleport_is_teleporting_obj(carry[idx])) {
                 schedule_teleport_obj_recursively(carry[idx], teleport_data->loc);
@@ -319,7 +326,9 @@ bool teleport_process(TeleportData* teleport_data)
     /* Coop Lite: host PC travel forces remote players to the same destination. */
     if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
         coop_lite_after_party_carry(teleport_data->obj, teleport_data->loc);
-        coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
+        if (!coop_solo_hop) {
+            coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
+        }
         /* Client may have queued a follow while still on ShopMap / main menu. */
         coop_lite_flush_pending_follow();
         /* Client: host map now loaded — bind PCs from pending SESSION_SYNC. */
