@@ -760,6 +760,9 @@ bool coop_lite_is_client_role(void)
     if (coop_preshop) {
         return false; /* PT40: the pre-session shop is single player */
     }
+    if (tig_net_has_local_authority()) {
+        return false; /* Coop Middle M6: inside a solo instance */
+    }
     /* Local suspension is only used by clients running their own PC's SP
        path (move/talk); the dialog it opens is still a client dialog. */
     if (tig_net_is_locally_suspended()) {
@@ -2777,6 +2780,9 @@ static int coop_story_applying;
 
 bool coop_lite_story_write_blocked(void)
 {
+    if (tig_net_has_local_authority()) {
+        return false; /* M6: solo instance - written here, sent as deltas */
+    }
     return tig_net_is_active() && !tig_net_is_host() && coop_story_applying == 0;
 }
 
@@ -12408,7 +12414,8 @@ void coop_lite_client_request_steal(int64_t pc_obj, int64_t target_obj, int64_t 
 bool coop_lite_client_local_loot(int64_t source_obj)
 {
 #ifndef COOP_LITE_TEST_STUBS
-    return coop_lite_is_client_role() && source_obj != OBJ_HANDLE_NULL && source_obj == player_get_local_pc_obj();
+    return !tig_net_has_local_authority() && coop_lite_is_client_role() && source_obj != OBJ_HANDLE_NULL
+        && source_obj == player_get_local_pc_obj();
 #else
     (void)source_obj;
     return false;
@@ -18972,8 +18979,14 @@ void coop_lite_host_pc_changed(int64_t pc, bool stats) { (void)pc; (void)stats; 
 
 bool coop_lite_client_local_goal_obj(int64_t obj)
 {
-    int depth = tig_net_local_suspend_pause();
-    bool r = coop_lite_client_drives_obj(obj);
+    int depth;
+    bool r;
+
+    if (tig_net_has_local_authority()) {
+        return false; /* M6: solo instance - doors / scenery run here */
+    }
+    depth = tig_net_local_suspend_pause();
+    r = coop_lite_client_drives_obj(obj);
 
     tig_net_local_suspend_resume(depth);
     return r;
@@ -23558,6 +23571,13 @@ void coop_lite_lobby_tick(unsigned int now_ms)
 
 /* ---- Coop Middle M6: thin helpers for coop_subinst.c (solo instances) ---- */
 
+void coop_lite_pc_inv_repair(int64_t pc)
+{
+    if (pc != OBJ_HANDLE_NULL) {
+        coop_lite_inv_list_repair(pc);
+    }
+}
+
 bool coop_lite_build_pc_bundle(int64_t pc, CoopCharBundleBuf* out)
 {
     if (pc == OBJ_HANDLE_NULL || out == NULL) {
@@ -23716,6 +23736,7 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
         }
 
         tig_net_local_suspend_begin();
+        coop_lite_inv_list_repair(pc); /* PT54d: a sparse list reads short */
         /* Our items the client no longer carries (used, dropped, sold, given inside). */
         have_n = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
         if (have_n > COOP_CHAR_MAX_ITEMS) {
@@ -23764,23 +23785,79 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
             item_insert(item, pc, loc);
             added++;
         }
+        coop_lite_inv_list_repair(pc);
         tig_net_local_suspend_end();
     }
-    for (i = 0; qty != NULL && i < qty_n; i++) {
-        int64_t item;
-        int64_t parent = OBJ_HANDLE_NULL;
+    /* Item state from the client (also for items we already had): amounts,
+       wear, charges, mana, and where it sits / what is worn. */
+    {
+        static int64_t moved[COOP_SUBINST_MAX_QTY_ITEMS];
+        static int moved_loc[COOP_SUBINST_MAX_QTY_ITEMS];
+        int moved_n = 0;
+        int k;
 
-        memcpy(&x, qty[i].oid, sizeof(x));
-        item = obj_pool_perm_lookup(x);
-        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc) {
-            continue;
+        tig_net_local_suspend_begin();
+        for (i = 0; qty != NULL && i < qty_n; i++) {
+            int64_t item;
+            int64_t parent = OBJ_HANDLE_NULL;
+
+            memcpy(&x, qty[i].oid, sizeof(x));
+            item = obj_pool_perm_lookup(x);
+            if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc) {
+                continue;
+            }
+            type = obj_field_int32_get(item, OBJ_F_TYPE);
+            if (type == OBJ_TYPE_GOLD && qty[i].qty >= 0) {
+                obj_field_int32_set(item, OBJ_F_GOLD_QUANTITY, qty[i].qty);
+            } else if (type == OBJ_TYPE_AMMO && qty[i].qty >= 0) {
+                obj_field_int32_set(item, OBJ_F_AMMO_QUANTITY, qty[i].qty);
+            }
+            if (obj_field_int32_get(item, OBJ_F_HP_DAMAGE) != qty[i].hp_damage) {
+                obj_field_int32_set(item, OBJ_F_HP_DAMAGE, qty[i].hp_damage);
+            }
+            if (obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE) != qty[i].charges) {
+                obj_field_int32_set(item, OBJ_F_ITEM_SPELL_MANA_STORE, qty[i].charges);
+            }
+            if (obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE) != qty[i].mana) {
+                obj_field_int32_set(item, OBJ_F_ITEM_MANA_STORE, qty[i].mana);
+            }
+            if (obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION) != qty[i].inv_loc
+                && moved_n < COOP_SUBINST_MAX_QTY_ITEMS) {
+                moved[moved_n] = item;
+                moved_loc[moved_n] = qty[i].inv_loc;
+                moved_n++;
+            }
         }
-        type = obj_field_int32_get(item, OBJ_F_TYPE);
-        if (type == OBJ_TYPE_GOLD) {
-            obj_field_int32_set(item, OBJ_F_GOLD_QUANTITY, qty[i].qty);
-        } else if (type == OBJ_TYPE_AMMO) {
-            obj_field_int32_set(item, OBJ_F_AMMO_QUANTITY, qty[i].qty);
+        /* Two passes: everything that moves leaves first, so a swap (sword
+           in hand <-> pack) never meets an occupied slot. */
+        for (k = 0; k < moved_n; k++) {
+            item_remove(moved[k]);
         }
+        for (k = 0; k < moved_n; k++) {
+            int loc = moved_loc[k];
+            int free_loc = -1;
+            int slots[960];
+
+            if (item_check_insert(moved[k], pc, &free_loc) != ITEM_CANNOT_OK) {
+                free_loc = -1;
+            }
+            if (IS_WEAR_INV_LOC(loc)) {
+                if (item_wield_get(pc, loc) != OBJ_HANDLE_NULL && free_loc != -1) {
+                    loc = free_loc;
+                }
+            } else {
+                item_inventory_slots_get(pc, slots);
+                if (!item_inventory_slots_has_room_for(moved[k], pc, loc, slots) && free_loc != -1) {
+                    loc = free_loc;
+                }
+            }
+            item_insert(moved[k], pc, loc);
+        }
+        if (moved_n > 0) {
+            coop_lite_inv_list_repair(pc);
+            tig_debug_printf("CoopLite: M6 reconcile: %d item(s) moved / re-equipped\n", moved_n);
+        }
+        tig_net_local_suspend_end();
     }
     if (!critter_is_dead(pc)) {
         object_hp_damage_set(pc, hp_damage);

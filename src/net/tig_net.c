@@ -353,6 +353,7 @@ static char local_name[TIG_NET_MAX_NAME] = "Player"; /* PT58: ARCANUM_COOP_NAME 
 
 static int last_message_size;
 static int local_suspend_depth;
+static bool local_authority; /* Coop Middle M6: solo instance */
 /* Client: host connection dropped during this pump; tear down after it. */
 static bool lost_host;
 /* Client: the host's protocol doesn't match ours. Sticky until the join
@@ -1074,8 +1075,27 @@ bool tig_net_is_host(void)
 
 bool tig_net_is_coop_client(void)
 {
-    return coop_enabled && active && !is_host;
+    return coop_enabled && active && !is_host && !tig_net_has_local_authority();
 }
+
+void tig_net_set_local_authority(bool on)
+{
+    local_authority = on;
+}
+
+bool tig_net_has_local_authority(void)
+{
+    return local_authority && local_suspend_depth > 0;
+}
+
+#ifdef TIG_NET_TEST_STUB_DEBUG
+void tig_net_test_force_role(bool coop, bool is_active, bool host)
+{
+    coop_enabled = coop;
+    active = is_active;
+    is_host = host;
+}
+#endif
 
 void tig_net_local_suspend_begin(void)
 {

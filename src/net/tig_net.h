@@ -148,6 +148,14 @@ bool tig_net_is_locally_suspended(void);
 /* Leave local suspension for one network request (returns the depth). */
 int tig_net_local_suspend_pause(void);
 void tig_net_local_suspend_resume(int depth);
+/* Coop Middle M6: a client inside a solo instance has full local authority
+   while suspended (tig_net_is_coop_client() and the co-op client role read
+   false then); a pause (pumping the net) is a client again. */
+void tig_net_set_local_authority(bool on);
+bool tig_net_has_local_authority(void);
+#ifdef TIG_NET_TEST_STUB_DEBUG
+void tig_net_test_force_role(bool coop, bool is_active, bool host);
+#endif
 int sub_52A900(void); /* non-zero blocks time advance */
 void sub_52A940(void);
 void sub_52A950(void);

@@ -345,6 +345,10 @@ size_t coop_subinst_qty_build(const CoopSubinstQty* items, int count, uint8_t* o
 
         memcpy(p, items[i].oid, 24);
         put_u32(p + 24, (uint32_t)items[i].qty);
+        put_u32(p + 28, (uint32_t)items[i].hp_damage);
+        put_u32(p + 32, (uint32_t)items[i].charges);
+        put_u32(p + 36, (uint32_t)items[i].mana);
+        put_u32(p + 40, (uint32_t)items[i].inv_loc);
     }
     return need;
 }
@@ -364,14 +368,52 @@ int coop_subinst_qty_parse(const uint8_t* data, size_t len, CoopSubinstQty* item
     for (i = 0; i < n; i++) {
         const uint8_t* p = data + 4 + (size_t)i * COOP_SUBINST_QTY_ENTRY;
         int32_t q = (int32_t)get_u32(p + 24);
+        int32_t hp = (int32_t)get_u32(p + 28);
+        int32_t ch = (int32_t)get_u32(p + 32);
+        int32_t mana = (int32_t)get_u32(p + 36);
+        int32_t loc = (int32_t)get_u32(p + 40);
 
-        if (q < 0) {
+        if (q < COOP_SUBINST_QTY_NONE || q > COOP_SUBINST_ITEM_VAL_MAX || hp < 0 || hp > COOP_SUBINST_ITEM_VAL_MAX
+            || ch < -COOP_SUBINST_ITEM_VAL_MAX || ch > COOP_SUBINST_ITEM_VAL_MAX || mana < -COOP_SUBINST_ITEM_VAL_MAX
+            || mana > COOP_SUBINST_ITEM_VAL_MAX || loc < 0 || loc > COOP_SUBINST_ITEM_VAL_MAX) {
             return -1;
         }
         memcpy(items[i].oid, p, 24);
         items[i].qty = q;
+        items[i].hp_damage = hp;
+        items[i].charges = ch;
+        items[i].mana = mana;
+        items[i].inv_loc = loc;
     }
     return (int)n;
+}
+
+size_t coop_subinst_des_filter(uint8_t* data, size_t len, const uint8_t (*oids)[24], int n)
+{
+    size_t in;
+    size_t out = 0;
+    int k;
+
+    if (data == NULL) {
+        return 0;
+    }
+    for (in = 0; in + 24 <= len; in += 24) {
+        bool drop = false;
+
+        for (k = 0; k < n && oids != NULL; k++) {
+            if (memcmp(data + in, oids[k], 24) == 0) {
+                drop = true;
+                break;
+            }
+        }
+        if (!drop) {
+            if (out != in) {
+                memmove(data + out, data + in, 24);
+            }
+            out += 24;
+        }
+    }
+    return out;
 }
 
 int coop_subinst_chunk_count(size_t total_bytes)
@@ -530,8 +572,9 @@ int coop_subinst_client_next(int state, int event)
         switch (event) {
         case COOP_SUBINST_EV_ACK:
         case COOP_SUBINST_EV_ABORT:
-        case COOP_SUBINST_EV_DENY:
             return COOP_SUBINST_ST_IDLE;
+        case COOP_SUBINST_EV_DENY:
+            return COOP_SUBINST_ST_COMMITTING; /* next map refused: the ACK(0) follows */
         case COOP_SUBINST_EV_ACK_NEXT:
             return COOP_SUBINST_ST_REQUESTED;
         default:
@@ -542,14 +585,28 @@ int coop_subinst_client_next(int state, int event)
     }
 }
 
+bool coop_subinst_client_stalled(int state, bool holding, unsigned int since_ms, unsigned int now_ms)
+{
+    if (!holding || (state != COOP_SUBINST_ST_REQUESTED && state != COOP_SUBINST_ST_RECEIVING
+                        && state != COOP_SUBINST_ST_IDLE)) {
+        return false;
+    }
+    return (unsigned int)(now_ms - since_ms) >= COOP_SUBINST_STALL_MS;
+}
+
+int coop_subinst_sub_next_plan(int lease_rc, bool packed)
+{
+    return lease_rc == COOP_SUBINST_LEASE_OK && packed ? COOP_SUBINST_NEXT_GRANT : COOP_SUBINST_NEXT_BACK;
+}
+
 bool coop_subinst_ctrl_valid(const PacketCoopSubinstCtrl* pkt, int size, bool from_host)
 {
     if (pkt == NULL || size != (int)sizeof(PacketCoopSubinstCtrl) || pkt->type != PACKET_COOP_SUBINST_CTRL
         || pkt->op < 1 || pkt->op > COOP_SUBINST_OP_MAX || (pkt->flags & ~COOP_SUBINST_F_MASK) != 0) {
         return false;
     }
-    if (from_host == (pkt->op == COOP_SUBINST_OP_COMMIT_BEGIN)) {
-        return false; /* COMMIT_BEGIN is the only client op */
+    if (from_host == (pkt->op == COOP_SUBINST_OP_COMMIT_BEGIN || pkt->op == COOP_SUBINST_OP_CANCEL)) {
+        return false; /* COMMIT_BEGIN / CANCEL are the client ops */
     }
     switch (pkt->op) {
     case COOP_SUBINST_OP_LEASE_GRANT:
@@ -573,6 +630,8 @@ bool coop_subinst_ctrl_valid(const PacketCoopSubinstCtrl* pkt, int size, bool fr
         return pkt->lease_id != 0 && pkt->lease_id <= COOP_SUBINST_MAX_LEASE_ID && (pkt->flags & COOP_SUBINST_F_DEAD) == 0;
     case COOP_SUBINST_OP_STATE:
         return pkt->slot > 0 && pkt->slot < 8 && pkt->map_id >= 0;
+    case COOP_SUBINST_OP_CANCEL:
+        return pkt->lease_id != 0 && pkt->lease_id <= COOP_SUBINST_MAX_LEASE_ID && pkt->flags == 0;
     default:
         return false;
     }
@@ -704,6 +763,8 @@ static unsigned int si_cl_ckpt_ms;
 static bool si_cl_ckpt_req;
 static unsigned int si_cl_dead_ms;
 static bool si_cl_unhide_pending;
+static unsigned int si_cl_state_ms;
+static bool si_cl_entered; /* ACTIVE and our PC reached the leased map */
 
 static unsigned int si_now(void)
 {
@@ -1124,20 +1185,15 @@ static void si_deny(int slot, int reason, int other_slot, int map)
 
 /* Lease + archive to the client. from_sub: the PC is parked already
    (sub -> sub). Returns 0 or a COOP_SUBINST_DENY_* reason. */
-static int si_grant(int slot, int map, int64_t loc, bool from_sub)
+/* wire: the packed map (taken: freed here). */
+static int si_grant_packed(int slot, int map, int64_t loc, bool from_sub, uint8_t* wire, size_t wire_len)
 {
     PacketCoopSubinstCtrl pkt;
-    uint8_t* wire = NULL;
-    size_t wire_len = 0;
     int64_t pc = sub_4A2B60(slot);
-    int rc;
 
     if (pc == OBJ_HANDLE_NULL) {
+        free(wire);
         return COOP_SUBINST_DENY_STATE;
-    }
-    rc = si_pack_map(map, &wire, &wire_len);
-    if (rc != COOP_SUBINST_OK) {
-        return COOP_SUBINST_DENY_TOO_BIG;
     }
     si_next_lease = si_next_lease >= COOP_SUBINST_MAX_LEASE_ID ? 1u : si_next_lease + 1u;
     if (!from_sub) {
@@ -1166,6 +1222,20 @@ static int si_grant(int slot, int map, int64_t loc, bool from_sub)
     tig_debug_printf("CoopSubinst: slot %d leased map %d (lease %u, %u bytes)\n", slot, map, si_next_lease,
         (unsigned int)wire_len);
     return 0;
+}
+
+static int si_grant(int slot, int map, int64_t loc, bool from_sub)
+{
+    uint8_t* wire = NULL;
+    size_t wire_len = 0;
+
+    if (sub_4A2B60(slot) == OBJ_HANDLE_NULL) {
+        return COOP_SUBINST_DENY_STATE;
+    }
+    if (si_pack_map(map, &wire, &wire_len) != COOP_SUBINST_OK) {
+        return COOP_SUBINST_DENY_TOO_BIG;
+    }
+    return si_grant_packed(slot, map, loc, from_sub, wire, wire_len);
 }
 
 bool coop_subinst_host_travel(int slot, int map, int64_t loc)
@@ -1269,6 +1339,13 @@ static void si_host_apply(int slot)
         return;
     }
     if (!final) {
+        /* The parked PC follows the map files on disk (a host save now
+           holds both the same way: no lost or doubled items). */
+        if (pc != OBJ_HANDLE_NULL
+            && !coop_lite_host_pc_reconcile(pc, bundle.data, bundle.len, qty_items, qty_n, c->hp_damage,
+                c->fatigue_damage)) {
+            tig_debug_printf("CoopSubinst: slot %d checkpoint: character not reconciled\n", slot);
+        }
         free(si_ckpt[slot]);
         si_ckpt[slot] = rx->data; /* kept for a disconnect */
         si_ckpt_len[slot] = rx->total;
@@ -1302,26 +1379,44 @@ static void si_host_apply(int slot)
     if (c->dest_map > 0 && si_rule() && pc != OBJ_HANDLE_NULL && c->dest_map != map_by_type(MAP_TYPE_START_MAP)) {
         int other = -1;
         int r;
+        uint8_t* wire = NULL;
+        size_t wire_len = 0;
+        bool packed = false;
 
-        /* sub -> sub: the old lease ends, a new one starts (PC stays parked). */
+        /* sub -> sub: the old lease ends, a new one starts (PC stays parked).
+           The next map is packed BEFORE the ACK: an ACK(F_NEXT) always has
+           its GRANT behind it. */
         si_leases[slot].active = false;
         r = coop_subinst_can_lease(map_current_map(), c->dest_map, map_by_type(MAP_TYPE_SHOPPING_MAP), slot,
             si_leases, false, critter_is_dead(pc), &other);
         si_leases[slot].active = true;
         if (r == COOP_SUBINST_LEASE_OK) {
+            packed = si_pack_map(c->dest_map, &wire, &wire_len) == COOP_SUBINST_OK;
+        }
+        if (coop_subinst_sub_next_plan(r, packed) == COOP_SUBINST_NEXT_GRANT) {
             si_send_ack(slot, lease_id, COOP_SUBINST_F_NEXT);
             si_slot_line(slot, false, lease_map);
-            if (si_grant(slot, c->dest_map, c->dest_loc, true) == 0) {
+            if (si_grant_packed(slot, c->dest_map, c->dest_loc, true, wire, wire_len) == 0) {
                 return;
             }
-            tig_debug_printf("CoopSubinst: slot %d next map %d too big - back to the party\n", slot, c->dest_map);
-            si_send_ack(slot, lease_id, 0);
-        } else {
-            if (r == COOP_SUBINST_LEASE_DENY_BUSY) {
-                si_deny(slot, COOP_SUBINST_DENY_BUSY, other, c->dest_map);
+            /* PC gone meanwhile: the client waits in REQUESTED - tell it. */
+            {
+                PacketCoopSubinstCtrl ab;
+
+                si_ctrl_init(&ab, COOP_SUBINST_OP_ABORT);
+                ab.slot = slot;
+                si_send(&ab, sizeof(ab), slot);
             }
-            si_send_ack(slot, lease_id, 0);
+            si_host_release(slot, 0, "next lease failed");
+            return;
         }
+        free(wire);
+        if (r == COOP_SUBINST_LEASE_DENY_BUSY) {
+            si_deny(slot, COOP_SUBINST_DENY_BUSY, other, c->dest_map);
+        } else if (r == COOP_SUBINST_LEASE_OK) {
+            si_deny(slot, COOP_SUBINST_DENY_TOO_BIG, -1, c->dest_map);
+        }
+        si_send_ack(slot, lease_id, 0); /* the client is still COMMITTING: this ends it */
         si_host_release(slot, 0, "commit, next map not leased");
         return;
     }
@@ -1331,7 +1426,16 @@ static void si_host_apply(int slot)
 
 static void si_host_handle_ctrl(PacketCoopSubinstCtrl* pkt, int slot)
 {
-    if (slot <= 0 || slot >= 8 || pkt->op != COOP_SUBINST_OP_COMMIT_BEGIN) {
+    if (slot <= 0 || slot >= 8) {
+        return;
+    }
+    if (pkt->op == COOP_SUBINST_OP_CANCEL) {
+        if (si_leases[slot].active && pkt->lease_id == si_leases[slot].lease_id) {
+            si_host_release(slot, 0, "client gave the lease back");
+        }
+        return;
+    }
+    if (pkt->op != COOP_SUBINST_OP_COMMIT_BEGIN) {
         return;
     }
     if (!si_leases[slot].active || pkt->lease_id != si_leases[slot].lease_id) {
@@ -1537,6 +1641,7 @@ static void si_client_leave(const char* why)
 {
     if (si_cl_active) {
         si_cl_active = false;
+        tig_net_set_local_authority(false);
         if (si_cl_in_pump) {
             si_cl_left_in_pump = true; /* coop_subinst_ping drops our suspend level */
         } else {
@@ -1551,6 +1656,7 @@ static void si_client_leave(const char* why)
     si_cl_ckpt_req = false;
     si_cl_dead_ms = 0;
     si_cl_unhide_pending = false;
+    si_cl_entered = false;
 }
 
 static void si_client_event(int ev)
@@ -1558,8 +1664,30 @@ static void si_client_event(int ev)
     int next = coop_subinst_client_next(si_cl_state, ev);
 
     if (next >= 0) {
+        if (next != si_cl_state) {
+            si_cl_state_ms = si_now();
+        }
         si_cl_state = next;
     }
+}
+
+/* The lease goes back before we got in (archive bad, enter failed, stalled):
+   the host unparks our PC and resyncs us; our local authority ends now. */
+static void si_client_cancel(uint32_t lease_id, const char* why)
+{
+    PacketCoopSubinstCtrl pkt;
+
+    if (lease_id != 0) {
+        si_ctrl_init(&pkt, COOP_SUBINST_OP_CANCEL);
+        pkt.slot = sub_529520();
+        pkt.lease_id = lease_id;
+        si_send(&pkt, sizeof(pkt), 0);
+    }
+    tig_debug_printf("CoopSubinst: lease %u given back (%s)\n", lease_id, why);
+    si_client_leave(why);
+    coop_lite_mid_notice(coop_lite_lang_ru() ? "Не удалось войти в отдельную локацию - возвращаемся к группе."
+                                             : "Could not enter the solo instance - back to the party.",
+        false);
 }
 
 static void si_client_deny(const PacketCoopSubinstCtrl* pkt)
@@ -1596,8 +1724,11 @@ static void si_client_deny(const PacketCoopSubinstCtrl* pkt)
 }
 
 /* Map state flushed to disk without our PC, its pack and its followers
-   (they leave the map with us, as a vanilla teleport records them), the
-   folder packed, the mobile.des of this flush undone again. */
+   (they leave the map with us, as a vanilla teleport records them) and the
+   folder packed. The archive keeps this flush's mobile.des as it is (static
+   things we carry out stay gone from the map, like a vanilla teleport);
+   our local copy drops only our party's ids again (we are still here) and
+   keeps every real destruction. */
 static bool si_client_pack(uint8_t** wire, size_t* wire_len)
 {
     static int64_t objs[SI_PARTY_MAX];
@@ -1607,9 +1738,9 @@ static bool si_client_pack(uint8_t** wire, size_t* wire_len)
     ObjectNode* node;
     char dir[TIG_MAX_PATH];
     char des[TIG_MAX_PATH];
+    static uint8_t oids[SI_PARTY_MAX][24];
     uint8_t* des_data = NULL;
     uint32_t des_len = 0;
-    bool des_had;
     int n = 0;
     int i;
     int rc;
@@ -1621,6 +1752,7 @@ static bool si_client_pack(uint8_t** wire, size_t* wire_len)
         return false;
     }
     /* PC, followers, and everything they carry. */
+    coop_lite_pc_inv_repair(pc);
     objs[n++] = pc;
     object_list_all_followers(pc, &followers);
     for (node = followers.head; node != NULL && n < SI_PARTY_MAX; node = node->next) {
@@ -1644,8 +1776,11 @@ static bool si_client_pack(uint8_t** wire, size_t* wire_len)
         }
     }
     snprintf(des, sizeof(des), "%s\\mobile.des", dir);
-    des_had = si_read_file(des, &des_data, &des_len);
     for (i = 0; i < n; i++) {
+        ObjectID oid = obj_get_id(objs[i]);
+
+        memset(oids[i], 0, sizeof(oids[i]));
+        memcpy(oids[i], &oid, sizeof(oid) < sizeof(oids[i]) ? sizeof(oid) : sizeof(oids[i]));
         flags[i] = (unsigned int)obj_field_int32_get(objs[i], OBJ_F_FLAGS);
         obj_field_int32_set(objs[i], OBJ_F_FLAGS, (int)(flags[i] | OF_EXTINCT | OF_DESTROYED));
     }
@@ -1654,10 +1789,12 @@ static bool si_client_pack(uint8_t** wire, size_t* wire_len)
         obj_field_int32_set(objs[i], OBJ_F_FLAGS, (int)flags[i]);
     }
     rc = si_pack_map(si_cl_map, wire, wire_len);
-    if (des_had) {
-        si_write_file(des, des_data, des_len);
-    } else {
-        tig_file_remove(des);
+    if (si_read_file(des, &des_data, &des_len) && des_data != NULL) {
+        size_t keep = coop_subinst_des_filter(des_data, des_len, (const uint8_t(*)[24])oids, n);
+
+        if (keep != des_len) {
+            si_write_file(des, des_data, (uint32_t)keep);
+        }
     }
     free(des_data);
     return rc == COOP_SUBINST_OK;
@@ -1704,13 +1841,24 @@ static bool si_client_commit(int dest_map, int64_t dest_loc, bool checkpoint, bo
             continue;
         }
         type = obj_field_int32_get(item, OBJ_F_TYPE);
-        if (type != OBJ_TYPE_GOLD && type != OBJ_TYPE_AMMO) {
+        if (!obj_type_is_item(type)) {
             continue;
         }
         oid = obj_get_id(item);
+        memset(&qty[qty_n], 0, sizeof(qty[qty_n]));
         memcpy(qty[qty_n].oid, &oid, sizeof(qty[qty_n].oid));
-        qty[qty_n].qty = obj_field_int32_get(item, type == OBJ_TYPE_GOLD ? OBJ_F_GOLD_QUANTITY : OBJ_F_AMMO_QUANTITY);
-        if (qty[qty_n].qty >= 0) {
+        qty[qty_n].qty = type == OBJ_TYPE_GOLD ? obj_field_int32_get(item, OBJ_F_GOLD_QUANTITY)
+            : type == OBJ_TYPE_AMMO           ? obj_field_int32_get(item, OBJ_F_AMMO_QUANTITY)
+                                              : COOP_SUBINST_QTY_NONE;
+        qty[qty_n].hp_damage = obj_field_int32_get(item, OBJ_F_HP_DAMAGE);
+        qty[qty_n].charges = obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE);
+        qty[qty_n].mana = obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE);
+        qty[qty_n].inv_loc = obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION);
+        if (qty[qty_n].qty >= COOP_SUBINST_QTY_NONE && qty[qty_n].qty <= COOP_SUBINST_ITEM_VAL_MAX
+            && qty[qty_n].hp_damage >= 0 && qty[qty_n].hp_damage <= COOP_SUBINST_ITEM_VAL_MAX
+            && qty[qty_n].charges >= -COOP_SUBINST_ITEM_VAL_MAX && qty[qty_n].charges <= COOP_SUBINST_ITEM_VAL_MAX
+            && qty[qty_n].mana >= -COOP_SUBINST_ITEM_VAL_MAX && qty[qty_n].mana <= COOP_SUBINST_ITEM_VAL_MAX
+            && qty[qty_n].inv_loc >= 0 && qty[qty_n].inv_loc <= COOP_SUBINST_ITEM_VAL_MAX) {
             qty_n++;
         }
     }
@@ -1769,7 +1917,7 @@ bool coop_subinst_client_travel(const TeleportData* td)
     if (td->obj != player_get_local_pc_obj() || td->map <= 0 || (map_is_valid() && td->map == map_current_map())) {
         return false; /* NPCs, and moves inside this map, stay local */
     }
-    if (si_cl_state != COOP_SUBINST_ST_ACTIVE || si_cl_enter_pending) {
+    if (si_cl_state != COOP_SUBINST_ST_ACTIVE || !si_cl_entered) {
         return true; /* a transfer is running: wait */
     }
     if (si_client_commit(td->map, td->loc, false, false)) {
@@ -1824,10 +1972,10 @@ static void si_client_handle_ctrl(PacketCoopSubinstCtrl* pkt)
     case COOP_SUBINST_OP_LEASE_DENY:
         si_client_deny(pkt);
         if (si_cl_active && si_cl_state == COOP_SUBINST_ST_REQUESTED) {
-            /* sub -> sub refused after the ACK: the host resyncs us. */
+            /* (older host) sub -> sub refused after the ACK: the host resyncs us. */
             si_client_leave("next map denied");
         } else {
-            si_client_event(COOP_SUBINST_EV_DENY);
+            si_client_event(COOP_SUBINST_EV_DENY); /* COMMITTING stays: the ACK(0) follows */
         }
         return;
     case COOP_SUBINST_OP_CHECKPOINT_REQ:
@@ -1872,16 +2020,14 @@ static void si_client_handle_chunk(PacketCoopSubinstChunk* pkt)
     }
     r = coop_subinst_rx_accept(&si_cl_rx, pkt->lease_id, pkt->chunk_idx, pkt->chunk_count, pkt->data_len, pkt->data);
     if (r == COOP_SUBINST_RX_BAD) {
-        tig_debug_printf("CoopSubinst: map archive stream broken\n");
-        si_client_event(COOP_SUBINST_EV_ARCHIVE_BAD);
+        si_client_cancel(si_cl_lease, "map archive stream broken");
         return;
     }
     if (r != COOP_SUBINST_RX_DONE) {
         return;
     }
     if (!si_unpack_map(si_cl_rx.data, si_cl_rx.total, si_cl_map)) {
-        coop_subinst_rx_free(&si_cl_rx);
-        si_client_event(COOP_SUBINST_EV_ARCHIVE_BAD);
+        si_client_cancel(si_cl_lease, "map archive refused");
         return;
     }
     coop_subinst_rx_free(&si_cl_rx);
@@ -1889,8 +2035,10 @@ static void si_client_handle_chunk(PacketCoopSubinstChunk* pkt)
         si_cl_active = true;
         tig_net_local_suspend_begin(); /* local authority from here on */
     }
+    tig_net_set_local_authority(true); /* AI, doors, loot, traps, dialogs, story: ours */
     si_client_event(COOP_SUBINST_EV_ARCHIVE_OK);
     si_cl_enter_pending = true;
+    si_cl_entered = false;
     si_cl_enter_ms = si_now();
     si_cl_ckpt_ms = si_now();
     si_cl_dead_ms = 0;
@@ -1977,10 +2125,13 @@ void coop_subinst_ping(unsigned int now_ms)
 {
     int depth;
 
-    (void)now_ms;
     depth = tig_net_local_suspend_pause();
     si_cl_in_pump = true;
     tig_net_pump();
+    /* The Middle client ticks (pause / sleep banners, F9 HUD, status
+       badges) and the launcher lobby keep running inside. */
+    coop_middle_tick(now_ms);
+    coop_lite_lobby_tick(now_ms);
     si_cl_in_pump = false;
     if (si_cl_left_in_pump) {
         si_cl_left_in_pump = false;
@@ -1990,17 +2141,24 @@ void coop_subinst_ping(unsigned int now_ms)
     if (!si_cl_active) {
         return;
     }
-    if (si_cl_enter_pending) {
+    if (coop_subinst_client_stalled(si_cl_state, si_cl_active, si_cl_state_ms, si_now())) {
+        si_client_cancel(si_cl_lease, "no map from the host");
+        return;
+    }
+    if (si_cl_state == COOP_SUBINST_ST_ACTIVE && !si_cl_entered) {
         if (map_is_valid() && map_current_map() == si_cl_map) {
+            si_cl_entered = true;
             si_cl_enter_pending = false;
-        } else if (coop_lite_client_subinst_teleport(si_cl_map, si_cl_loc)) {
+        } else if ((unsigned int)(si_now() - si_cl_enter_ms) > SI_ENTER_GIVEUP_MS) {
+            si_client_cancel(si_cl_lease, "could not enter the map");
+            return;
+        } else if (si_cl_enter_pending && coop_lite_client_subinst_teleport(si_cl_map, si_cl_loc)) {
             si_cl_enter_pending = false;
             tig_debug_printf("CoopSubinst: teleport into map %d queued\n", si_cl_map);
-        } else if ((unsigned int)(si_now() - si_cl_enter_ms) > SI_ENTER_GIVEUP_MS) {
-            tig_debug_printf("CoopSubinst: could not enter map %d - giving the lease back\n", si_cl_map);
-            si_cl_enter_pending = false;
         }
-        return;
+        if (!si_cl_entered) {
+            return;
+        }
     }
     if (si_cl_state != COOP_SUBINST_ST_ACTIVE || !map_is_valid() || map_current_map() != si_cl_map) {
         return;

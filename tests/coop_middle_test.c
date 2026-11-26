@@ -1783,6 +1783,106 @@ static void test_m6_packets(void)
     CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
 }
 
+static void test_m6_review(void)
+{
+    uint8_t des[24 * 4];
+    uint8_t ours[2][24];
+    uint8_t qbuf[4 + COOP_SUBINST_QTY_ENTRY];
+    CoopSubinstQty it;
+    CoopSubinstQty back;
+    PacketCoopSubinstCtrl c;
+    int s;
+    int i;
+
+    /* mobile.des: only our party's ids leave the local copy. */
+    for (i = 0; i < 4; i++) {
+        memset(des + i * 24, 0x10 + i, 24);
+    }
+    memset(ours[0], 0x11, 24);
+    memset(ours[1], 0x13, 24);
+    CHECK(coop_subinst_des_filter(des, sizeof(des), (const uint8_t(*)[24])ours, 2) == 48);
+    CHECK(des[0] == 0x10 && des[24] == 0x12);
+    CHECK(coop_subinst_des_filter(des, 48 + 5, NULL, 0) == 48); /* partial record dropped */
+
+    /* item state table: every item, -1 = no quantity */
+    memset(&it, 0, sizeof(it));
+    it.oid[0] = 7;
+    it.qty = COOP_SUBINST_QTY_NONE;
+    it.hp_damage = 12;
+    it.charges = 3;
+    it.mana = -1;
+    it.inv_loc = 1003;
+    CHECK(coop_subinst_qty_build(&it, 1, qbuf, sizeof(qbuf)) == sizeof(qbuf));
+    CHECK(coop_subinst_qty_parse(qbuf, sizeof(qbuf), &back, 1) == 1 && back.qty == -1 && back.hp_damage == 12
+        && back.charges == 3 && back.mana == -1 && back.inv_loc == 1003);
+    it.qty = -2;
+    coop_subinst_qty_build(&it, 1, qbuf, sizeof(qbuf));
+    CHECK(coop_subinst_qty_parse(qbuf, sizeof(qbuf), &back, 1) < 0);
+    it.qty = 5;
+    it.hp_damage = -1;
+    coop_subinst_qty_build(&it, 1, qbuf, sizeof(qbuf));
+    CHECK(coop_subinst_qty_parse(qbuf, sizeof(qbuf), &back, 1) < 0);
+
+    /* sub -> sub refused: never an ACK(F_NEXT) without a GRANT; the client
+       stays COMMITTING through the DENY and the ACK(0) ends it. */
+    CHECK(coop_subinst_sub_next_plan(COOP_SUBINST_LEASE_OK, true) == COOP_SUBINST_NEXT_GRANT);
+    CHECK(coop_subinst_sub_next_plan(COOP_SUBINST_LEASE_OK, false) == COOP_SUBINST_NEXT_BACK);
+    CHECK(coop_subinst_sub_next_plan(COOP_SUBINST_LEASE_DENY_BUSY, true) == COOP_SUBINST_NEXT_BACK);
+    CHECK(coop_subinst_sub_next_plan(COOP_SUBINST_LEASE_DENY_STATE, true) == COOP_SUBINST_NEXT_BACK);
+    CHECK(coop_subinst_sub_next_plan(COOP_SUBINST_LEASE_NORMAL, true) == COOP_SUBINST_NEXT_BACK);
+    s = COOP_SUBINST_ST_COMMITTING;
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_DENY);
+    CHECK(s == COOP_SUBINST_ST_COMMITTING);
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_ACK);
+    CHECK(s == COOP_SUBINST_ST_IDLE);
+    /* ACK(F_NEXT) then a failed grant: ABORT frees REQUESTED */
+    s = coop_subinst_client_next(COOP_SUBINST_ST_COMMITTING, COOP_SUBINST_EV_ACK_NEXT);
+    CHECK(s == COOP_SUBINST_ST_REQUESTED);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_ABORT) == COOP_SUBINST_ST_IDLE);
+    /* and if nothing comes at all, the stall timer gives the lease back */
+    CHECK(!coop_subinst_client_stalled(COOP_SUBINST_ST_REQUESTED, true, 1000, 1000 + COOP_SUBINST_STALL_MS - 1));
+    CHECK(coop_subinst_client_stalled(COOP_SUBINST_ST_REQUESTED, true, 1000, 1000 + COOP_SUBINST_STALL_MS));
+    CHECK(coop_subinst_client_stalled(COOP_SUBINST_ST_RECEIVING, true, 0xFFFFFF00u, 0xFFFFFF00u + COOP_SUBINST_STALL_MS));
+    CHECK(!coop_subinst_client_stalled(COOP_SUBINST_ST_REQUESTED, false, 0, 1000000));
+    CHECK(!coop_subinst_client_stalled(COOP_SUBINST_ST_ACTIVE, true, 0, 1000000));
+    CHECK(!coop_subinst_client_stalled(COOP_SUBINST_ST_COMMITTING, true, 0, 1000000));
+
+    /* CANCEL (client -> host) */
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_SUBINST_CTRL;
+    c.op = COOP_SUBINST_OP_CANCEL;
+    c.lease_id = 9;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.lease_id = 0;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false));
+
+    /* client role inside a solo instance: full local authority */
+    tig_net_test_force_role(true, true, false);
+    CHECK(tig_net_is_coop_client() && coop_lite_is_client_role());
+    tig_net_local_suspend_begin();
+    CHECK(coop_lite_is_client_role()); /* PT7: the client's own suspended talk is still a client */
+    tig_net_set_local_authority(true);
+    CHECK(tig_net_has_local_authority());
+    CHECK(!coop_lite_is_client_role());
+    CHECK(!tig_net_is_coop_client());
+    CHECK(!coop_lite_story_write_blocked());
+    CHECK(!coop_lite_client_local_loot(1));
+    {
+        int depth = tig_net_local_suspend_pause(); /* pumping: a client again */
+
+        CHECK(!tig_net_has_local_authority() && tig_net_is_coop_client() && coop_lite_is_client_role());
+        tig_net_local_suspend_resume(depth);
+    }
+    CHECK(!coop_lite_is_client_role());
+    tig_net_set_local_authority(false);
+    CHECK(coop_lite_is_client_role());
+    tig_net_local_suspend_end();
+    CHECK(coop_lite_story_write_blocked()); /* outside: the host writes the story */
+    tig_net_test_force_role(false, false, false);
+    CHECK(!coop_lite_is_client_role() && !tig_net_is_coop_client());
+}
+
 static void test_m6_ui(void)
 {
     char tag[4];
@@ -1839,6 +1939,7 @@ int main(void)
     test_m6_state_machine();
     test_m6_packets();
     test_m6_ui();
+    test_m6_review();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;

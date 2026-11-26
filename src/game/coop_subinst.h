@@ -70,7 +70,9 @@ int coop_subinst_unpack_buf(const uint8_t* wire, size_t wire_len, uint8_t* raw, 
    table (bundle and qty may be empty). */
 #define COOP_SUBINST_MAX_BUNDLE (256 * 1024)
 #define COOP_SUBINST_MAX_QTY_ITEMS 1024
-#define COOP_SUBINST_QTY_ENTRY 28 /* 24-byte ObjectID + i32 quantity */
+#define COOP_SUBINST_QTY_ENTRY 44 /* 24-byte ObjectID + 5 x i32 (quantity, hp damage, charges, mana, inv loc) */
+#define COOP_SUBINST_QTY_NONE (-1) /* quantity of an item that has none (not gold / ammo) */
+#define COOP_SUBINST_ITEM_VAL_MAX 1000000
 #define COOP_SUBINST_MAX_QTY (4 + COOP_SUBINST_MAX_QTY_ITEMS * COOP_SUBINST_QTY_ENTRY)
 #define COOP_SUBINST_MAX_PAYLOAD (12 + COOP_SUBINST_MAX_WIRE + COOP_SUBINST_MAX_BUNDLE + COOP_SUBINST_MAX_QTY)
 
@@ -85,15 +87,28 @@ bool coop_subinst_payload_build(CoopSubinstSection cmap, CoopSubinstSection bund
 bool coop_subinst_payload_split(const uint8_t* data, size_t len, CoopSubinstSection* cmap,
     CoopSubinstSection* bundle, CoopSubinstSection* qty);
 
-/* Quantity table: u32 count, count x { u8 oid[24], i32 qty }. */
+/* Item state table (every item the PC carries): u32 count, count x { u8
+   oid[24], i32 qty (gold / ammo, else -1), i32 hp_damage, i32 charges
+   (OBJ_F_ITEM_SPELL_MANA_STORE), i32 mana (OBJ_F_ITEM_MANA_STORE), i32
+   inv_loc (OBJ_F_ITEM_INV_LOCATION) }. */
 typedef struct CoopSubinstQty {
     uint8_t oid[24];
     int32_t qty;
+    int32_t hp_damage;
+    int32_t charges;
+    int32_t mana;
+    int32_t inv_loc;
 } CoopSubinstQty;
 
 size_t coop_subinst_qty_build(const CoopSubinstQty* items, int count, uint8_t* out, size_t out_cap);
-/* -1 = malformed (count over the max, size mismatch, qty < 0). */
+/* -1 = malformed (count over the max, size mismatch, qty < -1, hp damage /
+   inv loc < 0, any value over COOP_SUBINST_ITEM_VAL_MAX). */
 int coop_subinst_qty_parse(const uint8_t* data, size_t len, CoopSubinstQty* items, int max);
+
+/* mobile.des (24-byte object ids): drops every record found in oids[n]
+   in place; a trailing partial record is dropped too. Returns the new
+   length. */
+size_t coop_subinst_des_filter(uint8_t* data, size_t len, const uint8_t (*oids)[24], int n);
 
 /* ---- chunks ---- */
 
@@ -172,6 +187,20 @@ typedef enum CoopSubinstEvent {
 /* Next state, or -1 when the event is not valid in this state (ignored). */
 int coop_subinst_client_next(int state, int event);
 
+/* Client: a lease that never became ACTIVE (REQUESTED / RECEIVING while the
+   local authority is held) for longer than COOP_SUBINST_STALL_MS: give it
+   back (CANCEL) and rejoin the party. */
+#define COOP_SUBINST_STALL_MS 20000u
+bool coop_subinst_client_stalled(int state, bool holding, unsigned int since_ms, unsigned int now_ms);
+
+/* Host, a final commit asking for another map (sub -> sub). lease_rc is
+   coop_subinst_can_lease for the next map, packed: its archive is ready.
+   NEXT_GRANT = COMMIT_ACK(F_NEXT) then GRANT; NEXT_BACK = COMMIT_ACK(0) and
+   back to the party (never an ACK(F_NEXT) without a GRANT behind it). */
+#define COOP_SUBINST_NEXT_GRANT 1
+#define COOP_SUBINST_NEXT_BACK 0
+int coop_subinst_sub_next_plan(int lease_rc, bool packed);
+
 /* ---- packets (TIG_NET_PROTOCOL 58) ---- */
 
 #define PACKET_COOP_SUBINST_CTRL 171 /* both ways (op-checked) */
@@ -186,7 +215,8 @@ int coop_subinst_client_next(int state, int event);
 #define COOP_SUBINST_OP_COMMIT_ACK 5 /* host -> client: final commit applied (flags: NEXT = a new GRANT follows) */
 #define COOP_SUBINST_OP_ABORT 6 /* host -> client: lease gone (host load / map change); reason */
 #define COOP_SUBINST_OP_STATE 7 /* host -> all: slot is inside map_id (0 = left) - the M badge, world marker */
-#define COOP_SUBINST_OP_MAX 7
+#define COOP_SUBINST_OP_CANCEL 8 /* client -> host: lease given back before entering (archive bad / enter failed) */
+#define COOP_SUBINST_OP_MAX 8
 
 #define COOP_SUBINST_DENY_BUSY 1
 #define COOP_SUBINST_DENY_STATE 2 /* combat / dead */
@@ -264,7 +294,7 @@ _Static_assert(sizeof(PacketCoopSubinstDelta) == 0x18, "PacketCoopSubinstDelta s
 #endif
 
 /* from_host: sent by the host (GRANT / DENY / CHECKPOINT_REQ / ACK / ABORT /
-   STATE), else by a client (COMMIT_BEGIN). */
+   STATE), else by a client (COMMIT_BEGIN / CANCEL). */
 bool coop_subinst_ctrl_valid(const PacketCoopSubinstCtrl* pkt, int size, bool from_host);
 bool coop_subinst_chunk_valid(const PacketCoopSubinstChunk* pkt, int size);
 bool coop_subinst_delta_valid(const PacketCoopSubinstDelta* pkt, int size);
@@ -299,6 +329,7 @@ unsigned int coop_subinst_serial(void); /* changes when who-is-inside changes */
 /* coop_lite.c helpers (static state lives there). */
 struct CoopCharBundleBuf;
 bool coop_lite_build_pc_bundle(int64_t pc, struct CoopCharBundleBuf* out);
+void coop_lite_pc_inv_repair(int64_t pc); /* PT54d sparse inventory list repair */
 bool coop_lite_client_subinst_teleport(int map, int64_t loc);
 bool coop_lite_host_resync_slot(int slot);
 bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundle_len, const CoopSubinstQty* qty,
