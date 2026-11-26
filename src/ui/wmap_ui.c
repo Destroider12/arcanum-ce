@@ -5034,7 +5034,9 @@ void wmap_town_refresh_rect(TigRect* rect)
             mark.width = 5;
             mark.height = 5;
             if (tig_rect_intersection(&mark, &dirty_rect, &clip) == TIG_OK) {
-                tig_window_fill(wmap_ui_window, &clip, tig_color_make(40, 120, 255));
+                /* Coop Middle M7: a fallen teammate is a red square. */
+                tig_window_fill(wmap_ui_window, &clip,
+                    critter_is_dead(mates[m]) ? tig_color_make(220, 60, 60) : tig_color_make(40, 120, 255));
             }
         }
 

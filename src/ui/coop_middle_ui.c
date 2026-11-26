@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game/combat.h"
 #include "game/coop_lite.h"
 #include "game/coop_subinst.h"
 #include "game/coop_middle.h"
@@ -1068,6 +1069,267 @@ static void coop_mid_ui_pings_draw(GameDrawInfo* draw_info)
     }
 }
 
+/* ---- M7: off-screen arrows for fallen / unconscious teammates ---- */
+
+#define COOP_MID_EDGE_N 7
+#define COOP_MID_EDGE_PAD 28
+#define COOP_MID_EDGE_H 20
+#define COOP_MID_EDGE_W_MAX 220
+#define COOP_MID_EDGE_ARROW 18
+
+typedef struct CoopMidEdgeDraw {
+    TigRect rect;
+    bool dead; /* else unconscious */
+    int octant;
+    int text_w;
+    char text[64];
+} CoopMidEdgeDraw;
+
+static CoopMidEdgeDraw coop_mid_edge_draw[COOP_MID_EDGE_N];
+static int coop_mid_edge_draw_n;
+static TigVideoBuffer* coop_mid_edge_vb;
+
+static void coop_mid_ui_edges_invalidate(void)
+{
+    int i;
+
+    for (i = 0; i < coop_mid_edge_draw_n; i++) {
+        gamelib_invalidate_rect(&coop_mid_edge_draw[i].rect);
+    }
+}
+
+static void coop_mid_ui_edges_off(void)
+{
+    coop_mid_ui_edges_invalidate();
+    coop_mid_edge_draw_n = 0;
+}
+
+/* A solid triangle pointing to the octant, in a box at (x0, y0). */
+static void coop_mid_ui_edge_arrow(int x0, int y0, int octant, tig_color_t color)
+{
+    static const int k_dir[8][2] = { { 10, 0 }, { 7, -7 }, { 0, -10 }, { -7, -7 }, { -10, 0 }, { -7, 7 }, { 0, 10 },
+        { 7, 7 } };
+    int c = COOP_MID_EDGE_ARROW / 2;
+    int dx = k_dir[octant & 7][0];
+    int dy = k_dir[octant & 7][1];
+    /* tip = c + 0.7 d, base = c - 0.5 d +- 0.6 perp (perp = (-dy, dx)) */
+    int tx = c * 10 + dx * 7;
+    int ty = c * 10 + dy * 7;
+    int ax = c * 10 - dx * 5 - dy * 6;
+    int ay = c * 10 - dy * 5 + dx * 6;
+    int bx = c * 10 - dx * 5 + dy * 6;
+    int by = c * 10 - dy * 5 - dx * 6;
+    int x;
+    int y;
+    TigRect rect;
+
+    rect.width = 1;
+    rect.height = 1;
+    for (y = 0; y < COOP_MID_EDGE_ARROW; y++) {
+        for (x = 0; x < COOP_MID_EDGE_ARROW; x++) {
+            int px = x * 10 + 5;
+            int py = y * 10 + 5;
+            long d1 = (long)(px - bx) * (ty - by) - (long)(tx - bx) * (py - by);
+            long d2 = (long)(px - tx) * (ay - ty) - (long)(ax - tx) * (py - ty);
+            long d3 = (long)(px - ax) * (by - ay) - (long)(bx - ax) * (py - ay);
+            bool neg = d1 < 0 || d2 < 0 || d3 < 0;
+            bool pos = d1 > 0 || d2 > 0 || d3 > 0;
+
+            if (!(neg && pos)) {
+                rect.x = x0 + x;
+                rect.y = y0 + y;
+                tig_video_buffer_fill(coop_mid_edge_vb, &rect, color);
+            }
+        }
+    }
+}
+
+static void coop_mid_ui_edges_render(void)
+{
+    TigRect rect;
+    TigRect dirty;
+    int i;
+
+    if (coop_mid_edge_vb == NULL) {
+        coop_mid_edge_vb = coop_mid_ui_vb_create(COOP_MID_EDGE_W_MAX, COOP_MID_EDGE_H * COOP_MID_EDGE_N);
+        if (coop_mid_edge_vb == NULL) {
+            return;
+        }
+    }
+    for (i = 0; i < coop_mid_edge_draw_n; i++) {
+        CoopMidEdgeDraw* d = &coop_mid_edge_draw[i];
+        int y0 = i * COOP_MID_EDGE_H;
+        uint8_t r = d->dead ? 220 : 180;
+        uint8_t g = d->dead ? 60 : 130;
+        uint8_t b = d->dead ? 60 : 230;
+        tig_color_t frame = tig_color_make(r, g, b);
+
+        rect.x = 0;
+        rect.y = y0;
+        rect.width = COOP_MID_EDGE_W_MAX;
+        rect.height = COOP_MID_EDGE_H;
+        tig_video_buffer_fill(coop_mid_edge_vb, &rect, coop_mid_key);
+        rect.width = d->rect.width;
+        tig_video_buffer_fill(coop_mid_edge_vb, &rect, frame); /* solid plate: frame ... */
+        rect.x += 2;
+        rect.y += 2;
+        rect.width -= 4;
+        rect.height -= 4;
+        tig_video_buffer_fill(coop_mid_edge_vb, &rect, tig_color_make(20, 16, 14)); /* ... and a dark body */
+        coop_mid_ui_edge_arrow(2, y0 + (COOP_MID_EDGE_H - COOP_MID_EDGE_ARROW) / 2, d->octant, frame);
+        rect.x = COOP_MID_EDGE_ARROW + 4;
+        rect.y = y0 + 3;
+        rect.width = d->rect.width - COOP_MID_EDGE_ARROW - 6;
+        rect.height = COOP_MID_EDGE_H - 4;
+        tig_font_push(coop_mid_ui_font(r, g, b));
+        tig_font_write(coop_mid_edge_vb, d->text, &rect, &dirty);
+        tig_font_pop();
+    }
+}
+
+static void coop_mid_ui_edges_tick(void)
+{
+    CoopMidEdgeDraw next[COOP_MID_EDGE_N];
+    int64_t me = player_get_local_pc_obj();
+    int64_t my_loc;
+    int n = 0;
+    int slot;
+    int i;
+    bool same;
+
+    if (coop_mid_ui_session() && coop_mid_iso_window != TIG_WINDOW_HANDLE_INVALID && !mainmenu_ui_is_active()
+        && me != OBJ_HANDLE_NULL && !wmap_ui_is_created()) {
+        my_loc = obj_field_int64_get(me, OBJ_F_LOCATION);
+        for (slot = 0; slot < 8 && n < COOP_MID_EDGE_N; slot++) {
+            int64_t pc = sub_4A2B60(slot);
+            CoopMidEdgeDraw* d = &next[n];
+            bool dead;
+            int64_t loc;
+            int64_t sx;
+            int64_t sy;
+            int ex;
+            int ey;
+            int oct;
+            int dist;
+            int j;
+            char name[48];
+
+            if (pc == OBJ_HANDLE_NULL || pc == me || coop_subinst_slot_inside(slot)
+                || (obj_field_int32_get(pc, OBJ_F_FLAGS) & (OF_OFF | OF_DESTROYED)) != 0) {
+                continue;
+            }
+            dead = critter_is_dead(pc);
+            if (!dead && critter_fatigue_current(pc) > 0) {
+                continue;
+            }
+            loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+            location_xy(loc, &sx, &sy);
+            if (!coop_middle_edge_indicator((int)sx + 40, (int)sy + 20, coop_mid_iso_w, coop_mid_iso_h,
+                    COOP_MID_EDGE_PAD, &ex, &ey, &oct)) {
+                continue; /* on screen: the portrait badge says it */
+            }
+            memset(d, 0, sizeof(*d));
+            coop_middle_slot_name(slot, name, sizeof(name));
+            dist = (int)location_dist(my_loc, loc);
+            snprintf(d->text, sizeof(d->text), "%s %s (%d)", dead ? "X" : "Z", name[0] != '\0' ? name : "?", dist);
+            d->dead = dead;
+            d->octant = oct;
+            d->text_w = coop_mid_ui_text_width(coop_mid_ui_font(220, 60, 60), d->text);
+            d->rect.width = d->text_w + COOP_MID_EDGE_ARROW + 10;
+            if (d->rect.width > COOP_MID_EDGE_W_MAX) {
+                d->rect.width = COOP_MID_EDGE_W_MAX;
+            }
+            d->rect.height = COOP_MID_EDGE_H;
+            d->rect.x = ex - d->rect.width / 2;
+            d->rect.y = ey - d->rect.height / 2;
+            /* keep it inside the view, under the ones placed before */
+            for (j = 0; j < n; j++) {
+                TigRect tmp;
+
+                if (tig_rect_intersection(&next[j].rect, &d->rect, &tmp) == TIG_OK) {
+                    d->rect.y = next[j].rect.y + COOP_MID_EDGE_H + 2;
+                }
+            }
+            if (d->rect.x < 0) {
+                d->rect.x = 0;
+            }
+            if (d->rect.x + d->rect.width > coop_mid_iso_w) {
+                d->rect.x = coop_mid_iso_w - d->rect.width;
+            }
+            if (d->rect.y + d->rect.height > coop_mid_iso_h) {
+                d->rect.y = coop_mid_iso_h - d->rect.height;
+            }
+            if (d->rect.y < 0) {
+                d->rect.y = 0;
+            }
+            n++;
+        }
+    }
+    same = n == coop_mid_edge_draw_n;
+    for (i = 0; i < n && same; i++) {
+        same = memcmp(&next[i].rect, &coop_mid_edge_draw[i].rect, sizeof(TigRect)) == 0
+            && next[i].dead == coop_mid_edge_draw[i].dead && next[i].octant == coop_mid_edge_draw[i].octant
+            && strcmp(next[i].text, coop_mid_edge_draw[i].text) == 0;
+    }
+    if (same) {
+        return;
+    }
+    coop_mid_ui_edges_invalidate(); /* old spots repaint */
+    memcpy(coop_mid_edge_draw, next, sizeof(next[0]) * (size_t)n);
+    coop_mid_edge_draw_n = n;
+    coop_mid_ui_edges_render();
+    coop_mid_ui_edges_invalidate();
+}
+
+static void coop_mid_ui_edges_draw(GameDrawInfo* draw_info)
+{
+    int i;
+
+    if (coop_mid_edge_vb == NULL) {
+        return;
+    }
+    for (i = 0; i < coop_mid_edge_draw_n; i++) {
+        coop_mid_ui_blit(draw_info, coop_mid_edge_vb, &coop_mid_edge_draw[i].rect, 0, i * COOP_MID_EDGE_H);
+    }
+}
+
+/* ---- M7: trade auto-close ---- */
+
+static void coop_mid_ui_trade_watch(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+    int64_t partner = coop_middle_trade_partner();
+    const char* why = NULL;
+
+    if (partner == OBJ_HANDLE_NULL || !inven_ui_is_created()) {
+        return;
+    }
+    if (coop_subinst_client_active()) {
+        why = "solo instance";
+    } else if (coop_middle_owt_local_active()) {
+        why = "overworld travel";
+    } else if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || critter_is_dead(partner)) {
+        why = "death";
+    } else if (combat_critter_is_combat_mode_active(pc) || combat_critter_is_combat_mode_active(partner)
+        || combat_turn_based_is_active()) {
+        why = "combat";
+    } else if (!coop_middle_trade_live(pc, partner)) {
+        why = "out of range / gone";
+    }
+    if (why == NULL) {
+        return;
+    }
+    /* a held item goes back first (a stale one is just dropped) */
+    if (!inven_ui_drag_cancel_if_stale() && inven_ui_drag_item_obj_get() != OBJ_HANDLE_NULL) {
+        sub_575930();
+        intgame_refresh_cursor();
+    }
+    inven_ui_destroy();
+    coop_middle_trade_local_end();
+    coop_mid_ui_notice("Trade closed.", "Обмен закрыт.", false);
+    tig_debug_printf("CoopMiddle: trade: window auto-closed (%s)\n", why);
+}
+
 /* Danger when a hostile NPC or a spotted trap is under the cursor. */
 static bool coop_mid_ui_is_danger(int64_t pc, int64_t obj)
 {
@@ -1156,6 +1418,7 @@ void coop_middle_ui_draw(GameDrawInfo* draw_info)
     }
     coop_mid_ui_labels_draw(draw_info);
     coop_mid_ui_pings_draw(draw_info);
+    coop_mid_ui_edges_draw(draw_info); /* M7 */
     coop_mid_ui_hud_draw(draw_info);
     coop_mid_ui_banner_draw(draw_info);
 }
@@ -1189,6 +1452,13 @@ void coop_middle_ui_on_scroll(int dx, int dy)
         rect.x += dx;
         rect.y += dy;
         gamelib_invalidate_rect(&rect); /* the shifted copy; the tick moves the ping */
+    }
+    for (i = 0; i < coop_mid_edge_draw_n; i++) {
+        rect = coop_mid_edge_draw[i].rect;
+        rect.x += dx;
+        rect.y += dy;
+        gamelib_invalidate_rect(&rect); /* M7: the shifted copy of an arrow plate */
+        gamelib_invalidate_rect(&coop_mid_edge_draw[i].rect);
     }
     if (coop_mid_labels_on) {
         for (i = 0; i < coop_mid_label_count; i++) {
@@ -1247,11 +1517,13 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     if (!inven_ui_is_created()) {
         coop_middle_trade_local_end(); /* window closed (no-op if none) */
     }
+    coop_mid_ui_trade_watch(); /* M7 */
     if (!coop_mid_ui_session()) {
         coop_mid_ui_labels_off();
         coop_mid_ui_hud_tick(now_ms); /* hides it */
         coop_mid_ui_banner_tick();
         coop_mid_ui_pings_tick(now_ms);
+        coop_mid_ui_edges_tick(); /* hides them */
         return;
     }
     if (inven_ui_is_created()) {
@@ -1265,11 +1537,13 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     if (sig != coop_mid_badge_sig) {
         coop_mid_badge_sig = sig;
         follower_ui_update(); /* portraits redraw with the new badges */
+        wmap_ui_coop_town_refresh(); /* M7: dead teammates turn red on the town map */
     }
     coop_mid_ui_labels_tick(now_ms);
     coop_mid_ui_hud_tick(now_ms);
     coop_mid_ui_banner_tick(); /* after the HUD: it sits under it */
     coop_mid_ui_pings_tick(now_ms);
+    coop_mid_ui_edges_tick(); /* M7 */
     coop_mid_ui_wmap_tick(now_ms); /* M5 */
 }
 
@@ -1301,6 +1575,11 @@ void coop_middle_ui_exit(void)
         tig_video_buffer_destroy(coop_mid_ping_vb);
         coop_mid_ping_vb = NULL;
     }
+    if (coop_mid_edge_vb != NULL) {
+        tig_video_buffer_destroy(coop_mid_edge_vb);
+        coop_mid_edge_vb = NULL;
+    }
+    coop_mid_edge_draw_n = 0;
     coop_mid_banner_shown = false;
     coop_mid_ping_draw_n = 0;
     coop_mid_labels_on = false;
@@ -1313,6 +1592,17 @@ void coop_middle_ui_exit(void)
 void coop_middle_ui_reset(void)
 {
     coop_middle_trade_local_end();
+    if (!coop_mid_ui_inited) {
+        /* M7: also called from coop_middle_session_reset; nothing on screen */
+        coop_mid_labels_on = false;
+        coop_mid_label_count = 0;
+        coop_mid_hud_on = false;
+        coop_mid_hud_shown = false;
+        coop_mid_banner_shown = false;
+        coop_mid_ping_draw_n = 0;
+        coop_mid_edge_draw_n = 0;
+        return;
+    }
     coop_mid_ui_labels_off();
     coop_mid_hud_on = false;
     if (coop_mid_hud_shown) {
@@ -1321,6 +1611,7 @@ void coop_middle_ui_reset(void)
     }
     coop_mid_ui_banner_hide();
     coop_mid_ui_pings_off();
+    coop_mid_ui_edges_off(); /* M7 */
 }
 
 void coop_middle_ui_resize(GameResizeInfo* resize_info)
@@ -1333,4 +1624,5 @@ void coop_middle_ui_resize(GameResizeInfo* resize_info)
     coop_mid_hud_shown = false;
     coop_mid_banner_shown = false;
     coop_mid_ping_draw_n = 0;
+    coop_mid_edge_draw_n = 0;
 }
