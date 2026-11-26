@@ -118,6 +118,7 @@
 #define IDC_RULE_SUBINST 142 /* Coop Middle M6 */
 #define IDC_RULE_ASAVE 143 /* Coop Middle M7 */
 #define IDC_LOBBY_RULES 144
+#define IDC_RULE_LITE 145 /* t391u: Coop Lite mode (as release 1.0) */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -184,6 +185,8 @@ static int port_of(const char* addr)
     return port > 0 && port < 65536 ? port : 7777;
 }
 
+static void rules_enable(bool host);
+
 static void refresh(void)
 {
     bool host = is_host();
@@ -203,19 +206,29 @@ static void refresh(void)
     SetWindowTextA(item(IDC_PUBIP), ip);
     EnableWindow(item(IDC_COPY), host && !steam);
     EnableWindow(item(IDC_RULES_LABEL), host); /* Coop Middle: rules are the host's */
-    EnableWindow(item(IDC_RULE_GOLD), host);
+    rules_enable(host);
+}
+
+/* t391u: Coop Lite mode greys every Middle gameplay rule (the game plays
+   the Lite 1.0 set whatever they say); Loot feed and Auto-save stay. */
+static void rules_enable(bool host)
+{
+    bool mid = host && SendMessageA(item(IDC_RULE_LITE), BM_GETCHECK, 0, 0) != BST_CHECKED;
+
+    EnableWindow(item(IDC_RULE_LITE), host);
+    EnableWindow(item(IDC_RULE_GOLD), mid);
     EnableWindow(item(IDC_RULE_LOOT), host);
-    EnableWindow(item(IDC_RULE_REST), host);
-    EnableWindow(item(IDC_RULE_TRADE), host);
-    EnableWindow(item(IDC_RULE_PAUSE), host);
-    EnableWindow(item(IDC_RULE_NOFF), host);
-    EnableWindow(item(IDC_RULE_HP), host);
-    EnableWindow(item(IDC_RULE_XP), host);
-    EnableWindow(item(IDC_RULE_QITEMS), host);
-    EnableWindow(item(IDC_RULE_SFOL), host);
-    EnableWindow(item(IDC_RULE_OW), host);
-    EnableWindow(item(IDC_RULE_USLEEP), host);
-    EnableWindow(item(IDC_RULE_SUBINST), host);
+    EnableWindow(item(IDC_RULE_REST), mid);
+    EnableWindow(item(IDC_RULE_TRADE), mid);
+    EnableWindow(item(IDC_RULE_PAUSE), mid);
+    EnableWindow(item(IDC_RULE_NOFF), mid);
+    EnableWindow(item(IDC_RULE_HP), mid);
+    EnableWindow(item(IDC_RULE_XP), mid);
+    EnableWindow(item(IDC_RULE_QITEMS), mid);
+    EnableWindow(item(IDC_RULE_SFOL), mid);
+    EnableWindow(item(IDC_RULE_OW), mid);
+    EnableWindow(item(IDC_RULE_USLEEP), mid);
+    EnableWindow(item(IDC_RULE_SUBINST), mid);
     EnableWindow(item(IDC_RULE_ASAVE), host);
 }
 
@@ -380,6 +393,8 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "unified_sleep", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_SUBINST), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "solo_instances", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_LITE), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "lite_mode", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
         rule_pct_index(k_rule_hp, RULE_HP_COUNT, GetPrivateProfileIntA("rules", "enemy_hp_pct", 100, g_ini)), 0);
     SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL,
@@ -399,7 +414,7 @@ static void rules_env(char* out, size_t sz)
     CoopRules r;
 
     coop_rules_default(&r);
-    r.flags &= ~COOP_RULE_ACTIVE_MASK;
+    r.flags &= ~(COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE);
     r.flags |= (rule_checked(IDC_RULE_GOLD) ? COOP_RULE_GOLD_SPLIT : 0u)
         | (rule_checked(IDC_RULE_LOOT) ? COOP_RULE_LOOT_FEED : 0u)
         | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u)
@@ -410,7 +425,8 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_SFOL) ? COOP_RULE_SHARED_FOLLOWERS : 0u)
         | (rule_checked(IDC_RULE_OW) ? COOP_RULE_FREE_OVERWORLD : 0u)
         | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u)
-        | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u);
+        | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u)
+        | (rule_checked(IDC_RULE_LITE) ? COOP_RULE_LITE_MODE : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
     r.autosave_min = (uint16_t)rule_pct(IDC_RULE_ASAVE, k_rule_asave, RULE_ASAVE_COUNT);
@@ -442,6 +458,7 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "free_overworld", rule_checked(IDC_RULE_OW) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "unified_sleep", rule_checked(IDC_RULE_USLEEP) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "solo_instances", rule_checked(IDC_RULE_SUBINST) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "lite_mode", rule_checked(IDC_RULE_LITE) ? "1" : "0", g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT));
@@ -842,10 +859,27 @@ static void lobby_rules_poll(void)
     }
 }
 
+/* Client heights: the panel (update row ends at 550) and the lobby (rules
+   line ends at 750). */
+#define LAUNCHER_PANEL_H 558
+#define LAUNCHER_LOBBY_H (714 + 36 + 12)
+
+static void launcher_client_size(HWND hwnd, int client_h)
+{
+    RECT r;
+
+    GetClientRect(hwnd, &r);
+    r.left = 0;
+    r.top = 0;
+    r.right = r.right > 0 ? r.right : 444;
+    r.bottom = client_h;
+    AdjustWindowRect(&r, (DWORD)GetWindowLongA(hwnd, GWL_STYLE), FALSE);
+    SetWindowPos(hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+}
+
 static void show_lobby(bool on)
 {
     int show = on ? SW_SHOW : SW_HIDE;
-    RECT r;
     HWND hwnd = g_wnd;
 
     g_lobby_on = on;
@@ -865,19 +899,14 @@ static void show_lobby(bool on)
         SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
         SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) | BS_DEFPUSHBUTTON);
         /* M7 review: size from the client area, so the rules line
-           (IDC_LOBBY_RULES, y 690 + 36) fits whatever the caption height. */
-        GetClientRect(hwnd, &r);
-        r.left = 0;
-        r.top = 0;
-        r.bottom = 690 + 36 + 12;
-        AdjustWindowRect(&r, (DWORD)GetWindowLongA(hwnd, GWL_STYLE), FALSE);
-        SetWindowPos(hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+           (IDC_LOBBY_RULES, y 714 + 36) fits whatever the caption height. */
+        launcher_client_size(hwnd, LAUNCHER_LOBBY_H);
         lobby_poll();
     } else {
         KillTimer(g_wnd, IDT_LOBBY);
         SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
         SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) | BS_DEFPUSHBUTTON);
-        SetWindowPos(hwnd, NULL, 0, 0, 460, 573, SWP_NOMOVE | SWP_NOZORDER);
+        launcher_client_size(hwnd, LAUNCHER_PANEL_H);
     }
 }
 
@@ -2339,26 +2368,28 @@ static void create_controls(void)
         }
         SendMessageA(combo, CB_SETCURSEL, 2, 0); /* 10 min */
     }
+    /* t391u: one switch for the Coop Lite 1.0 rules (greys the others). */
+    make("BUTTON", "Coop Lite mode (as release 1.0)", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 380, 340, 20, IDC_RULE_LITE);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 380, 418, 34, IDC_CHECK_OUT);
-    make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
-    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
-    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);
-    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 460, 130, 30, IDC_BUGREPORT);
-    make("BUTTON", "Close", WS_TABSTOP, 250, 460, 70, 30, IDC_PANEL_CLOSE);
-    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 504, 196, 20, IDC_UPD_TEXT);
-    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 500, 120, 26, IDC_UPD_CHECK);
-    make("BUTTON", "Update", WS_TABSTOP, 340, 500, 90, 26, IDC_UPD_GO);
+        12, 404, 418, 34, IDC_CHECK_OUT);
+    make("STATIC", "", SS_LEFT, 12, 442, 418, 36, IDC_STATUS);
+    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 484, 100, 30, IDC_START);
+    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 484, 96, 30, IDC_RECONNECT);
+    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 484, 130, 30, IDC_BUGREPORT);
+    make("BUTTON", "Close", WS_TABSTOP, 250, 484, 70, 30, IDC_PANEL_CLOSE);
+    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 528, 196, 20, IDC_UPD_TEXT);
+    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 524, 120, 26, IDC_UPD_CHECK);
+    make("BUTTON", "Update", WS_TABSTOP, 340, 524, 90, 26, IDC_UPD_GO);
     ShowWindow(item(IDC_UPD_GO), SW_HIDE);
-    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 536, 418, 18, IDC_LOBBY_LABEL);
+    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 560, 418, 18, IDC_LOBBY_LABEL);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 556, 200, 100, IDC_PLAYERS);
+        12, 580, 200, 100, IDC_PLAYERS);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        220, 556, 210, 100, IDC_LOBBY_CHAT);
-    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 662, 330, 22, IDC_LOBBY_INPUT);
+        220, 580, 210, 100, IDC_LOBBY_CHAT);
+    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 686, 330, 22, IDC_LOBBY_INPUT);
     SendMessageA(item(IDC_LOBBY_INPUT), EM_LIMITTEXT, 120, 0);
-    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 660, 80, 26, IDC_LOBBY_SEND);
-    make("STATIC", "", SS_LEFT, 12, 690, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
+    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 684, 80, 26, IDC_LOBBY_SEND);
+    make("STATIC", "", SS_LEFT, 12, 714, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
     show_panel(false);
     show_lobby(false);
 }
@@ -2415,6 +2446,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDC_JOIN:
             refresh();
+            break;
+        case IDC_RULE_LITE:
+            refresh(); /* greys / ungreys the other rules */
             break;
         case IDC_CHECK:
             start_check(true);
@@ -2494,7 +2528,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     WNDCLASSA wc;
     WSADATA wsa;
     MSG m;
-    RECT r = { 0, 0, 444, 534 };
+    RECT r = { 0, 0, 444, LAUNCHER_PANEL_H };
     char* slash;
     NONCLIENTMETRICSA ncm;
 
