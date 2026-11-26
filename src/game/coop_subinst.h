@@ -192,6 +192,13 @@ int coop_subinst_client_next(int state, int event);
    back (CANCEL) and rejoin the party. */
 #define COOP_SUBINST_STALL_MS 20000u
 bool coop_subinst_client_stalled(int state, bool holding, unsigned int since_ms, unsigned int now_ms);
+/* M7 review: the timed checkpoint (COOP_SUBINST_CHECKPOINT_MS) of a client
+   inside. *ping_ms = the last call (0 = first call after entry: no delta).
+   An explicit request is always due. While paused the timed one is skipped
+   and the paused time does not count (*ckpt_ms moves with it); a *ckpt_ms
+   ahead of now (wrap) is pulled back to now instead of firing every frame. */
+bool coop_subinst_ckpt_due(unsigned int* ckpt_ms, unsigned int* ping_ms, unsigned int now_ms, bool paused,
+    bool requested);
 
 /* Host, a final commit asking for another map (sub -> sub). lease_rc is
    coop_subinst_can_lease for the next map, packed: its archive is ready.

@@ -594,6 +594,33 @@ bool coop_subinst_client_stalled(int state, bool holding, unsigned int since_ms,
     return (unsigned int)(now_ms - since_ms) >= COOP_SUBINST_STALL_MS;
 }
 
+bool coop_subinst_ckpt_due(unsigned int* ckpt_ms, unsigned int* ping_ms, unsigned int now_ms, bool paused,
+    bool requested)
+{
+    unsigned int delta = 0;
+
+    if (ckpt_ms == NULL || ping_ms == NULL) {
+        return requested;
+    }
+    if (*ping_ms != 0) {
+        delta = now_ms - *ping_ms;
+    }
+    *ping_ms = now_ms != 0 ? now_ms : 1u;
+    if (requested) {
+        return true;
+    }
+    if (paused) {
+        *ckpt_ms += delta; /* the pause does not count */
+    }
+    if ((int)(now_ms - *ckpt_ms) < 0) {
+        *ckpt_ms = now_ms; /* ahead of now: never a wrap storm */
+    }
+    if (paused) {
+        return false;
+    }
+    return (unsigned int)(now_ms - *ckpt_ms) >= COOP_SUBINST_CHECKPOINT_MS;
+}
+
 int coop_subinst_sub_next_plan(int lease_rc, bool packed)
 {
     return lease_rc == COOP_SUBINST_LEASE_OK && packed ? COOP_SUBINST_NEXT_GRANT : COOP_SUBINST_NEXT_BACK;
@@ -760,6 +787,7 @@ static CoopSubinstRx si_cl_rx;
 static bool si_cl_enter_pending;
 static unsigned int si_cl_enter_ms;
 static unsigned int si_cl_ckpt_ms;
+static unsigned int si_cl_ping_ms; /* M7 review: last checkpoint check (0 = none since entry) */
 static bool si_cl_ckpt_req;
 static unsigned int si_cl_dead_ms;
 static bool si_cl_unhide_pending;
@@ -1679,6 +1707,7 @@ static void si_client_leave(const char* why)
     si_cl_lease = 0;
     si_cl_enter_pending = false;
     si_cl_ckpt_req = false;
+    si_cl_ping_ms = 0;
     si_cl_dead_ms = 0;
     si_cl_unhide_pending = false;
     si_cl_entered = false;
@@ -2066,6 +2095,7 @@ static void si_client_handle_chunk(PacketCoopSubinstChunk* pkt)
     si_cl_entered = false;
     si_cl_enter_ms = si_now();
     si_cl_ckpt_ms = si_now();
+    si_cl_ping_ms = 0; /* M7 review: no delta from an earlier instance */
     si_cl_dead_ms = 0;
     si_cl_unhide_pending = true;
     tig_debug_printf("CoopSubinst: entering map %d alone\n", si_cl_map);
@@ -2166,16 +2196,6 @@ void coop_subinst_ping(unsigned int now_ms)
     tig_net_local_suspend_resume(depth);
     /* M7: a party sleep's heal runs here, with local authority. */
     coop_middle_subinst_local_tick();
-    {
-        static unsigned int last_ping;
-        unsigned int now = si_now();
-
-        /* M7: the host's pause freezes the 45 s checkpoint clock too. */
-        if (coop_middle_is_paused() && last_ping != 0) {
-            si_cl_ckpt_ms += now - last_ping;
-        }
-        last_ping = now;
-    }
     if (!si_cl_active) {
         return;
     }
@@ -2224,7 +2244,8 @@ void coop_subinst_ping(unsigned int now_ms)
         }
         return;
     }
-    if (si_cl_ckpt_req || (unsigned int)(si_now() - si_cl_ckpt_ms) >= COOP_SUBINST_CHECKPOINT_MS) {
+    /* M7: no timed checkpoint during the host's pause (an asked one still goes). */
+    if (coop_subinst_ckpt_due(&si_cl_ckpt_ms, &si_cl_ping_ms, si_now(), coop_middle_is_paused(), si_cl_ckpt_req)) {
         si_cl_ckpt_req = false;
         si_client_commit(si_cl_host_map, 0, true, false);
         si_cl_ckpt_ms = si_now();

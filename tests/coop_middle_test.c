@@ -1795,6 +1795,56 @@ static bool m7_on_border(int x, int y, int w, int h, int pad)
     return in_x && in_y && (x == pad || x == w - pad || y == pad || y == h - pad);
 }
 
+/* M7 review: the subinst client's timed checkpoint clock. */
+static void test_m7_ckpt_clock(void)
+{
+    unsigned int ck = 1000;
+    unsigned int ping = 0;
+    const unsigned int P = COOP_SUBINST_CHECKPOINT_MS;
+
+    /* first call after entry: no delta, not due yet */
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 1000, false, false));
+    CHECK(ping == 1000);
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 1000 + P - 1, false, false));
+    CHECK(coop_subinst_ckpt_due(&ck, &ping, 1000 + P, false, false));
+    /* a pause of 30 s neither fires nor counts */
+    ck = 1000;
+    ping = 0;
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 2000, false, false));
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 2000 + P, true, false)); /* paused: skipped */
+    CHECK(ck == 1000 + P);
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 2000 + P + 500, false, false));
+    CHECK(coop_subinst_ckpt_due(&ck, &ping, 1000 + 2 * P, false, false));
+    /* an explicit request still goes while paused */
+    CHECK(coop_subinst_ckpt_due(&ck, &ping, 1000 + 2 * P + 1, true, true));
+    /* the tick counter wraps: still due exactly one period later */
+    ck = 0xFFFFF000u;
+    ping = 0;
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 0xFFFFF000u, false, false));
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 0xFFFFF000u + P - 1, false, false));
+    CHECK(coop_subinst_ckpt_due(&ck, &ping, 0xFFFFF000u + P, false, false));
+    /* a checkpoint stamp ahead of now (stale / wrapped) is pulled back, no storm */
+    ck = 50000;
+    ping = 0;
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 10000, false, false));
+    CHECK(ck == 10000);
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 10000 + P - 1, false, false));
+    /* a reset ping (leave / entry) gives no stale delta: a long gap while
+       paused does not push the clock */
+    ck = 5000;
+    ping = 0;
+    CHECK(!coop_subinst_ckpt_due(&ck, &ping, 900000, true, false));
+    CHECK(ck == 5000);
+    CHECK(coop_subinst_ckpt_due(&ck, &ping, 900001, false, false));
+    /* now == 0 never re-arms the "first call" sentinel */
+    ping = 0;
+    ck = 0;
+    (void)coop_subinst_ckpt_due(&ck, &ping, 0, false, false);
+    CHECK(ping != 0);
+    CHECK(!coop_subinst_ckpt_due(NULL, &ping, 1, false, false));
+    CHECK(coop_subinst_ckpt_due(&ck, NULL, 1, false, true));
+}
+
 static void test_m7(void)
 {
     int x = -1;
@@ -2105,6 +2155,7 @@ int main(void)
     test_m6_ui();
     test_m6_review();
     test_m7();
+    test_m7_ckpt_clock();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
