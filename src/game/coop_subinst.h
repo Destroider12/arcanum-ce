@@ -201,7 +201,7 @@ bool coop_subinst_client_stalled(int state, bool holding, unsigned int since_ms,
 #define COOP_SUBINST_NEXT_BACK 0
 int coop_subinst_sub_next_plan(int lease_rc, bool packed);
 
-/* ---- packets (TIG_NET_PROTOCOL 58) ---- */
+/* ---- packets (TIG_NET_PROTOCOL 58, unchanged in 59) ---- */
 
 #define PACKET_COOP_SUBINST_CTRL 171 /* both ways (op-checked) */
 #define PACKET_COOP_SUBINST_CHUNK 172 /* both ways: map archive / commit payload */
@@ -325,6 +325,8 @@ void coop_subinst_session_reset(void);
 void coop_subinst_tick(unsigned int now_ms); /* host: resync after an abort */
 bool coop_subinst_slot_entry(int slot, int* map, int64_t* loc); /* where the slot went in (world marker) */
 unsigned int coop_subinst_serial(void); /* changes when who-is-inside changes */
+uint8_t coop_subinst_host_lease_mask(void); /* M7 host: slots holding a lease */
+bool coop_subinst_host_commit_busy(void); /* M7 host: a COMMIT / checkpoint is still arriving */
 
 /* coop_lite.c helpers (static state lives there). */
 struct CoopCharBundleBuf;
@@ -337,6 +339,8 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
 #else
 static inline bool coop_subinst_client_active(void) { return false; }
 static inline bool coop_subinst_slot_inside(int slot) { (void)slot; return false; }
+static inline uint8_t coop_subinst_host_lease_mask(void) { return 0; }
+static inline bool coop_subinst_host_commit_busy(void) { return false; }
 #endif
 
 #ifdef __cplusplus

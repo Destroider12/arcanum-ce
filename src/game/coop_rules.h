@@ -58,19 +58,25 @@ extern "C" {
 #define COOP_RULES_HP_MAX 300
 #define COOP_RULES_XP_MIN 100
 #define COOP_RULES_XP_MAX 250
+#define COOP_RULES_ASAVE_MIN 5 /* M7: minutes (0 = off) */
+#define COOP_RULES_ASAVE_MAX 60
+#define COOP_RULES_ASAVE_DEFAULT 10
 
 typedef struct CoopRules {
     /* 0000 */ uint32_t version; /* COOP_RULES_VERSION */
     /* 0004 */ uint32_t flags; /* COOP_RULE_* */
     /* 0008 */ uint16_t enemy_hp_pct; /* 100..300: damage to enemies / pct (M3, key hp) */
     /* 000A */ uint16_t xp_mult_pct; /* 100..250: party XP * pct (M3, key xp) */
-    /* 000C */ uint32_t reserved[4]; /* zero; room to grow without a protocol bump */
+    /* 000C */ uint16_t autosave_min; /* M7: host rotating autosave, 0 = off or 5..60 minutes (key asave) */
+    /* 000E */ uint16_t reserved16; /* zero */
+    /* 0010 */ uint32_t reserved[3]; /* zero; room to grow without a protocol bump */
 } CoopRules;
 
 _Static_assert(sizeof(CoopRules) == 0x1C, "CoopRules size");
 _Static_assert(_Alignof(CoopRules) == 4, "CoopRules alignment");
 _Static_assert(offsetof(CoopRules, enemy_hp_pct) == 0x08, "CoopRules.enemy_hp_pct");
-_Static_assert(offsetof(CoopRules, reserved) == 0x0C, "CoopRules.reserved");
+_Static_assert(offsetof(CoopRules, autosave_min) == 0x0C, "CoopRules.autosave_min");
+_Static_assert(offsetof(CoopRules, reserved) == 0x10, "CoopRules.reserved");
 
 typedef struct PacketCoopRules {
     /* 0000 */ int type; /* PACKET_COOP_RULES */

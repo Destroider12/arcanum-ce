@@ -79,7 +79,9 @@ extern "C" {
 #define COOP_MID_CHAT_PAUSE_DROP 8 /* M3: name = the pauser who left, text = "-" */
 #define COOP_MID_CHAT_QUEST 9 /* M4: name = owner, text = item */
 #define COOP_MID_CHAT_SUBINST 10 /* M6: name = player, text = "1|map" entered / "0|map" left a solo instance */
-#define COOP_MID_CHAT_KIND_MAX 10
+#define COOP_MID_CHAT_COLLAPSE 11 /* M7: name = player, text = "-" (fell unconscious from fatigue) */
+#define COOP_MID_CHAT_AUTOSAVE 12 /* M7: name = "", text = "N" (AutoSave N written) */
+#define COOP_MID_CHAT_KIND_MAX 12
 
 /* M3 chat commands (pure parse; the host runs them, never relayed). */
 #define COOP_CMD_NONE 0
@@ -428,6 +430,56 @@ int coop_middle_sleep_count(uint8_t mask);
 const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int living, const char* name, int mode,
     bool ru);
 
+/* ---- M7 ---- */
+
+/* Host -> a client inside a solo instance (M6): the party slept `a` hours
+   (1..168); heal the PC + its followers locally under a fade. b = 0. */
+#define COOP_CTRL_SLEEP_APPLY 11
+#define COOP_SLEEP_APPLY_MAX_HOURS 168
+/* Slots that get SLEEP_APPLY when a unified sleep runs: living clients
+   with a solo-instance lease (never the host, slot 0). */
+uint8_t coop_middle_sleep_apply_mask(uint8_t living_mask, uint8_t subinst_mask);
+
+/* Off-screen teammate arrow: false when (sx, sy) lies inside
+   [pad..w-pad] x [pad..h-pad]; else the point where the ray from the view
+   centre (w/2, h/2) to (sx, sy) crosses that pad border, and the octant
+   0..7 (0 = right, counter-clockwise in screen terms: 2 = up, 4 = left,
+   6 = down; odd = the corners between). */
+bool coop_middle_edge_indicator(int sx, int sy, int view_w, int view_h, int pad, int* out_x, int* out_y,
+    int* octant_out);
+
+/* Host: "<Name> collapsed from exhaustion" once per fall, 10 s per slot. */
+#define COOP_COLLAPSE_SPAM_MS 10000u
+typedef struct CoopCollapseTrack {
+    uint8_t down_mask; /* unconscious (fatigue <= 0) at the last step */
+    uint8_t sent_mask; /* sent_ms[slot] valid */
+    unsigned int sent_ms[8];
+} CoopCollapseTrack;
+/* true = announce now (slot went down and the 10 s window passed). */
+bool coop_middle_collapse_step(CoopCollapseTrack* t, int slot, bool down, unsigned int now_ms);
+
+/* Host autosave (CoopRules.autosave_min). */
+#define COOP_AUTOSAVE_SLOT_FIRST 9690
+#define COOP_AUTOSAVE_SLOT_COUNT 5 /* Slot9690..Slot9694, "[Host] AutoSave 1".."5" */
+#define COOP_AUTOSAVE_CHECK_MS 1000u
+#define COOP_AUTOSAVE_RETRY_MS 15000u
+typedef struct CoopAutosaveGate {
+    bool in_world; /* a valid map, the host PC alive, no main menu */
+    bool paused; /* M3 pause */
+    bool combat;
+    bool dialog;
+    bool world_map; /* world / town map window up */
+    bool teleport; /* teleport, map load, a Lite travel / reload in progress */
+    bool commit; /* a solo-instance client's COMMIT / checkpoint is arriving */
+} CoopAutosaveGate;
+bool coop_middle_autosave_ready(int autosave_min, unsigned int now_ms, unsigned int last_save_ms,
+    const CoopAutosaveGate* gate);
+/* index 0.. -> Slot number 9690..9694 (round robin). */
+int coop_middle_autosave_slot(int index);
+/* The index after the newest existing autosave slot number (any other -> 0). */
+int coop_middle_autosave_next_index(int newest_slot_num);
+bool coop_middle_autosave_is_slot(int slot_num);
+
 /* ---- game hooks (no-ops in test stubs) ---- */
 
 const CoopRules* coop_middle_rules(void);
@@ -440,6 +492,13 @@ void coop_middle_map_changed(void);
 /* M6: a host system chat line (COOP_MID_CHAT_*) to everyone, shown here too. */
 void coop_middle_sys_line_all(int kind, int slot, const char* who, const char* what);
 void coop_middle_handle_rules(PacketCoopRules* pkt);
+/* M7: any save (manual or auto) restarts the autosave interval. */
+void coop_middle_note_save(void);
+/* M7 main loop (outside gamelib_ping): an autosave is due -> slot / desc. */
+bool coop_middle_take_autosave(char* slot, size_t slot_size, char* desc, size_t desc_size);
+void coop_middle_autosave_done(bool ok);
+/* M7 client inside a solo instance, net suspended: pending SLEEP_APPLY heal. */
+void coop_middle_subinst_local_tick(void);
 /* Consumes REST_ASK / REST_REFUSE; false for Lite ops. */
 bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt);
 /* Client rest button / bed: true when a request went (or is pending). */
@@ -493,6 +552,8 @@ void coop_middle_trade_given(int64_t giver, int64_t receiver, const char* item_n
 void coop_middle_trade_local_begin(int64_t partner);
 void coop_middle_trade_local_end(void);
 bool coop_middle_trade_local_is(int64_t partner);
+int64_t coop_middle_trade_partner(void); /* M7: the open trade window's partner PC, or 0 */
+bool coop_middle_owt_local_active(void); /* M7: this client's own overworld trip runs */
 /* Client inven_ui_open: OPEN_TRADE for the trade partner, else `kind`. */
 int coop_middle_trade_barter_kind(int64_t target, int kind);
 /* Inventory window drag from the partner's pack: true = refused (notice). */

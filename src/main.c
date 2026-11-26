@@ -19,6 +19,7 @@
 
 #include "game/ai.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h" /* Coop Middle M7 autosave */
 #include "game/coop_menu.h"
 #include "game/anim.h"
 #include "game/combat.h"
@@ -578,6 +579,15 @@ void main_loop(void)
                 if (coop_lite_take_client_save_request(sreq_slot, sizeof(sreq_slot), sreq_desc, sizeof(sreq_desc))) {
                     /* PT61: a client's F7, saved on the host in that player's own slot */
                     coop_lite_client_save_done(gamelib_save(sreq_slot, sreq_desc));
+                }
+            }
+            {
+                char as_slot[16];
+                char as_desc[48];
+
+                /* Coop Middle M7: host autosave at the same safe point. */
+                if (coop_middle_take_autosave(as_slot, sizeof(as_slot), as_desc, sizeof(as_desc))) {
+                    coop_middle_autosave_done(gamelib_save(as_slot, as_desc));
                 }
             }
             if (coop_lite_take_dev_save_request()) {

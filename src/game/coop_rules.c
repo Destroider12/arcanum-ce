@@ -19,6 +19,7 @@ void coop_rules_default(CoopRules* r)
     r->flags = COOP_RULE_DEFAULT_FLAGS;
     r->enemy_hp_pct = 100;
     r->xp_mult_pct = 100;
+    r->autosave_min = COOP_RULES_ASAVE_DEFAULT;
 }
 
 void coop_rules_sanitize(CoopRules* r)
@@ -38,6 +39,12 @@ void coop_rules_sanitize(CoopRules* r)
     } else if (r->xp_mult_pct > COOP_RULES_XP_MAX) {
         r->xp_mult_pct = COOP_RULES_XP_MAX;
     }
+    if (r->autosave_min != 0 && r->autosave_min < COOP_RULES_ASAVE_MIN) {
+        r->autosave_min = COOP_RULES_ASAVE_MIN;
+    } else if (r->autosave_min > COOP_RULES_ASAVE_MAX) {
+        r->autosave_min = COOP_RULES_ASAVE_MAX;
+    }
+    r->reserved16 = 0;
     memset(r->reserved, 0, sizeof(r->reserved));
 }
 
@@ -149,6 +156,11 @@ int coop_rules_parse_env(CoopRules* r, const char* env_str)
             used++;
             continue;
         }
+        if (strcmp(key, "asave") == 0 || strcmp(key, "autosave_min") == 0 || strcmp(key, "autosave") == 0) {
+            r->autosave_min = (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v)); /* clamped by sanitize */
+            used++;
+            continue;
+        }
         for (i = 0; i < COOP_RULES_KEY_COUNT; i++) {
             if (strcmp(key, coop_rules_keys[i].key) == 0 || strcmp(key, coop_rules_keys[i].alias) == 0
                 || (coop_rules_keys[i].legacy != NULL && strcmp(key, coop_rules_keys[i].legacy) == 0)) {
@@ -196,7 +208,8 @@ int coop_rules_format_env(const CoopRules* r, char* out, size_t sz)
         }
         len += (size_t)n;
     }
-    n = snprintf(out + len, sz - len, ",hp=%u,xp=%u", (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
+    n = snprintf(out + len, sz - len, ",hp=%u,xp=%u,asave=%u", (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct,
+        (unsigned)s.autosave_min);
     if (n < 0 || (size_t)n >= sz - len) {
         out[sz - 1] = '\0';
         return (int)strlen(out);
@@ -209,6 +222,7 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
     CoopRules s;
     const char* on = ru ? "вкл" : "on";
     const char* off = ru ? "выкл" : "off";
+    char asave[32];
 
     if (out == NULL || sz == 0) {
         return;
@@ -219,11 +233,16 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
         s = *r;
         coop_rules_sanitize(&s);
     }
+    if (s.autosave_min == 0) {
+        snprintf(asave, sizeof(asave), "%s", off);
+    } else {
+        snprintf(asave, sizeof(asave), ru ? "%u мин" : "%u min", (unsigned)s.autosave_min);
+    }
     if (ru) {
         snprintf(out, sz,
             "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, пауза клиентов %s, "
             "без огня по своим %s, общие квестовые предметы %s, общие спутники %s, свободная карта мира %s, "
-            "единый сон %s, отдельные локации %s, HP врагов %u%%, опыт %u%%",
+            "единый сон %s, отдельные локации %s, HP врагов %u%%, опыт %u%%, автосейв %s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
@@ -235,11 +254,11 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
             (s.flags & COOP_RULE_FREE_OVERWORLD) != 0 ? on : off,
             (s.flags & COOP_RULE_UNIFIED_SLEEP) != 0 ? on : off,
             (s.flags & COOP_RULE_SUBINSTANCES) != 0 ? on : off,
-            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
+            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, asave);
     } else {
         snprintf(out, sz,
             "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, client pause %s, no friendly fire %s, "
-            "shared quest items %s, shared followers %s, free world map %s, unified sleep %s, solo interiors %s, enemy HP %u%%, XP %u%%",
+            "shared quest items %s, shared followers %s, free world map %s, unified sleep %s, solo interiors %s, enemy HP %u%%, XP %u%%, autosave %s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
@@ -251,7 +270,7 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
             (s.flags & COOP_RULE_FREE_OVERWORLD) != 0 ? on : off,
             (s.flags & COOP_RULE_UNIFIED_SLEEP) != 0 ? on : off,
             (s.flags & COOP_RULE_SUBINSTANCES) != 0 ? on : off,
-            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct);
+            (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, asave);
     }
 }
 

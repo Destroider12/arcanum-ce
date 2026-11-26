@@ -31,7 +31,7 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 58 /* Coop Middle M6 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55, M4 56, M5 57):
+#define TIG_NET_PROTOCOL 59 /* Coop Middle M7 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55, M4 56, M5 57, M6 58):
                                M1 PACKET_COOP_RULES + REST_ASK / REST_REFUSE + loot feed;
                                M2 COOP_BARTER_OPEN_TRADE, COOP_CTRL_SLOT_STATUS, trade chat lines;
                                M3 PACKET_COOP_PING (168), COOP_CTRL_PAUSE, /tp chat lines;
@@ -41,7 +41,9 @@ extern "C" {
                                SLEEP_STATE, addressed NPC_POS;
                                M5 fixes: COOP_OWT_SELECT / WAYPOINT, F_TELEPORT;
                                M6 PACKET_COOP_SUBINST_CTRL / CHUNK / DELTA (171-173),
-                               [Co-op] solo instance chat line */
+                               [Co-op] solo instance chat line;
+                               M7 CoopRules.autosave_min, COOP_CTRL_SLEEP_APPLY (11),
+                               [Party] collapse + [AutoSave] chat lines */
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

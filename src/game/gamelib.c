@@ -1,5 +1,6 @@
 #include "game/gamelib.h"
 #include "game/coop_subinst.h" /* Coop Middle M6 */
+#include "game/coop_middle.h" /* Coop Middle M7 */
 
 #include "crash_handler.h"
 #include "game/coop_lite.h"
@@ -978,6 +979,7 @@ bool gamelib_save(const char* name, const char* description)
 
     /* Coop Middle M6: solo instances send their state first (2 s max). */
     coop_subinst_host_before_save();
+    coop_middle_note_save(); /* Coop Middle M7: restarts the autosave interval */
 
     in_save = true;
 

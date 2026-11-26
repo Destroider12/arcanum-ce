@@ -1042,6 +1042,31 @@ static void si_set_inside(int slot, int map, int entry_map, int64_t entry_loc)
     si_entry_loc[slot] = map > 0 ? entry_loc : 0;
 }
 
+uint8_t coop_subinst_host_lease_mask(void)
+{
+    uint8_t mask = 0;
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        if (si_leases[slot].active) {
+            mask |= (uint8_t)(1u << slot);
+        }
+    }
+    return mask;
+}
+
+bool coop_subinst_host_commit_busy(void)
+{
+    int slot;
+
+    for (slot = 1; slot < 8; slot++) {
+        if (si_host_rx[slot].active) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool coop_subinst_slot_inside(int slot)
 {
     return slot > 0 && slot < 8 && si_inside[slot];
@@ -2088,7 +2113,8 @@ bool coop_subinst_packet_filter(int type, const void* msg)
     case PACKET_COOP_PARTY_CTRL: {
         int op = ((const PacketCoopPartyCtrl*)msg)->op;
 
-        return op == COOP_CTRL_PAUSE || op == COOP_CTRL_SLEEP_STATE || op == COOP_CTRL_SLOT_STATUS;
+        return op == COOP_CTRL_PAUSE || op == COOP_CTRL_SLEEP_STATE || op == COOP_CTRL_SLOT_STATUS
+            || op == COOP_CTRL_SLEEP_APPLY; /* M7 */
     }
     default:
         return false; /* the host's map: not ours while inside */
@@ -2138,6 +2164,18 @@ void coop_subinst_ping(unsigned int now_ms)
         depth = depth > 0 ? depth - 1 : 0;
     }
     tig_net_local_suspend_resume(depth);
+    /* M7: a party sleep's heal runs here, with local authority. */
+    coop_middle_subinst_local_tick();
+    {
+        static unsigned int last_ping;
+        unsigned int now = si_now();
+
+        /* M7: the host's pause freezes the 45 s checkpoint clock too. */
+        if (coop_middle_is_paused() && last_ping != 0) {
+            si_cl_ckpt_ms += now - last_ping;
+        }
+        last_ping = now;
+    }
     if (!si_cl_active) {
         return;
     }
