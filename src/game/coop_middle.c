@@ -3091,6 +3091,16 @@ typedef struct CoopOwtMarker {
 
 static CoopOwtTransit coop_owt[8]; /* host */
 static CoopOwtRoute coop_owt_route[8]; /* host: WAYPOINT packets before a START */
+/* Host: a Teleport spell waiting for the client's world map pick (SELECT
+   sent): the spell, whether the caster pays fatigue (not from a scroll -
+   vanilla charges only a PC caster), when. */
+static struct {
+    bool pending;
+    bool charge;
+    int spell;
+    unsigned int since_ms;
+} coop_owt_tp[8];
+#define COOP_OWT_TP_PENDING_MS 300000u
 static CoopOwtMarker coop_owt_mark[8]; /* both sides */
 static unsigned int coop_owt_serial;
 static unsigned int coop_owt_markers_ms; /* host: last all-slot sweep */
@@ -3421,8 +3431,19 @@ static void coop_owt_host_teleport(int slot, int64_t dest, int spell)
     CoopOwtTransit* t = &coop_owt[slot];
     int64_t pc = sub_4A2B60(slot);
     int reason = 0;
+    bool charge;
 
     coop_middle_owt_route_reset(&coop_owt_route[slot]);
+    /* Only the spell we asked this client to place (SELECT), once. */
+    if (!coop_owt_tp[slot].pending
+        || (unsigned int)(coop_mid_now_ms - coop_owt_tp[slot].since_ms) > COOP_OWT_TP_PENDING_MS) {
+        coop_owt_tp[slot].pending = false;
+        coop_owt_refuse(slot, COOP_OWT_REFUSE_DEST);
+        tig_debug_printf("CoopMiddle: teleport pick of slot %d without a pending spell - refused\n", slot);
+        return;
+    }
+    spell = coop_owt_tp[slot].spell;
+    charge = coop_owt_tp[slot].charge;
     if (!coop_im_start_map()) {
         reason = COOP_OWT_REFUSE_MAP;
     } else if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !tig_net_client_is_active(slot)) {
@@ -3436,6 +3457,7 @@ static void coop_owt_host_teleport(int slot, int64_t dest, int spell)
         coop_owt_refuse(slot, reason);
         return;
     }
+    coop_owt_tp[slot].pending = false;
     if (!t->active) {
         int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
 
@@ -3447,9 +3469,10 @@ static void coop_owt_host_teleport(int slot, int64_t dest, int spell)
     }
     t->path_len = 0;
     t->path_pos = 0;
-    if (spell >= 0 && spell < MT_SPELL_COUNT) {
-        sub_4507B0(pc, spell); /* the vanilla cost, charged where the stats live */
+    if (charge && spell >= 0 && spell < MT_SPELL_COUNT) {
+        sub_4507B0(pc, spell); /* the vanilla cost, charged where the stats live (not for a scroll) */
     }
+    /* coop_owt_finish moves the PC and all its followers (object_list_all_followers). */
     coop_owt_finish(slot, dest, true, false, "teleport spell");
 }
 
@@ -3474,6 +3497,10 @@ void coop_middle_teleport_spell(int64_t source_obj, int64_t target_obj, int spel
     }
     slot = coop_middle_slot_of_pc(target_obj);
     if (slot > 0 && slot < 8 && spell >= 0 && spell < COOP_OWT_SPELL_MAX) {
+        coop_owt_tp[slot].pending = true;
+        coop_owt_tp[slot].charge = source_obj == target_obj; /* a scroll casts as itself */
+        coop_owt_tp[slot].spell = spell;
+        coop_owt_tp[slot].since_ms = coop_mid_now_ms;
         coop_owt_send(COOP_OWT_SELECT, slot, 0, 0, spell, 0, slot);
         tig_debug_printf("CoopMiddle: teleport spell of slot %d: the client picks the place\n", slot);
     }
@@ -3889,6 +3916,7 @@ static void coop_owt_reset(bool unhide)
         coop_owt_remote_hid[slot].count = 0;
     }
     memset(coop_owt, 0, sizeof(coop_owt));
+    memset(coop_owt_tp, 0, sizeof(coop_owt_tp));
     memset(coop_owt_mark, 0, sizeof(coop_owt_mark));
     coop_owt_serial++;
     coop_owt_client_active = false;
