@@ -615,12 +615,14 @@ add_executable(coop_lite_rx_fuzz_test
     "src/game/coop_lite.c"
     "src/game/coop_rules.c"
     "src/game/coop_middle.c"
+    "src/game/coop_subinst.c"
 )
 target_include_directories(coop_lite_rx_fuzz_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+    ${ZLIB_INCLUDE_DIRS}
 )
-target_link_libraries(coop_lite_rx_fuzz_test PRIVATE enet)
+target_link_libraries(coop_lite_rx_fuzz_test PRIVATE enet ${ZLIB_LIBRARIES})
 target_compile_definitions(coop_lite_rx_fuzz_test PRIVATE
     TIG_NET_TEST_STUB_DEBUG=1
     COOP_LITE_TEST_STUBS=1
@@ -640,12 +642,14 @@ add_executable(coop_lite_fuzz8_test
     "src/game/coop_lite.c"
     "src/game/coop_rules.c"
     "src/game/coop_middle.c"
+    "src/game/coop_subinst.c"
 )
 target_include_directories(coop_lite_fuzz8_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+    ${ZLIB_INCLUDE_DIRS}
 )
-target_link_libraries(coop_lite_fuzz8_test PRIVATE enet)
+target_link_libraries(coop_lite_fuzz8_test PRIVATE enet ${ZLIB_LIBRARIES})
 target_compile_definitions(coop_lite_fuzz8_test PRIVATE
     TIG_NET_TEST_STUB_DEBUG=1
     COOP_LITE_TEST_STUBS=1

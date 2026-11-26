@@ -68,7 +68,8 @@ static void test_rules_default_sanitize(void)
         | COOP_RULE_SUBINSTANCES));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
-    CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
+    CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved16 == 0);
+    CHECK(r.autosave_min == COOP_RULES_ASAVE_DEFAULT);
 
     d = r;
     coop_rules_sanitize(&d);
@@ -91,13 +92,14 @@ static void test_rules_default_sanitize(void)
     /* unknown bits dropped, reserved M2-M3 bits kept, reserved[] zeroed */
     r.flags = 0xFFFFFFFFu;
     r.reserved[0] = 7;
-    r.reserved[3] = 0xDEADBEEFu;
+    r.reserved[2] = 0xDEADBEEFu;
+    r.reserved16 = 0x55;
     r.version = 99;
     coop_rules_sanitize(&r);
     CHECK(r.flags == COOP_RULE_KNOWN_MASK);
     CHECK((r.flags & COOP_RULE_DIRECT_TRADE) && (r.flags & COOP_RULE_CLIENT_PAUSE)
         && (r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
-    CHECK(r.reserved[0] == 0 && r.reserved[3] == 0);
+    CHECK(r.reserved[0] == 0 && r.reserved[2] == 0 && r.reserved16 == 0);
     CHECK(r.version == COOP_RULES_VERSION);
 
     coop_rules_default(NULL); /* no crash */
@@ -118,7 +120,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,hp=100,xp=100,asave=10") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -197,7 +199,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 58);
+    CHECK(TIG_NET_PROTOCOL == 59);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -370,7 +372,7 @@ static void test_rest_ops(void)
     c.op = COOP_CTRL_TRAVEL_STATE;
     c.a = COOP_TRAVEL_READY;
     CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
-    c.op = 11; /* 9 / 10 are the M5 sleep ops */
+    c.op = 12; /* 9 / 10 are the M5 sleep ops, 11 the M7 SLEEP_APPLY */
     c.a = 1;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
     c.op = 0;
@@ -646,7 +648,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 13);
+            CHECK(coop_rules_parse_env(&back, text) == 14);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -771,7 +773,7 @@ static void test_m3_cmds(void)
     CHECK(line[0] != '\0');
     coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
     CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
-    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_SUBINST);
+    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_AUTOSAVE);
 }
 
 /* 13. M3 pings: packet, role, validity, rate limit */
@@ -837,7 +839,7 @@ static void test_m3_pause(void)
     unsigned int last = 0;
     int b;
 
-    CHECK(TIG_NET_PROTOCOL == 58);
+    CHECK(TIG_NET_PROTOCOL == 59);
     CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
     memset(&c, 0, sizeof(c));
     c.type = PACKET_COOP_PARTY_CTRL;
@@ -893,7 +895,7 @@ static void test_m4_rules(void)
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 13 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 14 && coop_rules_equal(&r, &back));
     n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
     CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
     n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
@@ -1068,7 +1070,7 @@ static void test_m5_rules(void)
     r.flags &= ~(COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "ow=0") != NULL && strstr(text, "usleep=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 13 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 14 && coop_rules_equal(&r, &back));
     CHECK(coop_rules_parse_env(&r, "free_overworld=0,unified_sleep=off") == 2);
     CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP)) == 0);
     coop_rules_default(&r);
@@ -1137,7 +1139,7 @@ static void test_m5_overworld(void)
     int x;
     int y;
 
-    CHECK(TIG_NET_PROTOCOL == 58);
+    CHECK(TIG_NET_PROTOCOL == 59);
     CHECK(PACKET_COOP_OVERWORLD_TRAVEL == 170 && PACKET_COOP_TYPE_LIMIT >= 172);
     CHECK(sizeof(PacketCoopOverworldTravel) == 0x20);
     CHECK(coop_lite_mp_packet_role(PACKET_COOP_OVERWORLD_TRAVEL) == COOP_MP_PKT_BOTH);
@@ -1678,7 +1680,7 @@ static void test_m6_packets(void)
     PacketCoopSubinstChunk k;
     PacketCoopSubinstDelta d;
 
-    CHECK(TIG_NET_PROTOCOL == 58);
+    CHECK(TIG_NET_PROTOCOL == 59);
     CHECK(PACKET_COOP_SUBINST_CTRL == 171 && PACKET_COOP_SUBINST_CHUNK == 172 && PACKET_COOP_SUBINST_DELTA == 173);
     CHECK(PACKET_COOP_SUBINST_DELTA < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopSubinstCtrl) == 0x40 && sizeof(PacketCoopSubinstDelta) == 0x18);
@@ -1781,6 +1783,168 @@ static void test_m6_packets(void)
     d.val = 1;
     d.lease_id = 0;
     CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+}
+
+/* M7: off-screen arrows, collapse notice, autosave gate / rotation, asave
+   rule, SLEEP_APPLY, session reset. */
+static bool m7_on_border(int x, int y, int w, int h, int pad)
+{
+    bool in_x = x >= pad && x <= w - pad;
+    bool in_y = y >= pad && y <= h - pad;
+
+    return in_x && in_y && (x == pad || x == w - pad || y == pad || y == h - pad);
+}
+
+static void test_m7(void)
+{
+    int x = -1;
+    int y = -1;
+    int oct = -1;
+    CoopCollapseTrack ct;
+    CoopAutosaveGate g;
+    CoopRules r;
+    CoopSleepState st;
+    PacketCoopPartyCtrl c;
+    char line[256];
+    int i;
+
+    /* edge indicator: inside (border included) = false */
+    CHECK(!coop_middle_edge_indicator(400, 300, 800, 600, 20, &x, &y, &oct));
+    CHECK(!coop_middle_edge_indicator(20, 20, 800, 600, 20, &x, &y, &oct));
+    CHECK(!coop_middle_edge_indicator(780, 580, 800, 600, 20, &x, &y, &oct));
+    CHECK(!coop_middle_edge_indicator(10, 10, 0, 600, 20, &x, &y, &oct));
+    /* the four sides */
+    CHECK(coop_middle_edge_indicator(400, -100, 800, 600, 20, &x, &y, &oct) && x == 400 && y == 20 && oct == 2);
+    CHECK(coop_middle_edge_indicator(400, 900, 800, 600, 20, &x, &y, &oct) && x == 400 && y == 580 && oct == 6);
+    CHECK(coop_middle_edge_indicator(-100, 300, 800, 600, 20, &x, &y, &oct) && x == 20 && y == 300 && oct == 4);
+    CHECK(coop_middle_edge_indicator(1000, 300, 800, 600, 20, &x, &y, &oct) && x == 780 && y == 300 && oct == 0);
+    /* the four corners (square view: the ray hits the corner itself) */
+    CHECK(coop_middle_edge_indicator(-300, -300, 600, 600, 20, &x, &y, &oct) && x == 20 && y == 20 && oct == 3);
+    CHECK(coop_middle_edge_indicator(900, -300, 600, 600, 20, &x, &y, &oct) && x == 580 && y == 20 && oct == 1);
+    CHECK(coop_middle_edge_indicator(-300, 900, 600, 600, 20, &x, &y, &oct) && x == 20 && y == 580 && oct == 5);
+    CHECK(coop_middle_edge_indicator(900, 900, 600, 600, 20, &x, &y, &oct) && x == 580 && y == 580 && oct == 7);
+    /* off-axis points land on the pad border */
+    CHECK(coop_middle_edge_indicator(-1000, -1000, 800, 600, 20, &x, &y, &oct) && m7_on_border(x, y, 800, 600, 20)
+        && y == 20 && oct == 3);
+    CHECK(coop_middle_edge_indicator(5000, 310, 800, 600, 20, &x, &y, &oct) && x == 780 && m7_on_border(x, y, 800, 600, 20)
+        && oct == 0);
+    CHECK(coop_middle_edge_indicator(-7, 3000, 800, 600, 24, &x, &y, &oct) && y == 576 && m7_on_border(x, y, 800, 600, 24)
+        && oct == 6);
+    for (i = -2000; i <= 2000; i += 97) {
+        CHECK(coop_middle_edge_indicator(i, -50, 800, 600, 28, &x, &y, &oct) && m7_on_border(x, y, 800, 600, 28));
+        CHECK(coop_middle_edge_indicator(-60, i, 800, 600, 28, &x, &y, &oct) && m7_on_border(x, y, 800, 600, 28));
+        CHECK(oct >= 0 && oct <= 7);
+    }
+
+    /* collapse notice: once per fall, 10 s per slot */
+    memset(&ct, 0, sizeof(ct));
+    CHECK(coop_middle_collapse_step(&ct, 2, true, 1000));
+    CHECK(!coop_middle_collapse_step(&ct, 2, true, 1500));
+    CHECK(!coop_middle_collapse_step(&ct, 2, false, 2000));
+    CHECK(!coop_middle_collapse_step(&ct, 2, true, 6000)); /* within 10 s */
+    CHECK(coop_middle_collapse_step(&ct, 3, true, 6000)); /* another slot */
+    CHECK(!coop_middle_collapse_step(&ct, 2, false, 7000));
+    CHECK(coop_middle_collapse_step(&ct, 2, true, 1000 + COOP_COLLAPSE_SPAM_MS));
+    CHECK(!coop_middle_collapse_step(&ct, 8, true, 0) && !coop_middle_collapse_step(NULL, 1, true, 0));
+    coop_middle_feed_format(COOP_MID_CHAT_COLLAPSE, "Bob", "-", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Party] Bob collapsed from exhaustion!") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_COLLAPSE, "Bob", "-", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Партия] Bob упал без сознания от усталости!") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_AUTOSAVE, "", "3", false, line, sizeof(line));
+    CHECK(strcmp(line, "[AutoSave] World saved (AutoSave 3).") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_AUTOSAVE, "", "3", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Автосейв] Мир сохранён (AutoSave 3).") == 0);
+
+    /* autosave gate */
+    memset(&g, 0, sizeof(g));
+    g.in_world = true;
+    CHECK(coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    CHECK(!coop_middle_autosave_ready(10, 599999u, 0u, &g)); /* interval not over */
+    CHECK(coop_middle_autosave_ready(10, 100000u, 100000u - 600000u, &g)); /* clock wrap */
+    CHECK(!coop_middle_autosave_ready(0, 600000u, 0u, &g)); /* interval 0 = off */
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, NULL));
+    g.paused = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.paused = false;
+    g.combat = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.combat = false;
+    g.dialog = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.dialog = false;
+    g.world_map = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.world_map = false;
+    g.commit = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.commit = false;
+    g.teleport = true;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    g.teleport = false;
+    g.in_world = false;
+    CHECK(!coop_middle_autosave_ready(10, 600000u, 0u, &g));
+    /* rotation Slot9690..9694, round robin, never a client slot */
+    for (i = 0; i < 12; i++) {
+        CHECK(coop_middle_autosave_slot(i) == 9690 + i % 5);
+    }
+    CHECK(coop_middle_autosave_slot(-1) == 9694);
+    CHECK(coop_middle_autosave_next_index(9690) == 1 && coop_middle_autosave_next_index(9694) == 0);
+    CHECK(coop_middle_autosave_next_index(9700) == 0 && coop_middle_autosave_next_index(1) == 0);
+    CHECK(coop_middle_autosave_is_slot(9690) && coop_middle_autosave_is_slot(9694));
+    CHECK(!coop_middle_autosave_is_slot(9689) && !coop_middle_autosave_is_slot(9695));
+    CHECK(!coop_middle_autosave_is_slot(COOP_SREQ_SLOT_FIRST) && !coop_middle_autosave_is_slot(COOP_SREQ_SLOT_LAST));
+    CHECK(COOP_AUTOSAVE_SLOT_FIRST + COOP_AUTOSAVE_SLOT_COUNT <= COOP_SREQ_SLOT_FIRST);
+
+    /* asave rule */
+    CHECK(sizeof(CoopRules) == 0x1C);
+    coop_rules_default(&r);
+    CHECK(r.autosave_min == COOP_RULES_ASAVE_DEFAULT && r.autosave_min == 10);
+    CHECK(coop_rules_parse_env(&r, "asave=0") == 1 && r.autosave_min == 0);
+    CHECK(coop_rules_parse_env(&r, "asave=10") == 1 && r.autosave_min == 10);
+    CHECK(coop_rules_parse_env(&r, "asave=1") == 1 && r.autosave_min == 5);
+    CHECK(coop_rules_parse_env(&r, "asave=999") == 1 && r.autosave_min == 60);
+    CHECK(coop_rules_parse_env(&r, "autosave_min=30") == 1 && r.autosave_min == 30);
+    coop_rules_describe(&r, false, line, sizeof(line));
+    CHECK(strstr(line, "autosave 30 min") != NULL);
+    r.autosave_min = 0;
+    coop_rules_describe(&r, false, line, sizeof(line));
+    CHECK(strstr(line, "autosave off") != NULL);
+
+    /* unified sleep with a player inside a solo instance */
+    coop_middle_sleep_reset(&st);
+    CHECK(coop_middle_sleep_step(&st, 0x07, COOP_SLEEP_EV_VOTE, 0, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_WAIT);
+    CHECK(coop_middle_sleep_step(&st, 0x07, COOP_SLEEP_EV_VOTE, 1, COOP_SLEEP_MODE_8H) == COOP_SLEEP_RES_WAIT);
+    CHECK(coop_middle_sleep_step(&st, 0x07, COOP_SLEEP_EV_VOTE, 2, COOP_SLEEP_MODE_1H) == COOP_SLEEP_RES_EXECUTE);
+    CHECK(st.mode == COOP_SLEEP_MODE_8H);
+    CHECK(coop_middle_sleep_apply_mask(0x07, 0x04) == 0x04); /* slot 2 inside: gets SLEEP_APPLY */
+    CHECK(coop_middle_sleep_apply_mask(0x03, 0x05) == 0x00); /* never the host, never a dead slot */
+    CHECK(coop_middle_sleep_apply_mask(0xFF, 0xFF) == 0xFE);
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_PARTY_CTRL;
+    c.op = COOP_CTRL_SLEEP_APPLY;
+    CHECK(COOP_CTRL_SLEEP_APPLY == 11);
+    c.a = 1;
+    CHECK(coop_middle_party_ctrl_valid(&c) && coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = COOP_SLEEP_APPLY_MAX_HOURS;
+    CHECK(coop_middle_party_ctrl_valid(&c) && coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = 0;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.a = COOP_SLEEP_APPLY_MAX_HOURS + 1;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.a = 8;
+    c.b = 1;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
+    c.b = 0;
+    CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c) - 1));
+
+    /* repeated session resets are idempotent (LSan: nothing left behind) */
+    for (i = 0; i < 3; i++) {
+        coop_middle_session_reset();
+        coop_lite_session_reset();
+        CHECK(coop_middle_rules()->autosave_min == COOP_RULES_ASAVE_DEFAULT);
+        CHECK(!coop_middle_is_paused());
+    }
+    CHECK(TIG_NET_PROTOCOL == 59);
 }
 
 static void test_m6_review(void)
@@ -1940,6 +2104,7 @@ int main(void)
     test_m6_packets();
     test_m6_ui();
     test_m6_review();
+    test_m7();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
@@ -1948,6 +2113,7 @@ int main(void)
            "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause, "
            "M4 rules / quest items / town map fog / dialog routing / followers, "
            "M5 rules / interest / world map travel / unified sleep, "
-           "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge)\n");
+           "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge, "
+           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, protocol 59)\n");
     return 0;
 }

@@ -6,6 +6,11 @@
  * multiplayer.c. Then the same handlers run in client role on exact-size heap
  * copies. Run under ASan/UBSan. COOP_RX_FUZZ_SECONDS (default 5) sets the
  * host-phase duration.
+ * Coop Middle M7: packets 167-173 (RULES, PING, TOWNMAP_FOG,
+ * OVERWORLD_TRAVEL, SUBINST_CTRL / CHUNK / DELTA) and the Middle PARTY_CTRL
+ * ops (REST_ASK / REFUSE, SLOT_STATUS, PAUSE, SLEEP_VOTE / STATE / APPLY);
+ * SUBINST_CTRL carries ABORT / CANCEL often, both directions (host phase =
+ * client -> host, client phase = host -> client).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +21,9 @@
 #include <enet/enet.h>
 
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
+#include "game/coop_rules.h"
+#include "game/coop_subinst.h"
 
 typedef unsigned int TeleportFlags;
 typedef struct TeleportData {
@@ -44,6 +52,8 @@ typedef struct CtrlName {
 } CtrlName;
 
 static long g_delivered;
+static int g_size; /* the dispatched message's size */
+static long g_mid_valid; /* Middle packets / ops the validators accepted */
 static uint32_t rng = 0xC0FFEE11u;
 static uint32_t rnd(void)
 {
@@ -106,13 +116,43 @@ static void dispatch(void* msg)
     case PACKET_COOP_CRAFT: coop_lite_handle_craft(msg); break;
     case PACKET_COOP_PARTY_CTRL: coop_lite_handle_party_ctrl(msg); break;
     case PACKET_COOP_INVEN_LAYOUT: coop_lite_host_handle_inven_layout(msg); break;
+    /* Coop Middle (the stub build has no-op handlers: the validators run) */
+    case PACKET_COOP_RULES:
+        g_mid_valid += coop_rules_packet_valid((const PacketCoopRules*)msg, g_size) ? 1 : 0;
+        coop_middle_handle_rules((PacketCoopRules*)msg);
+        break;
+    case PACKET_COOP_PING:
+        g_mid_valid += coop_middle_ping_valid((const PacketCoopPing*)msg, g_size) ? 1 : 0;
+        coop_middle_handle_ping((PacketCoopPing*)msg);
+        break;
+    case PACKET_COOP_TOWNMAP_FOG:
+        g_mid_valid += coop_middle_townmap_fog_valid((const PacketCoopTownmapFog*)msg, g_size) ? 1 : 0;
+        break;
+    case PACKET_COOP_OVERWORLD_TRAVEL:
+        g_mid_valid += coop_middle_overworld_pkt_valid((const PacketCoopOverworldTravel*)msg, g_size,
+                           !tig_net_is_host()) ? 1 : 0;
+        break;
+    case PACKET_COOP_SUBINST_CTRL:
+        g_mid_valid += coop_subinst_ctrl_valid((const PacketCoopSubinstCtrl*)msg, g_size, !tig_net_is_host()) ? 1 : 0;
+        break;
+    case PACKET_COOP_SUBINST_CHUNK:
+        g_mid_valid += coop_subinst_chunk_valid((const PacketCoopSubinstChunk*)msg, g_size) ? 1 : 0;
+        break;
+    case PACKET_COOP_SUBINST_DELTA:
+        g_mid_valid += coop_subinst_delta_valid((const PacketCoopSubinstDelta*)msg, g_size) ? 1 : 0;
+        break;
     default: break;
+    }
+    if (*(int*)msg == PACKET_COOP_PARTY_CTRL && g_size >= (int)sizeof(PacketCoopPartyCtrl)
+        && coop_middle_party_ctrl_valid((const PacketCoopPartyCtrl*)msg)) {
+        g_mid_valid++;
     }
 }
 
 static void on_message(void* msg)
 {
     g_delivered++;
+    g_size = tig_net_last_message_size();
     dispatch(msg);
 }
 
@@ -134,7 +174,12 @@ static const int k_types[] = {
     PACKET_COOP_INVEN_SYNC, PACKET_COOP_ROSTER, PACKET_COOP_PC_STATS, PACKET_COOP_WORLD_REQ,
     PACKET_COOP_WORLD_STATE, PACKET_COOP_DOOR_USE, PACKET_COOP_SKILL_USE, PACKET_COOP_CRAFT,
     PACKET_COOP_PARTY_CTRL, PACKET_COOP_INVEN_LAYOUT,
+    /* Coop Middle M1-M6 (protocol 59) */
+    PACKET_COOP_RULES, PACKET_COOP_PING, PACKET_COOP_TOWNMAP_FOG, PACKET_COOP_OVERWORLD_TRAVEL,
+    PACKET_COOP_SUBINST_CTRL, PACKET_COOP_SUBINST_CHUNK, PACKET_COOP_SUBINST_DELTA,
 };
+static const int k_mid_ops[] = { COOP_CTRL_REST_ASK, COOP_CTRL_REST_REFUSE, COOP_CTRL_SLOT_STATUS, COOP_CTRL_PAUSE,
+    COOP_CTRL_SLEEP_VOTE, COOP_CTRL_SLEEP_STATE, COOP_CTRL_SLEEP_APPLY };
 #define NTYPES ((int)(sizeof(k_types) / sizeof(k_types[0])))
 
 /* Random packet: valid type, size around the type's minimum (truncated,
@@ -172,6 +217,32 @@ static int make_packet(uint8_t* buf, int cap)
         }
     }
     memcpy(buf, &type, 4);
+    /* Middle: well-formed headers often, so the validators go deep */
+    if (type == PACKET_COOP_PARTY_CTRL && size >= 16 && (rnd() & 1)) {
+        int op = k_mid_ops[rnd() % (sizeof(k_mid_ops) / sizeof(k_mid_ops[0]))];
+        int a = (int)(rnd() % 170);
+        int b = (rnd() & 1) ? 0 : (int)(rnd() % 9);
+
+        memcpy(buf + 4, &op, 4);
+        memcpy(buf + 8, &a, 4);
+        memcpy(buf + 12, &b, 4);
+    } else if (type == PACKET_COOP_SUBINST_CTRL && size >= 8 && (rnd() & 1)) {
+        int op = (rnd() & 1) ? COOP_SUBINST_OP_ABORT : (rnd() & 1) ? COOP_SUBINST_OP_CANCEL : 1 + (int)(rnd() % 8);
+
+        if (size >= (int)sizeof(PacketCoopSubinstCtrl) && (rnd() & 1)) {
+            PacketCoopSubinstCtrl c;
+
+            size = (int)sizeof(c); /* exact: ABORT / CANCEL may pass */
+            memset(&c, 0, sizeof(c));
+            c.type = type;
+            c.op = op;
+            c.lease_id = 1u + rnd() % 1000u;
+            c.slot = (int)(rnd() % 8);
+            memcpy(buf, &c, sizeof(c));
+        } else {
+            memcpy(buf + 4, &op, 4);
+        }
+    }
     return size;
 }
 
@@ -320,10 +391,11 @@ static void phase_client(long iters)
         }
         p = (uint8_t*)malloc((size_t)size);
         memcpy(p, buf, (size_t)size);
+        g_size = size;
         dispatch(p);
         free(p);
     }
-    printf("client phase: %ld iterations\n", iters);
+    printf("client phase: %ld iterations (Middle packets / ops accepted so far: %ld)\n", iters, g_mid_valid);
 }
 
 int main(void)

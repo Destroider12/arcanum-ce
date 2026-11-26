@@ -10,6 +10,9 @@
 #include <string.h>
 
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
+#include "game/coop_rules.h"
+#include "game/coop_subinst.h"
 #define COOP_STORY_MAGIC 0x59525453u /* mirrors coop_lite.c */
 
 static int failures;
@@ -518,10 +521,165 @@ static void travel_soak(void)
     CHECK(starts > 1000 && goes > 1000);
 }
 
+/* Coop Middle M1-M7: packets 167-173 and the Middle PARTY_CTRL ops
+   (REST_ASK / REST_REFUSE, SLOT_STATUS, PAUSE, SLEEP_VOTE / STATE / APPLY);
+   SUBINST_CTRL in both directions, ABORT and CANCEL included. */
+static const int k_mid_types[] = { PACKET_COOP_RULES, PACKET_COOP_PING, PACKET_COOP_TOWNMAP_FOG,
+    PACKET_COOP_OVERWORLD_TRAVEL, PACKET_COOP_SUBINST_CTRL, PACKET_COOP_SUBINST_CHUNK, PACKET_COOP_SUBINST_DELTA };
+static const int k_mid_ops[] = { COOP_CTRL_REST_ASK, COOP_CTRL_REST_REFUSE, COOP_CTRL_SLOT_STATUS, COOP_CTRL_PAUSE,
+    COOP_CTRL_SLEEP_VOTE, COOP_CTRL_SLEEP_STATE, COOP_CTRL_SLEEP_APPLY };
+
+static void fuzz_middle_one(int type, int size)
+{
+    uint8_t* p = fuzz_buf(type, size);
+    int min = (int)coop_lite_coop_packet_min_size(type);
+
+    if (size >= 4 && type == PACKET_COOP_SUBINST_CTRL && size >= 8 && (rnd() & 1)) {
+        int op = (rnd() & 1) ? COOP_SUBINST_OP_ABORT : (rnd() & 1) ? COOP_SUBINST_OP_CANCEL : (int)(rnd() % 10);
+
+        memcpy(p + 4, &op, 4);
+    }
+    if (size >= min && size >= 4) {
+        switch (type) {
+        case PACKET_COOP_RULES:
+            (void)coop_rules_packet_valid((const PacketCoopRules*)p, size);
+            break;
+        case PACKET_COOP_PING:
+            (void)coop_middle_ping_valid((const PacketCoopPing*)p, size);
+            break;
+        case PACKET_COOP_TOWNMAP_FOG:
+            (void)coop_middle_townmap_fog_valid((const PacketCoopTownmapFog*)p, size);
+            break;
+        case PACKET_COOP_OVERWORLD_TRAVEL:
+            (void)coop_middle_overworld_pkt_valid((const PacketCoopOverworldTravel*)p, size, true);
+            (void)coop_middle_overworld_pkt_valid((const PacketCoopOverworldTravel*)p, size, false);
+            break;
+        case PACKET_COOP_SUBINST_CTRL:
+            (void)coop_subinst_ctrl_valid((const PacketCoopSubinstCtrl*)p, size, true);
+            (void)coop_subinst_ctrl_valid((const PacketCoopSubinstCtrl*)p, size, false);
+            break;
+        case PACKET_COOP_SUBINST_CHUNK:
+            (void)coop_subinst_chunk_valid((const PacketCoopSubinstChunk*)p, size);
+            break;
+        case PACKET_COOP_SUBINST_DELTA:
+            (void)coop_subinst_delta_valid((const PacketCoopSubinstDelta*)p, size);
+            break;
+        default:
+            break;
+        }
+    }
+    free(p);
+}
+
+static void fuzz_middle(void)
+{
+    static const int sizes[] = { 0, 3, 4, 8, 15, 16, 17, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x3C, 0x40, 0x44, 64, 100,
+        1000, 1024 + 0x18, 1025 + 0x18, 2048, 4096 };
+    PacketCoopSubinstCtrl c;
+    PacketCoopPartyCtrl pc;
+    CoopSubinstRx rx;
+    int it;
+    int abort_ok = 0;
+    int cancel_ok = 0;
+
+    for (it = 0; it < 120000; it++) {
+        int type = k_mid_types[rnd() % (sizeof(k_mid_types) / sizeof(k_mid_types[0]))];
+        int size = (it & 1) ? sizes[rnd() % (sizeof(sizes) / sizeof(sizes[0]))] : (int)(rnd() % 2200);
+        uint8_t* p;
+
+        fuzz_middle_one(type, size);
+        /* PARTY_CTRL with every Middle op, random a / b / size */
+        {
+            int raw = (it & 3) == 0 ? (int)(rnd() % 24) : (int)sizeof(PacketCoopPartyCtrl);
+
+            p = fuzz_buf(PACKET_COOP_PARTY_CTRL, raw);
+            if (raw >= (int)sizeof(PacketCoopPartyCtrl)) {
+                int op = k_mid_ops[rnd() % (sizeof(k_mid_ops) / sizeof(k_mid_ops[0]))];
+
+                memcpy(p + 4, &op, 4);
+                (void)coop_lite_party_ctrl_valid((const PacketCoopPartyCtrl*)p, raw);
+            }
+            free(p);
+        }
+        memset(&pc, 0, sizeof(pc));
+        pc.type = PACKET_COOP_PARTY_CTRL;
+        pc.op = k_mid_ops[rnd() % (sizeof(k_mid_ops) / sizeof(k_mid_ops[0]))];
+        pc.a = (rnd() & 3) == 0 ? (int)rnd() : (int)(rnd() % 200) - 2;
+        pc.b = (rnd() & 1) ? 0 : (rnd() & 1) ? (int)(rnd() % 0x10000) : (int)rnd();
+        p = (uint8_t*)malloc(sizeof(pc));
+        memcpy(p, &pc, sizeof(pc));
+        (void)coop_lite_party_ctrl_valid((const PacketCoopPartyCtrl*)p, (int)(rnd() % (sizeof(pc) + 4)));
+        if (coop_lite_party_ctrl_valid((const PacketCoopPartyCtrl*)p, (int)sizeof(pc)) && pc.op == COOP_CTRL_SLEEP_APPLY) {
+            CHECK(pc.a >= 1 && pc.a <= COOP_SLEEP_APPLY_MAX_HOURS && pc.b == 0);
+        }
+        free(p);
+    }
+
+    /* SUBINST_CTRL ABORT / CANCEL in both directions: ABORT is a host op,
+       CANCEL the client's; the other direction is always refused. */
+    for (it = 0; it < 20000; it++) {
+        bool from_host = (it & 1) != 0;
+        bool ok;
+
+        memset(&c, 0, sizeof(c));
+        c.type = PACKET_COOP_SUBINST_CTRL;
+        c.op = (it & 2) ? COOP_SUBINST_OP_ABORT : COOP_SUBINST_OP_CANCEL;
+        c.lease_id = (rnd() & 7) == 0 ? (uint32_t)rnd() : 1u + rnd() % COOP_SUBINST_MAX_LEASE_ID;
+        c.flags = (rnd() & 7) == 0 ? (int)(rnd() & 0xFF) : 0;
+        c.slot = (int)(rnd() % 10) - 1;
+        c.reason = (int)(rnd() % 6);
+        ok = coop_subinst_ctrl_valid(&c, (int)sizeof(c), from_host);
+        if (c.op == COOP_SUBINST_OP_ABORT) {
+            CHECK(!ok || from_host);
+            abort_ok += ok ? 1 : 0;
+        } else {
+            CHECK(!ok || !from_host);
+            CHECK(!ok || (c.lease_id != 0 && c.flags == 0));
+            cancel_ok += ok ? 1 : 0;
+        }
+        CHECK(!coop_subinst_ctrl_valid(&c, (int)sizeof(c) - 1, from_host));
+    }
+    CHECK(abort_ok > 1000 && cancel_ok > 1000);
+
+    /* chunk reassembly with random chunks (heap, exact sizes) */
+    memset(&rx, 0, sizeof(rx));
+    for (it = 0; it < 4000; it++) {
+        int chunks = 1 + (int)(rnd() % 6);
+        size_t total = (size_t)(1 + rnd() % ((unsigned)chunks * COOP_SUBINST_CHUNK));
+        int k;
+
+        if (!coop_subinst_rx_begin(&rx, 7u, (rnd() & 7) == 0 ? (int)(rnd() % 9) : coop_subinst_chunk_count(total),
+                total, COOP_SUBINST_MAX_WIRE)) {
+            continue;
+        }
+        for (k = 0; k < 8; k++) {
+            int len = (rnd() & 3) == 0 ? (int)(rnd() % (COOP_SUBINST_CHUNK + 4)) - 2 : COOP_SUBINST_CHUNK;
+            uint8_t* d = (uint8_t*)malloc(len > 0 ? (size_t)len : 1);
+            int r;
+
+            memset(d, (int)k, len > 0 ? (size_t)len : 1);
+            r = coop_subinst_rx_accept(&rx, (rnd() & 7) == 0 ? 8u : 7u, (rnd() & 3) == 0 ? (int)(rnd() % 8) : k,
+                rx.chunks, len, d);
+            free(d);
+            if (r != COOP_SUBINST_RX_MORE) {
+                break;
+            }
+        }
+        coop_subinst_rx_free(&rx);
+    }
+    coop_subinst_rx_free(&rx);
+}
+
 int main(void)
 {
+    const char* seed = getenv("COOP_FUZZ8_SEED"); /* M7 soak: vary the stream */
+
+    if (seed != NULL && strtoul(seed, NULL, 10) != 0) {
+        rng = (uint32_t)strtoul(seed, NULL, 10);
+    }
     fuzz_validators();
     fuzz_rx();
+    fuzz_middle();
     notice_texts();
     eight_players();
     oid_hash_set();
