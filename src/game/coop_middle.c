@@ -232,6 +232,18 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
     case COOP_MID_CHAT_QUEST:
         snprintf(out, sz, ru ? "[Квест] %s передан из рюкзака %s" : "[Quest] %s handed over from %s", what, who);
         break;
+    case COOP_MID_CHAT_SUBINST: {
+        const char* map = strchr(what, '|');
+
+        map = map != NULL && map[1] != '\0' ? map + 1 : (ru ? "локацию" : "a location");
+        if (what[0] == '1') {
+            snprintf(out, sz, ru ? "[Кооп] %s вошёл в %s (отдельная локация)." : "[Co-op] %s entered %s (solo instance).",
+                who, map);
+        } else {
+            snprintf(out, sz, ru ? "[Кооп] %s вышел из %s." : "[Co-op] %s left %s.", who, map);
+        }
+        break;
+    }
     default:
         out[0] = '\0';
         break;
@@ -320,6 +332,12 @@ uint8_t coop_middle_status_get(uint32_t packed, int slot)
 bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* tag, uint8_t* r, uint8_t* g,
     uint8_t* b)
 {
+    return coop_middle_status_badge_ex(dead, unconscious, false, bits, tag, r, g, b);
+}
+
+bool coop_middle_status_badge_ex(bool dead, bool unconscious, bool solo_instance, uint8_t bits, char* tag, uint8_t* r,
+    uint8_t* g, uint8_t* b)
+{
     char c;
     uint8_t cr;
     uint8_t cg;
@@ -329,6 +347,8 @@ bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* t
         c = 'X', cr = 220, cg = 60, cb = 60;
     } else if (unconscious) {
         c = 'Z', cr = 180, cg = 130, cb = 230;
+    } else if (solo_instance) {
+        c = 'M', cr = 120, cg = 160, cb = 255; /* M6: in a solo instance */
     } else if ((bits & COOP_STATUS_POISON) != 0) {
         c = 'P', cr = 90, cg = 220, cb = 90;
     } else if ((bits & COOP_STATUS_DIALOG) != 0) {
@@ -1036,6 +1056,7 @@ const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int l
 #include "game/timeevent.h"
 #include "ui/wmap_rnd.h"
 #include "game/combat.h"
+#include "game/coop_subinst.h"
 #include "game/critter.h"
 #include "game/gsound.h"
 #include "game/item.h"
@@ -1303,6 +1324,13 @@ static void coop_mid_sys_line(int kind, int slot, const char* who, const char* w
             }
         }
         tig_net_local_suspend_resume(depth);
+    }
+}
+
+void coop_middle_sys_line_all(int kind, int slot, const char* who, const char* what)
+{
+    if (coop_mid_session_host()) {
+        coop_mid_sys_line(kind, slot, who, what, -1, -1);
     }
 }
 
@@ -3800,15 +3828,34 @@ int coop_middle_world_markers(CoopWorldMarker* out, int max)
     int slot;
     int local;
 
-    if (out == NULL || max <= 0 || !coop_owt_rule()) {
+    if (out == NULL || max <= 0 || !tig_net_is_coop_enabled()) {
         return 0;
     }
     local = tig_net_is_host() ? 0 : sub_529520();
+    /* M6: a player in a solo instance entered from the world map stays
+       marked at the entrance. */
+    for (slot = 1; slot < 8 && n < max; slot++) {
+        int entry_map = 0;
+        int64_t entry_loc = 0;
+
+        if (slot != local && coop_subinst_slot_entry(slot, &entry_map, &entry_loc) && entry_loc != 0
+            && entry_map == map_by_type(MAP_TYPE_START_MAP)) {
+            out[n].slot = slot;
+            out[n].world_x = (int)(LOCATION_GET_X(entry_loc) >> 6);
+            out[n].world_y = (int)(LOCATION_GET_Y(entry_loc) >> 6);
+            out[n].moving = false;
+            out[n].encounter = false;
+            n++;
+        }
+    }
+    if (!coop_owt_rule()) {
+        return n;
+    }
     for (slot = 0; slot < 8 && n < max; slot++) {
         CoopOwtMarker* m = &coop_owt_mark[slot];
         bool enc;
 
-        if (slot == local || !m->valid) {
+        if (slot == local || !m->valid || coop_subinst_slot_inside(slot)) {
             continue;
         }
         enc = m->enc_ms != 0 && (unsigned int)(coop_mid_now_ms - m->enc_ms) < COOP_OWT_ENCOUNTER_MARK_MS;
@@ -3827,7 +3874,7 @@ int coop_middle_world_markers(CoopWorldMarker* out, int max)
 
 unsigned int coop_middle_world_markers_serial(void)
 {
-    return coop_owt_serial;
+    return coop_owt_serial + coop_subinst_serial() * 7919u; /* M6: entrance markers too */
 }
 
 static void coop_owt_reset(bool unhide)
@@ -4262,10 +4309,12 @@ void coop_middle_session_reset(void)
     coop_sleep_reset_all();
     coop_sleep_executing = false;
     coop_im_margin_logged = -1;
+    coop_subinst_session_reset(); /* M6 */
 }
 
 void coop_middle_slot_gone(int slot)
 {
+    coop_subinst_slot_gone(slot); /* M6: checkpoint kept, lease freed */
     if (slot > 0 && slot < 8) {
         /* M5: a traveller that left comes back on the map; no sleep wait for it. */
         if (coop_mid_session_host() && coop_owt[slot].active) {
@@ -4302,6 +4351,7 @@ void coop_middle_slot_gone(int slot)
 
 void coop_middle_map_changed(void)
 {
+    coop_subinst_map_changed(); /* M6 */
     coop_rest_end(COOP_REST_REFUSE_CANCELLED, "map change");
     memset(coop_mid_stash, 0, sizeof(coop_mid_stash)); /* containers of the old map */
     /* M3: a new map (travel or a save load) starts unpaused, no old pings. */
@@ -4351,6 +4401,7 @@ void coop_middle_tick(unsigned int now_ms)
         coop_status_client_tick(now_ms);
     }
     coop_fog_tick(now_ms); /* M4, both sides */
+    coop_subinst_tick(now_ms); /* M6 */
     if (!coop_mid_session_host()) {
         return;
     }

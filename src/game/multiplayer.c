@@ -9,6 +9,7 @@
 #include "game/combat.h"
 #include "game/coop_lite.h"
 #include "game/coop_middle.h"
+#include "game/coop_subinst.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/effect.h"
@@ -1234,6 +1235,15 @@ void multiplayer_handle_message(void* msg)
     case PACKET_COOP_OVERWORLD_TRAVEL: /* Coop Middle M5 */
         coop_middle_handle_overworld((PacketCoopOverworldTravel*)msg);
         break;
+    case PACKET_COOP_SUBINST_CTRL: /* Coop Middle M6 */
+        coop_subinst_handle_ctrl((PacketCoopSubinstCtrl*)msg);
+        break;
+    case PACKET_COOP_SUBINST_CHUNK:
+        coop_subinst_handle_chunk((PacketCoopSubinstChunk*)msg);
+        break;
+    case PACKET_COOP_SUBINST_DELTA:
+        coop_subinst_handle_delta((PacketCoopSubinstDelta*)msg);
+        break;
     case PACKET_COOP_DIALOG_STATE:
         coop_lite_handle_dialog_state((PacketCoopDialogState*)msg);
         break;
@@ -1381,6 +1391,33 @@ bool multiplayer_validate_message(void* msg)
     /* Direction: clients can't inject host state; hosts don't take orders. */
     if (!coop_lite_packet_allowed(type, tig_net_is_host(), sub_52A530())) {
         tig_debug_printf("MP: drop type %d from slot %d (wrong direction)\n", type, sub_52A530());
+        return false;
+    }
+    /* Coop Middle M6: whole-packet checks, and a client inside a solo
+       instance only takes chat / time / pause / its own lease traffic. */
+    switch (type) {
+    case PACKET_COOP_SUBINST_CTRL:
+        if (!coop_subinst_ctrl_valid((const PacketCoopSubinstCtrl*)msg, size, !tig_net_is_host())) {
+            tig_debug_printf("MP: drop SUBINST_CTRL from slot %d (invalid)\n", sub_52A530());
+            return false;
+        }
+        break;
+    case PACKET_COOP_SUBINST_CHUNK:
+        if (!coop_subinst_chunk_valid((const PacketCoopSubinstChunk*)msg, size)) {
+            tig_debug_printf("MP: drop SUBINST_CHUNK from slot %d (invalid)\n", sub_52A530());
+            return false;
+        }
+        break;
+    case PACKET_COOP_SUBINST_DELTA:
+        if (!coop_subinst_delta_valid((const PacketCoopSubinstDelta*)msg, size)) {
+            tig_debug_printf("MP: drop SUBINST_DELTA from slot %d (invalid)\n", sub_52A530());
+            return false;
+        }
+        break;
+    default:
+        break;
+    }
+    if (!coop_subinst_packet_filter(type, msg)) {
         return false;
     }
     return true;
@@ -2890,6 +2927,12 @@ int sub_4A5460(int64_t a1)
 // 0x4A5490
 void multiplayer_ping(tig_timestamp_t timestamp)
 {
+    if (coop_subinst_client_active()) {
+        /* Coop Middle M6: inside a solo instance the client runs the map
+           itself; only the lease traffic / chat / time are pumped. */
+        coop_subinst_ping((unsigned int)timestamp);
+        return;
+    }
     tig_net_pump();
     coop_lite_ping((unsigned int)timestamp);
 }

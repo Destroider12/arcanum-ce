@@ -78,7 +78,8 @@ extern "C" {
 #define COOP_MID_CHAT_CMD_REFUSE 7 /* M3: name = "", text = "reason seconds" (COOP_TP_REFUSE_*) */
 #define COOP_MID_CHAT_PAUSE_DROP 8 /* M3: name = the pauser who left, text = "-" */
 #define COOP_MID_CHAT_QUEST 9 /* M4: name = owner, text = item */
-#define COOP_MID_CHAT_KIND_MAX 9
+#define COOP_MID_CHAT_SUBINST 10 /* M6: name = player, text = "1|map" entered / "0|map" left a solo instance */
+#define COOP_MID_CHAT_KIND_MAX 10
 
 /* M3 chat commands (pure parse; the host runs them, never relayed). */
 #define COOP_CMD_NONE 0
@@ -196,6 +197,9 @@ uint8_t coop_middle_status_get(uint32_t packed, int slot);
    P poisoned, D dialog, I inventory, C combat. tag gets 2 chars. */
 bool coop_middle_status_badge(bool dead, bool unconscious, uint8_t bits, char* tag, uint8_t* r, uint8_t* g,
     uint8_t* b);
+/* M6: the same with M (in a solo instance) between Z and P. */
+bool coop_middle_status_badge_ex(bool dead, bool unconscious, bool solo_instance, uint8_t bits, char* tag, uint8_t* r,
+    uint8_t* g, uint8_t* b);
 
 /* M2 Alt loot labels (screen rects, priority order: index 0 first). */
 #define COOP_LABELS_MAX 32
@@ -433,6 +437,8 @@ void coop_middle_tick(unsigned int now_ms);
 void coop_middle_host_slot_synced(int slot); /* after SESSION_SYNC (join, rejoin) */
 void coop_middle_slot_gone(int slot);
 void coop_middle_map_changed(void);
+/* M6: a host system chat line (COOP_MID_CHAT_*) to everyone, shown here too. */
+void coop_middle_sys_line_all(int kind, int slot, const char* who, const char* what);
 void coop_middle_handle_rules(PacketCoopRules* pkt);
 /* Consumes REST_ASK / REST_REFUSE; false for Lite ops. */
 bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt);

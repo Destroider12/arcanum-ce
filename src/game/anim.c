@@ -1,4 +1,5 @@
 #include "game/anim.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include <stdio.h>
 #include <string.h>
@@ -11393,7 +11394,8 @@ bool sub_42FF40(AnimRunInfo* run_info)
         object_flags_set(obj, OF_FLAT | OF_NO_BLOCK);
 
         if (!tig_net_is_active()) {
-            if (player_is_local_pc_obj(obj)) {
+            /* Coop Middle M6: a death in a solo instance is no game over. */
+            if (player_is_local_pc_obj(obj) && !coop_subinst_client_death()) {
                 ui_end_death();
             }
         }

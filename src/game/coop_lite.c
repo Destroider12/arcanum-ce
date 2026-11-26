@@ -1,5 +1,6 @@
 #include "game/coop_lite.h"
 #include "game/coop_middle.h" /* Coop Middle hooks */
+#include "game/coop_subinst.h" /* Coop Middle M6: solo instances */
 
 #ifndef COOP_LITE_TEST_STUBS
 #include "game/area.h" /* PT78 */
@@ -2320,7 +2321,11 @@ CoopMpPacketRole coop_lite_mp_packet_role(int type)
     case PACKET_COOP_PING: /* Coop Middle M3: client ping -> host, stamped -> all */
     case PACKET_COOP_TOWNMAP_FOG: /* Coop Middle M4: client new bits -> host, snapshot / relay -> clients */
     case PACKET_COOP_OVERWORLD_TRAVEL: /* Coop Middle M5: client start / cancel -> host, progress -> all (op-checked) */
+    case PACKET_COOP_SUBINST_CTRL: /* Coop Middle M6: grant / deny / ack -> client, commit -> host (op-checked) */
+    case PACKET_COOP_SUBINST_CHUNK: /* Coop Middle M6: map archive -> client, commit payload -> host */
         return COOP_MP_PKT_BOTH;
+    case PACKET_COOP_SUBINST_DELTA: /* Coop Middle M6: client story / XP change inside -> host */
+        return COOP_MP_PKT_HOST_RESOLVE;
     case 11: /* combat mode: client toggles own PC, host mirrors (PT12) */
     case 9: /* interrupt — host resolves client intent, peers apply */
     case 100: /* UI + vitals subtype 13 */
@@ -3522,6 +3527,12 @@ size_t coop_lite_coop_packet_min_size(int type)
         return sizeof(PacketCoopPing);
     case PACKET_COOP_OVERWORLD_TRAVEL: /* Coop Middle M5 */
         return sizeof(PacketCoopOverworldTravel);
+    case PACKET_COOP_SUBINST_CTRL: /* Coop Middle M6 */
+        return sizeof(PacketCoopSubinstCtrl);
+    case PACKET_COOP_SUBINST_CHUNK: /* Coop Middle M6: header + data_len bytes */
+        return COOP_SUBINST_CHUNK_HDR + 1;
+    case PACKET_COOP_SUBINST_DELTA: /* Coop Middle M6 */
+        return sizeof(PacketCoopSubinstDelta);
     case PACKET_COOP_TOWNMAP_FOG: /* Coop Middle M4: header + len bytes */
         return COOP_TOWNMAP_FOG_HDR + 1;
     case PACKET_COOP_HOTBAR:
@@ -7219,6 +7230,10 @@ int coop_lite_party_carry_list(int64_t mover, int64_t* objs, int max)
         /* Coop Middle M5: a party move lands every world map trip first
            (the PCs are carried as they are). */
         coop_middle_owt_abort_all("party travels");
+#ifndef COOP_LITE_TEST_STUBS
+        /* M6: solo instances end; their PCs come back and travel too. */
+        coop_subinst_host_abort_all("party travels");
+#endif
         mover_slot = 0;
     } else {
         if (!coop_follow_carry_pending) {
@@ -21221,6 +21236,9 @@ bool coop_lite_client_travel_intercept(const TeleportData* td)
 {
     unsigned int now;
 
+    if (td != NULL && coop_client_tp_auth == 0 && coop_subinst_client_travel(td)) {
+        return true; /* Coop Middle M6: leaving a solo instance = commit */
+    }
     if (td == NULL || coop_client_tp_auth > 0 || !tig_net_is_coop_enabled() || !tig_net_is_active()
         || tig_net_is_host() || !coop_lite_client_in_session || !player_is_local_pc_obj(td->obj)
         || td->map <= 0 || !map_is_valid() || td->map == map_current_map()) {
@@ -21374,7 +21392,7 @@ bool coop_lite_host_remote_travel_intercept(const TeleportData* td)
     if (slot <= 0 || slot >= 8) {
         return false;
     }
-    if (!coop_travel_active) {
+    if (!coop_travel_active && !coop_subinst_host_travel(slot, td->map, td->loc)) { /* M6: solo instance? */
         coop_treq_host_ask(slot, td->map, td->loc, "host-side transition");
     }
     return true; /* never alone */
@@ -21390,6 +21408,9 @@ void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
 
         if (pkt->kind != COOP_TREQ_ASK || slot <= 0 || slot >= 8) {
             return;
+        }
+        if (coop_subinst_host_travel(slot, pkt->map, pkt->loc)) {
+            return; /* Coop Middle M6: a solo instance (granted or denied) */
         }
         coop_treq_host_ask(slot, pkt->map, pkt->loc, "client packet");
         return;
@@ -23257,6 +23278,14 @@ static void coop_chat_net_send(const char* text, bool present_local, bool bubble
     int local_slot;
     unsigned int now;
 
+    if (coop_subinst_client_active() && tig_net_is_locally_suspended()) {
+        /* Coop Middle M6: chat still reaches the party from a solo instance. */
+        int depth = tig_net_local_suspend_pause();
+
+        coop_chat_net_send(text, present_local, bubble_local);
+        tig_net_local_suspend_resume(depth);
+        return;
+    }
     if (!coop_lite_chat_prepare(text, clean, sizeof(clean))) {
         return;
     }
@@ -23525,6 +23554,241 @@ void coop_lite_lobby_tick(unsigned int now_ms)
         fprintf(f, "%d\t%s\t%s\t1\n", slot, name, role);
     }
     fclose(f);
+}
+
+/* ---- Coop Middle M6: thin helpers for coop_subinst.c (solo instances) ---- */
+
+bool coop_lite_build_pc_bundle(int64_t pc, CoopCharBundleBuf* out)
+{
+    if (pc == OBJ_HANDLE_NULL || out == NULL) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    return coop_lite_build_char_bundle(pc, out);
+}
+
+/* Client: our PC to map / loc through the co-op teleport gate (the solo
+   instance enter path; the caller holds the local suspend). */
+bool coop_lite_client_subinst_teleport(int map, int64_t loc)
+{
+    TeleportData td;
+    int64_t pc = player_get_local_pc_obj();
+
+    if (pc == OBJ_HANDLE_NULL || map <= 0 || loc == 0) {
+        return false;
+    }
+    if (wmap_ui_is_spectating()) {
+        wmap_ui_spectate_close();
+    }
+    if (coop_travel_close_hook != NULL) {
+        coop_travel_close_hook();
+    }
+    coop_lite_client_clear_stuck_flags(pc, "solo instance");
+    coop_lite_inv_list_repair(pc);
+    memset(&td, 0, sizeof(td));
+    td.flags = TELEPORT_RENDER_LOCK;
+    td.obj = pc;
+    td.map = map;
+    td.loc = loc;
+    return coop_lite_auth_teleport(&td);
+}
+
+/* Host: a SESSION_SYNC for a slot whose PC we already hold (back from a
+   solo instance, or after an aborted one). The client reloads our map and
+   asks for its inventory as we have it. */
+bool coop_lite_host_resync_slot(int slot)
+{
+    PacketCoopSessionSync sync;
+    ObjectID host_oid;
+    ObjectID client_oid;
+    int64_t host_pc;
+    int64_t pc;
+
+    if (slot <= 0 || slot >= 8 || !tig_net_is_host() || !map_is_valid() || !tig_net_client_is_active(slot)) {
+        return false;
+    }
+    host_pc = coop_lite_host_pc_obj();
+    pc = sub_4A2B60(slot);
+    if (host_pc == OBJ_HANDLE_NULL || pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return false;
+    }
+    coop_lite_keep_sector(slot, obj_field_int64_get(pc, OBJ_F_LOCATION));
+    coop_last_pc_pos_valid[slot] = false;
+    coop_last_pc_pos_valid[0] = false;
+    coop_client_applied_valid[slot] = false;
+    coop_lite_pose_order_bump(&coop_pose_rx[slot]);
+    coop_pose_force_active[slot] = false;
+
+    host_oid = obj_get_id(host_pc);
+    client_oid = obj_get_id(pc);
+    memset(&sync, 0, sizeof(sync));
+    sync.type = PACKET_COOP_SESSION_SYNC;
+    sync.map_gen = coop_map_gen;
+    sync.pose_epoch = coop_pose_rx[slot].epoch;
+    sync.flags = 0;
+    sync.map = map_current_map();
+    sync.host_loc = obj_field_int64_get(host_pc, OBJ_F_LOCATION);
+    sync.client_loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    memcpy(sync.host_pc_oid, &host_oid, sizeof(host_oid));
+    memcpy(sync.client_pc_oid, &client_oid, sizeof(client_oid));
+    sync.client_slot = slot;
+    sync.client_proto = sub_49B290(pc);
+    if (!coop_lite_proto_is_pc(sync.client_proto)) {
+        sync.client_proto = BP_GENERIC_PC;
+    }
+    sync.host_proto = sub_49B290(host_pc);
+    if (!coop_lite_proto_is_pc(sync.host_proto)) {
+        sync.host_proto = BP_GENERIC_PC;
+    }
+    coop_lite_copy_pc_name(pc, sync.client_name, sizeof(sync.client_name));
+    coop_lite_copy_pc_name(host_pc, sync.host_name, sizeof(sync.host_name));
+    tig_net_send_app(&sync, sizeof(sync), slot);
+    coop_lite_host_area_send_slot(slot);
+    coop_middle_host_slot_synced(slot);
+    coop_layout_seq_applied[slot] = 0;
+    coop_lite_host_vitals_force();
+    coop_lite_host_announce_roster(slot);
+    tig_debug_printf("CoopLite: M6 SESSION_SYNC resent to slot %d (map %d)\n", slot, sync.map);
+    return true;
+}
+
+static bool coop_lite_oid_in_blobs(const CoopBundleBlobs* b, ObjectID oid)
+{
+    int i;
+
+    for (i = 1; i < b->n; i++) {
+        ObjectID x;
+
+        memcpy(&x, b->blob[i] + COOP_BLOB_OID_AT, sizeof(x));
+        if (objid_is_equal(x, oid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Host: the solo instance commit for a PC we hold - the bundle's items
+   replace the pack (items gone inside are destroyed here, new ones are
+   read in with their OIDs; items on both sides keep our copy, gold / ammo
+   take the client's quantity), then the vitals. All blobs are checked
+   before anything changes; false = nothing changed. */
+bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundle_len, const CoopSubinstQty* qty,
+    int qty_n, int hp_damage, int fatigue_damage)
+{
+    CoopBundleBlobs blobs;
+    ObjectID pc_oid;
+    ObjectID x;
+    int64_t have[COOP_CHAR_MAX_ITEMS];
+    int have_n;
+    int count = 0;
+    int type;
+    int i;
+    int added = 0;
+    int removed = 0;
+
+    if (pc == OBJ_HANDLE_NULL || !tig_net_is_host() || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
+        return false;
+    }
+    memset(&blobs, 0, sizeof(blobs));
+    if (bundle != NULL && bundle_len > 0) {
+        if (!coop_char_bundle_parse(bundle, bundle_len, coop_lite_bundle_collect, &blobs, &count, NULL, NULL)
+            || blobs.n < 1 || blobs.n != count) {
+            tig_debug_printf("CoopLite: M6 reconcile: bundle layout refused\n");
+            return false;
+        }
+        pc_oid = obj_get_id(pc);
+        memcpy(&x, blobs.blob[0] + COOP_BLOB_OID_AT, sizeof(x));
+        memcpy(&type, blobs.blob[0] + COOP_BLOB_TYPE_AT, sizeof(type));
+        if (type != OBJ_TYPE_PC || !objid_is_equal(x, pc_oid)) {
+            tig_debug_printf("CoopLite: M6 reconcile: bundle is not this PC\n");
+            return false;
+        }
+        for (i = 1; i < blobs.n; i++) {
+            ObjectID proto_oid;
+
+            memcpy(&type, blobs.blob[i] + COOP_BLOB_TYPE_AT, sizeof(type));
+            memcpy(&proto_oid, blobs.blob[i] + COOP_BLOB_PROTO_AT, sizeof(proto_oid));
+            if (type < OBJ_TYPE_WEAPON || type > OBJ_TYPE_GENERIC || obj_pool_perm_lookup(proto_oid) == OBJ_HANDLE_NULL
+                || !coop_lite_obj_blob_bounded(blobs.blob[i], (int)blobs.size[i])) {
+                tig_debug_printf("CoopLite: M6 reconcile: item blob %d refused\n", i);
+                return false;
+            }
+        }
+
+        tig_net_local_suspend_begin();
+        /* Our items the client no longer carries (used, dropped, sold, given inside). */
+        have_n = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
+        if (have_n > COOP_CHAR_MAX_ITEMS) {
+            have_n = COOP_CHAR_MAX_ITEMS;
+        }
+        for (i = 0; i < have_n; i++) {
+            have[i] = obj_arrayfield_handle_get(pc, OBJ_F_CRITTER_INVENTORY_LIST_IDX, i);
+        }
+        for (i = 0; i < have_n; i++) {
+            if (have[i] != OBJ_HANDLE_NULL && !coop_lite_oid_in_blobs(&blobs, obj_get_id(have[i]))) {
+                item_remove(have[i]);
+                object_destroy(have[i]);
+                removed++;
+            }
+        }
+        /* New items (found inside): read with their OIDs, into the pack. */
+        for (i = 1; i < blobs.n; i++) {
+            int64_t item = OBJ_HANDLE_NULL;
+            int loc;
+            int free_loc = -1;
+            int slots[960];
+
+            memcpy(&x, blobs.blob[i] + COOP_BLOB_OID_AT, sizeof(x));
+            if (x.type == OID_TYPE_NULL || obj_pool_perm_lookup(x) != OBJ_HANDLE_NULL) {
+                continue; /* ours already (or taken: never alias another object) */
+            }
+            if (!obj_read_mem((uint8_t*)blobs.blob[i], &item) || item == OBJ_HANDLE_NULL) {
+                tig_debug_printf("CoopLite: M6 reconcile: item blob %d not read\n", i);
+                continue;
+            }
+            obj_load_postprocess(item);
+            loc = obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION);
+            if (item_check_insert(item, pc, &free_loc) != ITEM_CANNOT_OK) {
+                free_loc = -1;
+            }
+            if (IS_WEAR_INV_LOC(loc)) {
+                if (item_wield_get(pc, loc) != OBJ_HANDLE_NULL && free_loc != -1) {
+                    loc = free_loc;
+                }
+            } else {
+                item_inventory_slots_get(pc, slots);
+                if (!item_inventory_slots_has_room_for(item, pc, loc, slots) && free_loc != -1) {
+                    loc = free_loc;
+                }
+            }
+            item_insert(item, pc, loc);
+            added++;
+        }
+        tig_net_local_suspend_end();
+    }
+    for (i = 0; qty != NULL && i < qty_n; i++) {
+        int64_t item;
+        int64_t parent = OBJ_HANDLE_NULL;
+
+        memcpy(&x, qty[i].oid, sizeof(x));
+        item = obj_pool_perm_lookup(x);
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != pc) {
+            continue;
+        }
+        type = obj_field_int32_get(item, OBJ_F_TYPE);
+        if (type == OBJ_TYPE_GOLD) {
+            obj_field_int32_set(item, OBJ_F_GOLD_QUANTITY, qty[i].qty);
+        } else if (type == OBJ_TYPE_AMMO) {
+            obj_field_int32_set(item, OBJ_F_AMMO_QUANTITY, qty[i].qty);
+        }
+    }
+    if (!critter_is_dead(pc)) {
+        object_hp_damage_set(pc, hp_damage);
+        critter_fatigue_damage_set(pc, fatigue_damage);
+    }
+    tig_debug_printf("CoopLite: M6 reconcile: %d item(s) in, %d out, %d quantities, hp dmg %d, fatigue dmg %d\n",
+        added, removed, qty_n, hp_damage, fatigue_damage);
+    return true;
 }
 
 #else /* COOP_LITE_TEST_STUBS */

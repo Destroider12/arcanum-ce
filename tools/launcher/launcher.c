@@ -47,6 +47,8 @@
  * shared_followers, default 1).
  * Coop Middle M5: a fourth row - Free world map ([rules] free_overworld,
  * default 1) and Unified sleep ([rules] unified_sleep, default 1).
+ * Coop Middle M6: a fifth row - Solo interiors/dungeons ([rules]
+ * solo_instances, default 1).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -110,6 +112,7 @@
 #define IDC_RULE_SFOL 139
 #define IDC_RULE_OW 140 /* Coop Middle M5 */
 #define IDC_RULE_USLEEP 141
+#define IDC_RULE_SUBINST 142 /* Coop Middle M6 */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -207,6 +210,7 @@ static void refresh(void)
     EnableWindow(item(IDC_RULE_SFOL), host);
     EnableWindow(item(IDC_RULE_OW), host);
     EnableWindow(item(IDC_RULE_USLEEP), host);
+    EnableWindow(item(IDC_RULE_SUBINST), host);
 }
 
 static void find_local_ip(void)
@@ -365,6 +369,8 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "free_overworld", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_USLEEP), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "unified_sleep", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_SUBINST), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "solo_instances", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
         rule_pct_index(k_rule_hp, RULE_HP_COUNT, GetPrivateProfileIntA("rules", "enemy_hp_pct", 100, g_ini)), 0);
     SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL,
@@ -392,7 +398,8 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_QITEMS) ? COOP_RULE_SHARED_QUEST_ITEMS : 0u)
         | (rule_checked(IDC_RULE_SFOL) ? COOP_RULE_SHARED_FOLLOWERS : 0u)
         | (rule_checked(IDC_RULE_OW) ? COOP_RULE_FREE_OVERWORLD : 0u)
-        | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u);
+        | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u)
+        | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
     coop_rules_format_env(&r, out, sz);
@@ -422,6 +429,7 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "shared_followers", rule_checked(IDC_RULE_SFOL) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "free_overworld", rule_checked(IDC_RULE_OW) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "unified_sleep", rule_checked(IDC_RULE_USLEEP) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "solo_instances", rule_checked(IDC_RULE_SUBINST) ? "1" : "0", g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT));
@@ -2243,8 +2251,10 @@ static void create_controls(void)
     /* Coop Middle M5: fourth rules row. */
     make("BUTTON", "Free world map", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 334, 130, 20, IDC_RULE_OW);
     make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 334, 120, 20, IDC_RULE_USLEEP);
+    /* Coop Middle M6: fifth rules row (the output box below got shorter). */
+    make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 356, 200, 20, IDC_RULE_SUBINST);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 358, 418, 54, IDC_CHECK_OUT);
+        12, 380, 418, 34, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
     make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 460, 100, 30, IDC_START);
     make("BUTTON", "Reconnect", WS_TABSTOP, 12, 460, 96, 30, IDC_RECONNECT);

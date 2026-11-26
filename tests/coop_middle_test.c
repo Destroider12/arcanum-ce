@@ -16,6 +16,7 @@
 #include "game/coop_lite.h"
 #include "game/coop_middle.h"
 #include "game/coop_rules.h"
+#include "game/coop_subinst.h"
 
 typedef unsigned int TeleportFlags;
 typedef struct TeleportData {
@@ -63,7 +64,8 @@ static void test_rules_default_sanitize(void)
     coop_rules_default(&r);
     CHECK(r.version == 1u);
     CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
-        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
+        | COOP_RULE_SUBINSTANCES));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved[3] == 0);
@@ -116,7 +118,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,hp=100,xp=100") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,hp=100,xp=100") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -134,13 +136,15 @@ static void test_rules_env(void)
     n = coop_rules_parse_env(&r, " gold_split = 1 ; loot_feed=0, rest_vote=on ");
     CHECK(n == 3);
     CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
-        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
+        | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
+        | COOP_RULE_SUBINSTANCES));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
     CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
         | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS
-        | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
+        | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
+        | COOP_RULE_SUBINSTANCES));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -193,7 +197,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 57);
+    CHECK(TIG_NET_PROTOCOL == 58);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -642,7 +646,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 12);
+            CHECK(coop_rules_parse_env(&back, text) == 13);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -767,7 +771,7 @@ static void test_m3_cmds(void)
     CHECK(line[0] != '\0');
     coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
     CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
-    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_QUEST);
+    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_SUBINST);
 }
 
 /* 13. M3 pings: packet, role, validity, rate limit */
@@ -778,7 +782,7 @@ static void test_m3_ping(void)
     unsigned int last = 0;
 
     CHECK(PACKET_COOP_PING == 168 && PACKET_COOP_PING < PACKET_COOP_TYPE_LIMIT);
-    CHECK(PACKET_COOP_TYPE_LIMIT == 172);
+    CHECK(PACKET_COOP_TYPE_LIMIT == 176);
     CHECK(sizeof(PacketCoopPing) == 24);
     CHECK(offsetof(PacketCoopPing, kind) == 0x0C && offsetof(PacketCoopPing, loc) == 0x10);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_PING) == sizeof(PacketCoopPing));
@@ -833,7 +837,7 @@ static void test_m3_pause(void)
     unsigned int last = 0;
     int b;
 
-    CHECK(TIG_NET_PROTOCOL == 57);
+    CHECK(TIG_NET_PROTOCOL == 58);
     CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
     memset(&c, 0, sizeof(c));
     c.type = PACKET_COOP_PARTY_CTRL;
@@ -889,7 +893,7 @@ static void test_m4_rules(void)
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 12 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 13 && coop_rules_equal(&r, &back));
     n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
     CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
     n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
@@ -1064,7 +1068,7 @@ static void test_m5_rules(void)
     r.flags &= ~(COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "ow=0") != NULL && strstr(text, "usleep=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 12 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 13 && coop_rules_equal(&r, &back));
     CHECK(coop_rules_parse_env(&r, "free_overworld=0,unified_sleep=off") == 2);
     CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP)) == 0);
     coop_rules_default(&r);
@@ -1133,7 +1137,7 @@ static void test_m5_overworld(void)
     int x;
     int y;
 
-    CHECK(TIG_NET_PROTOCOL == 57);
+    CHECK(TIG_NET_PROTOCOL == 58);
     CHECK(PACKET_COOP_OVERWORLD_TRAVEL == 170 && PACKET_COOP_TYPE_LIMIT >= 172);
     CHECK(sizeof(PacketCoopOverworldTravel) == 0x20);
     CHECK(coop_lite_mp_packet_role(PACKET_COOP_OVERWORLD_TRAVEL) == COOP_MP_PKT_BOTH);
@@ -1381,6 +1385,426 @@ static void test_m5_sleep(void)
     CHECK(!coop_middle_party_ctrl_valid(&c));
 }
 
+/* ---- M6: solo sub-instances ---- */
+
+static void test_m6_filenames(void)
+{
+    char longname[80];
+
+    CHECK(coop_subinst_filename_safe("12345.dif"));
+    CHECK(coop_subinst_filename_safe("mobile.mdy"));
+    CHECK(coop_subinst_filename_safe("MOBILE.MD"));
+    CHECK(coop_subinst_filename_safe("mobile.des"));
+    CHECK(coop_subinst_filename_safe("a-b_c.DIF"));
+    CHECK(!coop_subinst_filename_safe(NULL));
+    CHECK(!coop_subinst_filename_safe(""));
+    CHECK(!coop_subinst_filename_safe(".dif"));
+    CHECK(!coop_subinst_filename_safe("../x.dif"));
+    CHECK(!coop_subinst_filename_safe("..dif"));
+    CHECK(!coop_subinst_filename_safe("a..b.dif"));
+    CHECK(!coop_subinst_filename_safe("dir/x.dif"));
+    CHECK(!coop_subinst_filename_safe("dir\\x.dif"));
+    CHECK(!coop_subinst_filename_safe("c:x.dif"));
+    CHECK(!coop_subinst_filename_safe("x.sav"));
+    CHECK(!coop_subinst_filename_safe("x.dif.exe"));
+    CHECK(!coop_subinst_filename_safe("x y.dif"));
+    memset(longname, 'a', sizeof(longname));
+    strcpy(longname + 59, ".dif"); /* 63 chars */
+    CHECK(coop_subinst_filename_safe(longname));
+    memset(longname, 'a', sizeof(longname));
+    strcpy(longname + 60, ".dif"); /* 64 chars */
+    CHECK(!coop_subinst_filename_safe(longname));
+}
+
+static int m6_roundtrip(int nfiles)
+{
+    static uint8_t wire[COOP_SUBINST_MAX_WIRE];
+    static uint8_t raw[COOP_SUBINST_MAX_RAW];
+    static char names[COOP_SUBINST_MAX_FILES][COOP_SUBINST_NAME_MAX + 1];
+    CoopSubinstFile in[32];
+    CoopSubinstFile out[COOP_SUBINST_MAX_FILES];
+    char nbuf[32][32];
+    uint8_t data[32][300];
+    size_t wire_len = 0;
+    uint32_t map_id = 0;
+    int count = -1;
+    int i;
+    int rc;
+
+    for (i = 0; i < nfiles; i++) {
+        size_t k;
+
+        snprintf(nbuf[i], sizeof(nbuf[i]), "%d.dif", 1000 + i);
+        for (k = 0; k < sizeof(data[i]); k++) {
+            data[i][k] = (uint8_t)(i * 7 + k);
+        }
+        in[i].name = nbuf[i];
+        in[i].data = data[i];
+        in[i].len = (uint32_t)(i * 13 % 300);
+    }
+    rc = coop_subinst_pack_buf(4242u, in, nfiles, wire, sizeof(wire), &wire_len);
+    if (rc != COOP_SUBINST_OK) {
+        return 1;
+    }
+    rc = coop_subinst_unpack_buf(wire, wire_len, raw, sizeof(raw), &map_id, out, names, COOP_SUBINST_MAX_FILES,
+        &count);
+    if (rc != COOP_SUBINST_OK || map_id != 4242u || count != nfiles) {
+        return 2;
+    }
+    for (i = 0; i < nfiles; i++) {
+        if (strcmp(out[i].name, nbuf[i]) != 0 || out[i].len != in[i].len
+            || (in[i].len > 0 && memcmp(out[i].data, in[i].data, in[i].len) != 0)) {
+            return 3;
+        }
+    }
+    return 0;
+}
+
+static void test_m6_archive(void)
+{
+    static uint8_t wire[COOP_SUBINST_MAX_WIRE];
+    static uint8_t raw[COOP_SUBINST_MAX_RAW];
+    static char names[COOP_SUBINST_MAX_FILES][COOP_SUBINST_NAME_MAX + 1];
+    CoopSubinstFile out[COOP_SUBINST_MAX_FILES];
+    CoopSubinstFile in[3];
+    static const uint8_t body[] = "map differences";
+    size_t wire_len = 0;
+    uint32_t map_id = 0;
+    int count = 0;
+
+    CHECK(m6_roundtrip(0) == 0);
+    CHECK(m6_roundtrip(1) == 0);
+    CHECK(m6_roundtrip(20) == 0);
+
+    in[0].name = "mobile.md";
+    in[0].data = body;
+    in[0].len = sizeof(body);
+    in[1].name = "../evil.dif";
+    in[1].data = body;
+    in[1].len = sizeof(body);
+    CHECK(coop_subinst_pack_buf(7u, in, 2, wire, sizeof(wire), &wire_len) == COOP_SUBINST_E_NAME);
+    in[1].name = "MOBILE.md"; /* duplicate, case-insensitive */
+    CHECK(coop_subinst_pack_buf(7u, in, 2, wire, sizeof(wire), &wire_len) != COOP_SUBINST_OK
+        || coop_subinst_unpack_buf(wire, wire_len, raw, sizeof(raw), &map_id, out, names, COOP_SUBINST_MAX_FILES,
+               &count)
+            != COOP_SUBINST_OK);
+    CHECK(coop_subinst_pack_buf(7u, in, COOP_SUBINST_MAX_FILES + 1, wire, sizeof(wire), &wire_len)
+        != COOP_SUBINST_OK);
+
+    CHECK(coop_subinst_pack_buf(7u, in, 1, wire, sizeof(wire), &wire_len) == COOP_SUBINST_OK);
+    CHECK(coop_subinst_unpack_buf(wire, wire_len, raw, sizeof(raw), &map_id, out, names, COOP_SUBINST_MAX_FILES,
+              &count)
+            == COOP_SUBINST_OK
+        && map_id == 7u && count == 1 && strcmp(out[0].name, "mobile.md") == 0);
+    /* truncated */
+    CHECK(coop_subinst_unpack_buf(wire, wire_len - 1, raw, sizeof(raw), &map_id, out, names,
+              COOP_SUBINST_MAX_FILES, &count)
+        != COOP_SUBINST_OK);
+    CHECK(coop_subinst_unpack_buf(wire, 3, raw, sizeof(raw), &map_id, out, names, COOP_SUBINST_MAX_FILES, &count)
+        != COOP_SUBINST_OK);
+    /* raw size field over the limit */
+    {
+        uint8_t bad[64];
+
+        memcpy(bad, wire, wire_len < sizeof(bad) ? wire_len : sizeof(bad));
+        bad[0] = 0xFF;
+        bad[1] = 0xFF;
+        bad[2] = 0xFF;
+        bad[3] = 0x7F;
+        CHECK(coop_subinst_unpack_buf(bad, wire_len < sizeof(bad) ? wire_len : sizeof(bad), raw, sizeof(raw),
+                  &map_id, out, names, COOP_SUBINST_MAX_FILES, &count)
+            != COOP_SUBINST_OK);
+    }
+    /* trailing garbage */
+    {
+        uint8_t* big = (uint8_t*)malloc(wire_len + 4);
+
+        memcpy(big, wire, wire_len);
+        memset(big + wire_len, 0, 4);
+        CHECK(coop_subinst_unpack_buf(big, wire_len + 4, raw, sizeof(raw), &map_id, out, names,
+                  COOP_SUBINST_MAX_FILES, &count)
+            != COOP_SUBINST_OK);
+        free(big);
+    }
+    /* corrupted zlib stream / CRC */
+    {
+        uint8_t* bad = (uint8_t*)malloc(wire_len);
+        size_t i;
+        int fails = 0;
+
+        for (i = 4; i < wire_len; i++) {
+            memcpy(bad, wire, wire_len);
+            bad[i] ^= 0x5A;
+            if (coop_subinst_unpack_buf(bad, wire_len, raw, sizeof(raw), &map_id, out, names,
+                    COOP_SUBINST_MAX_FILES, &count)
+                != COOP_SUBINST_OK) {
+                fails++;
+            }
+        }
+        CHECK(fails == (int)(wire_len - 4));
+        free(bad);
+    }
+    /* raw buffer too small */
+    CHECK(coop_subinst_unpack_buf(wire, wire_len, raw, 8, &map_id, out, names, COOP_SUBINST_MAX_FILES, &count)
+        != COOP_SUBINST_OK);
+}
+
+static void test_m6_payload(void)
+{
+    uint8_t buf[512];
+    uint8_t qbuf[4 + 3 * COOP_SUBINST_QTY_ENTRY];
+    CoopSubinstSection a = { (const uint8_t*)"CMAPDATA", 8 };
+    CoopSubinstSection b = { (const uint8_t*)"BUNDLE", 6 };
+    CoopSubinstSection q = { NULL, 0 };
+    CoopSubinstSection ca;
+    CoopSubinstSection cb;
+    CoopSubinstSection cq;
+    CoopSubinstQty items[3];
+    CoopSubinstQty back[3];
+    size_t len = 0;
+    size_t qlen;
+
+    memset(items, 0, sizeof(items));
+    items[0].oid[0] = 1;
+    items[0].qty = 500;
+    items[1].oid[23] = 9;
+    items[1].qty = 0;
+    qlen = coop_subinst_qty_build(items, 2, qbuf, sizeof(qbuf));
+    CHECK(qlen == 4 + 2 * COOP_SUBINST_QTY_ENTRY);
+    CHECK(coop_subinst_qty_parse(qbuf, qlen, back, 3) == 2 && back[0].qty == 500 && back[1].oid[23] == 9);
+    CHECK(coop_subinst_qty_parse(qbuf, qlen - 1, back, 3) < 0);
+    CHECK(coop_subinst_qty_parse(qbuf, qlen, back, 1) < 0);
+    q.data = qbuf;
+    q.len = qlen;
+    CHECK(coop_subinst_payload_size(8, 6, qlen) == 12 + 8 + 6 + qlen);
+    CHECK(coop_subinst_payload_build(a, b, q, buf, sizeof(buf), &len) && len == 12 + 8 + 6 + qlen);
+    CHECK(coop_subinst_payload_split(buf, len, &ca, &cb, &cq) && ca.len == 8 && memcmp(ca.data, "CMAPDATA", 8) == 0
+        && cb.len == 6 && cq.len == qlen);
+    CHECK(!coop_subinst_payload_split(buf, len - 1, &ca, &cb, &cq));
+    CHECK(!coop_subinst_payload_build(a, b, q, buf, 10, &len));
+    b.len = 0;
+    CHECK(coop_subinst_payload_build(a, b, q, buf, sizeof(buf), &len)
+        && coop_subinst_payload_split(buf, len, &ca, &cb, &cq) && cb.len == 0);
+}
+
+static void test_m6_chunks(void)
+{
+    CoopSubinstRx rx;
+    uint8_t data[9000];
+    size_t i;
+
+    memset(&rx, 0, sizeof(rx));
+    for (i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)i;
+    }
+    CHECK(coop_subinst_chunk_count(0) == 0);
+    CHECK(coop_subinst_chunk_count(1) == 1);
+    CHECK(coop_subinst_chunk_count(4096) == 1);
+    CHECK(coop_subinst_chunk_count(4097) == 2);
+    CHECK(coop_subinst_chunk_count(COOP_SUBINST_MAX_PAYLOAD + 1) == 0);
+    CHECK(!coop_subinst_rx_begin(&rx, 0, 3, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(!coop_subinst_rx_begin(&rx, 5, 2, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(!coop_subinst_rx_begin(&rx, 5, 3, sizeof(data), 100));
+    CHECK(coop_subinst_rx_begin(&rx, 5, 3, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(coop_subinst_rx_accept(&rx, 6, 0, 3, 4096, data) == COOP_SUBINST_RX_STALE);
+    CHECK(coop_subinst_rx_accept(&rx, 5, 0, 3, 4096, data) == COOP_SUBINST_RX_MORE);
+    CHECK(coop_subinst_rx_accept(&rx, 5, 1, 3, 4096, data + 4096) == COOP_SUBINST_RX_MORE);
+    CHECK(coop_subinst_rx_accept(&rx, 5, 2, 3, 9000 - 8192, data + 8192) == COOP_SUBINST_RX_DONE);
+    CHECK(rx.total == sizeof(data) && memcmp(rx.data, data, sizeof(data)) == 0);
+    coop_subinst_rx_free(&rx);
+    /* out of order / wrong size = broken stream */
+    CHECK(coop_subinst_rx_begin(&rx, 5, 3, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(coop_subinst_rx_accept(&rx, 5, 1, 3, 4096, data) == COOP_SUBINST_RX_BAD);
+    CHECK(!rx.active && rx.data == NULL);
+    CHECK(coop_subinst_rx_begin(&rx, 5, 3, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(coop_subinst_rx_accept(&rx, 5, 0, 3, 100, data) == COOP_SUBINST_RX_BAD);
+    CHECK(coop_subinst_rx_begin(&rx, 5, 3, sizeof(data), COOP_SUBINST_MAX_WIRE));
+    CHECK(coop_subinst_rx_accept(&rx, 5, 0, 4, 4096, data) == COOP_SUBINST_RX_BAD);
+    coop_subinst_rx_free(&rx);
+}
+
+static void test_m6_lease(void)
+{
+    CoopSubinstLease leases[8];
+    int other = 0;
+
+    memset(leases, 0, sizeof(leases));
+    /* not sub-instance cases */
+    CHECK(coop_subinst_can_lease(10, 10, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_NORMAL);
+    CHECK(coop_subinst_can_lease(10, 99, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_NORMAL);
+    CHECK(coop_subinst_can_lease(10, 0, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_NORMAL);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 0, leases, false, false, &other) == COOP_SUBINST_LEASE_NORMAL);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_OK
+        && other == -1);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 1, leases, true, false, &other) == COOP_SUBINST_LEASE_DENY_STATE);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 1, leases, false, true, &other) == COOP_SUBINST_LEASE_DENY_STATE);
+    leases[2].active = true;
+    leases[2].map_id = 20;
+    leases[2].lease_id = 7;
+    CHECK(coop_subinst_lease_owner(leases, 20) == 2);
+    CHECK(coop_subinst_lease_owner(leases, 21) == -1);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_DENY_BUSY
+        && other == 2);
+    CHECK(coop_subinst_can_lease(10, 20, 99, 2, leases, false, false, &other) == COOP_SUBINST_LEASE_OK);
+    CHECK(coop_subinst_can_lease(10, 21, 99, 1, leases, false, false, &other) == COOP_SUBINST_LEASE_OK);
+}
+
+static void test_m6_state_machine(void)
+{
+    int s = COOP_SUBINST_ST_IDLE;
+
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_REQUEST);
+    CHECK(s == COOP_SUBINST_ST_REQUESTED);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_DENY) == COOP_SUBINST_ST_IDLE);
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_GRANT);
+    CHECK(s == COOP_SUBINST_ST_RECEIVING);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_ARCHIVE_BAD) == COOP_SUBINST_ST_IDLE);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_COMMIT) == -1);
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_ARCHIVE_OK);
+    CHECK(s == COOP_SUBINST_ST_ACTIVE);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_GRANT) == -1);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_ABORT) == COOP_SUBINST_ST_IDLE);
+    s = coop_subinst_client_next(s, COOP_SUBINST_EV_COMMIT);
+    CHECK(s == COOP_SUBINST_ST_COMMITTING);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_ACK) == COOP_SUBINST_ST_IDLE);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_ACK_NEXT) == COOP_SUBINST_ST_REQUESTED);
+    CHECK(coop_subinst_client_next(s, COOP_SUBINST_EV_RESET) == COOP_SUBINST_ST_IDLE);
+    CHECK(coop_subinst_client_next(COOP_SUBINST_ST_IDLE, COOP_SUBINST_EV_ACK) == -1);
+}
+
+static void test_m6_packets(void)
+{
+    PacketCoopSubinstCtrl c;
+    PacketCoopSubinstChunk k;
+    PacketCoopSubinstDelta d;
+
+    CHECK(TIG_NET_PROTOCOL == 58);
+    CHECK(PACKET_COOP_SUBINST_CTRL == 171 && PACKET_COOP_SUBINST_CHUNK == 172 && PACKET_COOP_SUBINST_DELTA == 173);
+    CHECK(PACKET_COOP_SUBINST_DELTA < PACKET_COOP_TYPE_LIMIT);
+    CHECK(sizeof(PacketCoopSubinstCtrl) == 0x40 && sizeof(PacketCoopSubinstDelta) == 0x18);
+
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_SUBINST_CTRL;
+    c.op = COOP_SUBINST_OP_LEASE_GRANT;
+    c.lease_id = 3;
+    c.map_id = 12;
+    c.total_bytes = 5000;
+    c.total_chunks = 2;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false)); /* GRANT from a client */
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c) - 1, true));
+    c.total_chunks = 3;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.total_chunks = 2;
+    c.total_bytes = COOP_SUBINST_MAX_WIRE + 1;
+    c.total_chunks = coop_subinst_chunk_count((size_t)c.total_bytes);
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.op = COOP_SUBINST_OP_COMMIT_BEGIN;
+    c.total_bytes = 5000;
+    c.total_chunks = 2;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.flags = COOP_SUBINST_F_DEAD;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    c.flags = COOP_SUBINST_F_NEXT;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    c.flags = 0x10;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    c.flags = 0;
+    c.hp_damage = -1;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    c.hp_damage = 0;
+    c.lease_id = 0;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), false));
+    memset(&c, 0, sizeof(c));
+    c.type = PACKET_COOP_SUBINST_CTRL;
+    c.op = COOP_SUBINST_OP_LEASE_DENY;
+    c.reason = COOP_SUBINST_DENY_BUSY;
+    c.slot = 2;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.reason = 9;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.op = COOP_SUBINST_OP_STATE;
+    c.slot = 0;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.slot = 3;
+    CHECK(coop_subinst_ctrl_valid(&c, sizeof(c), true));
+    c.op = 99;
+    CHECK(!coop_subinst_ctrl_valid(&c, sizeof(c), true));
+
+    memset(&k, 0, sizeof(k));
+    k.type = PACKET_COOP_SUBINST_CHUNK;
+    k.lease_id = 3;
+    k.chunk_count = 2;
+    k.chunk_idx = 1;
+    k.data_len = 10;
+    CHECK(coop_subinst_chunk_valid(&k, COOP_SUBINST_CHUNK_HDR + 10));
+    CHECK(!coop_subinst_chunk_valid(&k, COOP_SUBINST_CHUNK_HDR + 11));
+    k.chunk_idx = 2;
+    CHECK(!coop_subinst_chunk_valid(&k, COOP_SUBINST_CHUNK_HDR + 10));
+    k.chunk_idx = 0;
+    k.data_len = COOP_SUBINST_CHUNK + 1;
+    CHECK(!coop_subinst_chunk_valid(&k, COOP_SUBINST_CHUNK_HDR + COOP_SUBINST_CHUNK + 1));
+    k.data_len = 0;
+    CHECK(!coop_subinst_chunk_valid(&k, COOP_SUBINST_CHUNK_HDR));
+
+    memset(&d, 0, sizeof(d));
+    d.type = PACKET_COOP_SUBINST_DELTA;
+    d.lease_id = 3;
+    d.kind = COOP_SUBINST_DELTA_GF;
+    d.index = 5;
+    d.val = 1;
+    CHECK(coop_subinst_delta_valid(&d, sizeof(d)));
+    d.val = 2;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = COOP_SUBINST_DELTA_GV;
+    d.index = COOP_SUBINST_GV_MAX;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = COOP_SUBINST_DELTA_XP;
+    d.index = 0;
+    d.val = 150;
+    CHECK(coop_subinst_delta_valid(&d, sizeof(d)));
+    d.val = -5;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = COOP_SUBINST_DELTA_REP;
+    d.index = 4;
+    d.val = -1;
+    CHECK(coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = COOP_SUBINST_DELTA_FATE;
+    d.index = COOP_SUBINST_FATE_MAX;
+    d.val = 1;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = 0;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+    d.kind = COOP_SUBINST_DELTA_GF;
+    d.index = 1;
+    d.val = 1;
+    d.lease_id = 0;
+    CHECK(!coop_subinst_delta_valid(&d, sizeof(d)));
+}
+
+static void test_m6_ui(void)
+{
+    char tag[4];
+    char line[256];
+    uint8_t r = 0;
+    uint8_t g = 0;
+    uint8_t b = 0;
+
+    CHECK(coop_middle_status_badge_ex(false, false, true, COOP_STATUS_COMBAT, tag, &r, &g, &b) && strcmp(tag, "M") == 0
+        && r == 120 && g == 160 && b == 255);
+    CHECK(coop_middle_status_badge_ex(false, true, true, 0, tag, &r, &g, &b) && strcmp(tag, "Z") == 0);
+    CHECK(coop_middle_status_badge_ex(true, false, true, 0, tag, &r, &g, &b) && strcmp(tag, "X") == 0);
+    CHECK(coop_middle_status_badge_ex(false, false, false, 0xF, tag, &r, &g, &b) && strcmp(tag, "P") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_SUBINST, "Bob", "1|Tarant Sewers", false, line, sizeof(line));
+    CHECK(strcmp(line, "[Co-op] Bob entered Tarant Sewers (solo instance).") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_SUBINST, "Bob", "1|Tarant Sewers", true, line, sizeof(line));
+    CHECK(strcmp(line, "[Кооп] Bob вошёл в Tarant Sewers (отдельная локация).") == 0);
+    coop_middle_feed_format(COOP_MID_CHAT_SUBINST, "Bob", "0|Tarant Sewers", false, line, sizeof(line));
+    CHECK(strstr(line, "left Tarant Sewers") != NULL);
+    CHECK((COOP_RULE_DEFAULT_FLAGS & COOP_RULE_SUBINSTANCES) != 0);
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -1407,6 +1831,14 @@ int main(void)
     test_m5_overworld();
     test_m5_sleep();
     test_m5_route_teleport();
+    test_m6_filenames();
+    test_m6_archive();
+    test_m6_payload();
+    test_m6_chunks();
+    test_m6_lease();
+    test_m6_state_machine();
+    test_m6_packets();
+    test_m6_ui();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
@@ -1414,6 +1846,7 @@ int main(void)
     printf("PASS: coop_middle (rules contract, PACKET_COOP_RULES, gold split, loot feed, rest ops, "
            "trade, status badges, label deoverlap, M3 rules / scaling / commands / pings / pause, "
            "M4 rules / quest items / town map fog / dialog routing / followers, "
-           "M5 rules / interest / world map travel / unified sleep)\n");
+           "M5 rules / interest / world map travel / unified sleep, "
+           "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge)\n");
     return 0;
 }

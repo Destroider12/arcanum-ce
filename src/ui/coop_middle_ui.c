@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "game/coop_lite.h"
+#include "game/coop_subinst.h"
 #include "game/coop_middle.h"
 #include "game/critter.h"
 #include "game/gamelib.h"
@@ -175,8 +176,8 @@ static bool coop_mid_ui_badge_of(int64_t obj, char* tag, uint8_t* r, uint8_t* g,
     if (obj == OBJ_HANDLE_NULL || slot < 0) {
         return false;
     }
-    return coop_middle_status_badge(critter_is_dead(obj), !critter_is_dead(obj) && critter_fatigue_current(obj) <= 0,
-        coop_middle_slot_status(slot), tag, r, g, b);
+    return coop_middle_status_badge_ex(critter_is_dead(obj), !critter_is_dead(obj) && critter_fatigue_current(obj) <= 0,
+        coop_subinst_slot_inside(slot), coop_middle_slot_status(slot), tag, r, g, b); /* M6: M = solo instance */
 }
 
 void coop_middle_ui_draw_badge(tig_window_handle_t window_handle, int64_t obj, int width)

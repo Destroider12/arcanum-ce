@@ -67,6 +67,8 @@ set(SRCS
     "src/game/coop_middle.c"
     "src/game/coop_rules.h"
     "src/game/coop_middle.h"
+    "src/game/coop_subinst.c"
+    "src/game/coop_subinst.h"
     "src/game/coop_menu.c"
     "src/game/coop_menu_sys.c"
     "src/game/coop_lite.h"
@@ -459,12 +461,14 @@ add_executable(coop_middle_test
     "src/game/coop_lite.c"
     "src/game/coop_rules.c"
     "src/game/coop_middle.c"
+    "src/game/coop_subinst.c"
 )
 target_include_directories(coop_middle_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/first_party/tig/include"
+    ${ZLIB_INCLUDE_DIRS}
 )
-target_link_libraries(coop_middle_test PRIVATE enet)
+target_link_libraries(coop_middle_test PRIVATE enet ${ZLIB_LIBRARIES})
 target_compile_definitions(coop_middle_test PRIVATE
     TIG_NET_TEST_STUB_DEBUG=1
     COOP_LITE_TEST_STUBS=1

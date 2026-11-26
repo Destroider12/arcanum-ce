@@ -1,4 +1,5 @@
 #include "game/quest.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include "game/critter.h"
 #include "game/coop_lite.h"
@@ -28,7 +29,7 @@ typedef struct Quest {
 } Quest;
 
 static bool quest_parse(const char* path, int start, int end);
-static int quest_state_set_internal(int64_t pc_obj, int num, int state, int64_t npc_obj);
+int quest_state_set_internal(int64_t pc_obj, int num, int state, int64_t npc_obj); /* Coop Middle M6: extern */
 static int quest_logbook_entry_compare(const void* va, const void* vb);
 
 /**
@@ -475,6 +476,7 @@ int quest_state_set_internal(int64_t pc_obj, int num, int state, int64_t npc_obj
         if ((pc_quest_state.state & ~QUEST_BOTCHED_MODIFIER) != QUEST_STATE_UNKNOWN) {
             ui_toggle_primary_button(UI_PRIMARY_BUTTON_LOGBOOK, true);
         }
+        coop_subinst_note(COOP_SUBINST_DELTA_QUEST, num, state); /* Coop Middle M6 */
     }
 
     return state;

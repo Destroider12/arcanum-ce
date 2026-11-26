@@ -1,4 +1,5 @@
 #include "game/gamelib.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include "crash_handler.h"
 #include "game/coop_lite.h"
@@ -974,6 +975,9 @@ bool gamelib_save(const char* name, const char* description)
 
     tig_debug_printf("\ngamelib_save(): Saving to File: %s.\n", name);
     tig_timer_now(&start_time);
+
+    /* Coop Middle M6: solo instances send their state first (2 s max). */
+    coop_subinst_host_before_save();
 
     in_save = true;
 
