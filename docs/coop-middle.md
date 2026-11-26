@@ -9,7 +9,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Middle M2 | `coop-middle` (up to `283402e5`) | 54 |
 | Coop Middle M3 | `coop-middle` (up to `ecc31c26`) | 55 |
 | Coop Middle M4 | `coop-middle` (up to `9f60cded`) | 56 |
-| Coop Middle M5 | `coop-middle` | **57** |
+| Coop Middle M5 | `coop-middle` (up to `d0c4c597`) | 57 |
+| Coop Middle M6 | `coop-middle` | **58** |
 
 Lite and Middle builds refuse each other at the handshake. Every player needs the same build.
 
@@ -58,7 +59,7 @@ Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge 
 | `script.c` | `SCT_OBJ_HAS_ITEM_NAMED`, `SAT_TRANSFER_ITEM`, `SAT_DESTROY_ITEM_NAMED` -> the same |
 | `townmap.c` | `townmap_coop_fog()` / `townmap_coop_fog_touched()` (the known-tile bit array) |
 | **M5** | |
-| `tig_net.h/.c` | protocol 57; `tig_net_send_pose(data, size, slot)` (addressed unreliable send for NPC_POS) |
+| `tig_net.h/.c` | protocol 58; `tig_net_send_pose(data, size, slot)` (addressed unreliable send for NPC_POS) |
 | `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 172 |
 | `coop_lite.c` | NPC_POS per-slot batches (44 tiles, seen mask); DOOR_STATE / TRAP_FX / PROJECTILE_FX -> `coop_middle_send_app_near`; keep window -> `coop_middle_keep_sector_set`; role `BOTH` + min size of 170; host world-map dimming off while `ow` is active; party travel aborts world map trips; client world map click -> `coop_middle_owt_client_propose`; a transiting slot is BUSY in the ready check; bridges `coop_lite_mid_keep*` / `coop_lite_mid_center_local` |
 | `sector.c/.h` | co-op cache 128; `sector_cache_coop_stats()` |
@@ -317,6 +318,27 @@ Off = Lite behaviour. On, and only while the party is on map 1 (the world):
 - When every living player is ready: REST_BEGIN, host fade, the clock moves (morning 08:00 / evening 20:00 / fixed hours / until healed, max 168 h), all PCs and followers heal, time and vitals are synced, REST_END. Dead and disconnected players do not block.
 - **With the M1 rest vote:** while `usleep=1`, unified sleep replaces the M1 client rest request (and the Lite refusal). With `usleep=0`, the M1 rest vote (`rest=1`) and the Lite behaviour are unchanged.
 
+## M5 fixes (`d0c4c597`)
+
+- **Teleport spell sent the whole party to the edge of the world.** Vanilla MP (`MTComponentMovement`, move_location 2) put the caster on the map's starting location (the corner of map 1) and the party carry followed. Now the caster picks the place on the world map like in single player: the host opens its own pick; a client gets `COOP_OWT_SELECT` and its pick comes back as START with `F_TELEPORT` (the host checks anti-teleport, charges the spell, hops only that PC). Off map 1 the usual party travel ask is used.
+- **Client world map trips ignored the plotted route** (a straight 8-way line to the last point, over mountains and water). The client now sends its waypoints (WAYPOINT op) before START; the host plans each leg with the vanilla `wmap_path_make` (blocked terrain, bridges, passes) and steps sector by sector; an impassable route is refused (`REFUSE_BLOCKED`, vanilla text 601).
+
+## M6: solo interiors / dungeons (`COOP_RULE_SUBINSTANCES` 0x400, key `subinst`, default on)
+
+Off = the M5 behaviour (a client's map change is a party travel ask). On, when a **client** walks into another map (stairs, door, world map entrance) that is not the host's map, not map 1 and not the shop map:
+
+- **Lease.** The host checks `coop_subinst_can_lease`: one player per map (else DENY busy: "<Name> is already inside <map>. Wait or ask the host for group travel." / RU "<Name> уже находится в <map>. ..."), not in combat, alive. On GRANT the host parks the client's PC and followers on its own map (`OF_OFF | OF_INVULNERABLE`, place remembered), packs `Save\Current\maps\<map>` into a **CMAP1** archive and streams it.
+- **CMAP1** (`src/game/coop_subinst.c`, pure + unit tested): wire = u32 raw_len + zlib(level 6) of raw = header `CMAP`, u32 map_id, u32 count, u32 CRC32 of the body, then count x {u16 name_len, name, u32 len, data}. Limits: raw 2 MB, wire 512 KB, 128 files, names 1..63 chars of `[A-Za-z0-9_.-]`, no leading dot / `..` / path separators, extension `.dif` / `.mdy` / `.md` / `.des`, no duplicates (case-insensitive). The receiver validates everything (sizes, magic, CRC, names, trailing bytes, map id) before it touches a file; it never overwrites the map it has open.
+- **Packets:** 171 `PACKET_COOP_SUBINST_CTRL` (0x40, `BOTH`, op-checked: 1 GRANT, 2 DENY, 3 CHECKPOINT_REQ, 4 COMMIT_BEGIN (the only client op), 5 COMMIT_ACK, 6 ABORT, 7 STATE), 172 `PACKET_COOP_SUBINST_CHUNK` (0x18 header + 1..4096 bytes, in order, `BOTH`), 173 `PACKET_COOP_SUBINST_DELTA` (0x18, client -> host, `HOST_RESOLVE`). Type limit 176. All three have validators in `multiplayer_validate_message`.
+- **Inside** the client runs the map with local authority (`tig_net` local suspend, like single player): host world packets are dropped (chat, rules, player list, time, pause / sleep / slot status still pass), the client pumps the network itself. Story changes go to the host as deltas: global flags / vars, quest states, rumors, reputations, known areas, fates, earned XP. The host accepts them only from the slot holding that lease id.
+- **Checkpoints** every 45 s and when the host saves (`CHECKPOINT_REQ`, the save waits up to 2000 ms pumping the network): the client flushes the map (its PC, its pack and followers are kept out of the files), packs it and sends map + character bundle + gold / ammo quantities. The host writes the map files and keeps the last checkpoint for a disconnect.
+- **Leaving** (any map change of the local PC): final commit. The host writes the map, reconciles the PC (pack, gold / ammo, HP / fatigue), and: back to the host's map at the exit's spot, or (another leasable map) straight into the next solo instance (`F_NEXT`, sub -> sub), else back where the PC went in. The client is then resynced (SESSION_SYNC).
+- **Death inside:** no game over; 5 s later a commit with `F_DEAD`, the host kills the parked PC at the entrance.
+- **Disconnect:** the last checkpoint is applied, the PC is parked like any disconnected player. **Host load / map change / party travel:** every lease is aborted (ABORT, notice), the PCs come back and are resynced.
+- **UI:** badge **M** (120,160,255) between Z and P; on the world map the entrance shows the ally marker; chat "[Co-op] <Name> entered <map> (solo instance)." / "[Кооп] <Name> вошёл в <map> (отдельная локация)." and "... left <map>.".
+
+Deviations from the spec: magic is 4 bytes `CMAP` (the version is the format, not a 5th byte); `.md` and `.des` are allowed besides `.dif` / `.mdy` (the engine keeps object diffs and the destroyed list there); STATE (op 7) is an extra host -> all op for the badge / marker; a soloist's XP is not split with the party (it was earned alone); DELTA has role `HOST_RESOLVE` (client -> host); the reconcile matches items by object id and replaces the host's pack with the client's (new items read from the bundle); a dead PC is committed out to the entrance, not left inside.
+
 ## Launcher
 
 `arcanum-coop-launcher.ini`:
@@ -333,6 +355,7 @@ shared_quest_items=1
 shared_followers=1
 free_overworld=1
 unified_sleep=1
+solo_instances=1
 enemy_hp_pct=100
 xp_mult_pct=100
 ```
@@ -342,7 +365,8 @@ Host mode shows four rows (disabled in Join mode):
 - **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
 - M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200);
 - M4: **Shared quest items**, **Shared followers**;
-- M5: **Free world map**, **Unified sleep**.
+- M5: **Free world map**, **Unified sleep**;
+- M6: **Solo interiors/dungeons** (`solo_instances=1`).
 
 An odd ini value lands on the nearest step below it. At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
 
@@ -461,6 +485,7 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 20. M5 rules: bits 0x100 / 0x200, on by default, `ow` / `usleep` always in the string, ini aliases, describe EN/RU.
 21. M5 interest: `coop_middle_keep_sector_margin` (<= 4 remote or >= 36 free -> 3x3, else margin 32), `coop_middle_keep_ids` (3x3, 2x2 corners at offsets 31 / 32, no negative sectors, max), `coop_middle_loc_within`, radii per packet type on / off map 1, NPC_POS force on range entry.
 22. M5 world map travel: id 170, limit >= 172, size 0x20, role `BOTH`, min size, `coop_middle_overworld_pkt_valid` (ops, direction, flags, slot, size), `coop_middle_owt_advance`, `TIG_NET_PROTOCOL == 57`.
+23. M6 solo instances: `coop_subinst_filename_safe`; CMAP1 pack / unpack round trip for 0 / 1 / 20 files; traversal, duplicate and too many names refused; truncated, oversized raw length, trailing bytes, every flipped byte (zlib / CRC) refused; payload build / split, quantity table; chunk reassembly (order, size, lease id); `coop_subinst_can_lease` (normal / busy / state / own lease); client state machine; validators for 171 / 172 / 173 (direction, sizes, flags, ranges); badge M priority and colour; chat kind 10 EN / RU; rule default on; `TIG_NET_PROTOCOL == 58`.
 23. M5 sleep: `coop_middle_sleep_step` for 1..8 players (solo, wait, execute, mode kept, initiator hand-over, dead player not blocking, cleared, refusals), `coop_middle_sleep_minutes` across midnight, `coop_middle_sleep_mode_from_ui`, banner text EN/RU, `SLEEP_VOTE` / `SLEEP_STATE` validity.
 
 ## Not done / risks (M1)
@@ -502,8 +527,18 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
 - Distances are Chebyshev (tile squares), not the engine's path distance.
-- A client trip is a straight 8-way line over world sectors (not the vanilla road route); an encounter roll uses the vanilla `wmap_rnd_check` at the trip's sector (its level / table quirks come from the host PC). The landing spot of a stopped trip is the nearest known area, else the sector centre.
+- (fixed in `d0c4c597`: client trips follow the plotted vanilla route.) An encounter roll uses the vanilla `wmap_rnd_check` at the trip's sector (its level / table quirks come from the host PC). The landing spot of a stopped trip is the nearest known area, else the sector centre.
 - Markers are drawn in the WORLD view only (not on the continent view). "Clicking" a marker is the normal route click on that spot.
 - ARRIVED is broadcast to all (others un-hide the traveller). Closing the world map during a trip stops it.
 - Morning is 08:00 as the spec says (vanilla uses 07:00). Unified sleep always heals (the vanilla "wait" choice is not separate). Execution is synchronous on the host with a fade.
 - Doors and eye-candy removals outside map 1 are not filtered; on map 1 a door changed far away reaches a slot through the radius WORLD_REQ when it enters the sector.
+
+## Not done / risks (M6)
+
+- **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests (CMAP1, payload, chunks, leases, client states, packet validators, badge, chat line).
+- The commit flush hides the PC, its pack and followers by marking them destroyed during `map_flush` and restores `mobile.des` afterwards; an engine path that reacts to these flags during the flush would break it.
+- Reconcile trusts the client's bundle for its own PC's pack (bounded, PC id checked) - fine for friends, not for strangers.
+- Things done inside that are not deltas (e.g. NPC states on other maps changed by scripts, faction / blessing / curse changes, time passing) stay local to the client and are lost on commit. Time inside does not move the host's clock.
+- A map over the limits (2 MB raw / 512 KB compressed) falls back to the normal party travel ask (DENY "too big" notice).
+- The save wait pumps only the network (no frames) for up to 2 s; a slow client misses that save's checkpoint (the previous one is used).
+- Followers that walked in with the client are parked with the PC on the host map and come back with it; followers recruited inside stay in the client's map files only.

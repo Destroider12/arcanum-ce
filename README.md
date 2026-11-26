@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 57`** on this branch (`coop-middle`, Coop Middle M5; M1 was 53, M2 54, M3 55, M4 56); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 58`** on this branch (`coop-middle`, Coop Middle M6; M1 was 53, M2 54, M3 55, M4 56, M5 57); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -127,7 +127,7 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 57)
+## Coop Middle (branch `coop-middle`, protocol 58)
 
 Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
@@ -164,6 +164,12 @@ Stage **M5 (open world)**:
 - **Interest management**: each player gets NPC updates only within 44 tiles; on the world map, doors, traps, projectiles, sounds and spell effects only reach players nearby. Larger sector cache (128).
 - **Free world map** (on): on the world map each player travels on their own; the clock does not run while travelling. Allies show as coloured markers; an ambush shows a red marker for 15 s.
 - **Unified sleep** (on): picking a rest is a vote; the others press Y to join or N to cancel. When everyone alive is ready, the whole party sleeps and heals together.
+
+M5 fixes: the Teleport spell no longer throws the party to the edge of the world (the place is picked on the world map, as in single player); a client's world map trip follows the plotted route instead of a straight line over mountains and sea.
+
+Stage **M6 (solo instances)**:
+
+- **Solo interiors/dungeons** (on, `subinst`): a client can enter another map alone. The host hands it that map (a CMAP1 archive), the client plays it locally, and story changes, XP and items go back to the host (checkpoints every 45 s and before a host save, a final commit on exit). One player per map; a busy map says "<Name> is already inside <map>. Wait or ask the host for group travel.". Badge **M** on the portrait, an entrance marker on the world map, a chat line.
 
 Not tested in play yet. Details, keys and log lines are in [docs/coop-middle.md](docs/coop-middle.md).
 
