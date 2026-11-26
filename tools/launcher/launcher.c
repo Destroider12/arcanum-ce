@@ -45,8 +45,9 @@
  * Coop Middle M4: a third row - Shared quest items ([rules]
  * shared_quest_items, default 1) and Shared followers ([rules]
  * shared_followers, default 1).
- * Coop Middle M5: a fourth row - Free world map ([rules] free_overworld,
- * default 1) and Unified sleep ([rules] unified_sleep, default 1).
+ * Coop Middle M5: a fourth row - Unified sleep ([rules] unified_sleep,
+ * default 1). The free world map has no box since 2026-11-27: always on
+ * (ow=1) unless Coop Lite mode.
  * Coop Middle M6: a fifth row - Solo interiors/dungeons ([rules]
  * solo_instances, default 1).
  * Coop Middle M7: Auto-save Off / 5 / 10 / 15 / 30 min ([rules]
@@ -113,7 +114,7 @@
 #define IDC_RULE_XP 137
 #define IDC_RULE_QITEMS 138 /* Coop Middle M4 */
 #define IDC_RULE_SFOL 139
-#define IDC_RULE_OW 140 /* Coop Middle M5 */
+/* 140 was IDC_RULE_OW: the free world map is always on unless Coop Lite mode (2026-11-27) */
 #define IDC_RULE_USLEEP 141
 #define IDC_RULE_SUBINST 142 /* Coop Middle M6 */
 #define IDC_RULE_ASAVE 143 /* Coop Middle M7 */
@@ -226,7 +227,6 @@ static void rules_enable(bool host)
     EnableWindow(item(IDC_RULE_XP), mid);
     EnableWindow(item(IDC_RULE_QITEMS), mid);
     EnableWindow(item(IDC_RULE_SFOL), mid);
-    EnableWindow(item(IDC_RULE_OW), mid);
     EnableWindow(item(IDC_RULE_USLEEP), mid);
     EnableWindow(item(IDC_RULE_SUBINST), mid);
     EnableWindow(item(IDC_RULE_ASAVE), host);
@@ -387,8 +387,6 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "shared_quest_items", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_SFOL), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "shared_followers", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageA(item(IDC_RULE_OW), BM_SETCHECK,
-        GetPrivateProfileIntA("rules", "free_overworld", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_USLEEP), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "unified_sleep", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_SUBINST), BM_SETCHECK,
@@ -423,7 +421,7 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_NOFF) ? COOP_RULE_NO_FRIENDLY_FIRE_AOE : 0u)
         | (rule_checked(IDC_RULE_QITEMS) ? COOP_RULE_SHARED_QUEST_ITEMS : 0u)
         | (rule_checked(IDC_RULE_SFOL) ? COOP_RULE_SHARED_FOLLOWERS : 0u)
-        | (rule_checked(IDC_RULE_OW) ? COOP_RULE_FREE_OVERWORLD : 0u)
+        | COOP_RULE_FREE_OVERWORLD /* always on; Coop Lite mode turns it off */
         | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u)
         | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u)
         | (rule_checked(IDC_RULE_LITE) ? COOP_RULE_LITE_MODE : 0u);
@@ -455,7 +453,6 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "no_ff_aoe", rule_checked(IDC_RULE_NOFF) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "shared_quest_items", rule_checked(IDC_RULE_QITEMS) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "shared_followers", rule_checked(IDC_RULE_SFOL) ? "1" : "0", g_ini);
-    WritePrivateProfileStringA("rules", "free_overworld", rule_checked(IDC_RULE_OW) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "unified_sleep", rule_checked(IDC_RULE_USLEEP) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "solo_instances", rule_checked(IDC_RULE_SUBINST) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "lite_mode", rule_checked(IDC_RULE_LITE) ? "1" : "0", g_ini);
@@ -2348,8 +2345,7 @@ static void create_controls(void)
     make("BUTTON", "Shared quest items", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 312, 130, 20, IDC_RULE_QITEMS);
     make("BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 312, 120, 20, IDC_RULE_SFOL);
     /* Coop Middle M5: fourth rules row. */
-    make("BUTTON", "Free world map", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 334, 130, 20, IDC_RULE_OW);
-    make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 334, 120, 20, IDC_RULE_USLEEP);
+    make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 334, 130, 20, IDC_RULE_USLEEP);
     /* Coop Middle M6: fifth rules row (the output box below got shorter). */
     make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 356, 200, 20, IDC_RULE_SUBINST);
     /* Coop Middle M7: host autosave interval, same row. */

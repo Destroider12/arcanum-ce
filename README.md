@@ -81,7 +81,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 ### Launcher (`arcanum-coop-launcher.exe`)
 
 - Name, Host/Join, transport **Direct + UPnP** or **Steam**, port (default 7777) or host address / SteamID64, Windowed mode.
-- **Rules (host, Coop Middle):** Split gold / Loot feed / Rest vote / Direct trade / Client pause / No friendly fire / Shared quest items / Shared followers / Free world map / Unified sleep checkboxes and Enemy HP % / XP % lists, saved in `[rules]` of `arcanum-coop-launcher.ini` and passed to the game as `ARCANUM_COOP_RULES`.
+- **Rules (host, Coop Middle):** Split gold / Loot feed / Rest vote / Direct trade / Client pause / No friendly fire / Shared quest items / Shared followers / Unified sleep checkboxes (the free world map is always on unless **Coop Lite mode**) and Enemy HP % / XP % lists, saved in `[rules]` of `arcanum-coop-launcher.ini` and passed to the game as `ARCANUM_COOP_RULES`.
 - **Lobby pane** while the game runs: connected players and a chat mirror with Send.
 - Shows your local IP and, through UPnP, your public IP, with a **Copy** button.
 - **Port check:** local bind, STUN (public IP and port mapping), UPnP mapping test, CGNAT detection, Windows firewall rule check, and an optional "Add firewall rule" (runs elevated, only when you click it).
@@ -162,7 +162,7 @@ Stage **M4 (shared party)**:
 Stage **M5 (open world)**:
 
 - **Interest management**: each player gets NPC updates only within 44 tiles; on the world map, doors, traps, projectiles, sounds and spell effects only reach players nearby. Larger sector cache (128).
-- **Free world map** (on): on the world map each player travels on their own; the clock does not run while travelling. Allies show as coloured markers; an ambush shows a red marker for 15 s.
+- **Free world map** (always on unless Coop Lite mode; no launcher box): on the world map each player travels on their own; the clock does not run while travelling. Allies show as coloured markers; an ambush shows a red marker for 15 s.
 - **Unified sleep** (on): picking a rest is a vote; the others press Y to join or N to cancel. When everyone alive is ready, the whole party sleeps and heals together.
 
 M5 fixes: the Teleport spell no longer throws the party to the edge of the world (the place is picked on the world map, as in single player); a client's world map trip follows the plotted route instead of a straight line over mountains and sea.

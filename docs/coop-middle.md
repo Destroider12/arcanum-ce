@@ -41,7 +41,7 @@ The host's launcher builds `ARCANUM_COOP_RULES` (e.g. `gold=0,loot=1,rest=1,trad
 | `ff` (`no_ff_aoe`, old `noffaoe`) | the party never damages the party | on | No friendly fire (`no_ff_aoe`) | M3 |
 | `qitems` (`shared_quest_items`) | quest item checks also see nearby players' packs | on | Shared quest items (`shared_quest_items`) | M4 |
 | `sfol` (`shared_followers`) | any player manages / barters with any follower | on | Shared followers (`shared_followers`) | M4 |
-| `ow` (`free_overworld`) | everyone travels the world map alone, no clock jump | on | Free world map (`free_overworld`) | M5 |
+| `ow` (`free_overworld`) | everyone travels the world map alone, no clock jump. Since 2026-11-27 always on unless `lite=1` (`coop_rules_effective`; `ow=0` is still parsed but ignored) | on | none (the box was removed; old `free_overworld` in the ini is ignored) | M5 |
 | `usleep` (`unified_sleep`) | sleep needs every living player ready | on | Unified sleep (`unified_sleep`) | M5 |
 | `subinst` (`solo_instances`, old `subinstances`) | a client may enter an interior / dungeon alone | on | Solo interiors/dungeons (`solo_instances`) | M6 |
 | `hp` (`enemy_hp_pct`) | enemy HP %, 100..300 | 100 | HP % combo (`enemy_hp_pct`) | M3 |
@@ -332,9 +332,9 @@ typedef struct PacketCoopPing {
 - NPC_POS: each slot gets its own batch (`tig_net_send_pose`) with only NPCs within 44 tiles of its PC (Chebyshev, all maps). A per-NPC seen mask sends the state at once to a slot that enters range; a state change resets the mask.
 - On map 1 only: DOOR_STATE to slots within 96 tiles; TRAP_FX, PROJECTILE_FX, sounds (106) and eye-candy adds (77) within 56 tiles of the source / target. Other maps and vanilla MP: broadcast as before. Eye-candy removals stay broadcast (no stuck particles).
 
-### M5: free world map (`COOP_RULE_FREE_OVERWORLD`, key `ow`, default on)
+### M5: free world map (`COOP_RULE_FREE_OVERWORLD`, key `ow`, always on unless Coop Lite mode)
 
-Off = Lite behaviour. On, and only while the party is on map 1 (the world):
+Off (only in Coop Lite mode now) = Lite behaviour. On, and only while the party is on map 1 (the world):
 
 - World map travel does not move the clock and gives no travel healing; speed stays vanilla.
 - The host's world map does not dim clients and does not open the PT73 spectator. The host's own hop (arrival, stop or random encounter) moves only its PC and followers (no FOLLOW_HOST, no carry). Fixed after M7 (t391u): `teleport_process` still ran `coop_lite_after_party_carry` on a solo hop, which put every client PC next to the host, so a host encounter pulled the clients in; it now runs only for party travel.
@@ -394,7 +394,6 @@ client_pause=0
 no_ff_aoe=1
 shared_quest_items=1
 shared_followers=1
-free_overworld=1
 unified_sleep=1
 solo_instances=1
 enemy_hp_pct=100
@@ -407,7 +406,7 @@ Host mode shows five rows (disabled in Join mode):
 - **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
 - M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200);
 - M4: **Shared quest items**, **Shared followers**;
-- M5: **Free world map**, **Unified sleep**;
+- M5: **Unified sleep** (the **Free world map** box was removed on 2026-11-27: always on unless Coop Lite mode);
 - M6: **Solo interiors/dungeons** (`solo_instances=1`);
 - M7: **Auto-save** Off / 5 / 10 / 15 / 30 min (`autosave_min=10`), and the lobby rules line from `lobby_rules.txt`.
 

@@ -1816,6 +1816,14 @@ static void test_lite_mode(void)
     e = r;
     coop_rules_effective(&e);
     CHECK(coop_rules_equal(&r, &e)); /* lite=0: the rules as set */
+    /* 2026-11-27: no ow box - the free world map is always on in Middle */
+    coop_rules_parse_env(&r, "ow=0");
+    CHECK((r.flags & COOP_RULE_FREE_OVERWORLD) == 0); /* still parsed */
+    coop_rules_effective(&r);
+    CHECK((r.flags & COOP_RULE_FREE_OVERWORLD) != 0);
+    coop_rules_parse_env(&r, "ow=0,lite=1");
+    coop_rules_effective(&r);
+    CHECK((r.flags & COOP_RULE_FREE_OVERWORLD) == 0);
 
     /* lite=1 with everything on: the Coop Lite 1.0 set */
     CHECK(coop_rules_parse_env(&r, "gold=1,loot=1,rest=1,trade=1,pause=1,ff=1,qitems=1,sfol=1,ow=1,usleep=1,"

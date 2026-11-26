@@ -107,7 +107,8 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz);
 bool coop_rules_equal(const CoopRules* a, const CoopRules* b);
 /* The rules the game plays by: sanitized, and with COOP_RULE_LITE_MODE the
    Coop Lite 1.0 set (flags & COOP_RULE_LITE_KEEP_MASK, hp 100, xp 100; the
-   autosave interval is kept). Idempotent. The host applies it before it
+   autosave interval is kept); without it the free world map is always on
+   (ow=0 is still parsed, but ignored). Idempotent. The host applies it before it
    uses or sends its rules, a client to what it receives. */
 void coop_rules_effective(CoopRules* r);
 bool coop_rules_is_lite(const CoopRules* r);

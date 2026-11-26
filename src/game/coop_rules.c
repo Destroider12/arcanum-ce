@@ -298,6 +298,10 @@ void coop_rules_effective(CoopRules* r)
         r->flags &= COOP_RULE_LITE_KEEP_MASK;
         r->enemy_hp_pct = 100;
         r->xp_mult_pct = 100;
+    } else {
+        /* 2026-11-27: the free world map is always on in Middle (no
+           launcher box any more; an old ow=0 is ignored). */
+        r->flags |= COOP_RULE_FREE_OVERWORLD;
     }
 }
 
