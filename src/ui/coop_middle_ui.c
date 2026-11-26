@@ -20,6 +20,7 @@
 #include "game/multiplayer.h"
 #include "game/obj.h"
 #include "game/obj_flags.h"
+#include "game/obj_pool.h"
 #include "game/object_node.h"
 #include "game/object.h"
 #include "game/player.h"
@@ -1304,11 +1305,15 @@ static void coop_mid_ui_trade_watch(void)
     if (partner == OBJ_HANDLE_NULL || !inven_ui_is_created()) {
         return;
     }
-    if (coop_subinst_client_active()) {
+    /* review: a partner that left (or a reloaded PC) is a stale handle -
+       nothing may read it; close cleanly. */
+    if (pc == OBJ_HANDLE_NULL || !obj_handle_is_valid(pc) || !obj_handle_is_valid(partner)) {
+        why = "partner / PC gone";
+    } else if (coop_subinst_client_active()) {
         why = "solo instance";
     } else if (coop_middle_owt_local_active()) {
         why = "overworld travel";
-    } else if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || critter_is_dead(partner)) {
+    } else if (critter_is_dead(pc) || critter_is_dead(partner)) {
         why = "death";
     } else if (combat_critter_is_combat_mode_active(pc) || combat_critter_is_combat_mode_active(partner)
         || combat_turn_based_is_active()) {
