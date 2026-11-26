@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 58`** on this branch (`coop-middle`, Coop Middle M6; M1 was 53, M2 54, M3 55, M4 56, M5 57); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 59`** on this branch (`coop-middle`, Coop Middle M7; M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -127,7 +127,7 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 58)
+## Coop Middle (branch `coop-middle`, protocol 59)
 
 Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
@@ -171,7 +171,16 @@ Stage **M6 (solo instances)**:
 
 - **Solo interiors/dungeons** (on, `subinst`): a client can enter another map alone. The host hands it that map (a CMAP1 archive), the client plays it locally, and story changes, XP and items go back to the host (checkpoints every 45 s and before a host save, a final commit on exit). One player per map; a busy map says "<Name> is already inside <map>. Wait or ask the host for group travel.". Badge **M** on the portrait, an entrance marker on the world map, a chat line.
 
-Not tested in play yet. Details, keys and log lines are in [docs/coop-middle.md](docs/coop-middle.md).
+Stage **M7 (final polish)**:
+
+- **Fallen teammates**: `[Party] <Name> collapsed from exhaustion!` in chat; a teammate who is dead (red **X**) or unconscious (lilac **Z**) off screen gets an arrow plate at the screen edge with the distance in tiles; a dead teammate is a red square on the town map.
+- **Host autosave** (`asave`, launcher **Auto-save** Off / 5 / 10 / 15 / 30 min, default 10): the host saves the world into `[Host] AutoSave 1`..`5` (Slot9690-9694, round robin) at a safe moment (no pause, combat, dialog, world map, travel or solo-instance commit; retried every 15 s). Manual saves and client slots are never touched. `[AutoSave] World saved (AutoSave N).`
+- **Solo instances join the party's sleep**: they vote, and after a unified sleep they heal inside too. The pause also freezes world map trips, checkpoints and the autosave clock; an open trade window closes by itself when the partner travels, enters an instance, fights, dies or walks away.
+- The launcher lobby shows the session rules under the player list.
+
+Hotkeys: Alt (loot labels), F9 (net HUD), Pause (shared pause), MMB / Alt+RMB (ping), Ctrl+LMB on a teammate or RMB on a portrait (trade), Y / N (rest / sleep). Chat: `/tp`, `/stuck`, `/gather`.
+
+Not tested in play yet. Details, all `ARCANUM_COOP_RULES` keys and log lines are in [docs/coop-middle.md](docs/coop-middle.md).
 
 ## Installing and playing
 

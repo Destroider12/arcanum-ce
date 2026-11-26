@@ -1,6 +1,6 @@
-# Coop Middle
+# Coop Middle (release notes M1-M7)
 
-Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit).
+Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit). M7 is the final Middle stage.
 
 | Line | Branch | Protocol (`TIG_NET_PROTOCOL`) |
 | --- | --- | --- |
@@ -10,101 +10,114 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Middle M3 | `coop-middle` (up to `ecc31c26`) | 55 |
 | Coop Middle M4 | `coop-middle` (up to `9f60cded`) | 56 |
 | Coop Middle M5 | `coop-middle` (up to `d0c4c597`) | 57 |
-| Coop Middle M6 | `coop-middle` | **58** |
+| Coop Middle M6 | `coop-middle` (up to `2bd38e3b`) | 58 |
+| Coop Middle M7 | `coop-middle` | **59** |
 
-Lite and Middle builds refuse each other at the handshake. Every player needs the same build.
+Lite and Middle builds (and different Middle stages) refuse each other at the handshake. Every player needs the same build. Single player (no `-coop`) is unchanged: every Middle entry point returns at once outside a co-op session.
 
-## Architecture rule
+## Stages at a glance
 
-All Middle code lives in new files:
-
-- `src/game/coop_rules.h/.c`: the session rules contract (pure C, also linked into the launcher and the tests).
-- `src/game/coop_middle.h/.c`: the M1/M2 mechanics. Pure helpers come first (headless tests). The game side is compiled out under `COOP_LITE_TEST_STUBS`.
-- `src/ui/coop_middle_ui.h/.c` (M2): trade entry points, portrait badges, Alt loot labels, F9 net HUD; M3: pause banner, pings, the world mouse hook.
-
-Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge into `coop-middle` without conflicts:
-
-| File | Hook |
+| Stage | What it adds |
 | --- | --- |
-| `coop_lite.c` | session reset, SESSION_SYNC sent (rules to the slot), slot gone, map opened, ping tick, party ctrl valid/handle, client chat (system lines), player drop mark, item op 28 (client pickup / container take), packet role + size of `PACKET_COOP_RULES`, a small bridge (notice, Y/N panel, chat line); `coop_lite_host_sync_slot_inven` and `coop_lite_container_is_store` are no longer `static` |
-| `anim.c` | `sub_42AA70` ground pickup: take begin / done |
-| `inven_ui.c` | `sub_578EA0` inventory transfer (host loot, client loot via Packet81): take begin / done |
-| `sleep_ui.c` | client rest button / bed -> rest request; `sleep_ui_coop_rest()` presses "Until Healed" / "8 Hours" for the host |
-| `intgame.c` | Y / N keys -> `coop_middle_rest_key()` |
-| `multiplayer.c` | dispatch of `PACKET_COOP_RULES` |
-| `tig_net.h` | protocol 54; M2: `TigNetHudStats` / `tig_net_get_hud_stats()` |
-| **M2** | |
-| `coop_lite.c` | `coop_lite_target_transfer_ok` default case -> `coop_middle_trade_transfer_ok`; `coop_lite_target_still_ok` (TRADE sessions use Middle's partner rule) in the session watch and the target transfer; `COOP_BARTER_OPEN_TRADE` branch in `coop_lite_handle_barter`; gift branch: no "You succeed" notice for TRADE + `coop_middle_trade_given` |
-| `inven_ui.c` | client open sends `coop_middle_trade_barter_kind()`; host give `coop_middle_host_trade_give()`; take from the partner `coop_middle_trade_refuse_take()` |
-| `intgame.c` | Ctrl+LMB on an object -> `coop_middle_ui_trade_try()`; F9 -> `coop_middle_ui_hud_toggle()` |
-| `follower_ui.c` | RMB on a teammate portrait -> `coop_middle_ui_trade_try()`; badge draw after each teammate portrait |
-| `coop_chat_ui.c` | overlay draw / scroll also call `coop_middle_ui_draw()` / `coop_middle_ui_on_scroll()` (one overlay hook in gamelib) |
-| `gameuilib.c` | module `CoopMiddle-UI` (init / reset / exit / resize) |
-| `tig_net.c`, `tig_net_transport.h`, `tig_net_enet.c`, `tig_net_steam.c` | HUD stats: last app packet per slot, optional `peer_stats` (ENet RTT / loss; Steam NULL) |
-| **M3** | |
-| `tig_net.h` | protocol 55 |
-| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 169 |
-| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_PING`; `coop_lite_host_share_xp` -> `coop_middle_host_scale_xp`; chat relay / own send -> `coop_middle_try_chat_command`; bridge `coop_lite_mid_move_pc` |
-| `multiplayer.c` | dispatch of `PACKET_COOP_PING` |
-| `timeevent.c` | `timeevent_ping`: no game / anim time while `coop_middle_is_paused()` |
-| `combat.c` | `combat_dmg`: `coop_middle_host_ff_block` (start), `coop_middle_host_enemy_damage` (after the bonuses) |
-| `intgame.c` | `intgame_process_event` start -> `coop_middle_ui_world_event` (ping, paused clicks); Pause key -> `coop_middle_pause_key`; spell hotkey refused while paused |
-| `wmap_ui.c` | town map draws live pings (blinking cross); `wmap_ui_coop_town_refresh()` |
-| **M4** | |
-| `tig_net.h` | protocol 56 |
-| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 170; `PacketCoopNpcStats` + skills (0x120); new dialog-session API |
-| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_TOWNMAP_FOG`; NPC stats fill / apply of skills; `coop_lite_barter_partner_ok` / `coop_lite_follower_exchange` -> `coop_middle_shared_follower_ok`; Packet81 and `INVEN_LAYOUT` accept moves inside a follower's pack; the PT36/PT41 dialog block now keeps 8 sessions (see below); map opened ends all client dialogs |
-| `multiplayer.c` | dispatch of `PACKET_COOP_TOWNMAP_FOG` |
-| `dialog.c` | conditions `in` / `ni` and action `in` -> `coop_middle_find_party_item` (+ `coop_middle_quest_handed_over`) |
-| `script.c` | `SCT_OBJ_HAS_ITEM_NAMED`, `SAT_TRANSFER_ITEM`, `SAT_DESTROY_ITEM_NAMED` -> the same |
-| `townmap.c` | `townmap_coop_fog()` / `townmap_coop_fog_touched()` (the known-tile bit array) |
-| **M5** | |
-| `tig_net.h/.c` | protocol 58; `tig_net_send_pose(data, size, slot)` (addressed unreliable send for NPC_POS) |
-| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 172 |
-| `coop_lite.c` | NPC_POS per-slot batches (44 tiles, seen mask); DOOR_STATE / TRAP_FX / PROJECTILE_FX -> `coop_middle_send_app_near`; keep window -> `coop_middle_keep_sector_set`; role `BOTH` + min size of 170; host world-map dimming off while `ow` is active; party travel aborts world map trips; client world map click -> `coop_middle_owt_client_propose`; a transiting slot is BUSY in the ready check; bridges `coop_lite_mid_keep*` / `coop_lite_mid_center_local` |
-| `sector.c/.h` | co-op cache 128; `sector_cache_coop_stats()` |
-| `teleport.c` | host's own hop on map 1 with `ow`: carries no other PCs, no FOLLOW_HOST |
-| `multiplayer.c` | dispatch of `PACKET_COOP_OVERWORLD_TRAVEL` |
-| `mp_utils.c` / `magictech.c` | sound (106) and eye-candy add (77) -> `coop_middle_send_app_near` |
-| `wmap_ui.c/.h` | frozen clock + own encounter rolls on map 1; client close -> CANCEL; ally markers (WORLD view); `wmap_ui_coop_marker_set` / `_local_sector` / `_refresh` |
-| `wmap_rnd.c/.h` | `wmap_rnd_coop_check(loc)` |
-| `sleep_ui.c` / `intgame.c` | rest choice -> `coop_middle_sleep_choose`; Y / N -> `coop_middle_sleep_key` |
-| `dialog_ui.c` | `sub_567420` returns a client PC's own entry on the host; party checks by slot; the choose hook gets the slot; a client's dialog never cuts the host's voice line |
-| `inven_ui.c` | follower (free) barter mode also for a shared follower |
-| `coop_middle_ui.c` | Ctrl+LMB on a teammate's follower opens the follower exchange |
+| M1 | Session rules from the host (`CoopRules`, `PACKET_COOP_RULES` 167), gold split, `[Loot]` feed, client rest request (Y / N on the host) |
+| M2 | Direct trade between players, status badges on teammate portraits, Alt-hold loot labels, F9 net HUD |
+| M3 | Shared tactical pause, enemy HP % / XP % / no friendly fire, map pings (168), `/tp` `/stuck` `/gather` |
+| M4 | Shared quest items, town map fog sync (169), parallel dialogs (8 sessions), shared followers |
+| M5 | Interest management (per-slot NPC_POS, sector keep window), free world map travel (170), unified sleep |
+| M6 | Solo interiors / dungeons: map leases, archive transfer and commit (171-173), M badge, `[Co-op]` lines |
+| M7 | Collapse notice + off-screen arrows for fallen / unconscious teammates, red dead marker on the town map, host autosave rotation, sleep inside solo instances (`SLEEP_APPLY`), pause freezes world map trips / checkpoints / autosave, trade auto-close, one full session reset, launcher Auto-save choice + lobby rules line |
 
-The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pings, pause, difficulty, quest pocket, town map fog, parallel dialogs, ...) was reverted in one commit before M1. Ideas from it come back stage by stage in the Middle files. Parallel dialogs came back as M4.
+## Session rules (`ARCANUM_COOP_RULES`)
 
-## M1: session rules (`CoopRules`, `PACKET_COOP_RULES`)
+The host's launcher builds `ARCANUM_COOP_RULES` (e.g. `gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,hp=100,xp=100,asave=10`). Keys are separated by `,` or `;`, values can be numbers or `on/off/yes/no/true/false`, unknown keys and bad values are ignored and missing keys keep their defaults. The host reads it once; clients get the sanitized rules in `PACKET_COOP_RULES` (type **167**, 32 bytes, host -> client only) right after SESSION_SYNC, show the summary in chat and write it to `lobby_rules.txt` (M7). A client goes back to the defaults on a session reset.
+
+| Key (alias) | Rule | Default | Launcher control (ini `[rules]` key) | Stage |
+| --- | --- | --- | --- | --- |
+| `gold` (`gold_split`) | split picked-up gold among living players | off | Split gold (`gold_split`) | M1 |
+| `loot` (`loot_feed`) | `[Loot]` chat lines for notable finds | on | Loot feed (`loot_feed`) | M1 |
+| `rest` (`rest_vote`) | clients may ask the host to rest | on | Rest vote (`rest_vote`) | M1 |
+| `trade` (`direct_trade`) | free give between players in a trade window | on | Direct trade (`direct_trade`) | M2 |
+| `pause` (`client_pause`) | clients may toggle the shared pause (the host always may) | off | Client pause (`client_pause`) | M3 |
+| `ff` (`no_ff_aoe`, old `noffaoe`) | the party never damages the party | on | No friendly fire (`no_ff_aoe`) | M3 |
+| `qitems` (`shared_quest_items`) | quest item checks also see nearby players' packs | on | Shared quest items (`shared_quest_items`) | M4 |
+| `sfol` (`shared_followers`) | any player manages / barters with any follower | on | Shared followers (`shared_followers`) | M4 |
+| `ow` (`free_overworld`) | everyone travels the world map alone, no clock jump | on | Free world map (`free_overworld`) | M5 |
+| `usleep` (`unified_sleep`) | sleep needs every living player ready | on | Unified sleep (`unified_sleep`) | M5 |
+| `subinst` (`solo_instances`, old `subinstances`) | a client may enter an interior / dungeon alone | on | Solo interiors/dungeons (`solo_instances`) | M6 |
+| `hp` (`enemy_hp_pct`) | enemy HP %, 100..300 | 100 | HP % combo (`enemy_hp_pct`) | M3 |
+| `xp` (`xp_mult_pct`) | XP %, 100..250 | 100 | XP % combo (`xp_mult_pct`) | M3 |
+| `asave` (`autosave_min`, `autosave`) | host autosave interval in minutes: 0 = off, else 5..60 (1 -> 5, 999 -> 60) | 10 | Auto-save combo Off / 5 / 10 / 15 / 30 min (`autosave_min`) | M7 |
 
 ```c
 typedef struct CoopRules {
-    uint32_t version;      /* 1 */
-    uint32_t flags;        /* COOP_RULE_* */
-    uint16_t enemy_hp_pct; /* 100..300, default 100 (M3, key hp) */
-    uint16_t xp_mult_pct;  /* 100..250, default 100 (M3, key xp) */
-    uint32_t reserved[4];  /* zero */
-} CoopRules;               /* 28 bytes, _Static_assert on size / alignment */
+    /* 0000 */ uint32_t version;      /* 1 */
+    /* 0004 */ uint32_t flags;        /* COOP_RULE_* */
+    /* 0008 */ uint16_t enemy_hp_pct; /* 100..300 */
+    /* 000A */ uint16_t xp_mult_pct;  /* 100..250 */
+    /* 000C */ uint16_t autosave_min; /* M7: 0 = off, 5..60 */
+    /* 000E */ uint16_t reserved16;   /* zero */
+    /* 0010 */ uint32_t reserved[3];  /* zero */
+} CoopRules;                          /* 28 bytes (unchanged since M1), _Static_assert on size / offsets */
 ```
 
-| Bit | Flag | Default | Env key (launcher ini key) |
-| --- | --- | --- | --- |
-| 0 | `COOP_RULE_GOLD_SPLIT` | off | `gold` (`gold_split`) |
-| 1 | `COOP_RULE_LOOT_FEED` | on | `loot` (`loot_feed`) |
-| 2 | `COOP_RULE_REST_VOTE` | on | `rest` (`rest_vote`) |
-| 3 | `COOP_RULE_DIRECT_TRADE` (M2) | **on** | `trade` (`direct_trade`) |
-| 4 | `COOP_RULE_CLIENT_PAUSE` (M3) | off | `pause` (`client_pause`) |
-| 5 | `COOP_RULE_NO_FRIENDLY_FIRE_AOE` (M3) | **on** | `ff` (`no_ff_aoe`; M1-M2 spelling `noffaoe` still read) |
-| 6 | `COOP_RULE_SHARED_QUEST_ITEMS` (M4) | **on** | `qitems` (`shared_quest_items`) |
-| 7 | `COOP_RULE_SHARED_FOLLOWERS` (M4) | **on** | `sfol` (`shared_followers`) |
-| - | `enemy_hp_pct` (M3) | 100 | `hp` (`enemy_hp_pct`) |
-| - | `xp_mult_pct` (M3) | 100 | `xp` (`xp_mult_pct`) |
+`coop_rules_sanitize` clamps the numbers, drops unknown flag bits, zeroes the reserved fields and fixes `version`. M7 took 2 bytes of the old `reserved[0]` for `autosave_min`, so `sizeof(CoopRules)` and the packet size stayed the same.
 
-- `coop_rules_sanitize` clamps the percentages, drops unknown flag bits (the reserved ones are kept), zeroes `reserved` and fixes `version`.
-- `ARCANUM_COOP_RULES`: `gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,hp=100,xp=100` (M3: every key is always written). Keys are separated by `,` or `;`, values can be numbers or `on/off/yes/no/true/false`, unknown keys and bad values are ignored, and missing keys keep their defaults. The host reads it once.
-- `PACKET_COOP_RULES` (type **167**, 32 bytes, host -> client only): the host sends it to a slot right after SESSION_SYNC (join and reconnect). The client checks the size and type, sanitizes the rules, keeps them for the session, shows the summary in chat, and goes back to the defaults on `coop_lite_session_reset`. A rules packet from a client is dropped by the direction table (and again in the handler).
+## Hotkeys and mouse (co-op only)
 
-## M1: gold split (`COOP_RULE_GOLD_SPLIT`, host only)
+| Input | Action | Stage |
+| --- | --- | --- |
+| hold **Alt** | loot labels for ground items, containers and corpses (22 tiles, up to 32) | M2 |
+| **F9** | net HUD line (players, RTT, loss, sync) on / off | M2 |
+| **Pause** | shared tactical pause on / off (clients only with the `pause` rule) | M3 |
+| **MMB** / **Alt+RMB** on the map | ping the tile (danger ping over a hostile NPC or a spotted trap) | M3 |
+| **Ctrl+LMB** on a teammate in the world | open the trade window (on a teammate's follower: the follower exchange) | M2 / M4 |
+| **RMB** on a teammate portrait | open the trade window | M2 |
+| **Y** / **N** | answer the rest request (host), join / leave a unified sleep round | M1 / M5 |
+
+## Chat commands
+
+| Command | Who | Effect |
+| --- | --- | --- |
+| `/tp`, `/stuck` | client | regroup to the host (alive, same map, no combat, no enemy fighting you; 30 s cooldown) |
+| `/gather`, `/tp all` | host | pull every eligible client to the host (30 s cooldown) |
+
+Commands are case-insensitive, run on the host before the chat relay and never show as chat. Refusals come back to the asker as a system line in their own language.
+
+## M7: final stage
+
+### Collapse notice and off-screen arrows
+
+- The host watches every living, connected PC (not one inside a solo instance) four times per second. When its fatigue drops to 0 or below (`critter_fatigue_current <= 0`, not dead) a system line goes to everyone, at most once per 10 s per slot (`coop_middle_collapse_step`): `[Party] <Name> collapsed from exhaustion!` / `[Партия] <Name> упал без сознания от усталости!` (chat kind 11, localized on each receiver).
+- `coop_middle_edge_indicator(sx, sy, w, h, pad, &x, &y, &octant)` (pure): a point inside `[pad..w-pad] x [pad..h-pad]` returns false; otherwise the ray from the view centre to the point is cut at the pad border, and the octant is 0 = right, 1 = up-right, 2 = up, ... 6 = down, 7 = down-right.
+- `coop_middle_ui.c` draws, for every other PC on this map that is dead or at fatigue <= 0 and off screen, a solid plate at that border point (pad 28 px): a coloured frame, a dark body, a solid arrow pointing to the teammate and `X <Name> (<tiles>)` (dead, red 220,60,60) or `Z <Name> (<tiles>)` (unconscious, lilac 180,130,230). The distance is in tiles from the local PC. Plates are pre-rendered in one off-screen buffer and blitted in the iso overlay pass after the text floaters (no windows); their rects are invalidated when they change, on scroll (old and shifted copy) and when they go away.
+- Town map (`wmap_ui.c`, town mode): a dead teammate's PT43 square is red instead of blue; the open town map repaints when a teammate dies or recovers.
+
+### Host autosave
+
+- `asave` minutes (default 10, 0 = off). The host checks once per second. `coop_middle_autosave_ready` needs: interval > 0, at least `asave` minutes since the last save (manual, client F7 or auto: every `gamelib_save` restarts the interval), the host in the world (valid map, alive, no main menu, no load / save running), no pause, no combat, no dialog (host or any client), no world / town map window, no teleport / sleep / Lite travel or load prompt / overworld trip, and no solo-instance COMMIT or checkpoint still arriving. If something blocks, it tries again in 15 s (the need stays). A pause freezes the interval.
+- The save runs in the main loop next to the PT61 client save (outside `gamelib_ping`): `gamelib_save` first sends `CHECKPOINT_REQ` to every solo-instance client and waits up to 2 s (M6), then writes `Slot9690`..`Slot9694` round robin with the descriptions `[Host] AutoSave 1`..`5`. The first slot of a session follows the newest existing autosave. Manual saves and the client slots `Slot9700`..`Slot9789` are never touched.
+- Chat to everyone: `[AutoSave] World saved (AutoSave N).` / `[Автосейв] Мир сохранён (AutoSave N).` (chat kind 12). A failed save is logged and retried in 15 s.
+- `gamelib_last_save_name` (party-wipe reload, `ARCANUM_COOP_AUTOLOAD=latest`) takes the newest save, autosaves included.
+
+### Sleep, pause and trade with solo instances
+
+- `COOP_CTRL_SLEEP_APPLY` (PARTY_CTRL op **11**, host -> client, `a` = hours 1..168, `b` = 0). After a unified sleep the host sends it to every living client that holds a solo-instance lease. That client heals its PC and followers (`critter_resting_heal`) with local authority under a fade, and takes the host's new game time packet (both pass the solo-instance packet filter).
+- A solo-instance client now counts in the sleep consensus: it uses the host's rules inside (not the local defaults), its sleep window sends a vote instead of running a vanilla local sleep, and it sees the banner. Like any player it can answer N; it never blocks a round it cannot see.
+- Pause: the host freezes overworld trip steps and their encounter rolls and the autosave interval; a solo-instance client stops its local `timeevent_ping` on `COOP_CTRL_PAUSE(1)` and its 45 s checkpoint clock stands still.
+- Trade (M2) closes on both sides by itself (held item put back with `inven_ui_drag_cancel_if_stale` / the vanilla drop-back, then a notice) when either side starts an overworld trip, enters a solo instance, enters combat, dies, or the partner is more than 6 tiles away / hidden.
+
+### One session reset
+
+`coop_lite_session_reset` calls `coop_middle_session_reset`, which clears all Middle state and is safe to call any number of times: client rules (defaults), pause, ping ring, status bits, rest / feed / gold-drop memory, the Alt label buffer, HUD, banner and arrow plates (`coop_middle_ui_reset`), all overworld trips and pending teleports (`coop_owt_reset`), the sleep round and a pending `SLEEP_APPLY`, town map fog sync, every solo-instance lease with its chunk / checkpoint buffers (`coop_subinst_session_reset`), the autosave timer and rotation, the collapse antispam and the lobby rules flag. The 8 dialog sessions live in `coop_lite.c` and are reset there in the same call chain (`coop_lite_session_reset_extra` -> `coop_lite_dialog_reset`).
+
+### Launcher
+
+- Host panel: **Auto-save** combo (Off / 5 / 10 / 15 / 30 min) next to Solo interiors/dungeons, `[rules] autosave_min` (default 10), sent as `asave=` in `ARCANUM_COOP_RULES`.
+- The game writes `lobby_rules.txt` (one `coop_rules_describe` line, UTF-8, EN or RU by `ARCANUM_COOP_LANG`) in its role folder (`coop\host\` or `coop\client\`) at host start and when a client gets `PACKET_COOP_RULES`. The lobby panel shows it in a status line under the player list (the old file is deleted when the lobby opens).
+
+## Feature details (M1-M6)
+
+### M1: gold split (`COOP_RULE_GOLD_SPLIT`, host only)
 
 When a PC (host or client) on the host takes gold:
 
@@ -120,7 +133,7 @@ Not split:
 - gold a player put into a container, when it is taken back (per-container amount, cleared on map change);
 - when the picker is the only living player.
 
-## M1: loot feed (`COOP_RULE_LOOT_FEED`)
+### M1: loot feed (`COOP_RULE_LOOT_FEED`)
 
 `coop_middle_loot_feed_worthy(type, flags, cost, quest_or_key)` passes keys and key rings, scrolls, written items (notes, books, schematics), quest items (`OIF_WONT_SELL`), unique items (`OIF_UBER`), and anything except gold or ammo that costs **250+**. Junk, cheap consumables and ammo never make a line.
 
@@ -129,7 +142,7 @@ Not split:
 
 The host sends these as `PACKET_COOP_CHAT` with a system marker (`reserved = 'MI' << 16 | kind`). Each client builds the text in its own language. The host relay rebuilds every player line with `reserved = 0`, so a client can't fake a system line. Anti-spam: at most **5 lines per second**. The rest of a burst (for example "Take all" on a big chest) collapses into one `[Loot] ... and N more` line.
 
-## M1: client rest request (`COOP_RULE_REST_VOTE`)
+### M1: client rest request (`COOP_RULE_REST_VOTE`)
 
 Two new ops in `PACKET_COOP_PARTY_CTRL` (no new packet type):
 
@@ -143,7 +156,7 @@ Two new ops in `PACKET_COOP_PARTY_CTRL` (no new packet type):
 - **Y:** the host opens its sleep window and presses "Until Healed" (or "8 Hours", also in wait-only towns): the normal party rest with fade and healing for all PCs (PT25). **N** sends `REST_REFUSE`.
 - **Auto-cancel** (with `REST_REFUSE` to the asker): the host enters combat, a map change, the asker dies, another Y/N prompt opens, or there is no answer in 60 s. If the asker disconnects, the request is dropped silently.
 
-## M2: direct trade (`COOP_RULE_DIRECT_TRADE`, default on)
+### M2: direct trade (`COOP_RULE_DIRECT_TRADE`, default on)
 
 A free give between two players, in the inventory window the game uses for pickpocketing (`INVEN_UI_MODE_STEAL`), run as a host-authoritative **TRADE** session.
 
@@ -154,7 +167,7 @@ A free give between two players, in the inventory window the game uses for pickp
 - **Lines:** `[Trade] <From> gave <Item> to <To>` / `[Обмен] <From> передал <Item> игроку <To>`; gold: `[Trade] <From> gave <N> gold to <To>` / `[Обмен] <From> передал <N> золота игроку <To>`. System chat kinds 4 / 5 (`receiver|item`, `receiver|amount`). They go to both players, or to everyone when the loot feed is on.
 - Symmetric: host <-> client and client <-> client (both sides run on the host's copies).
 
-## M2: Alt-hold loot labels (local only)
+### M2: Alt-hold loot labels (local only)
 
 While **LALT / RALT** is held in the world (intgame mode MAIN; no main menu, world map, inventory, dialog, chat input or load), up to **32** labels show:
 
@@ -164,7 +177,7 @@ While **LALT / RALT** is held in the world (intgame mode MAIN; no main menu, wor
 
 Collected with `object_list_rect` within **22 tiles** of the PC; visible means `OBJ_F_FLAGS & (OF_INVENTORY|OF_OFF|OF_DESTROYED|OF_DONTDRAW) == 0` and on screen. Ground items come first, then the nearest to the PC or the mouse cursor. `coop_middle_labels_deoverlap` pushes overlapping labels upward (1 px gap) and hides the ones that run out of room. Colours: gold `(240,210,90)` for keys, gold, quest / unique items and written items (schematics, notes); `(215,235,255)` for other items; `(195,175,140)` for containers and corpses. Each label is a solid plate `(16,14,12)` with a thin frame, pre-rendered in one off-screen buffer and blitted into the iso view in the overlay pass after the text floaters (no windows, clicks go to the world). Label areas are invalidated when they change (refresh every 150 ms), on scroll and on Alt release, so no trails are left.
 
-## M2: status badges on teammate portraits
+### M2: status badges on teammate portraits
 
 New op in `PACKET_COOP_PARTY_CTRL`:
 
@@ -175,7 +188,7 @@ New op in `PACKET_COOP_PARTY_CTRL`:
 
 Every 250 ms the host merges each slot's reported bits with `POISON 4` (`STAT_POISON_LEVEL > 0`) and `COMBAT 8` (combat mode on). A 14x14 badge (dark square, coloured frame, letter) is drawn in the top-right corner of a teammate portrait, in this priority: **X** dead `(220,60,60)`, **Z** unconscious (fatigue <= 0) `(180,130,230)`, **P** poisoned `(90,220,90)`, **D** dialog `(240,200,80)`, **I** inventory `(100,210,240)`, **C** combat `(240,140,60)`. Dead and unconscious are read locally from the PC. Portraits are redrawn only when a badge changes; no windows are created.
 
-## M2: F9 net HUD (local only)
+### M2: F9 net HUD (local only)
 
 **F9** toggles one line at the top centre of the iso view (co-op only; F9 does nothing new in single player). It refreshes every 0.5 s from `tig_net_get_hud_stats()`:
 
@@ -195,7 +208,7 @@ typedef struct TigNetHudStats {
 
 Line: `Host 3/8 | RTT 45 ms (avg 30) | loss 0% | sync OK` (client: `Client 3/8 | RTT 45 ms | loss 0% | sync OK`; RU: `Хост 3/8 | RTT 45 мс (ср. 30) | потери 0% | синхр. OK`). The line turns orange with **sync LAG N s** when no app packet arrived for more than **6 s**. That is longer than the 5 s status heartbeat, so an idle but connected peer stays OK. The thresholds and fields are easy to change in `coop_middle_ui.c`.
 
-## M3: shared tactical pause (`COOP_RULE_CLIENT_PAUSE`)
+### M3: shared tactical pause (`COOP_RULE_CLIENT_PAUSE`)
 
 - **Pause** (the key) toggles one shared pause for the whole session. It does not work while typing in chat or in the main menu. The host can always pause. A client can pause only when the host turned on **Client pause** (`pause=1`, default **off**); otherwise it gets a notice. A client can toggle at most once per 2 s (checked on the client and again on the host).
 - Wire: `PACKET_COOP_PARTY_CTRL` op `COOP_CTRL_PAUSE` (8). Client -> host: `a` = 1 pause / 0 resume, `b` = 0. Host -> all: `a` = state, `b` = the slot that paused. The host sends the state to a slot that joins during a pause, right after SESSION_SYNC.
@@ -212,7 +225,7 @@ Line: `Host 3/8 | RTT 45 ms (avg 30) | loss 0% | sync OK` (client: `Client 3/8 |
   - on a map change or save load;
   - on a session reset.
 
-## M3: difficulty (host only)
+### M3: difficulty (host only)
 
 | Rule | Range / default | Env key (alias) | Effect |
 | --- | --- | --- | --- |
@@ -229,7 +242,7 @@ Line: `Host 3/8 | RTT 45 ms (avg 30) | loss 0% | sync OK` (client: `Client 3/8 |
   - That means no damage, crit effects, `SAP_TAKING_DAMAGE` script, aggro or retaliation.
   - It applies to every party-on-party hit, not only AoE.
 
-## M3: map pings (`PACKET_COOP_PING` = 168)
+### M3: map pings (`PACKET_COOP_PING` = 168)
 
 ```c
 typedef struct PacketCoopPing {
@@ -254,7 +267,7 @@ typedef struct PacketCoopPing {
   - A soft UI click plays when the ping is within 40 tiles of the local PC.
   - On the open town map (`wmap_ui.c`, town mode) a ping on the current map blinks as a cross, repainted every 300 ms.
 
-## M3: `/tp`, `/stuck`, `/gather` (host)
+### M3: `/tp`, `/stuck`, `/gather` (host)
 
 - `coop_middle_parse_cmd` is case-insensitive and trims spaces: `/tp` and `/stuck` -> regroup to the host; `/gather` and `/tp all` -> the host pulls everyone. Plain text, `/unknown` and extra words stay chat.
 - The host runs a command before the chat relay (`coop_lite_handle_chat`) or on its own send, so commands never show as chat. A client's command text is not echoed locally.
@@ -264,13 +277,13 @@ typedef struct PacketCoopPing {
 - **`/gather` (host only):** the host must be alive and out of combat; cooldown 30 s. Every connected client that passes the same checks is moved. Line: `[Co-op] <Host> gathered the party.`
 - **Refusals** go to the asker only, as a system line in their own language: dead, other map, combat, enemy fighting you, `N s` cooldown, `/gather` is host-only, nobody to gather, or the host using `/tp`.
 
-## M4: shared quest items (`COOP_RULE_SHARED_QUEST_ITEMS`, host only)
+### M4: shared quest items (`COOP_RULE_SHARED_QUEST_ITEMS`, host only)
 
 - `coop_middle_find_party_item(asker, key, match, &owner)`: the asker's own pack first (vanilla lookup). Then, on the host with the rule on and the asker a party PC, every other slot that `coop_middle_quest_pocket_eligible` accepts: connected, alive, on this map (`coop_lite_loc_in_map`), within `COOP_SHARED_QUEST_RADIUS` (30) tiles. In an ally's pack the backpack (location < 1000) wins over worn items (1000..1008).
 - Checks: dialog `in` / `ni` (after the PC's own followers) and script "has item named". Takes: dialog action `in` and script "transfer item" / "destroy item named". The item leaves the owner's pack (the vanilla transfer unequips it), the owner's pack is resynced (`coop_lite_host_sync_slot_inven`) and everybody gets `[Quest] <Item> handed over from <Owner>` / `[Квест] <Item> передан из рюкзака <Owner>`.
 - Single player and clients: the vanilla lookup only.
 
-## M4: town map fog (`PACKET_COOP_TOWNMAP_FOG` = 169)
+### M4: town map fog (`PACKET_COOP_TOWNMAP_FOG` = 169)
 
 - Storage (`townmap.c`): one bit per town-map tile, the k-state of one town map at a time, saved as `Save/Current/<name>.tmf`; only the local PC marks tiles. `townmap_coop_fog()` gives the array (loading it), `townmap_coop_fog_touched()` marks it for saving.
 - Packet: `{type, townmap_id, offset, len <= 1024, flags (REPLACE 0x1), data[1024]}`, 0x410 bytes, sent as header + `len`. `coop_middle_townmap_fog_valid` checks the size, type, id > 0, len, flags and `offset + len <= 65536`.
@@ -279,7 +292,7 @@ typedef struct PacketCoopPing {
   - Client: after a town-map change, a resync or a session reset it sends nothing until the host's first packet for that town map. Then its changed chunks go to the host, which ORs them in and relays them to the others.
 - `coop_middle_fog_merge` returns the newly opened bits; when it is > 0 an open town map (`WMAP_UI_MODE_TOWN`) is redrawn.
 
-## M4: parallel dialogs
+### M4: parallel dialogs
 
 - The PT36/PT41 single dialog context is now `CoopDialogSession coop_dlg_sessions[8]` (in `coop_lite.c`): session 0 is the host's own dialog, session N a client's dialog that runs headless on the host.
 - On the host, `dialog_ui.c` gives every client PC its own `DialogUiEntry` (the engine always had 8, `sub_567420` was pinned to entry 0), so each session has its own `DialogState`; `dialog.c` keeps no per-conversation globals. The current session is kept in a context index that is saved / restored around each START / CHOOSE step.
@@ -289,19 +302,19 @@ typedef struct PacketCoopPing {
 - Routing (`coop_middle_dialog_route`): own session, else the attached one, else the host's, else the most recent client session. Votes go to the session the voter is routed to. The seq counter is global, so the client's stale check works across sessions.
 - Closing a session (leave, end, speaker disconnect) sends CLOSE (or EXCHANGE) to its viewers only; a map change, load or session reset closes all 8.
 
-## M4: shared followers (`COOP_RULE_SHARED_FOLLOWERS`)
+### M4: shared followers (`COOP_RULE_SHARED_FOLLOWERS`)
 
 - 4a: `PacketCoopNpcStats` (166) also carries `basic_skills[12]`, `tech_skills[4]`, `spell_tech[16]` (size 0xA0 -> 0x120, in the host's signature, applied on clients).
 - 4b: a move inside a follower's pack (Packet81 `from == to == follower`, or `INVEN_LAYOUT` for the follower) is applied for the leader, or for any party player with the rule, when it has that follower's window open. The sender and everyone with that follower open get the pack, and NPC_POS re-sends the follower (worn items).
 - 4c: with the rule, any living party player within 6 tiles may open the free follower exchange with any party follower: `coop_lite_barter_partner_ok`, `COOP_DIALOG_ACT_EXCHANGE`, the client's exchange open, and Ctrl+LMB on a teammate's follower. The leader keeps the follower (no re-binding on the client).
 
-## M5: interest management
+### M5: interest management
 
 - Co-op sector cache 96 -> 128. Each remote slot keeps a 3x3 sector window while there are <= 4 remote slots or >= 36 cache slots would stay free; otherwise an adaptive 2x2 (own sector + the nearer neighbour per axis, margin 32). The decision uses the free count *as if* every slot held 3x3, so it does not flip back and forth. The PT77y corpse fixes stay.
 - NPC_POS: each slot gets its own batch (`tig_net_send_pose`) with only NPCs within 44 tiles of its PC (Chebyshev, all maps). A per-NPC seen mask sends the state at once to a slot that enters range; a state change resets the mask.
 - On map 1 only: DOOR_STATE to slots within 96 tiles; TRAP_FX, PROJECTILE_FX, sounds (106) and eye-candy adds (77) within 56 tiles of the source / target. Other maps and vanilla MP: broadcast as before. Eye-candy removals stay broadcast (no stuck particles).
 
-## M5: free world map (`COOP_RULE_FREE_OVERWORLD`, key `ow`, default on)
+### M5: free world map (`COOP_RULE_FREE_OVERWORLD`, key `ow`, default on)
 
 Off = Lite behaviour. On, and only while the party is on map 1 (the world):
 
@@ -311,19 +324,19 @@ Off = Lite behaviour. On, and only while the party is on map 1 (the world):
 - Allies' markers: refreshed every 1000 ms (PROGRESS without MOVING), coloured by slot; an encounter shows a blinking red marker for 15 s.
 - Map-changing transitions keep the ready check: a transiting slot is BUSY, and party travel cancels all trips and carries everybody.
 
-## M5: unified sleep (`COOP_RULE_UNIFIED_SLEEP`, key `usleep`, default on)
+### M5: unified sleep (`COOP_RULE_UNIFIED_SLEEP`, key `usleep`, default on)
 
 - A rest choice in the sleep window becomes a vote (`COOP_CTRL_SLEEP_VOTE` 9, mode 1 morning, 2 evening, 3 healed, 4 8 h, 5-8 the 1 / 2 / 4 / 24 h buttons). The host keeps the round (`coop_middle_sleep_step`) and sends `COOP_CTRL_SLEEP_STATE` 10 (ready mask, mode, initiator, living count) on every change and every 2 s.
 - A lone living player (host) sleeps at once with the vanilla window. Otherwise a banner shows "Sleep: n/m ready (Name: mode). Y = join sleep, N = cancel" (RU behind `ARCANUM_COOP_LANG=ru`). Moving, combat, a dialog or a world map trip cancels your own vote. Ready players regain 2 fatigue per second while waiting.
 - When every living player is ready: REST_BEGIN, host fade, the clock moves (morning 08:00 / evening 20:00 / fixed hours / until healed, max 168 h), all PCs and followers heal, time and vitals are synced, REST_END. Dead and disconnected players do not block.
 - **With the M1 rest vote:** while `usleep=1`, unified sleep replaces the M1 client rest request (and the Lite refusal). With `usleep=0`, the M1 rest vote (`rest=1`) and the Lite behaviour are unchanged.
 
-## M5 fixes (`d0c4c597`)
+### M5 fixes (`d0c4c597`)
 
 - **Teleport spell sent the whole party to the edge of the world.** Vanilla MP (`MTComponentMovement`, move_location 2) put the caster on the map's starting location (the corner of map 1) and the party carry followed. Now the caster picks the place on the world map like in single player: the host opens its own pick; a client gets `COOP_OWT_SELECT` and its pick comes back as START with `F_TELEPORT` (the host checks anti-teleport, charges the spell, hops only that PC). Off map 1 the usual party travel ask is used.
 - **Client world map trips ignored the plotted route** (a straight 8-way line to the last point, over mountains and water). The client now sends its waypoints (WAYPOINT op) before START; the host plans each leg with the vanilla `wmap_path_make` (blocked terrain, bridges, passes) and steps sector by sector; an impassable route is refused (`REFUSE_BLOCKED`, vanilla text 601).
 
-## M6: solo interiors / dungeons (`COOP_RULE_SUBINSTANCES` 0x400, key `subinst`, default on)
+### M6: solo interiors / dungeons (`COOP_RULE_SUBINSTANCES` 0x400, key `subinst`, default on)
 
 Off = the M5 behaviour (a client's map change is a party travel ask). On, when a **client** walks into another map (stairs, door, world map entrance) that is not the host's map, not map 1 and not the shop map:
 
@@ -368,15 +381,17 @@ unified_sleep=1
 solo_instances=1
 enemy_hp_pct=100
 xp_mult_pct=100
+autosave_min=10
 ```
 
-Host mode shows four rows (disabled in Join mode):
+Host mode shows five rows (disabled in Join mode):
 
 - **Split gold**, **Loot feed**, **Rest vote**, **Direct trade**;
 - M3: **Client pause**, **No friendly fire**, **HP %** (100 / 150 / 200 / 250 / 300) and **XP %** (100 / 125 / 150 / 200);
 - M4: **Shared quest items**, **Shared followers**;
 - M5: **Free world map**, **Unified sleep**;
-- M6: **Solo interiors/dungeons** (`solo_instances=1`).
+- M6: **Solo interiors/dungeons** (`solo_instances=1`);
+- M7: **Auto-save** Off / 5 / 10 / 15 / 30 min (`autosave_min=10`), and the lobby rules line from `lobby_rules.txt`.
 
 An odd ini value lands on the nearest step below it. At start, the host gets `ARCANUM_COOP_RULES` built with `coop_rules_format_env` (the launcher links `coop_rules.c`). Clients don't get it: they receive the rules from the host. The optional self-update on this line looks for `coop-middle-*` tags, so a Middle launcher never installs a Lite (protocol 52) build.
 
@@ -465,6 +480,14 @@ CoopMiddle: random encounter on the host's own world map trip at x,y
 CoopMiddle: unified sleep: ready 0xMM mode M (vote|check|moved|dialog|combat / travel|...)
 CoopMiddle: unified sleep: everyone ready (...) - sleeping, mode M
 CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
+CoopMiddle: slot S collapsed from exhaustion
+CoopMiddle: autosave due but blocked (world W pause P combat C dialog D map M travel T commit K) - retry in 15 s
+CoopMiddle: autosave -> SlotNNNN '[Host] AutoSave N'
+CoopMiddle: autosave N FAILED - retry in 15 s
+CoopMiddle: unified sleep: SLEEP_APPLY H h -> slot S (solo instance)
+CoopMiddle: party slept H h - healing inside the solo instance
+CoopMiddle: solo instance: healed H h with the party's sleep
+CoopMiddle: trade: window auto-closed (solo instance|overworld travel|death|combat|out of range / gone)
 ```
 
 ## Tests
@@ -497,15 +520,93 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 22. M5 world map travel: id 170, limit >= 172, size 0x20, role `BOTH`, min size, `coop_middle_overworld_pkt_valid` (ops, direction, flags, slot, size), `coop_middle_owt_advance`, `TIG_NET_PROTOCOL == 57`.
 23. M6 solo instances: `coop_subinst_filename_safe`; CMAP1 pack / unpack round trip for 0 / 1 / 20 files; traversal, duplicate and too many names refused; truncated, oversized raw length, trailing bytes, every flipped byte (zlib / CRC) refused; payload build / split, quantity table; chunk reassembly (order, size, lease id); `coop_subinst_can_lease` (normal / busy / state / own lease); client state machine; validators for 171 / 172 / 173 (direction, sizes, flags, ranges); badge M priority and colour; chat kind 10 EN / RU; rule default on; `TIG_NET_PROTOCOL == 58`. Review: `coop_subinst_des_filter`, the item state table, `coop_subinst_sub_next_plan` and COMMITTING through DENY (no stall in REQUESTED), `coop_subinst_client_stalled`, CANCEL validator, client role / `tig_net_is_coop_client` false under local authority and true again while pumping.
 23. M5 sleep: `coop_middle_sleep_step` for 1..8 players (solo, wait, execute, mode kept, initiator hand-over, dead player not blocking, cleared, refusals), `coop_middle_sleep_minutes` across midnight, `coop_middle_sleep_mode_from_ui`, banner text EN/RU, `SLEEP_VOTE` / `SLEEP_STATE` validity.
+24. M7: `coop_middle_edge_indicator` (inside / on the border = false; top, bottom, left, right and the 4 corners land exactly on the pad border with the right octant; off-axis sweeps stay on the border); `coop_middle_collapse_step` (once per fall, 10 s per slot); chat kinds 11 / 12 EN / RU; `coop_middle_autosave_ready` (pause, combat, dialog, world map, commit, teleport, not in world, interval 0, clock wrap) and the rotation 9690..9694 (never a client slot 9700..9789); rule `asave` (0, 10, 1 -> 5, 999 -> 60, aliases, describe, `sizeof(CoopRules)` unchanged); unified sleep with a solo-instance player (in the consensus, `coop_middle_sleep_apply_mask` flags it for `SLEEP_APPLY`); `SLEEP_APPLY` in `coop_middle_party_ctrl_valid` / `coop_lite_party_ctrl_valid` (1..168, `b` = 0, size); repeated session resets; `TIG_NET_PROTOCOL == 59`.
 
-## Not done / risks (M1)
+Fuzz (`coop_lite_fuzz8`, `coop_lite_rx_fuzz`; M7): packet types 167-173 and the Middle PARTY_CTRL ops (REST_ASK / REFUSE, SLOT_STATUS, PAUSE, SLEEP_VOTE / STATE / APPLY) through the validators; `SUBINST_CTRL` with ABORT and CANCEL in both directions (ABORT is only valid from the host, CANCEL only from a client); chunk reassembly with random chunks. `COOP_RX_FUZZ_SECONDS` sets the transport phase length, `COOP_FUZZ8_SEED` varies the fuzz8 stream for soaks.
+
+## Architecture and hooks
+
+All Middle code lives in new files:
+
+- `src/game/coop_rules.h/.c`: the session rules contract (pure C, also linked into the launcher and the tests).
+- `src/game/coop_middle.h/.c`: the M1/M2 mechanics. Pure helpers come first (headless tests). The game side is compiled out under `COOP_LITE_TEST_STUBS`.
+- `src/ui/coop_middle_ui.h/.c` (M2): trade entry points, portrait badges, Alt loot labels, F9 net HUD; M3: pause banner, pings, the world mouse hook.
+
+Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge into `coop-middle` without conflicts:
+
+| File | Hook |
+| --- | --- |
+| `coop_lite.c` | session reset, SESSION_SYNC sent (rules to the slot), slot gone, map opened, ping tick, party ctrl valid/handle, client chat (system lines), player drop mark, item op 28 (client pickup / container take), packet role + size of `PACKET_COOP_RULES`, a small bridge (notice, Y/N panel, chat line); `coop_lite_host_sync_slot_inven` and `coop_lite_container_is_store` are no longer `static` |
+| `anim.c` | `sub_42AA70` ground pickup: take begin / done |
+| `inven_ui.c` | `sub_578EA0` inventory transfer (host loot, client loot via Packet81): take begin / done |
+| `sleep_ui.c` | client rest button / bed -> rest request; `sleep_ui_coop_rest()` presses "Until Healed" / "8 Hours" for the host |
+| `intgame.c` | Y / N keys -> `coop_middle_rest_key()` |
+| `multiplayer.c` | dispatch of `PACKET_COOP_RULES` |
+| `tig_net.h` | protocol 54; M2: `TigNetHudStats` / `tig_net_get_hud_stats()` |
+| **M2** | |
+| `coop_lite.c` | `coop_lite_target_transfer_ok` default case -> `coop_middle_trade_transfer_ok`; `coop_lite_target_still_ok` (TRADE sessions use Middle's partner rule) in the session watch and the target transfer; `COOP_BARTER_OPEN_TRADE` branch in `coop_lite_handle_barter`; gift branch: no "You succeed" notice for TRADE + `coop_middle_trade_given` |
+| `inven_ui.c` | client open sends `coop_middle_trade_barter_kind()`; host give `coop_middle_host_trade_give()`; take from the partner `coop_middle_trade_refuse_take()` |
+| `intgame.c` | Ctrl+LMB on an object -> `coop_middle_ui_trade_try()`; F9 -> `coop_middle_ui_hud_toggle()` |
+| `follower_ui.c` | RMB on a teammate portrait -> `coop_middle_ui_trade_try()`; badge draw after each teammate portrait |
+| `coop_chat_ui.c` | overlay draw / scroll also call `coop_middle_ui_draw()` / `coop_middle_ui_on_scroll()` (one overlay hook in gamelib) |
+| `gameuilib.c` | module `CoopMiddle-UI` (init / reset / exit / resize) |
+| `tig_net.c`, `tig_net_transport.h`, `tig_net_enet.c`, `tig_net_steam.c` | HUD stats: last app packet per slot, optional `peer_stats` (ENet RTT / loss; Steam NULL) |
+| **M3** | |
+| `tig_net.h` | protocol 55 |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 169 |
+| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_PING`; `coop_lite_host_share_xp` -> `coop_middle_host_scale_xp`; chat relay / own send -> `coop_middle_try_chat_command`; bridge `coop_lite_mid_move_pc` |
+| `multiplayer.c` | dispatch of `PACKET_COOP_PING` |
+| `timeevent.c` | `timeevent_ping`: no game / anim time while `coop_middle_is_paused()` |
+| `combat.c` | `combat_dmg`: `coop_middle_host_ff_block` (start), `coop_middle_host_enemy_damage` (after the bonuses) |
+| `intgame.c` | `intgame_process_event` start -> `coop_middle_ui_world_event` (ping, paused clicks); Pause key -> `coop_middle_pause_key`; spell hotkey refused while paused |
+| `wmap_ui.c` | town map draws live pings (blinking cross); `wmap_ui_coop_town_refresh()` |
+| **M4** | |
+| `tig_net.h` | protocol 56 |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 170; `PacketCoopNpcStats` + skills (0x120); new dialog-session API |
+| `coop_lite.c` | role `BOTH` + min size of `PACKET_COOP_TOWNMAP_FOG`; NPC stats fill / apply of skills; `coop_lite_barter_partner_ok` / `coop_lite_follower_exchange` -> `coop_middle_shared_follower_ok`; Packet81 and `INVEN_LAYOUT` accept moves inside a follower's pack; the PT36/PT41 dialog block now keeps 8 sessions (see below); map opened ends all client dialogs |
+| `multiplayer.c` | dispatch of `PACKET_COOP_TOWNMAP_FOG` |
+| `dialog.c` | conditions `in` / `ni` and action `in` -> `coop_middle_find_party_item` (+ `coop_middle_quest_handed_over`) |
+| `script.c` | `SCT_OBJ_HAS_ITEM_NAMED`, `SAT_TRANSFER_ITEM`, `SAT_DESTROY_ITEM_NAMED` -> the same |
+| `townmap.c` | `townmap_coop_fog()` / `townmap_coop_fog_touched()` (the known-tile bit array) |
+| **M5** | |
+| `tig_net.h/.c` | protocol 58; `tig_net_send_pose(data, size, slot)` (addressed unreliable send for NPC_POS) |
+| `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 172 |
+| `coop_lite.c` | NPC_POS per-slot batches (44 tiles, seen mask); DOOR_STATE / TRAP_FX / PROJECTILE_FX -> `coop_middle_send_app_near`; keep window -> `coop_middle_keep_sector_set`; role `BOTH` + min size of 170; host world-map dimming off while `ow` is active; party travel aborts world map trips; client world map click -> `coop_middle_owt_client_propose`; a transiting slot is BUSY in the ready check; bridges `coop_lite_mid_keep*` / `coop_lite_mid_center_local` |
+| `sector.c/.h` | co-op cache 128; `sector_cache_coop_stats()` |
+| `teleport.c` | host's own hop on map 1 with `ow`: carries no other PCs, no FOLLOW_HOST |
+| `multiplayer.c` | dispatch of `PACKET_COOP_OVERWORLD_TRAVEL` |
+| `mp_utils.c` / `magictech.c` | sound (106) and eye-candy add (77) -> `coop_middle_send_app_near` |
+| `wmap_ui.c/.h` | frozen clock + own encounter rolls on map 1; client close -> CANCEL; ally markers (WORLD view); `wmap_ui_coop_marker_set` / `_local_sector` / `_refresh` |
+| `wmap_rnd.c/.h` | `wmap_rnd_coop_check(loc)` |
+| `sleep_ui.c` / `intgame.c` | rest choice -> `coop_middle_sleep_choose`; Y / N -> `coop_middle_sleep_key` |
+| `dialog_ui.c` | `sub_567420` returns a client PC's own entry on the host; party checks by slot; the choose hook gets the slot; a client's dialog never cuts the host's voice line |
+| `inven_ui.c` | follower (free) barter mode also for a shared follower |
+| `coop_middle_ui.c` | Ctrl+LMB on a teammate's follower opens the follower exchange |
+
+The earlier Middle prototype (protocol 53/54 commits `8132dc3c`..`4e1e5455`: pings, pause, difficulty, quest pocket, town map fog, parallel dialogs, ...) was reverted in one commit before M1. Ideas from it come back stage by stage in the Middle files. Parallel dialogs came back as M4.
+
+M6 / M7 hooks:
+
+| File | Hook |
+| --- | --- |
+| `coop_subinst.h/.c` (new, M6) | solo instances; M7: `coop_subinst_host_lease_mask`, `coop_subinst_host_commit_busy`, `SLEEP_APPLY` in the packet filter, `coop_middle_subinst_local_tick` + pause-frozen checkpoint clock in `coop_subinst_ping` |
+| `tig_net.h` | protocol 59 (M7) |
+| `main.c` | M7: `coop_middle_take_autosave` / `coop_middle_autosave_done` next to the PT61 client save |
+| `gamelib.c` | M6: `coop_subinst_host_before_save`; M7: `coop_middle_note_save` (any save restarts the autosave interval) |
+| `wmap_ui.c` | M7: dead teammate square red on the town map |
+| `coop_middle_ui.c` | M7: arrow plates, trade auto-close watch, town map refresh on badge change |
+| `tools/launcher/launcher.c` | M7: Auto-save combo, lobby rules line |
+
+## Known limits / risks
+
+### M1
 
 - **Not tested in play yet:** only the build and headless tests.
 - The rest prompt uses the Lite travel Y/N panel. If a travel or load prompt opens while a rest request waits, the rest request is cancelled (busy) rather than queued.
 - An item the host places itself after a client's loot move failed (the client's grid cell was taken on the host, PT46 retry) gets no feed line. This path is rare.
 - `enemy_hp_pct`, `xp_mult_pct` and the reserved flags (`pause`, `noffaoe`) are carried and validated, but have no effect yet (M3: all of them are active now).
 
-## Not done / risks (M2)
+### M2
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests. The overlay drawing (labels, HUD, badge letters) has not been checked on screen.
 - Trade reuses the pickpocket window, so its title and look are the vanilla pickpocket ones. On open, the game turns the PC to the partner and needs line of sight (`ai_can_see`), as for pickpocketing.
@@ -515,7 +616,7 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 - The HUD's sync check uses "time since any app packet". The 5 s status heartbeat keeps an idle link at OK. RTT and loss come from ENet only (Steam shows `RTT ?`).
 - A client's INVEN / DIALOG badge lags by one host poll (250 ms) plus the network.
 
-## Not done / risks (M3)
+### M3
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests. The banner, the ping diamonds and the town-map cross have not been checked on screen.
 - The pause freezes game and anim time on every machine, but real-time events still run (UI, MP, the TB-combat timer, fidget queueing). Co-op disables turn-based combat, so the TB timer does not matter in practice.
@@ -525,7 +626,7 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 - A danger ping is detected on the hovered object or on objects on the cursor tile. A hostile NPC standing next to that tile gives a normal ping.
 - `/tp` decides "same map" from the client PC's location on the host (`coop_lite_loc_in_map`). A client that is still loading has no PC there yet and gets "dead / not here".
 
-## Not done / risks (M4)
+### M4
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
 - Quest items: the lookup by name covers what the game checks by name (dialog `in`/`ni`, script "has item named" / transfer / destroy). Only these by-name lookups (`item_find_by_name`) are hooked; `COOP_QITEM_MATCH_PROTO` is in the API but unused by the hooks. Dialog `ri` is the NPC "remove item" order (opens an inventory window), not a quest take, so it has no hook.
@@ -533,7 +634,7 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 - Dialogs: the leader-distance rule of PT41 (`coop_lite_party_talk_check`) is kept, so a client's story dialog still needs the host nearby, but two or more dialogs can now run at once. The client keeps one viewer panel: it shows the routed session only. Headless dialogs play no voice while the host is in its own dialog.
 - Followers: `spell_tech[16]` carries the 16 spell colleges as the spec asks; tech degrees (`OBJ_F_CRITTER_SPELL_TECH_IDX` 17..24) are not in the packet. The client does not send a follower's grid layout (`INVEN_LAYOUT`); its follower-window moves arrive as Packet81, and the host also accepts a follower layout if one comes. With the rule on, Ctrl+LMB on a teammate's follower opens the exchange instead of the vanilla Ctrl action.
 
-## Not done / risks (M5)
+### M5
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
 - Distances are Chebyshev (tile squares), not the engine's path distance.
@@ -543,7 +644,7 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 - Morning is 08:00 as the spec says (vanilla uses 07:00). Unified sleep always heals (the vanilla "wait" choice is not separate). Execution is synchronous on the host with a fade.
 - Doors and eye-candy removals outside map 1 are not filtered; on map 1 a door changed far away reaches a slot through the radius WORLD_REQ when it enters the sector.
 
-## Not done / risks (M6)
+### M6
 
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests (CMAP1, payload, chunks, leases, client states, packet validators, badge, chat line).
 - The commit flush hides the PC, its pack and followers by marking them destroyed during `map_flush` and restores `mobile.des` afterwards; an engine path that reacts to these flags during the flush would break it.
@@ -552,3 +653,12 @@ CoopMiddle: unified sleep done: mode M, H h healed, now day D hh:mm
 - A map over the limits (2 MB raw / 512 KB compressed) falls back to the normal party travel ask (DENY "too big" notice).
 - The save wait pumps only the network (no frames) for up to 2 s; a slow client misses that save's checkpoint (the previous one is used).
 - Followers that walked in with the client are parked with the PC on the host map and come back with it; followers recruited inside stay in the client's map files only.
+
+### M7
+
+- **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64), the headless tests and the fuzz soaks.
+- The collapse notice and the arrows use the host's view of a PC; a PC inside a solo instance is skipped (its parked copy on the host is stale).
+- Autosave writes on the main loop like the PT61 client save; the 2 s checkpoint wait pumps only the network, so the game freezes for up to 2 s when solo-instance clients are slow.
+- `gamelib_last_save_name` keeps the PT77q behaviour: client F7 world saves (9700..9789) still count as the newest save for party-wipe reload / `AUTOLOAD=latest` (they are full host world saves); autosaves count too.
+- `SLEEP_APPLY` heals the solo-instance PC with the hours the host slept; the client's clock inside still does not move (M6 limit), only the host's game time packet arrives.
+- The trade auto-close on the partner's side relies on the partner PC being hidden (OF_OFF) during a trip / instance and on the 6-tile trade rule; a lost hide flag leaves the window to the host's existing transfer checks.
