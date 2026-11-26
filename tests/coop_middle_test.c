@@ -616,7 +616,7 @@ static void test_m3_rules(void)
     CHECK((r.flags & COOP_RULE_CLIENT_PAUSE) == 0); /* host only by default */
     CHECK((r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0); /* ff on by default */
     CHECK((COOP_RULE_ACTIVE_MASK & COOP_RULE_CLIENT_PAUSE) && (COOP_RULE_ACTIVE_MASK & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
-    CHECK(COOP_RULE_ACTIVE_MASK == COOP_RULE_KNOWN_MASK);
+    CHECK((COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE) == COOP_RULE_KNOWN_MASK);
 
     n = coop_rules_parse_env(&r, "pause=1,ff=0");
     CHECK(n == 2 && (r.flags & COOP_RULE_CLIENT_PAUSE) && !(r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE));
@@ -890,7 +890,7 @@ static void test_m4_rules(void)
     CHECK(COOP_RULE_SHARED_QUEST_ITEMS == 0x40u && COOP_RULE_SHARED_FOLLOWERS == 0x80u);
     CHECK((COOP_RULE_ACTIVE_MASK & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS))
         == (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS));
-    CHECK(COOP_RULE_KNOWN_MASK == COOP_RULE_ACTIVE_MASK);
+    CHECK(COOP_RULE_KNOWN_MASK == (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE));
     coop_rules_default(&r);
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
@@ -1063,7 +1063,7 @@ static void test_m5_rules(void)
     char desc[512];
 
     CHECK(COOP_RULE_FREE_OVERWORLD == 0x100u && COOP_RULE_UNIFIED_SLEEP == 0x200u);
-    CHECK(COOP_RULE_KNOWN_MASK == COOP_RULE_ACTIVE_MASK);
+    CHECK(COOP_RULE_KNOWN_MASK == (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE));
     coop_rules_default(&r);
     CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP))
         == (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP));
@@ -1795,6 +1795,97 @@ static bool m7_on_border(int x, int y, int w, int h, int pad)
     return in_x && in_y && (x == pad || x == w - pad || y == pad || y == h - pad);
 }
 
+/* t391u: Coop Lite mode (rule lite) and the party dialog gate. */
+static void test_lite_mode(void)
+{
+    CoopRules r;
+    CoopRules e;
+    PacketCoopRules pkt;
+    char text[160];
+    char desc[600];
+    const uint32_t middle = COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
+        | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS
+        | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES;
+
+    /* default: off, and not in the env string (older strings unchanged) */
+    coop_rules_default(&r);
+    CHECK(!coop_rules_is_lite(&r));
+    CHECK((COOP_RULE_DEFAULT_FLAGS & COOP_RULE_LITE_MODE) == 0);
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, "lite") == NULL);
+    e = r;
+    coop_rules_effective(&e);
+    CHECK(coop_rules_equal(&r, &e)); /* lite=0: the rules as set */
+
+    /* lite=1 with everything on: the Coop Lite 1.0 set */
+    CHECK(coop_rules_parse_env(&r, "gold=1,loot=1,rest=1,trade=1,pause=1,ff=1,qitems=1,sfol=1,ow=1,usleep=1,"
+                                   "subinst=1,hp=300,xp=250,asave=30,lite=1")
+        == 15);
+    CHECK(coop_rules_is_lite(&r));
+    CHECK((r.flags & middle) == middle); /* parse keeps the boxes; effective decides */
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, ",lite=1") != NULL);
+    coop_rules_effective(&r);
+    CHECK(r.flags == (COOP_RULE_LITE_MODE | COOP_RULE_LOOT_FEED));
+    CHECK((r.flags & middle) == 0);
+    CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
+    CHECK(r.autosave_min == 30); /* kept */
+    e = r;
+    coop_rules_effective(&e);
+    CHECK(coop_rules_equal(&r, &e)); /* idempotent */
+    CHECK(coop_rules_parse_env(&r, "loot=0,lite=on") == 2);
+    coop_rules_effective(&r);
+    CHECK(r.flags == COOP_RULE_LITE_MODE);
+    /* aliases (launcher ini name, spelled out) */
+    coop_rules_parse_env(&r, "lite_mode=1");
+    CHECK(coop_rules_is_lite(&r));
+    coop_rules_parse_env(&r, "coop_lite=yes");
+    CHECK(coop_rules_is_lite(&r));
+    coop_rules_parse_env(&r, "lite=0");
+    CHECK(!coop_rules_is_lite(&r));
+    /* the wire: the host sends the effective rules, the bit survives */
+    coop_rules_parse_env(&r, "lite=1");
+    coop_rules_effective(&r);
+    coop_rules_packet_fill(&pkt, &r);
+    CHECK(pkt.rules.flags == (COOP_RULE_LITE_MODE | COOP_RULE_LOOT_FEED));
+    /* an earlier protocol-59 peer drops the unknown bit and still sees no Middle rule */
+    CHECK((pkt.rules.flags & COOP_RULE_ACTIVE_MASK & middle) == 0);
+    /* a client that gets lite with Middle bits still (bad host) plays Lite */
+    r.flags = COOP_RULE_LITE_MODE | middle;
+    r.enemy_hp_pct = 200;
+    coop_rules_effective(&r);
+    CHECK(r.flags == COOP_RULE_LITE_MODE && r.enemy_hp_pct == 100);
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strncmp(desc, "Coop Lite mode (as release 1.0). Rules:", 39) == 0);
+    CHECK(strstr(desc, "free world map off") != NULL);
+    coop_rules_describe(&r, true, desc, sizeof(desc));
+    CHECK(strstr(desc, "Coop Lite") != NULL);
+    coop_rules_effective(NULL);
+    CHECK(!coop_rules_is_lite(NULL));
+    CHECK(sizeof(CoopRules) == 28 && sizeof(PacketCoopRules) == 32);
+
+    /* party dialog gate: Middle = anywhere on the map, parallel dialogs */
+    CHECK(coop_lite_party_talk_gate(2, 1, 100000, false, false, false, false, false) == 0);
+    CHECK(coop_lite_party_talk_gate(2, 1, -1, false, false, false, false, false) == 0);
+    CHECK(coop_lite_party_talk_gate(2, 1, COOP_PARTY_TALK_MAX_HOST_DIST + 1, false, true, true, false, false) == 0);
+    CHECK(coop_lite_party_talk_gate(2, COOP_PARTY_TALK_MAX_DIST + 1, 1, false, false, false, false, false) == 2);
+    CHECK(coop_lite_party_talk_gate(2, 1, 1, true, false, false, false, false) == 4);
+    CHECK(coop_lite_party_talk_gate(2, 1, 1, false, false, false, true, false) == 4); /* own fight */
+    CHECK(coop_lite_party_talk_gate(0, 1, 1, false, false, false, false, false) == 1);
+    /* Lite mode = PT41 as released */
+    CHECK(coop_lite_party_talk_gate(2, 1, 10, false, false, false, false, true) == 0);
+    CHECK(coop_lite_party_talk_gate(2, 1, COOP_PARTY_TALK_MAX_HOST_DIST + 1, false, false, false, false, true) == 3);
+    CHECK(coop_lite_party_talk_gate(2, 1, -1, false, false, false, false, true) == 3);
+    CHECK(coop_lite_party_talk_gate(2, 1, 10, false, true, false, false, true) == 4); /* one at a time */
+    CHECK(coop_lite_party_talk_gate(2, 1, 10, false, false, true, false, true) == 4); /* host fights */
+    CHECK(coop_lite_party_talk_gate(2, 1, 10, false, false, false, true, true) == 0);
+    CHECK(coop_lite_party_talk_gate(2, COOP_PARTY_TALK_MAX_DIST + 1, 10, false, false, false, false, true) == 2);
+    CHECK(coop_lite_party_talk_gate(2, 1, 10, false, false, false, false, true)
+        == coop_lite_party_talk_check(2, 1, 10, false));
+    /* the stubs play Middle by default */
+    CHECK(!coop_middle_lite_mode());
+}
+
 /* M7 review: the subinst client's timed checkpoint clock. */
 static void test_m7_ckpt_clock(void)
 {
@@ -2156,6 +2247,7 @@ int main(void)
     test_m6_review();
     test_m7();
     test_m7_ckpt_clock();
+    test_lite_mode();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
