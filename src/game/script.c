@@ -1,4 +1,5 @@
 #include "game/script.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include "game/ai.h"
 #include "game/anim.h"
@@ -439,7 +440,12 @@ int script_global_var_get(int index)
 // 0x444C90
 void script_global_var_set(int index, int value)
 {
+    bool changed = script_global_vars[index] != value;
+
     script_global_vars[index] = value;
+    if (changed) {
+        coop_subinst_note(COOP_SUBINST_DELTA_GV, index, value); /* Coop Middle M6: solo instance -> host */
+    }
 }
 
 // 0x444CF0
@@ -451,8 +457,13 @@ int script_global_flag_get(int index)
 // 0x444D20
 void script_global_flag_set(int index, int value)
 {
+    int old = (script_global_flags[index / 32] >> (index % 32)) & 1;
+
     script_global_flags[index / 32] &= ~(1 << (index % 32));
     script_global_flags[index / 32] |= value << (index % 32);
+    if (old != (value & 1)) {
+        coop_subinst_note(COOP_SUBINST_DELTA_GF, index, value & 1); /* Coop Middle M6 */
+    }
 }
 
 // 0x444DB0

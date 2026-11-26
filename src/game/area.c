@@ -1,4 +1,5 @@
 #include "game/area.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include "game/coop_lite.h"
 
@@ -431,6 +432,9 @@ bool area_set_known(int64_t pc_obj, int area)
     }
 
     if (pc_obj == player_get_local_pc_obj() || coop_lite_area_pc_shared(pc_obj)) {
+        if (pc_obj == player_get_local_pc_obj()) {
+            coop_subinst_note(COOP_SUBINST_DELTA_AREA, area, 0); /* Coop Middle M6 */
+        }
         area_flags[area] |= AREA_KNOWN;
         area_last_known_area = area;
         ui_toggle_primary_button(UI_PRIMARY_BUTTON_WORLDMAP, true);

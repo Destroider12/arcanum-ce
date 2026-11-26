@@ -1,4 +1,6 @@
 #include "game/rumor.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
+#include "game/player.h"
 
 #include <stdio.h>
 
@@ -232,6 +234,7 @@ void rumor_qstate_set(int rumor)
     pos = rumor_num_to_idx(rumor) / 8;
     bit = rumor_num_to_idx(rumor) % 8;
     rumor_qstate[pos] |= 1 << bit;
+    coop_subinst_note(COOP_SUBINST_DELTA_RUMOR, rumor, 1); /* Coop Middle M6 */
 }
 
 /**
@@ -306,6 +309,9 @@ void rumor_known_set(int64_t obj, int rumor)
     }
 
     rumor_set_known_internal(obj, rumor, datetime.value);
+    if (player_is_local_pc_obj(obj)) {
+        coop_subinst_note(COOP_SUBINST_DELTA_RUMOR, rumor, 0); /* Coop Middle M6 */
+    }
 }
 
 /**

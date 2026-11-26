@@ -1,4 +1,5 @@
 #include "game/critter.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include <string.h>
 
@@ -1932,6 +1933,10 @@ void critter_give_xp(int64_t obj, int xp_gain)
         xp_gain -= xp_gain / 2;
         break;
     }
+
+    // Coop Middle M6: inside a solo instance the client awards locally and
+    // tells the host.
+    coop_subinst_note_xp(obj, xp_gain);
 
     // Co-op: XP is the host's (clients get it with the PC build sync), and
     // the host splits it among the living party.

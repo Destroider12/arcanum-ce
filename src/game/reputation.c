@@ -1,4 +1,5 @@
 #include "game/reputation.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
 
 #include <stdio.h>
 
@@ -466,6 +467,7 @@ void reputation_add(int64_t pc_obj, int reputation)
     // Highlight logbook button if this is a local PC.
     if (player_is_local_pc_obj(pc_obj)) {
         ui_toggle_primary_button(UI_PRIMARY_BUTTON_LOGBOOK, true);
+        coop_subinst_note(COOP_SUBINST_DELTA_REP, reputation, 1); /* Coop Middle M6 */
     }
 }
 
@@ -519,6 +521,7 @@ void reputation_remove(int64_t pc_obj, int reputation)
     // Highlight logbook button if this is a local PC.
     if (player_is_local_pc_obj(pc_obj)) {
         ui_toggle_primary_button(UI_PRIMARY_BUTTON_LOGBOOK, true);
+        coop_subinst_note(COOP_SUBINST_DELTA_REP, reputation, -1); /* Coop Middle M6 */
     }
 }
 

@@ -1,4 +1,6 @@
 #include "game/fate.h"
+#include "game/coop_subinst.h" /* Coop Middle M6 */
+#include "game/player.h"
 
 #include "game/critter.h"
 #include "game/obj.h"
@@ -92,6 +94,10 @@ bool fate_activate(int64_t obj, int fate)
         fate_apply(obj, fate);
     }
 
+    if (player_is_local_pc_obj(obj)) {
+        coop_subinst_note(COOP_SUBINST_DELTA_FATE, fate, 1); /* Coop Middle M6 */
+    }
+
     return true;
 }
 
@@ -143,6 +149,10 @@ bool fate_resolve(int64_t obj, int fate)
     // Clear the fate's bits.
     flags &= ~fate_flags[fate];
     obj_field_int32_set(obj, OBJ_F_PC_FLAGS_FATE, flags);
+
+    if (player_is_local_pc_obj(obj)) {
+        coop_subinst_note(COOP_SUBINST_DELTA_FATE, fate, 0); /* Coop Middle M6 */
+    }
 
     // Update UI.
     if (fate_callback != NULL) {
