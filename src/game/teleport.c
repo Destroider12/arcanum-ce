@@ -325,8 +325,11 @@ bool teleport_process(TeleportData* teleport_data)
 
     /* Coop Lite: host PC travel forces remote players to the same destination. */
     if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
-        coop_lite_after_party_carry(teleport_data->obj, teleport_data->loc);
+        /* t391u: a solo hop (the host's own world map trip / random
+           encounter) moves nobody else - after_party_carry placed every
+           client PC next to the host. */
         if (!coop_solo_hop) {
+            coop_lite_after_party_carry(teleport_data->obj, teleport_data->loc);
             coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
         }
         /* Client may have queued a follow while still on ShopMap / main menu. */
