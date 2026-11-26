@@ -1957,6 +1957,14 @@ void coop_dialog_fill_start(PacketCoopDialogState* pkt, const unsigned char* oid
 void coop_dialog_fill_choose(PacketCoopDialogState* pkt, unsigned int line, int option);
 /* 0 ok; 1 bad slot, 2 speaker too far, 3 leader too far, 4 busy. */
 int coop_lite_party_talk_check(int slot, int speaker_dist, int host_dist, bool busy);
+/* Coop Middle (t391u): the party dialog start gate (0 = start, else the
+   coop_lite_party_talk_check reason). lite (Coop Lite mode) = PT41 as
+   released: the leader within COOP_PARTY_TALK_MAX_HOST_DIST, one party
+   dialog at a time (own_busy || other_busy) and the host's combat blocks.
+   Middle: anywhere on the shared map (host_dist is not read), only the
+   speaker's own session and own fight block. */
+int coop_lite_party_talk_gate(int slot, int speaker_dist, int host_dist, bool own_busy, bool other_busy,
+    bool host_combat, bool speaker_combat, bool lite);
 /* CHOOSE accepted: from the speaker, current line, option in range or -1. */
 bool coop_lite_party_choose_ok(int speaker, int slot, unsigned int line, unsigned int cur_line, int option,
     int num_options);

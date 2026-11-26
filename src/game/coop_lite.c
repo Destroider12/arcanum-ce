@@ -3283,6 +3283,15 @@ int coop_lite_party_talk_check(int slot, int speaker_dist, int host_dist, bool b
     return busy ? 4 : 0;
 }
 
+int coop_lite_party_talk_gate(int slot, int speaker_dist, int host_dist, bool own_busy, bool other_busy,
+    bool host_combat, bool speaker_combat, bool lite)
+{
+    if (lite) {
+        return coop_lite_party_talk_check(slot, speaker_dist, host_dist, own_busy || other_busy || host_combat);
+    }
+    return coop_lite_party_talk_check(slot, speaker_dist, 0, own_busy || speaker_combat);
+}
+
 bool coop_lite_party_choose_ok(int speaker, int slot, unsigned int line, unsigned int cur_line, int option,
     int num_options)
 {
@@ -10834,6 +10843,32 @@ static int coop_dlg_npc_owner(int64_t npc, int self)
     return -1;
 }
 
+/* t391u: another session (not `self`) runs or is open: Lite mode allows
+   one party dialog at a time (the host's own counts). */
+static bool coop_dlg_other_busy(int self)
+{
+    int s;
+
+    for (s = 0; s < 8; s++) {
+        if (s != self && (coop_dlg_sessions[s].party || coop_dlg_sessions[s].votes.open)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int coop_dlg_first_client_session(void)
+{
+    int s;
+
+    for (s = 1; s < 8; s++) {
+        if (coop_dlg_sessions[s].votes.open) {
+            return s;
+        }
+    }
+    return -1;
+}
+
 /* M4: the host clicked an NPC that a client is talking to: watch it. */
 bool coop_lite_host_dialog_npc_busy(int64_t npc_obj)
 {
@@ -10844,6 +10879,10 @@ bool coop_lite_host_dialog_npc_busy(int64_t npc_obj)
     }
     coop_dlg_ensure();
     owner = coop_dlg_npc_owner(npc_obj, 0);
+    if (owner <= 0 && coop_middle_lite_mode()) {
+        /* Lite mode: single dialog entry - busy with a client's party dialog */
+        owner = coop_dlg_first_client_session();
+    }
     if (owner <= 0) {
         return false;
     }
@@ -10880,6 +10919,12 @@ static void coop_lite_host_handle_party_start(const PacketCoopDialogState* pkt)
     S = &coop_dlg_sessions[slot];
     pc = sub_4A2B60(slot);
     npc = coop_lite_get_oid_obj((const uint8_t*)pkt->npc_name);
+    if (npc == OBJ_HANDLE_NULL && pc != OBJ_HANDLE_NULL) {
+        /* t391u: the speaker may be far from the host - load its sectors
+           (they are normally kept already) and look again. */
+        coop_lite_keep_sector(slot, obj_field_int64_get(pc, OBJ_F_LOCATION));
+        npc = coop_lite_get_oid_obj((const uint8_t*)pkt->npc_name);
+    }
     host = player_get_local_pc_obj();
     if (pc == OBJ_HANDLE_NULL || npc == OBJ_HANDLE_NULL || host == OBJ_HANDLE_NULL
         || obj_field_int32_get(npc, OBJ_F_TYPE) != OBJ_TYPE_NPC || critter_is_dead(npc) || critter_is_dead(pc)
@@ -10888,15 +10933,17 @@ static void coop_lite_host_handle_party_start(const PacketCoopDialogState* pkt)
         return;
     }
     owner = coop_dlg_npc_owner(npc, slot);
-    if (owner >= 0 && !S->party) {
+    if (owner >= 0 && !S->party && !coop_middle_lite_mode()) {
         /* M4: the NPC is busy - watch (and vote in) its dialog. */
         coop_dlg_watch[slot] = owner;
         coop_dlg_republish(owner);
         tig_debug_printf("CoopMiddle: dialogs: slot %d watches slot %d's dialog (NPC busy)\n", slot, owner);
         return;
     }
-    r = coop_lite_party_talk_check(slot, (int)object_dist(pc, npc), (int)object_dist(host, npc),
-        S->party || S->votes.open || combat_critter_is_combat_mode_active(host));
+    /* t391u: Middle - anywhere on the shared map; Lite mode - PT41 as released. */
+    r = coop_lite_party_talk_gate(slot, (int)object_dist(pc, npc), (int)object_dist(host, npc),
+        S->party || S->votes.open, coop_dlg_other_busy(slot), combat_critter_is_combat_mode_active(host),
+        combat_critter_is_combat_mode_active(pc) || combat_turn_based_is_active(), coop_middle_lite_mode());
     if (r != 0) {
         coop_lite_party_refuse(slot, pc, r);
         return;
@@ -10959,8 +11006,9 @@ bool coop_lite_host_npc_party_begin(int64_t pc_obj, int64_t npc_obj)
         || combat_critter_is_combat_mode_active(pc_obj) || coop_dlg_npc_owner(npc_obj, slot) >= 0) {
         return false;
     }
-    r = coop_lite_party_talk_check(slot, (int)object_dist(pc_obj, npc_obj), (int)object_dist(host, npc_obj),
-        S->party || S->votes.open || combat_critter_is_combat_mode_active(host));
+    r = coop_lite_party_talk_gate(slot, (int)object_dist(pc_obj, npc_obj), (int)object_dist(host, npc_obj),
+        S->party || S->votes.open, coop_dlg_other_busy(slot), combat_critter_is_combat_mode_active(host),
+        combat_turn_based_is_active(), coop_middle_lite_mode());
     if (r != 0) {
         return false;
     }
