@@ -859,18 +859,19 @@ static void show_lobby(bool on)
         g_lobby_log_off = 0;
         SetWindowTextA(item(IDC_LOBBY_RULES), "");
         g_lobby_rules_last[0] = '\0';
-        {
-            char rules_path[MAX_PATH];
-
-            lobby_path(rules_path, sizeof(rules_path), "lobby_rules.txt");
-            DeleteFileA(rules_path); /* the last session's rules */
-        }
         SetWindowTextA(item(IDC_LOBBY_CHAT), "");
         SetWindowTextA(item(IDC_PLAYERS), "(waiting for game...)");
         SetTimer(g_wnd, IDT_LOBBY, 500, NULL);
         SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) & ~BS_DEFPUSHBUTTON);
         SetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE, GetWindowLongA(item(IDC_LOBBY_SEND), GWL_STYLE) | BS_DEFPUSHBUTTON);
-        SetWindowPos(hwnd, NULL, 0, 0, 460, 780, SWP_NOMOVE | SWP_NOZORDER);
+        /* M7 review: size from the client area, so the rules line
+           (IDC_LOBBY_RULES, y 690 + 36) fits whatever the caption height. */
+        GetClientRect(hwnd, &r);
+        r.left = 0;
+        r.top = 0;
+        r.bottom = 690 + 36 + 12;
+        AdjustWindowRect(&r, (DWORD)GetWindowLongA(hwnd, GWL_STYLE), FALSE);
+        SetWindowPos(hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
         lobby_poll();
     } else {
         KillTimer(g_wnd, IDT_LOBBY);
@@ -878,7 +879,6 @@ static void show_lobby(bool on)
         SetWindowLongA(item(IDC_START), GWL_STYLE, GetWindowLongA(item(IDC_START), GWL_STYLE) | BS_DEFPUSHBUTTON);
         SetWindowPos(hwnd, NULL, 0, 0, 460, 573, SWP_NOMOVE | SWP_NOZORDER);
     }
-    (void)r;
 }
 
 static void show_panel(bool on)
@@ -991,6 +991,14 @@ static void start_game(void)
                 fclose(f);
             }
         }
+    }
+    {
+        char rules_path[MAX_PATH];
+
+        /* M7 review: drop the last session's rules before the new game can
+           write its own (a delete in show_lobby could race the new file). */
+        lobby_path(rules_path, sizeof(rules_path), "lobby_rules.txt");
+        DeleteFileA(rules_path);
     }
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
