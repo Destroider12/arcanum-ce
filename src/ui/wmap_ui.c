@@ -2038,7 +2038,13 @@ bool wmap_ui_message_filter(TigMessage* msg)
 
                     int64_t pc_obj = player_get_local_pc_obj();
                     if (antiteleport_check(pc_obj, loc)) {
-                        if (player_is_local_pc_obj(wmap_ui_obj)) {
+                        /* Coop Middle: a client's spell lives on the host - the host
+                           charges it and hops the PC (map 1), else the party asks. */
+                        if (coop_middle_owt_client_teleport(loc, wmap_ui_spell)) {
+                            wmap_ui_close();
+                            return true;
+                        }
+                        if (player_is_local_pc_obj(wmap_ui_obj) && !coop_lite_is_client_role()) {
                             sub_4507B0(wmap_ui_obj, wmap_ui_spell);
                         }
 
@@ -5327,6 +5333,21 @@ bool wmap_ui_coop_local_sector(int* world_x, int* world_y)
     *world_x = dword_66D6F8 - wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.x;
     *world_y = wmap_ui_mode_info[WMAP_UI_MODE_WORLD].field_3C.y;
     return true;
+}
+
+/* Coop Middle M5: the plotted world route (waypoint locs, in order). */
+int wmap_ui_coop_route_locs(int64_t* out, int max)
+{
+    int n = 0;
+    int idx;
+
+    if (out == NULL || max <= 0) {
+        return 0;
+    }
+    for (idx = 0; idx < wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD].length && n < max; idx++) {
+        out[n++] = wmap_ui_routes[WMAP_ROUTE_TYPE_WORLD].waypoints[idx].loc;
+    }
+    return n;
 }
 
 /* Coop Middle M5: redraw the world map (ally markers moved). */

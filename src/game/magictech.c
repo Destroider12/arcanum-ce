@@ -2700,6 +2700,13 @@ void MTComponentMovement_ProcFunc(void)
             break;
         case 2:
             if (antiteleport_check(magictech_cur_run_info->parent_obj.obj, 0)) {
+                /* Coop Middle: the world map pick like single player (vanilla
+                   MP sent the caster - and the party - to the map start). */
+                if (tig_net_is_coop_enabled() && tig_net_is_active()) {
+                    coop_middle_teleport_spell(magictech_cur_run_info->source_obj.obj, stru_5E6D28.target_obj,
+                        magictech_cur_run_info->spell);
+                    return;
+                }
                 if (tig_net_is_active()) {
                     TeleportData teleport_data;
 

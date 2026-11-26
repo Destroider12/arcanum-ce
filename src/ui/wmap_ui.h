@@ -35,6 +35,7 @@ bool wmap_ui_world_coords_get(int* x, int* y);
 bool wmap_ui_is_moving(void);
 /* Coop Middle M5 (free world map). */
 void wmap_ui_coop_marker_set(int world_x, int world_y);
+int wmap_ui_coop_route_locs(int64_t* out, int max);
 bool wmap_ui_coop_local_sector(int* world_x, int* world_y);
 void wmap_ui_coop_refresh(void);
 

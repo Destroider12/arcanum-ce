@@ -1181,12 +1181,96 @@ static void test_m5_overworld(void)
     p.slot = 8;
     CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
 
-    x = 0;
-    y = 0;
-    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 1) == 1 && x == 1 && y == -1); /* diagonal */
-    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 10) == 2 && x == 3 && y == -1);
-    CHECK(coop_middle_owt_advance(&x, &y, 3, -1, 10) == 0);
-    CHECK(coop_middle_owt_advance(NULL, &y, 3, -1, 10) == 0);
+    (void)x;
+    (void)y;
+}
+
+/* 24. Bugfix: client trips follow the plotted waypoints; Teleport spell ops */
+static void test_m5_route_teleport(void)
+{
+    PacketCoopOverworldTravel p;
+    CoopOwtRoute r;
+    int64_t out[COOP_OWT_ROUTE_MAX];
+    int64_t a = LOCATION_MAKE(100, 200);
+    int64_t b = LOCATION_MAKE(300, 400);
+    int64_t d = LOCATION_MAKE(500, 600);
+    int i;
+
+    coop_middle_owt_route_reset(&r);
+    /* no waypoints: only the destination */
+    CHECK(coop_middle_owt_route_finish(&r, 0, d, out, COOP_OWT_ROUTE_MAX) == 1 && out[0] == d);
+    /* two waypoints in order, then the destination: all three, in order */
+    CHECK(coop_middle_owt_route_add(&r, 0, 2, a));
+    CHECK(coop_middle_owt_route_add(&r, 1, 2, b));
+    CHECK(coop_middle_owt_route_finish(&r, 2, d, out, COOP_OWT_ROUTE_MAX) == 3);
+    CHECK(out[0] == a && out[1] == b && out[2] == d);
+    CHECK(r.count == 0); /* consumed */
+    /* a lost waypoint: START falls back to its destination only */
+    CHECK(coop_middle_owt_route_add(&r, 0, 3, a));
+    CHECK(!coop_middle_owt_route_add(&r, 2, 3, b));
+    CHECK(coop_middle_owt_route_finish(&r, 3, d, out, COOP_OWT_ROUTE_MAX) == 1 && out[0] == d);
+    /* count mismatch with START */
+    CHECK(coop_middle_owt_route_add(&r, 0, 1, a));
+    CHECK(coop_middle_owt_route_finish(&r, 2, d, out, COOP_OWT_ROUTE_MAX) == 1);
+    /* a restart (idx 0) replaces an old partial route */
+    CHECK(coop_middle_owt_route_add(&r, 0, 2, b));
+    CHECK(coop_middle_owt_route_add(&r, 0, 1, a));
+    CHECK(coop_middle_owt_route_finish(&r, 1, d, out, COOP_OWT_ROUTE_MAX) == 2 && out[0] == a);
+    /* limits */
+    CHECK(!coop_middle_owt_route_add(&r, 0, COOP_OWT_ROUTE_MAX, a));
+    CHECK(!coop_middle_owt_route_add(&r, 0, 2, 0));
+    CHECK(!coop_middle_owt_route_add(NULL, 0, 2, a));
+    for (i = 0; i < COOP_OWT_ROUTE_MAX - 1; i++) {
+        CHECK(coop_middle_owt_route_add(&r, i, COOP_OWT_ROUTE_MAX - 1, a + i));
+    }
+    CHECK(coop_middle_owt_route_finish(&r, COOP_OWT_ROUTE_MAX - 1, d, out, COOP_OWT_ROUTE_MAX) == COOP_OWT_ROUTE_MAX);
+    CHECK(out[COOP_OWT_ROUTE_MAX - 1] == d);
+    CHECK(coop_middle_owt_route_finish(&r, 0, 0, out, COOP_OWT_ROUTE_MAX) == 0);
+    CHECK(coop_middle_owt_route_finish(&r, 0, d, NULL, 4) == 0);
+
+    memset(&p, 0, sizeof(p));
+    p.type = PACKET_COOP_OVERWORLD_TRAVEL;
+    p.slot = 1;
+    p.loc = a;
+    p.op = COOP_OWT_WAYPOINT;
+    p.world_x = 0;
+    p.world_y = 2;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.world_x = 2;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false)); /* idx < count */
+    p.world_x = 0;
+    p.world_y = COOP_OWT_ROUTE_MAX;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.op = COOP_OWT_START;
+    p.world_y = 0;
+    p.world_x = COOP_OWT_ROUTE_MAX - 1;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.world_x = COOP_OWT_ROUTE_MAX;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.flags = COOP_OWT_F_TELEPORT; /* spell id */
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.world_x = COOP_OWT_SPELL_MAX;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.world_x = 5;
+    p.flags = COOP_OWT_F_TELEPORT | COOP_OWT_F_MOVING;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.op = COOP_OWT_SELECT;
+    p.flags = 0;
+    p.loc = 0;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), false));
+    p.world_x = -1;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_ARRIVED;
+    p.world_x = 0;
+    p.loc = d;
+    p.flags = COOP_OWT_F_TELEPORT;
+    CHECK(!coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
+    p.op = COOP_OWT_REFUSED;
+    p.flags = 0;
+    p.world_x = COOP_OWT_REFUSE_BLOCKED;
+    CHECK(coop_middle_overworld_pkt_valid(&p, sizeof(p), true));
 }
 
 /* 23. M5 unified sleep: vote round for 1..8 players, times, ctrl ops */
@@ -1322,6 +1406,7 @@ int main(void)
     test_m5_interest();
     test_m5_overworld();
     test_m5_sleep();
+    test_m5_route_teleport();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;

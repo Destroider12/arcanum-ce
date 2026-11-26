@@ -313,21 +313,29 @@ int coop_middle_interest_radius(int packet_type, bool start_map);
 
 /* Free world map (COOP_RULE_FREE_OVERWORLD, map 1 only). */
 #define PACKET_COOP_OVERWORLD_TRAVEL 170
-#define COOP_OWT_START 1 /* client -> host: start a trip to loc (world_x / world_y = target sector) */
+#define COOP_OWT_START 1 /* client -> host: start a trip to loc (world_x = waypoints sent before it;
+                                 with F_TELEPORT: an instant Teleport spell hop, world_x = spell) */
 #define COOP_OWT_CANCEL 2 /* client -> host: stop now, land where the marker is */
 #define COOP_OWT_PROGRESS 3 /* host -> all: a slot's marker on the world map */
 #define COOP_OWT_ARRIVED 4 /* host -> all: landed at loc (flags: encounter) */
 #define COOP_OWT_REFUSED 5 /* host -> client: world_x = COOP_OWT_REFUSE_* */
+#define COOP_OWT_SELECT 6 /* host -> client: your Teleport spell: pick a place (world_x = spell) */
+#define COOP_OWT_WAYPOINT 7 /* client -> host: route waypoint world_x of world_y (before START) */
 #define COOP_OWT_F_MOVING 0x1
 #define COOP_OWT_F_ENCOUNTER 0x2
-#define COOP_OWT_F_MASK 0x3
+#define COOP_OWT_F_TELEPORT 0x4 /* START only */
+#define COOP_OWT_F_MASK 0x7
+#define COOP_OWT_ROUTE_MAX 30 /* vanilla WmapRoute.waypoints[30] */
+#define COOP_OWT_PATH_MAX 5000 /* vanilla byte_64E828[5000] rotations */
+#define COOP_OWT_SPELL_MAX 512
 #define COOP_OWT_REFUSE_RULE 1
 #define COOP_OWT_REFUSE_MAP 2
 #define COOP_OWT_REFUSE_DEAD 3
 #define COOP_OWT_REFUSE_COMBAT 4
 #define COOP_OWT_REFUSE_DEST 5
 #define COOP_OWT_REFUSE_BUSY 6 /* a party map change / sleep is running */
-#define COOP_OWT_REFUSE_MAX 6
+#define COOP_OWT_REFUSE_BLOCKED 7 /* no world map path (sea, mountains): vanilla message 601 */
+#define COOP_OWT_REFUSE_MAX 7
 #define COOP_OWT_STEP_MS 62u /* vanilla: one sector per world map step */
 #define COOP_OWT_PROGRESS_MS 150u
 #define COOP_OWT_MARKERS_MS 1000u
@@ -354,8 +362,21 @@ _Static_assert(offsetof(PacketCoopOverworldTravel, world_x) == 0x18, "PacketCoop
 /* from_host: the packet came from the host (PROGRESS / ARRIVED / REFUSED),
    else from a client (START / CANCEL). */
 bool coop_middle_overworld_pkt_valid(const PacketCoopOverworldTravel* pkt, int size, bool from_host);
-/* Move (x, y) up to `steps` 8-way steps toward (tx, ty); returns the steps used. */
-int coop_middle_owt_advance(int* x, int* y, int tx, int ty, int steps);
+
+/* A client's route, collected from WAYPOINT packets (host). */
+typedef struct CoopOwtRoute {
+    int count;
+    int expect;
+    int64_t locs[COOP_OWT_ROUTE_MAX];
+} CoopOwtRoute;
+
+void coop_middle_owt_route_reset(CoopOwtRoute* r);
+/* Waypoint idx of count (idx 0 restarts); false = out of order / bad. */
+bool coop_middle_owt_route_add(CoopOwtRoute* r, int idx, int count, int64_t loc);
+/* The whole route for START (before = waypoints the client says it sent):
+   the collected points + dest, or only dest when they do not match.
+   Returns the number of points written (>= 1), 0 on bad input. */
+int coop_middle_owt_route_finish(CoopOwtRoute* r, int before, int64_t dest, int64_t* out, int max);
 
 /* Unified sleep (COOP_RULE_UNIFIED_SLEEP). */
 #define COOP_CTRL_SLEEP_VOTE 9 /* client -> host: a = COOP_SLEEP_MODE_* (0 = cancel), b = 0 */
@@ -527,6 +548,11 @@ bool coop_middle_owt_local_in_transit(void);
 /* Host: a party map change carries everyone: land every trip where it is. */
 void coop_middle_owt_abort_all(const char* why);
 void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt);
+/* Teleport spell in co-op (both sides): the caster picks the place on the
+   world map like single player (vanilla MP used the map's start location). */
+void coop_middle_teleport_spell(int64_t source_obj, int64_t target_obj, int spell);
+/* Client: the picked Teleport place on map 1 -> the host hops us (true = sent). */
+bool coop_middle_owt_client_teleport(int64_t loc, int spell);
 typedef struct CoopWorldMarker {
     int slot;
     int world_x; /* sector coords */

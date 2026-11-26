@@ -772,13 +772,23 @@ bool coop_middle_overworld_pkt_valid(const PacketCoopOverworldTravel* pkt, int s
     }
     switch (pkt->op) {
     case COOP_OWT_START:
-        return !from_host && pkt->loc != 0 && pkt->flags == 0;
+        if (from_host || pkt->loc == 0 || (pkt->flags & ~COOP_OWT_F_TELEPORT) != 0) {
+            return false;
+        }
+        return (pkt->flags & COOP_OWT_F_TELEPORT) != 0
+            ? pkt->world_x >= 0 && pkt->world_x < COOP_OWT_SPELL_MAX
+            : pkt->world_x >= 0 && pkt->world_x < COOP_OWT_ROUTE_MAX;
+    case COOP_OWT_WAYPOINT:
+        return !from_host && pkt->loc != 0 && pkt->flags == 0 && pkt->world_y >= 1
+            && pkt->world_y < COOP_OWT_ROUTE_MAX && pkt->world_x >= 0 && pkt->world_x < pkt->world_y;
+    case COOP_OWT_SELECT:
+        return from_host && pkt->flags == 0 && pkt->world_x >= 0 && pkt->world_x < COOP_OWT_SPELL_MAX;
     case COOP_OWT_CANCEL:
         return !from_host && pkt->flags == 0;
     case COOP_OWT_PROGRESS:
-        return from_host;
+        return from_host && (pkt->flags & COOP_OWT_F_TELEPORT) == 0;
     case COOP_OWT_ARRIVED:
-        return from_host && pkt->loc != 0 && (pkt->flags & COOP_OWT_F_MOVING) == 0;
+        return from_host && pkt->loc != 0 && (pkt->flags & (COOP_OWT_F_MOVING | COOP_OWT_F_TELEPORT)) == 0;
     case COOP_OWT_REFUSED:
         return from_host && pkt->world_x >= 1 && pkt->world_x <= COOP_OWT_REFUSE_MAX && pkt->flags == 0;
     default:
@@ -786,19 +796,52 @@ bool coop_middle_overworld_pkt_valid(const PacketCoopOverworldTravel* pkt, int s
     }
 }
 
-int coop_middle_owt_advance(int* x, int* y, int tx, int ty, int steps)
+void coop_middle_owt_route_reset(CoopOwtRoute* r)
 {
-    int used = 0;
+    if (r != NULL) {
+        r->count = 0;
+        r->expect = 0;
+    }
+}
 
-    if (x == NULL || y == NULL) {
+bool coop_middle_owt_route_add(CoopOwtRoute* r, int idx, int count, int64_t loc)
+{
+    if (r == NULL || loc == 0 || count < 1 || count >= COOP_OWT_ROUTE_MAX || idx < 0 || idx >= count) {
+        return false;
+    }
+    if (idx == 0) {
+        r->count = 0;
+        r->expect = count;
+    }
+    if (idx != r->count || count != r->expect) {
+        coop_middle_owt_route_reset(r); /* lost or reordered: START falls back to its own dest */
+        return false;
+    }
+    r->locs[r->count++] = loc;
+    return true;
+}
+
+int coop_middle_owt_route_finish(CoopOwtRoute* r, int before, int64_t dest, int64_t* out, int max)
+{
+    int n = 0;
+    int i;
+
+    if (out == NULL || max < 1 || dest == 0) {
+        if (r != NULL) {
+            coop_middle_owt_route_reset(r);
+        }
         return 0;
     }
-    while (used < steps && (*x != tx || *y != ty)) {
-        *x += *x < tx ? 1 : (*x > tx ? -1 : 0);
-        *y += *y < ty ? 1 : (*y > ty ? -1 : 0);
-        used++;
+    if (r != NULL && before > 0 && r->count == before && r->expect == before && before + 1 <= max) {
+        for (i = 0; i < before; i++) {
+            out[n++] = r->locs[i];
+        }
     }
-    return used;
+    out[n++] = dest;
+    if (r != NULL) {
+        coop_middle_owt_route_reset(r);
+    }
+    return n;
 }
 
 void coop_middle_sleep_reset(CoopSleepState* st)
@@ -982,7 +1025,11 @@ const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int l
 #ifndef COOP_LITE_TEST_STUBS
 
 #include "game/anim.h"
+#include "game/antiteleport.h"
 #include "game/area.h"
+#include "game/magictech.h"
+#include "game/path.h"
+#include "game/ui.h"
 #include "game/gfade.h"
 #include "game/obj_pool.h"
 #include "game/random.h"
@@ -2994,8 +3041,10 @@ typedef struct CoopOwtTransit {
     bool active;
     int x; /* sector coords */
     int y;
-    int tx;
-    int ty;
+    int64_t sec; /* current world map sector (vanilla sector id) */
+    int path_len; /* rotations of the whole route (vanilla wmap_path_make legs) */
+    int path_pos;
+    int8_t path[COOP_OWT_PATH_MAX];
     int64_t dest;
     unsigned int step_ms;
     unsigned int progress_ms;
@@ -3013,6 +3062,7 @@ typedef struct CoopOwtMarker {
 } CoopOwtMarker;
 
 static CoopOwtTransit coop_owt[8]; /* host */
+static CoopOwtRoute coop_owt_route[8]; /* host: WAYPOINT packets before a START */
 static CoopOwtMarker coop_owt_mark[8]; /* both sides */
 static unsigned int coop_owt_serial;
 static unsigned int coop_owt_markers_ms; /* host: last all-slot sweep */
@@ -3229,13 +3279,53 @@ static void coop_owt_refuse(int slot, int reason)
 
 static bool coop_sleep_executing;
 
-static void coop_owt_host_start(int slot, int64_t dest)
+/* Host: the route's sector path with the vanilla world map pathing
+   (wmap_path_make: blocked sectors / terrain, bridges and passes),
+   leg by leg through the client's waypoints. 0 = blocked. */
+static int8_t coop_owt_scratch[COOP_OWT_PATH_MAX];
+
+static int coop_owt_plan(int8_t* path, int64_t from_loc, const int64_t* points, int count)
+{
+    int64_t from = sector_id_from_loc(from_loc);
+    int len = 0;
+    int i;
+
+    for (i = 0; i < count; i++) {
+        WmapPathInfo info;
+        int steps;
+
+        memset(&info, 0, sizeof(info));
+        info.from = from;
+        info.to = sector_id_from_loc(points[i]);
+        if (info.to == info.from) {
+            continue;
+        }
+        info.max_rotations = COOP_OWT_PATH_MAX - len;
+        info.rotations = &path[len];
+        if (info.max_rotations <= 0) {
+            return 0;
+        }
+        steps = wmap_path_make(&info);
+        if (steps <= 0) {
+            return 0;
+        }
+        len += steps;
+        from = info.to;
+    }
+    return len > 0 ? len : -1; /* -1: already there */
+}
+
+static void coop_owt_host_start(int slot, int64_t dest, int before)
 {
     CoopOwtTransit* t = &coop_owt[slot];
     int64_t pc = sub_4A2B60(slot);
     int64_t loc;
+    int64_t points[COOP_OWT_ROUTE_MAX];
+    int count;
+    int len = 0;
     int reason = 0;
 
+    count = coop_middle_owt_route_finish(&coop_owt_route[slot], before, dest, points, COOP_OWT_ROUTE_MAX);
     if (!coop_middle_rule_on(COOP_RULE_FREE_OVERWORLD)) {
         reason = COOP_OWT_REFUSE_RULE;
     } else if (!coop_im_start_map()) {
@@ -3244,7 +3334,72 @@ static void coop_owt_host_start(int slot, int64_t dest)
         reason = COOP_OWT_REFUSE_DEAD;
     } else if (!t->active && (combat_critter_is_combat_mode_active(pc) || coop_owt_targeted(pc))) {
         reason = COOP_OWT_REFUSE_COMBAT;
-    } else if (!coop_lite_loc_in_map(dest)) {
+    } else if (count <= 0 || !coop_lite_loc_in_map(dest)) {
+        reason = COOP_OWT_REFUSE_DEST;
+    } else if (coop_lite_mid_prompt_busy() || coop_sleep_executing) {
+        reason = COOP_OWT_REFUSE_BUSY;
+    } else {
+        int k;
+
+        for (k = 0; k < count && reason == 0; k++) {
+            if (!coop_lite_loc_in_map(points[k])) {
+                reason = COOP_OWT_REFUSE_DEST;
+            }
+        }
+        if (reason == 0) {
+            loc = t->active ? coop_owt_sector_loc(t->x, t->y) : obj_field_int64_get(pc, OBJ_F_LOCATION);
+            len = coop_owt_plan(coop_owt_scratch, loc, points, count);
+            if (len == 0) {
+                reason = COOP_OWT_REFUSE_BLOCKED;
+            }
+        }
+    }
+    if (reason != 0) {
+        coop_owt_refuse(slot, reason); /* a running trip keeps its old route */
+        return;
+    }
+    t->path_len = len > 0 ? len : 0;
+    if (t->path_len > 0) {
+        memcpy(t->path, coop_owt_scratch, (size_t)t->path_len);
+    }
+    t->path_pos = 0;
+    t->dest = dest;
+    if (t->active) {
+        t->sec = sector_id_from_loc(coop_owt_sector_loc(t->x, t->y));
+        tig_debug_printf("CoopMiddle: world map trip of slot %d re-routed to %d,%d (%d waypoint(s), %d sector(s))\n",
+            slot, (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest), count, t->path_len);
+        return;
+    }
+    loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+    t->active = true;
+    t->sec = sector_id_from_loc(loc);
+    t->x = (int)SECTOR_X(t->sec);
+    t->y = (int)SECTOR_Y(t->sec);
+    t->step_ms = coop_mid_now_ms;
+    t->progress_ms = coop_mid_now_ms;
+    t->roll_in = coop_owt_roll_steps();
+    coop_owt_hide(&t->hid, pc); /* IN_TRANSIT: off + invulnerable, PC and own followers */
+    coop_sleep_slot_left(slot, "world map trip");
+    coop_owt_publish(slot, t->x, t->y, COOP_OWT_F_MOVING);
+    tig_debug_printf("CoopMiddle: world map trip of slot %d: %d,%d -> %d,%d (%d waypoint(s), %d sector(s), %d object(s) in transit)\n",
+        slot, (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest),
+        count, t->path_len, t->hid.count);
+}
+
+/* Host: a client's Teleport spell (the spell was cast on the host, the
+   client picked the place on its world map): an instant hop on map 1. */
+static void coop_owt_host_teleport(int slot, int64_t dest, int spell)
+{
+    CoopOwtTransit* t = &coop_owt[slot];
+    int64_t pc = sub_4A2B60(slot);
+    int reason = 0;
+
+    coop_middle_owt_route_reset(&coop_owt_route[slot]);
+    if (!coop_im_start_map()) {
+        reason = COOP_OWT_REFUSE_MAP;
+    } else if (pc == OBJ_HANDLE_NULL || critter_is_dead(pc) || !tig_net_client_is_active(slot)) {
+        reason = COOP_OWT_REFUSE_DEAD;
+    } else if (!coop_lite_loc_in_map(dest) || !antiteleport_check(pc, dest)) {
         reason = COOP_OWT_REFUSE_DEST;
     } else if (coop_lite_mid_prompt_busy() || coop_sleep_executing) {
         reason = COOP_OWT_REFUSE_BUSY;
@@ -3253,27 +3408,62 @@ static void coop_owt_host_start(int slot, int64_t dest)
         coop_owt_refuse(slot, reason);
         return;
     }
-    t->tx = (int)(LOCATION_GET_X(dest) >> 6);
-    t->ty = (int)(LOCATION_GET_Y(dest) >> 6);
-    t->dest = dest;
-    if (t->active) {
-        tig_debug_printf("CoopMiddle: world map trip of slot %d re-routed to %d,%d\n", slot,
-            (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest));
+    if (!t->active) {
+        int64_t loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
+
+        t->active = true;
+        t->hid.count = 0;
+        t->sec = sector_id_from_loc(loc);
+        t->x = (int)SECTOR_X(t->sec);
+        t->y = (int)SECTOR_Y(t->sec);
+    }
+    t->path_len = 0;
+    t->path_pos = 0;
+    if (spell >= 0 && spell < MT_SPELL_COUNT) {
+        sub_4507B0(pc, spell); /* the vanilla cost, charged where the stats live */
+    }
+    coop_owt_finish(slot, dest, true, false, "teleport spell");
+}
+
+/* Both sides: Teleport spell (MTComponentMovement move_location 2) in co-op.
+   Vanilla multiplayer sends the caster to the map's starting location and the
+   party follows; co-op uses the single-player world map pick instead. */
+void coop_middle_teleport_spell(int64_t source_obj, int64_t target_obj, int spell)
+{
+    int slot;
+
+    if (target_obj == OBJ_HANDLE_NULL) {
         return;
     }
-    loc = obj_field_int64_get(pc, OBJ_F_LOCATION);
-    t->active = true;
-    t->x = (int)(LOCATION_GET_X(loc) >> 6);
-    t->y = (int)(LOCATION_GET_Y(loc) >> 6);
-    t->step_ms = coop_mid_now_ms;
-    t->progress_ms = coop_mid_now_ms;
-    t->roll_in = coop_owt_roll_steps();
-    coop_owt_hide(&t->hid, pc); /* IN_TRANSIT: off + invulnerable, PC and own followers */
-    coop_sleep_slot_left(slot, "world map trip");
-    coop_owt_publish(slot, t->x, t->y, COOP_OWT_F_MOVING);
-    tig_debug_printf("CoopMiddle: world map trip of slot %d: %d,%d -> %d,%d (%d object(s) in transit)\n", slot,
-        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest),
-        t->hid.count);
+    if (player_is_local_pc_obj(target_obj)) {
+        if (!wmap_ui_is_created()) {
+            ui_wmap_select(source_obj, spell);
+        }
+        return;
+    }
+    if (!coop_mid_session_host()) {
+        return;
+    }
+    slot = coop_middle_slot_of_pc(target_obj);
+    if (slot > 0 && slot < 8 && spell >= 0 && spell < COOP_OWT_SPELL_MAX) {
+        coop_owt_send(COOP_OWT_SELECT, slot, 0, 0, spell, 0, slot);
+        tig_debug_printf("CoopMiddle: teleport spell of slot %d: the client picks the place\n", slot);
+    }
+}
+
+bool coop_middle_owt_client_teleport(int64_t loc, int spell)
+{
+    if (!tig_net_is_active() || tig_net_is_host() || !tig_net_is_coop_enabled() || !coop_im_start_map()
+        || loc == 0) {
+        return false;
+    }
+    coop_owt_client_active = true;
+    coop_owt_client_dest = loc;
+    coop_owt_client_sent_ms = coop_mid_now_ms;
+    coop_owt_send(COOP_OWT_START, sub_529520(), COOP_OWT_F_TELEPORT, loc,
+        spell >= 0 && spell < COOP_OWT_SPELL_MAX ? spell : 0, 0, 0);
+    tig_debug_printf("CoopMiddle: teleport to %d,%d asked\n", (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+    return true;
 }
 
 static void coop_owt_host_tick(unsigned int now_ms)
@@ -3299,9 +3489,16 @@ static void coop_owt_host_tick(unsigned int now_ms)
         }
         t->step_ms += steps * COOP_OWT_STEP_MS;
         while (steps-- > 0 && !done) {
-            if (coop_middle_owt_advance(&t->x, &t->y, t->tx, t->ty, 1) == 0) {
+            int64_t next;
+
+            if (t->path_pos >= t->path_len) {
                 break;
             }
+            /* vanilla sub_565170: one sector in the planned direction */
+            sector_in_dir(t->sec, t->path[t->path_pos++], &next);
+            t->sec = next;
+            t->x = (int)SECTOR_X(next);
+            t->y = (int)SECTOR_Y(next);
             if (--t->roll_in <= 0) {
                 int64_t at = coop_owt_sector_loc(t->x, t->y);
 
@@ -3315,8 +3512,14 @@ static void coop_owt_host_tick(unsigned int now_ms)
         if (done) {
             continue;
         }
-        if (t->x == t->tx && t->y == t->ty) {
-            coop_owt_finish(slot, t->dest, true, false, "arrived");
+        if (t->path_pos >= t->path_len) {
+            int64_t at = t->dest;
+            int area = area_get_nearest_area_in_range(at, true);
+
+            if (area > 0) {
+                at = area_get_location(area); /* vanilla sub_5649F0 */
+            }
+            coop_owt_finish(slot, at, true, false, "arrived");
             continue;
         }
         if ((unsigned int)(now_ms - t->progress_ms) >= COOP_OWT_PROGRESS_MS) {
@@ -3397,10 +3600,25 @@ bool coop_middle_owt_client_propose(int64_t dest_loc)
     coop_owt_client_active = true;
     coop_owt_client_dest = dest_loc;
     coop_owt_client_sent_ms = coop_mid_now_ms;
-    coop_owt_send(COOP_OWT_START, sub_529520(), 0, dest_loc, (int)(LOCATION_GET_X(dest_loc) >> 6),
-        (int)(LOCATION_GET_Y(dest_loc) >> 6), 0);
-    tig_debug_printf("CoopMiddle: world map trip to %d,%d asked\n", (int)LOCATION_GET_X(dest_loc),
-        (int)LOCATION_GET_Y(dest_loc));
+    {
+        /* The plotted route, waypoint by waypoint (the host paths each leg
+           like vanilla); the last point is the destination itself. */
+        int64_t locs[COOP_OWT_ROUTE_MAX];
+        int n = wmap_ui_coop_route_locs(locs, COOP_OWT_ROUTE_MAX);
+        int before = 0;
+        int i;
+        int self = sub_529520();
+
+        if (n > 1 && locs[n - 1] == dest_loc) {
+            before = n - 1;
+            for (i = 0; i < before; i++) {
+                coop_owt_send(COOP_OWT_WAYPOINT, self, 0, locs[i], i, before, 0);
+            }
+        }
+        coop_owt_send(COOP_OWT_START, self, 0, dest_loc, before, 0, 0);
+        tig_debug_printf("CoopMiddle: world map trip to %d,%d asked (%d waypoint(s) before it)\n",
+            (int)LOCATION_GET_X(dest_loc), (int)LOCATION_GET_Y(dest_loc), before);
+    }
     return true;
 }
 
@@ -3471,6 +3689,8 @@ static const char* coop_owt_refuse_text(int reason, bool ru)
         return ru ? "Нельзя отправиться в путь." : "Can't travel now.";
     case COOP_OWT_REFUSE_DEST:
         return ru ? "Туда не попасть." : "That place can't be reached.";
+    case COOP_OWT_REFUSE_BLOCKED:
+        return ru ? "Путь прегражден. Нужен мост, перевал или транспорт." : "Your path is blocked. You must locate a bridge, pass or means of transportation.";
     case COOP_OWT_REFUSE_BUSY:
         return ru ? "Сейчас нельзя: идёт общий переход или сон." : "Not now: a party move or sleep is running.";
     default:
@@ -3499,9 +3719,13 @@ void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt)
                 pkt->slot);
             return;
         }
-        if (pkt->op == COOP_OWT_START) {
-            coop_owt_host_start(sender, pkt->loc);
-        } else if (coop_owt[sender].active) {
+        if (pkt->op == COOP_OWT_WAYPOINT) {
+            coop_middle_owt_route_add(&coop_owt_route[sender], pkt->world_x, pkt->world_y, pkt->loc);
+        } else if (pkt->op == COOP_OWT_START && (pkt->flags & COOP_OWT_F_TELEPORT) != 0) {
+            coop_owt_host_teleport(sender, pkt->loc, pkt->world_x);
+        } else if (pkt->op == COOP_OWT_START) {
+            coop_owt_host_start(sender, pkt->loc, pkt->world_x);
+        } else if (pkt->op == COOP_OWT_CANCEL && coop_owt[sender].active) {
             CoopOwtTransit* t = &coop_owt[sender];
             int64_t at = coop_owt_sector_loc(t->x, t->y);
             int area = area_get_nearest_area_in_range(at, true);
@@ -3515,6 +3739,12 @@ void coop_middle_handle_overworld(PacketCoopOverworldTravel* pkt)
     }
     local = sub_529520();
     switch (pkt->op) {
+    case COOP_OWT_SELECT:
+        /* our Teleport spell, resolved on the host: pick the place (vanilla) */
+        if (pkt->slot == local && player_get_local_pc_obj() != OBJ_HANDLE_NULL && !wmap_ui_is_created()) {
+            ui_wmap_select(player_get_local_pc_obj(), pkt->world_x);
+        }
+        break;
     case COOP_OWT_PROGRESS:
         coop_owt_mark_set(pkt->slot, pkt->world_x, pkt->world_y, pkt->flags);
         if (pkt->slot == local) {
@@ -4260,6 +4490,13 @@ bool coop_middle_overworld_solo_hop(int dest_map) { (void)dest_map; return false
 bool coop_middle_overworld_freeze_time(void) { return false; }
 bool coop_middle_overworld_local_step(int64_t loc) { (void)loc; return false; }
 bool coop_middle_owt_client_propose(int64_t dest_loc) { (void)dest_loc; return false; }
+bool coop_middle_owt_client_teleport(int64_t loc, int spell) { (void)loc; (void)spell; return false; }
+void coop_middle_teleport_spell(int64_t source_obj, int64_t target_obj, int spell)
+{
+    (void)source_obj;
+    (void)target_obj;
+    (void)spell;
+}
 void coop_middle_owt_client_closed(void) { }
 bool coop_middle_owt_in_transit(int slot) { (void)slot; return false; }
 bool coop_middle_owt_local_in_transit(void) { return false; }
