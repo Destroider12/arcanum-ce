@@ -41,6 +41,12 @@ extern "C" {
 #define COOP_RULE_UNIFIED_SLEEP 0x00000200u /* sleep / wait needs every living player ready (consensus) */
 /* Coop Middle M6 */
 #define COOP_RULE_SUBINSTANCES 0x00000400u /* a client may enter an interior / dungeon alone (solo instance) */
+/* Coop Lite mode (key lite, default off): the session plays as the Coop Lite
+   1.0 release. coop_rules_effective turns every Middle gameplay rule off
+   (and hp / xp to 100); only the bits in COOP_RULE_LITE_KEEP_MASK stay.
+   The game also reads it for the gates that are not a rule bit (party
+   dialog = one at a time, leader nearby; no pause; no /tp /stuck /gather). */
+#define COOP_RULE_LITE_MODE 0x00000800u
 
 #define COOP_RULE_M1_MASK (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
 /* Rules that do something (always in the env string / description). */
@@ -48,7 +54,10 @@ extern "C" {
     (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE \
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD \
         | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES)
-#define COOP_RULE_KNOWN_MASK COOP_RULE_ACTIVE_MASK
+/* lite is written to the env string only when it is on (older strings stay the same). */
+#define COOP_RULE_KNOWN_MASK (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE)
+/* What Lite mode keeps: the mode bit and the [Loot] chat feed (a UI line). */
+#define COOP_RULE_LITE_KEEP_MASK (COOP_RULE_LITE_MODE | COOP_RULE_LOOT_FEED)
 #define COOP_RULE_DEFAULT_FLAGS \
     (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE \
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD \
@@ -96,6 +105,12 @@ int coop_rules_format_env(const CoopRules* r, char* out, size_t sz);
 /* One readable line for the log and the chat. */
 void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz);
 bool coop_rules_equal(const CoopRules* a, const CoopRules* b);
+/* The rules the game plays by: sanitized, and with COOP_RULE_LITE_MODE the
+   Coop Lite 1.0 set (flags & COOP_RULE_LITE_KEEP_MASK, hp 100, xp 100; the
+   autosave interval is kept). Idempotent. The host applies it before it
+   uses or sends its rules, a client to what it receives. */
+void coop_rules_effective(CoopRules* r);
+bool coop_rules_is_lite(const CoopRules* r);
 
 /* Wire check: exact size, type, version >= 1. Direction is the packet
    role table (host -> client only). */

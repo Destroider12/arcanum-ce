@@ -65,6 +65,7 @@ static const struct {
     { "ow", "free_overworld", NULL, COOP_RULE_FREE_OVERWORLD },
     { "usleep", "unified_sleep", NULL, COOP_RULE_UNIFIED_SLEEP },
     { "subinst", "solo_instances", "subinstances", COOP_RULE_SUBINSTANCES },
+    { "lite", "lite_mode", "coop_lite", COOP_RULE_LITE_MODE },
 };
 
 #define COOP_RULES_KEY_COUNT ((int)(sizeof(coop_rules_keys) / sizeof(coop_rules_keys[0])))
@@ -233,6 +234,19 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
         s = *r;
         coop_rules_sanitize(&s);
     }
+    if ((s.flags & COOP_RULE_LITE_MODE) != 0) {
+        size_t n;
+
+        snprintf(out, sz, "%s", ru ? "Режим Coop Lite (как релиз 1.0). " : "Coop Lite mode (as release 1.0). ");
+        n = strlen(out);
+        if (n + 1 < sz) {
+            CoopRules e = s;
+
+            e.flags &= ~COOP_RULE_LITE_MODE;
+            coop_rules_describe(&e, ru, out + n, sz - n);
+        }
+        return;
+    }
     if (s.autosave_min == 0) {
         snprintf(asave, sizeof(asave), "%s", off);
     } else {
@@ -272,6 +286,24 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
             (s.flags & COOP_RULE_SUBINSTANCES) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, asave);
     }
+}
+
+void coop_rules_effective(CoopRules* r)
+{
+    if (r == NULL) {
+        return;
+    }
+    coop_rules_sanitize(r);
+    if ((r->flags & COOP_RULE_LITE_MODE) != 0) {
+        r->flags &= COOP_RULE_LITE_KEEP_MASK;
+        r->enemy_hp_pct = 100;
+        r->xp_mult_pct = 100;
+    }
+}
+
+bool coop_rules_is_lite(const CoopRules* r)
+{
+    return r != NULL && (r->flags & COOP_RULE_LITE_MODE) != 0;
 }
 
 bool coop_rules_equal(const CoopRules* a, const CoopRules* b)

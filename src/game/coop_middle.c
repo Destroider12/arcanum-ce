@@ -1339,6 +1339,7 @@ const CoopRules* coop_middle_rules(void)
         char desc[512];
         int used = coop_rules_parse_env(&coop_mid_host_rules, env);
 
+        coop_rules_effective(&coop_mid_host_rules); /* lite=1: the Coop Lite 1.0 set, also on the wire */
         coop_mid_host_rules_ready = true;
         coop_rules_format_env(&coop_mid_host_rules, text, sizeof(text));
         coop_rules_describe(&coop_mid_host_rules, false, desc, sizeof(desc));
@@ -1351,6 +1352,11 @@ const CoopRules* coop_middle_rules(void)
 bool coop_middle_rule_on(uint32_t flag)
 {
     return (coop_middle_rules()->flags & flag) != 0;
+}
+
+bool coop_middle_lite_mode(void)
+{
+    return tig_net_is_coop_enabled() && coop_rules_is_lite(coop_middle_rules());
 }
 
 static int coop_mid_slot_of(int64_t obj)
@@ -1487,7 +1493,7 @@ void coop_middle_handle_rules(PacketCoopRules* pkt)
         return;
     }
     coop_mid_rx_rules = pkt->rules;
-    coop_rules_sanitize(&coop_mid_rx_rules);
+    coop_rules_effective(&coop_mid_rx_rules); /* sanitize + Lite mode */
     coop_mid_rx_valid = true;
     coop_rules_format_env(&coop_mid_rx_rules, text, sizeof(text));
     tig_debug_printf("CoopMiddle: rules received from the host: %s\n", text);
@@ -2304,6 +2310,11 @@ static void coop_pause_set(bool on, int by, const char* why)
 
 static void coop_pause_host_request(int slot, bool want)
 {
+    if (coop_middle_lite_mode() && want) {
+        tig_debug_printf("CoopMiddle: pause request from slot %d refused (Lite mode)\n", slot);
+        coop_pause_send(slot > 0 ? slot : -1);
+        return;
+    }
     if (slot > 0) {
         if (!coop_middle_rule_on(COOP_RULE_CLIENT_PAUSE) || !tig_net_client_is_active(slot)) {
             tig_debug_printf("CoopMiddle: pause request from slot %d refused (rule off or inactive)\n", slot);
@@ -2326,8 +2337,8 @@ bool coop_middle_pause_key(void)
     bool want;
     bool ru = coop_lite_lang_ru();
 
-    if (!tig_net_is_active() || !tig_net_is_coop_enabled()) {
-        return false;
+    if (!tig_net_is_active() || !tig_net_is_coop_enabled() || coop_middle_lite_mode()) {
+        return false; /* Lite mode: no shared pause (Coop Lite 1.0) */
     }
     want = !coop_middle_is_paused();
     if (tig_net_is_host()) {
@@ -2729,8 +2740,9 @@ bool coop_middle_try_chat_command(int sender_slot, const char* text)
     int left;
     int reason;
 
-    if (cmd == COOP_CMD_NONE || !coop_mid_session_host() || sender_slot < 0 || sender_slot >= 8) {
-        return false;
+    if (cmd == COOP_CMD_NONE || !coop_mid_session_host() || sender_slot < 0 || sender_slot >= 8
+        || coop_middle_lite_mode()) {
+        return false; /* Lite mode: plain chat text, as in Coop Lite 1.0 */
     }
     tig_debug_printf("CoopMiddle: command %d from slot %d\n", cmd, sender_slot);
     host_pc = sub_4A2B60(0);
@@ -4978,6 +4990,7 @@ const CoopRules* coop_middle_rules(void)
     return &coop_mid_stub_rules;
 }
 bool coop_middle_rule_on(uint32_t flag) { return (coop_middle_rules()->flags & flag) != 0; }
+bool coop_middle_lite_mode(void) { return coop_rules_is_lite(coop_middle_rules()); }
 void coop_middle_session_reset(void) { }
 void coop_middle_note_save(void) { }
 bool coop_middle_take_autosave(char* slot, size_t slot_size, char* desc, size_t desc_size)

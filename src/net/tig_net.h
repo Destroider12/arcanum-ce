@@ -43,7 +43,9 @@ extern "C" {
                                M6 PACKET_COOP_SUBINST_CTRL / CHUNK / DELTA (171-173),
                                [Co-op] solo instance chat line;
                                M7 CoopRules.autosave_min, COOP_CTRL_SLEEP_APPLY (11),
-                               [Party] collapse + [AutoSave] chat lines */
+                               [Party] collapse + [AutoSave] chat lines;
+                               after M7 (same 59): COOP_RULE_LITE_MODE 0x800 in
+                               CoopRules.flags (the host sends effective rules) */
 
 typedef enum TigNetEvent {
     TIG_NET_EVENT_CONNECT = 1,

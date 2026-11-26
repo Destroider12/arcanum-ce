@@ -484,6 +484,8 @@ bool coop_middle_autosave_is_slot(int slot_num);
 
 const CoopRules* coop_middle_rules(void);
 bool coop_middle_rule_on(uint32_t flag);
+/* Coop Lite mode (rule lite=1): the gates that are not a rule bit read this. */
+bool coop_middle_lite_mode(void);
 void coop_middle_session_reset(void);
 void coop_middle_tick(unsigned int now_ms);
 void coop_middle_host_slot_synced(int slot); /* after SESSION_SYNC (join, rejoin) */
