@@ -47,6 +47,23 @@ The host's launcher builds `ARCANUM_COOP_RULES` (e.g. `gold=0,loot=1,rest=1,trad
 | `hp` (`enemy_hp_pct`) | enemy HP %, 100..300 | 100 | HP % combo (`enemy_hp_pct`) | M3 |
 | `xp` (`xp_mult_pct`) | XP %, 100..250 | 100 | XP % combo (`xp_mult_pct`) | M3 |
 | `asave` (`autosave_min`, `autosave`) | host autosave interval in minutes: 0 = off, else 5..60 (1 -> 5, 999 -> 60) | 10 | Auto-save combo Off / 5 / 10 / 15 / 30 min (`autosave_min`) | M7 |
+| `lite` (`lite_mode`, `coop_lite`) | Coop Lite mode: the session plays as the Coop Lite 1.0 release (see below); written to the env string only when on | off | Coop Lite mode (as release 1.0) (`lite_mode`) | after M7 |
+
+### Coop Lite mode (`lite=1`, `COOP_RULE_LITE_MODE` 0x800)
+
+One switch that turns the session into Coop Lite 1.0 gameplay. Everything goes through one function, `coop_rules_effective` (pure, `coop_rules.c`): the host applies it to its parsed rules before it uses or sends them, a client to the rules it receives, and every rule check (`coop_middle_rules()`, `coop_middle_rule_on`) reads the result. With `lite=1` the effective rules are `flags & (COOP_RULE_LITE_MODE | COOP_RULE_LOOT_FEED)`, `hp=100`, `xp=100`; `asave` is kept. The gates that are not a rule bit read `coop_middle_lite_mode()`.
+
+Off in Lite mode (Lite 1.0 behaviour):
+
+- free world map (`ow`): the host drives the party, clients watch the trip (PT73 spectator), strict tie to the host;
+- solo interiors / dungeons (`subinst`);
+- parallel and remote dialogs: one party dialog at a time (the host's own dialog counts, the host watches a running client dialog), the leader within `COOP_PARTY_TALK_MAX_HOST_DIST`, the host's combat blocks (`coop_lite_party_talk_gate(..., lite = true)` = PT41's `coop_lite_party_talk_check`);
+- shared quest items, shared followers, unified sleep and the client rest request (Lite rest), gold split, direct trade, no-friendly-fire, enemy HP % and XP % (100);
+- the shared pause (host and clients: the Pause key does nothing, requests are refused) and the `/tp`, `/stuck`, `/gather` commands (plain chat text).
+
+What stays (UI and housekeeping only): F9 net HUD, Alt loot labels, portrait status badges, map pings, off-screen arrows and the collapse notice for fallen teammates, the red dead marker and fog sync on the town map, the `[Loot]` chat feed (its own checkbox), the host autosave (its own combo), interest management (network traffic only), the lobby rules line.
+
+Launcher: the checkbox greys every other rule except Loot feed and Auto-save. Protocol stays **59**: the bit lives in the existing `flags` field (`sizeof(CoopRules)` unchanged) and the host sends the effective rules, so even a peer that does not know the bit sees every Middle rule off.
 
 ```c
 typedef struct CoopRules {
@@ -60,7 +77,7 @@ typedef struct CoopRules {
 } CoopRules;                          /* 28 bytes (unchanged since M1), _Static_assert on size / offsets */
 ```
 
-`coop_rules_sanitize` clamps the numbers, drops unknown flag bits, zeroes the reserved fields and fixes `version`. M7 took 2 bytes of the old `reserved[0]` for `autosave_min`, so `sizeof(CoopRules)` and the packet size stayed the same.
+`coop_rules_sanitize` clamps the numbers, drops unknown flag bits (known: the M1-M6 rule bits and `COOP_RULE_LITE_MODE`), zeroes the reserved fields and fixes `version`. M7 took 2 bytes of the old `reserved[0]` for `autosave_min`, so `sizeof(CoopRules)` and the packet size stayed the same.
 
 ## Hotkeys and mouse (co-op only)
 
@@ -94,7 +111,7 @@ Commands are case-insensitive, run on the host before the chat relay and never s
 
 ### Host autosave
 
-- `asave` minutes (default 10, 0 = off). The host checks once per second. `coop_middle_autosave_ready` needs: interval > 0, at least `asave` minutes since the last save (manual, client F7 or auto: every `gamelib_save` restarts the interval), the host in the world (valid map, alive, no main menu, no load / save running), no pause, no combat, no dialog (host or any client), no world / town map window, no teleport / sleep / Lite travel or load prompt / overworld trip, and no solo-instance COMMIT or checkpoint still arriving. If something blocks, it tries again in 15 s (the need stays). A pause freezes the interval.
+- `asave` minutes (default 10, 0 = off). The host checks once per second. `coop_middle_autosave_ready` needs: interval > 0, at least `asave` minutes since the last save (manual, client F7 or auto: every successful `gamelib_save` restarts the interval), the host in the world (valid map, alive, no main menu, no load / save running), no pause, no combat, no dialog (host or any client), no world / town map window, no teleport / sleep / Lite travel or load prompt / overworld trip, and no solo-instance COMMIT or checkpoint still arriving. If something blocks, it tries again in 15 s (the need stays). A pause freezes the interval.
 - The save runs in the main loop next to the PT61 client save (outside `gamelib_ping`): `gamelib_save` first sends `CHECKPOINT_REQ` to every solo-instance client and waits up to 2 s (M6), then writes `Slot9690`..`Slot9694` round robin with the descriptions `[Host] AutoSave 1`..`5`. The first slot of a session follows the newest existing autosave. Manual saves and the client slots `Slot9700`..`Slot9789` are never touched.
 - Chat to everyone: `[AutoSave] World saved (AutoSave N).` / `[Автосейв] Мир сохранён (AutoSave N).` (chat kind 12). A failed save is logged and retried in 15 s.
 - `gamelib_last_save_name` (party-wipe reload, `ARCANUM_COOP_AUTOLOAD=latest`) takes the newest save, autosaves included.
@@ -113,7 +130,8 @@ Commands are case-insensitive, run on the host before the chat relay and never s
 ### Launcher
 
 - Host panel: **Auto-save** combo (Off / 5 / 10 / 15 / 30 min) next to Solo interiors/dungeons, `[rules] autosave_min` (default 10), sent as `asave=` in `ARCANUM_COOP_RULES`.
-- The game writes `lobby_rules.txt` (one `coop_rules_describe` line, UTF-8, EN or RU by `ARCANUM_COOP_LANG`) in its role folder (`coop\host\` or `coop\client\`) at host start and when a client gets `PACKET_COOP_RULES`. The lobby panel shows it in a status line under the player list (the old file is deleted when the lobby opens).
+- The game writes `lobby_rules.txt` (one `coop_rules_describe` line, UTF-8, EN or RU by `ARCANUM_COOP_LANG`) in its role folder (`coop\host\` or `coop\client\`) at host start and when a client gets `PACKET_COOP_RULES`. The lobby panel shows it in a status line under the player list (the old file is deleted just before the game starts). The window is sized from its client area, so the line always fits.
+- After M7: a **Coop Lite mode (as release 1.0)** checkbox under the rules (`[rules] lite_mode`, sent as `lite=1`); it greys the other rules except Loot feed and Auto-save.
 
 ## Feature details (M1-M6)
 
@@ -319,7 +337,7 @@ typedef struct PacketCoopPing {
 Off = Lite behaviour. On, and only while the party is on map 1 (the world):
 
 - World map travel does not move the clock and gives no travel healing; speed stays vanilla.
-- The host's world map does not dim clients and does not open the PT73 spectator. The host's own hop moves only its PC and followers (no FOLLOW_HOST, no carry).
+- The host's world map does not dim clients and does not open the PT73 spectator. The host's own hop (arrival, stop or random encounter) moves only its PC and followers (no FOLLOW_HOST, no carry). Fixed after M7 (t391u): `teleport_process` still ran `coop_lite_after_party_carry` on a solo hop, which put every client PC next to the host, so a host encounter pulled the clients in; it now runs only for party travel.
 - A client's route click sends `PACKET_COOP_OVERWORLD_TRAVEL` (170, 0x20 bytes, role `BOTH`) START. The host validates (rule, map 1, alive, not in combat / targeted within 15 tiles, destination on the map, no ready check / sleep running), hides the PC and its followers (`OF_OFF | OF_INVULNERABLE`), moves them one sector per 62 ms, rolls `wmap_rnd` every 5-11 sectors and sends PROGRESS every 150 ms. ARRIVED / CANCEL (closing the world map) / an encounter land the PC (sectors kept, epoch bump, PC_POS FORCE); the client closes its world map and re-centres. A new START during a trip re-routes it. Refusals: REFUSED with a reason (EN/RU notice).
 - Allies' markers: refreshed every 1000 ms (PROGRESS without MOVING), coloured by slot; an encounter shows a blinking red marker for 15 s.
 - Map-changing transitions keep the ready check: a transiting slot is BUSY, and party travel cancels all trips and carries everybody.
@@ -573,7 +591,7 @@ Lite and engine files only get one-line hook calls, so Coop Lite bugfixes merge 
 | `coop_lite.h` | `PACKET_COOP_TYPE_LIMIT` 172 |
 | `coop_lite.c` | NPC_POS per-slot batches (44 tiles, seen mask); DOOR_STATE / TRAP_FX / PROJECTILE_FX -> `coop_middle_send_app_near`; keep window -> `coop_middle_keep_sector_set`; role `BOTH` + min size of 170; host world-map dimming off while `ow` is active; party travel aborts world map trips; client world map click -> `coop_middle_owt_client_propose`; a transiting slot is BUSY in the ready check; bridges `coop_lite_mid_keep*` / `coop_lite_mid_center_local` |
 | `sector.c/.h` | co-op cache 128; `sector_cache_coop_stats()` |
-| `teleport.c` | host's own hop on map 1 with `ow`: carries no other PCs, no FOLLOW_HOST |
+| `teleport.c` | host's own hop on map 1 with `ow`: carries no other PCs (no `coop_lite_after_party_carry`), no FOLLOW_HOST |
 | `multiplayer.c` | dispatch of `PACKET_COOP_OVERWORLD_TRAVEL` |
 | `mp_utils.c` / `magictech.c` | sound (106) and eye-candy add (77) -> `coop_middle_send_app_near` |
 | `wmap_ui.c/.h` | frozen clock + own encounter rolls on map 1; client close -> CANCEL; ally markers (WORLD view); `wmap_ui_coop_marker_set` / `_local_sector` / `_refresh` |
@@ -592,7 +610,7 @@ M6 / M7 hooks:
 | `coop_subinst.h/.c` (new, M6) | solo instances; M7: `coop_subinst_host_lease_mask`, `coop_subinst_host_commit_busy`, `SLEEP_APPLY` in the packet filter, `coop_middle_subinst_local_tick` + pause-frozen checkpoint clock in `coop_subinst_ping` |
 | `tig_net.h` | protocol 59 (M7) |
 | `main.c` | M7: `coop_middle_take_autosave` / `coop_middle_autosave_done` next to the PT61 client save |
-| `gamelib.c` | M6: `coop_subinst_host_before_save`; M7: `coop_middle_note_save` (any save restarts the autosave interval) |
+| `gamelib.c` | M6: `coop_subinst_host_before_save`; M7: `coop_middle_note_save` (only a successful save restarts the autosave interval) |
 | `wmap_ui.c` | M7: dead teammate square red on the town map |
 | `coop_middle_ui.c` | M7: arrow plates, trade auto-close watch, town map refresh on badge change |
 | `tools/launcher/launcher.c` | M7: Auto-save combo, lobby rules line |
@@ -631,7 +649,7 @@ M6 / M7 hooks:
 - **Not tested in play yet:** only the builds (Linux, ASan/UBSan, Win64) and the headless tests.
 - Quest items: the lookup by name covers what the game checks by name (dialog `in`/`ni`, script "has item named" / transfer / destroy). Only these by-name lookups (`item_find_by_name`) are hooked; `COOP_QITEM_MATCH_PROTO` is in the API but unused by the hooks. Dialog `ri` is the NPC "remove item" order (opens an inventory window), not a quest take, so it has no hook.
 - Fog: the client applies host packets for any valid town map (the game keeps one town map's array in memory, so this swaps the cached array and saves the old one). A client that changes town map at the same moment as the host can wait for the next snapshot (SESSION_SYNC or map change) before it sends its own bits.
-- Dialogs: the leader-distance rule of PT41 (`coop_lite_party_talk_check`) is kept, so a client's story dialog still needs the host nearby, but two or more dialogs can now run at once. The client keeps one viewer panel: it shows the routed session only. Headless dialogs play no voice while the host is in its own dialog.
+- Dialogs: two or more dialogs can run at once. Since t391u a client may start a story dialog anywhere on the shared map: `coop_lite_party_talk_gate` ignores the host's distance and the host's combat (the speaker's own session, own fight, turn-based combat and the 5-tile speaker range still count); a speaker whose NPC is not loaded on the host gets its sector window kept (`coop_lite_keep_sector`) and the NPC looked up again. Lite mode keeps PT41's leader-distance rule. The client keeps one viewer panel: it shows the routed session only. Headless dialogs play no voice while the host is in its own dialog.
 - Followers: `spell_tech[16]` carries the 16 spell colleges as the spec asks; tech degrees (`OBJ_F_CRITTER_SPELL_TECH_IDX` 17..24) are not in the packet. The client does not send a follower's grid layout (`INVEN_LAYOUT`); its follower-window moves arrive as Packet81, and the host also accepts a follower layout if one comes. With the rule on, Ctrl+LMB on a teammate's follower opens the exchange instead of the vanilla Ctrl action.
 
 ### M5

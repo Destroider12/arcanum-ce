@@ -178,6 +178,11 @@ Stage **M7 (final polish)**:
 - **Solo instances join the party's sleep**: they vote, and after a unified sleep they heal inside too. The pause also freezes world map trips, checkpoints and the autosave clock; an open trade window closes by itself when the partner travels, enters an instance, fights, dies or walks away.
 - The launcher lobby shows the session rules under the player list.
 
+After M7:
+
+- **Coop Lite mode** (`lite`, launcher checkbox **Coop Lite mode (as release 1.0)**, off by default): one switch that plays the session as the Coop Lite 1.0 release: no free world map (the host drives the party), no solo instances, one party dialog at a time with the leader nearby, no shared quest items / followers, no unified sleep or rest request, no gold split, trade, pause, `/tp` `/stuck` `/gather`, no friendly-fire protection, HP / XP at 100 %. The other rule boxes grey out. What stays: HUD, loot labels and feed, badges, pings, arrows, town map marks, autosave.
+- Fixes: a host's random encounter no longer pulls the clients to the host (free world map); a client can talk to NPCs anywhere on the shared map, not only near the host.
+
 Hotkeys: Alt (loot labels), F9 (net HUD), Pause (shared pause), MMB / Alt+RMB (ping), Ctrl+LMB on a teammate or RMB on a portrait (trade), Y / N (rest / sleep). Chat: `/tp`, `/stuck`, `/gather`.
 
 Not tested in play yet. Details, all `ARCANUM_COOP_RULES` keys and log lines are in [docs/coop-middle.md](docs/coop-middle.md).
