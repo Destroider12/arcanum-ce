@@ -49,6 +49,9 @@
  * default 1) and Unified sleep ([rules] unified_sleep, default 1).
  * Coop Middle M6: a fifth row - Solo interiors/dungeons ([rules]
  * solo_instances, default 1).
+ * Coop Middle M7: Auto-save Off / 5 / 10 / 15 / 30 min ([rules]
+ * autosave_min, default 10, asave= in ARCANUM_COOP_RULES); the lobby panel
+ * shows the session rules from lobby_rules.txt (written by the game).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -113,6 +116,8 @@
 #define IDC_RULE_OW 140 /* Coop Middle M5 */
 #define IDC_RULE_USLEEP 141
 #define IDC_RULE_SUBINST 142 /* Coop Middle M6 */
+#define IDC_RULE_ASAVE 143 /* Coop Middle M7 */
+#define IDC_LOBBY_RULES 144
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -211,6 +216,7 @@ static void refresh(void)
     EnableWindow(item(IDC_RULE_OW), host);
     EnableWindow(item(IDC_RULE_USLEEP), host);
     EnableWindow(item(IDC_RULE_SUBINST), host);
+    EnableWindow(item(IDC_RULE_ASAVE), host);
 }
 
 static void find_local_ip(void)
@@ -311,6 +317,9 @@ static const int k_rule_hp[] = { 100, 150, 200, 250, 300 };
 static const int k_rule_xp[] = { 100, 125, 150, 200 };
 #define RULE_HP_COUNT ((int)(sizeof(k_rule_hp) / sizeof(k_rule_hp[0])))
 #define RULE_XP_COUNT ((int)(sizeof(k_rule_xp) / sizeof(k_rule_xp[0])))
+/* Coop Middle M7: host autosave interval in minutes (0 = off). */
+static const int k_rule_asave[] = { 0, 5, 10, 15, 30 };
+#define RULE_ASAVE_COUNT ((int)(sizeof(k_rule_asave) / sizeof(k_rule_asave[0])))
 
 /* The nearest choice at or below pct (an odd ini value lands on a step). */
 static int rule_pct_index(const int* table, int count, int pct)
@@ -375,6 +384,8 @@ static void load_settings(void)
         rule_pct_index(k_rule_hp, RULE_HP_COUNT, GetPrivateProfileIntA("rules", "enemy_hp_pct", 100, g_ini)), 0);
     SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL,
         rule_pct_index(k_rule_xp, RULE_XP_COUNT, GetPrivateProfileIntA("rules", "xp_mult_pct", 100, g_ini)), 0);
+    SendMessageA(item(IDC_RULE_ASAVE), CB_SETCURSEL,
+        rule_pct_index(k_rule_asave, RULE_ASAVE_COUNT, GetPrivateProfileIntA("rules", "autosave_min", 10, g_ini)), 0);
 }
 
 static bool rule_checked(int id)
@@ -402,6 +413,7 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
+    r.autosave_min = (uint16_t)rule_pct(IDC_RULE_ASAVE, k_rule_asave, RULE_ASAVE_COUNT);
     coop_rules_format_env(&r, out, sz);
 }
 
@@ -434,6 +446,8 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT));
     WritePrivateProfileStringA("rules", "xp_mult_pct", buf, g_ini);
+    snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_ASAVE, k_rule_asave, RULE_ASAVE_COUNT));
+    WritePrivateProfileStringA("rules", "autosave_min", buf, g_ini);
 }
 
 static bool file_exists(const char* path)
@@ -674,6 +688,9 @@ static void lobby_send_chat(void)
     SetWindowTextA(item(IDC_LOBBY_INPUT), "");
 }
 
+static void lobby_rules_poll(void);
+static char g_lobby_rules_last[512];
+
 static void lobby_poll(void)
 {
     char path[MAX_PATH];
@@ -741,6 +758,7 @@ static void lobby_poll(void)
         || strcmp(buf, players) != 0) {
         SetWindowTextA(item(IDC_PLAYERS), players);
     }
+    lobby_rules_poll(); /* Coop Middle M7 */
 
     /* Tail the game log for [CHAT] lines. */
     lobby_path(path, sizeof(path), g_game_log);
@@ -789,6 +807,41 @@ static void lobby_poll(void)
     fclose(f);
 }
 
+/* Coop Middle M7: the game writes lobby_rules.txt (one coop_rules_describe
+   line, UTF-8) at host start and when a client gets the host's rules. */
+static void lobby_rules_poll(void)
+{
+    char* last = g_lobby_rules_last;
+    char path[MAX_PATH];
+    char line[512];
+    wchar_t wline[600];
+    FILE* f;
+
+    lobby_path(path, sizeof(path), "lobby_rules.txt");
+    f = fopen(path, "rb");
+    line[0] = '\0';
+    if (f != NULL) {
+        if (fgets(line, sizeof(line), f) == NULL) {
+            line[0] = '\0';
+        }
+        fclose(f);
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strcmp(line, last) == 0) {
+        return;
+    }
+    snprintf(last, sizeof(g_lobby_rules_last), "%s", line);
+    if (line[0] == '\0') {
+        SetWindowTextA(item(IDC_LOBBY_RULES), "");
+        return;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, line, -1, wline, (int)(sizeof(wline) / sizeof(wline[0]))) > 0) {
+        SetWindowTextW(item(IDC_LOBBY_RULES), wline);
+    } else {
+        SetWindowTextA(item(IDC_LOBBY_RULES), line);
+    }
+}
+
 static void show_lobby(bool on)
 {
     int show = on ? SW_SHOW : SW_HIDE;
@@ -801,8 +854,17 @@ static void show_lobby(bool on)
     ShowWindow(item(IDC_LOBBY_CHAT), show);
     ShowWindow(item(IDC_LOBBY_INPUT), show);
     ShowWindow(item(IDC_LOBBY_SEND), show);
+    ShowWindow(item(IDC_LOBBY_RULES), show);
     if (on) {
         g_lobby_log_off = 0;
+        SetWindowTextA(item(IDC_LOBBY_RULES), "");
+        g_lobby_rules_last[0] = '\0';
+        {
+            char rules_path[MAX_PATH];
+
+            lobby_path(rules_path, sizeof(rules_path), "lobby_rules.txt");
+            DeleteFileA(rules_path); /* the last session's rules */
+        }
         SetWindowTextA(item(IDC_LOBBY_CHAT), "");
         SetWindowTextA(item(IDC_PLAYERS), "(waiting for game...)");
         SetTimer(g_wnd, IDT_LOBBY, 500, NULL);
@@ -2253,6 +2315,22 @@ static void create_controls(void)
     make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 334, 120, 20, IDC_RULE_USLEEP);
     /* Coop Middle M6: fifth rules row (the output box below got shorter). */
     make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 356, 200, 20, IDC_RULE_SUBINST);
+    /* Coop Middle M7: host autosave interval, same row. */
+    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 292, 354, 138, 140, IDC_RULE_ASAVE);
+    {
+        char label[32];
+        int i;
+
+        for (i = 0; i < RULE_ASAVE_COUNT; i++) {
+            if (k_rule_asave[i] == 0) {
+                snprintf(label, sizeof(label), "Auto-save: Off");
+            } else {
+                snprintf(label, sizeof(label), "Auto-save: %d min", k_rule_asave[i]);
+            }
+            SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
+        }
+        SendMessageA(combo, CB_SETCURSEL, 2, 0); /* 10 min */
+    }
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         12, 380, 418, 34, IDC_CHECK_OUT);
     make("STATIC", "", SS_LEFT, 12, 418, 418, 36, IDC_STATUS);
@@ -2272,6 +2350,7 @@ static void create_controls(void)
     make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 662, 330, 22, IDC_LOBBY_INPUT);
     SendMessageA(item(IDC_LOBBY_INPUT), EM_LIMITTEXT, 120, 0);
     make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 660, 80, 26, IDC_LOBBY_SEND);
+    make("STATIC", "", SS_LEFT, 12, 690, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
     show_panel(false);
     show_lobby(false);
 }
