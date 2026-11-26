@@ -979,7 +979,6 @@ bool gamelib_save(const char* name, const char* description)
 
     /* Coop Middle M6: solo instances send their state first (2 s max). */
     coop_subinst_host_before_save();
-    coop_middle_note_save(); /* Coop Middle M7: restarts the autosave interval */
 
     in_save = true;
 
@@ -1101,6 +1100,8 @@ bool gamelib_save(const char* name, const char* description)
 
     duration = tig_timer_elapsed(start_time);
     tig_debug_printf("gamelib_save(): Save Complete.  Total time: %d ms.\n", duration);
+
+    coop_middle_note_save(); /* Coop Middle M7: a successful save restarts the autosave interval */
 
     return true;
 }
