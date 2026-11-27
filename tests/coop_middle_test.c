@@ -1896,6 +1896,58 @@ static void test_lite_mode(void)
 }
 
 /* After M7: auto-levelling rules (flvl / plvl) and their pure helpers. */
+/* t402u / t403u: same-map hops solo in Middle; client follower lists. */
+static void test_hop_and_followers(void)
+{
+    int64_t have[6];
+    bool ok[6];
+    int64_t want[4];
+    int64_t out[8];
+    bool changed = false;
+    int n;
+
+    /* Middle: same map (or -1 = same) is solo; a map change is not; Lite never. */
+    CHECK(coop_middle_solo_hop_rule(true, 7, 7));
+    CHECK(coop_middle_solo_hop_rule(true, 7, -1));
+    CHECK(coop_middle_solo_hop_rule(true, 1, 1));
+    CHECK(!coop_middle_solo_hop_rule(true, 7, 8));
+    CHECK(!coop_middle_solo_hop_rule(false, 7, 7));
+    CHECK(!coop_middle_solo_hop_rule(false, 1, 1));
+    CHECK(!coop_middle_solo_hop_rule(true, 0, 0));
+    CHECK(!coop_middle_solo_hop_rule(true, -1, -1));
+    /* the stub (no session) never hops solo */
+    CHECK(!coop_middle_host_solo_hop(7));
+
+    /* consistent list: unchanged */
+    have[0] = 0x101; ok[0] = true;
+    have[1] = 0x102; ok[1] = true;
+    want[0] = 0x102; want[1] = 0x101;
+    n = coop_middle_follower_list_plan(have, ok, 2, want, 2, out, 8, &changed);
+    CHECK(n == 2 && !changed && out[0] == 0x101 && out[1] == 0x102);
+
+    /* t403u: null / stale entries dropped, missing table followers added */
+    have[0] = 0;     ok[0] = false;
+    have[1] = 0x201; ok[1] = true;
+    have[2] = 0x999; ok[2] = false; /* freed handle */
+    have[3] = 0x201; ok[3] = true;  /* duplicate */
+    want[0] = 0x202; want[1] = 0x201; want[2] = 0; want[3] = 0x203;
+    n = coop_middle_follower_list_plan(have, ok, 4, want, 4, out, 8, &changed);
+    CHECK(changed && n == 3 && out[0] == 0x201 && out[1] == 0x202 && out[2] == 0x203);
+
+    /* t402u: leader field set, list empty (world state / load): added */
+    n = coop_middle_follower_list_plan(have, ok, 0, want, 1, out, 8, &changed);
+    CHECK(changed && n == 1 && out[0] == 0x202);
+
+    /* capacity respected */
+    have[0] = 1; have[1] = 2; have[2] = 3; ok[0] = ok[1] = ok[2] = true;
+    want[0] = 4; want[1] = 5;
+    n = coop_middle_follower_list_plan(have, ok, 3, want, 2, out, 4, &changed);
+    CHECK(n == 4 && changed && out[3] == 4);
+    n = coop_middle_follower_list_plan(NULL, NULL, 0, NULL, 0, out, 4, &changed);
+    CHECK(n == 0 && !changed);
+    printf("PASS: same-map solo hop (Middle) / client follower list repair\n");
+}
+
 static void test_autolevel(void)
 {
     CoopRules r;
@@ -2309,6 +2361,7 @@ int main(void)
     test_m7_ckpt_clock();
     test_lite_mode();
     test_autolevel();
+    test_hop_and_followers();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
@@ -2318,6 +2371,6 @@ int main(void)
            "M4 rules / quest items / town map fog / dialog routing / followers, "
            "M5 rules / interest / world map travel / unified sleep, "
            "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge, "
-           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, Lite mode, auto-levelling, protocol 60)\n");
+           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, Lite mode, auto-levelling, protocol 60, solo hops, follower lists)\n");
     return 0;
 }
