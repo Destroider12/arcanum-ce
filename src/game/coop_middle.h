@@ -490,6 +490,10 @@ bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map);
 int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int n_have, const int64_t* want,
     int n_want, int64_t* out, int max, bool* changed);
 bool coop_middle_autosave_is_slot(int slot_num);
+/* t404u (pure): length of one mobile.md dif record (after its leading id),
+   or 0 when the layout does not check out. Lets a load skip the record of an
+   object the map does not have instead of failing the whole save. */
+size_t coop_middle_dif_record_len(const uint8_t* buf, size_t len, const void* oid, size_t oid_size);
 
 /* ---- game hooks (no-ops in test stubs) ---- */
 
@@ -620,6 +624,9 @@ bool coop_middle_overworld_solo_hop(int dest_map);
 bool coop_middle_host_solo_hop(int dest_map);
 /* t402u: client: slot PCs' follower lists after a FOLLOWERS table. */
 void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt);
+/* t404u: map load, co-op only: the dif record of a missing object is skipped
+   (stream left at the next record). False = vanilla failure. */
+bool coop_middle_mobile_dif_skip(void* stream, const void* oid, size_t oid_size);
 /* World map step on this machine: true = skip the game time advance. */
 bool coop_middle_overworld_freeze_time(void);
 /* Host's own world map step at loc; true = an encounter fired (close the map). */

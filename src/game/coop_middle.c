@@ -1310,6 +1310,56 @@ int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int
     return n;
 }
 
+/* t404u: a mobile.md record is <id> <version:4> <0x12344321> <id> <bits..>
+   <fields..> <0x23455432>. Its size depends on the object's type, which a
+   missing object cannot tell, so the end marker is searched and accepted only
+   at the end of the file or right before a well-formed next record (same
+   version, start marker, its id twice). buf starts after the leading id. */
+size_t coop_middle_dif_record_len(const uint8_t* buf, size_t len, const void* oid, size_t oid_size)
+{
+    const uint32_t start_marker = 0x12344321u;
+    const uint32_t end_marker = 0x23455432u;
+    int32_t version;
+    int32_t v2;
+    uint32_t m;
+    size_t head;
+    size_t p;
+
+    if (buf == NULL || oid == NULL || oid_size == 0) {
+        return 0;
+    }
+    head = 8 + oid_size;
+    if (len < head + 4) {
+        return 0;
+    }
+    memcpy(&version, buf, 4);
+    memcpy(&m, buf + 4, 4);
+    if (m != start_marker || memcmp(buf + 8, oid, oid_size) != 0) {
+        return 0;
+    }
+    for (p = head; p + 4 <= len; p++) {
+        size_t next;
+
+        memcpy(&m, buf + p, 4);
+        if (m != end_marker) {
+            continue;
+        }
+        next = p + 4;
+        if (next == len) {
+            return next;
+        }
+        if (len - next >= oid_size + 8 + oid_size) {
+            memcpy(&v2, buf + next + oid_size, 4);
+            memcpy(&m, buf + next + oid_size + 4, 4);
+            if (v2 == version && m == start_marker
+                && memcmp(buf + next, buf + next + oid_size + 8, oid_size) == 0) {
+                return next;
+            }
+        }
+    }
+    return 0;
+}
+
 #ifndef COOP_LITE_TEST_STUBS
 
 #include <SDL3/SDL.h>
@@ -3532,6 +3582,55 @@ void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt)
     }
 }
 
+/* t404u: a host save written while a client's parked PC held items it had
+   found inside its own map (M6 reconcile, before this fix not OF_DYNAMIC)
+   stored them as difs of base objects this map never had; vanilla map_load
+   then fails the whole save (a reset to the start merchant). The record is
+   skipped instead: the map loads, the owner's list drops the missing entry
+   (the validator removes null inventory entries). */
+bool coop_middle_mobile_dif_skip(void* stream, const void* oid, size_t oid_size)
+{
+    TigFile* f = (TigFile*)stream;
+    int pos = 0;
+    int total;
+    size_t rest;
+    size_t len;
+    uint8_t* buf;
+
+    if (f == NULL || oid == NULL || !tig_net_is_coop_enabled()) {
+        return false;
+    }
+    if (tig_file_fgetpos(f, &pos) != 0) {
+        return false;
+    }
+    total = tig_file_filelength(f);
+    if (total <= pos) {
+        return false;
+    }
+    rest = (size_t)(total - pos);
+    buf = (uint8_t*)malloc(rest);
+    if (buf == NULL) {
+        return false;
+    }
+    if (tig_file_fread(buf, 1, rest, f) != rest) {
+        free(buf);
+        tig_file_fsetpos(f, &pos);
+        return false;
+    }
+    len = coop_middle_dif_record_len(buf, rest, oid, oid_size);
+    free(buf);
+    if (len == 0) {
+        tig_file_fsetpos(f, &pos);
+        tig_debug_printf("CoopMiddle: load: dif of a missing object, record not readable - load fails\n");
+        return false;
+    }
+    pos += (int)len;
+    tig_file_fsetpos(f, &pos);
+    tig_debug_printf("CoopMiddle: load: dif of an object this map does not have skipped (%u bytes, t404u)\n",
+        (unsigned)len);
+    return true;
+}
+
 bool coop_middle_overworld_freeze_time(void)
 {
     return coop_middle_overworld_free();
@@ -5362,6 +5461,13 @@ bool coop_middle_overworld_solo_hop(int dest_map) { (void)dest_map; return false
 bool coop_middle_overworld_freeze_time(void) { return false; }
 bool coop_middle_host_solo_hop(int dest_map) { (void)dest_map; return false; }
 void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt) { (void)pkt; }
+bool coop_middle_mobile_dif_skip(void* stream, const void* oid, size_t oid_size)
+{
+    (void)stream;
+    (void)oid;
+    (void)oid_size;
+    return false;
+}
 bool coop_middle_overworld_local_step(int64_t loc) { (void)loc; return false; }
 bool coop_middle_owt_client_propose(int64_t dest_loc) { (void)dest_loc; return false; }
 bool coop_middle_owt_client_teleport(int64_t loc, int spell) { (void)loc; (void)spell; return false; }

@@ -36,6 +36,7 @@
 #include "game/timeevent.h"
 #include "game/townmap.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/ui.h"
 #include "game/wall.h"
 #include "game/wallcheck.h"
@@ -1474,6 +1475,9 @@ bool map_load_mobile(const char* base_path, const char* save_path)
 
         while (tig_file_fread(&oid, sizeof(oid), 1, stream) == 1) {
             obj = obj_pool_perm_lookup(oid);
+            if (obj == OBJ_HANDLE_NULL && coop_middle_mobile_dif_skip(stream, &oid, sizeof(oid))) {
+                continue; /* t404u: co-op save with an orphan dif */
+            }
             if (obj == OBJ_HANDLE_NULL) {
                 tig_file_fclose(stream);
                 tig_debug_printf("Error retrieving object handle to apply differences\n");
