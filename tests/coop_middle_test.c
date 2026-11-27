@@ -65,7 +65,7 @@ static void test_rules_default_sanitize(void)
     CHECK(r.version == 1u);
     CHECK(r.flags == (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
-        | COOP_RULE_SUBINSTANCES));
+        | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
     CHECK((r.flags & COOP_RULE_GOLD_SPLIT) == 0);
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
     CHECK(r.reserved[0] == 0 && r.reserved[1] == 0 && r.reserved[2] == 0 && r.reserved16 == 0);
@@ -114,13 +114,13 @@ static void test_rules_env(void)
     CoopRules back;
     char text[128];
     char small[8];
-    char desc[512];
+    char desc[1024];
     unsigned int mask;
     int n;
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,hp=100,xp=100,asave=10") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,flvl=1,plvl=1,hp=100,xp=100,asave=10") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -139,14 +139,14 @@ static void test_rules_env(void)
     CHECK(n == 3);
     CHECK(r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
-        | COOP_RULE_SUBINSTANCES));
+        | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
 
     /* partial: missing keys keep defaults */
     n = coop_rules_parse_env(&r, "gold=1");
     CHECK(n == 1 && r.flags == (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
         | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS
         | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP
-        | COOP_RULE_SUBINSTANCES));
+        | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
     CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
 
     /* garbage: ignored, result is the defaults */
@@ -199,7 +199,7 @@ static void test_rules_packet(void)
     PacketCoopRules pkt;
     CoopRules r;
 
-    CHECK(TIG_NET_PROTOCOL == 59);
+    CHECK(TIG_NET_PROTOCOL >= 59);
     CHECK(PACKET_COOP_RULES == 167 && PACKET_COOP_RULES < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopRules) == 32);
     CHECK(coop_lite_coop_packet_min_size(PACKET_COOP_RULES) == sizeof(PacketCoopRules));
@@ -648,7 +648,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 14);
+            CHECK(coop_rules_parse_env(&back, text) == 16);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -839,7 +839,7 @@ static void test_m3_pause(void)
     unsigned int last = 0;
     int b;
 
-    CHECK(TIG_NET_PROTOCOL == 59);
+    CHECK(TIG_NET_PROTOCOL >= 59);
     CHECK(COOP_CTRL_PAUSE == 8 && COOP_CTRL_PAUSE > COOP_CTRL_SLOT_STATUS);
     memset(&c, 0, sizeof(c));
     c.type = PACKET_COOP_PARTY_CTRL;
@@ -884,7 +884,7 @@ static void test_m4_rules(void)
     CoopRules r;
     CoopRules back;
     char text[160];
-    char desc[512];
+    char desc[1024];
     int n;
 
     CHECK(COOP_RULE_SHARED_QUEST_ITEMS == 0x40u && COOP_RULE_SHARED_FOLLOWERS == 0x80u);
@@ -895,7 +895,7 @@ static void test_m4_rules(void)
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 14 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 16 && coop_rules_equal(&r, &back));
     n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
     CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
     n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
@@ -1060,7 +1060,7 @@ static void test_m5_rules(void)
     CoopRules r;
     CoopRules back;
     char text[200];
-    char desc[512];
+    char desc[1024];
 
     CHECK(COOP_RULE_FREE_OVERWORLD == 0x100u && COOP_RULE_UNIFIED_SLEEP == 0x200u);
     CHECK(COOP_RULE_KNOWN_MASK == (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE));
@@ -1070,7 +1070,7 @@ static void test_m5_rules(void)
     r.flags &= ~(COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "ow=0") != NULL && strstr(text, "usleep=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 14 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 16 && coop_rules_equal(&r, &back));
     CHECK(coop_rules_parse_env(&r, "free_overworld=0,unified_sleep=off") == 2);
     CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP)) == 0);
     coop_rules_default(&r);
@@ -1139,7 +1139,7 @@ static void test_m5_overworld(void)
     int x;
     int y;
 
-    CHECK(TIG_NET_PROTOCOL == 59);
+    CHECK(TIG_NET_PROTOCOL >= 59);
     CHECK(PACKET_COOP_OVERWORLD_TRAVEL == 170 && PACKET_COOP_TYPE_LIMIT >= 172);
     CHECK(sizeof(PacketCoopOverworldTravel) == 0x20);
     CHECK(coop_lite_mp_packet_role(PACKET_COOP_OVERWORLD_TRAVEL) == COOP_MP_PKT_BOTH);
@@ -1680,7 +1680,7 @@ static void test_m6_packets(void)
     PacketCoopSubinstChunk k;
     PacketCoopSubinstDelta d;
 
-    CHECK(TIG_NET_PROTOCOL == 59);
+    CHECK(TIG_NET_PROTOCOL >= 59);
     CHECK(PACKET_COOP_SUBINST_CTRL == 171 && PACKET_COOP_SUBINST_CHUNK == 172 && PACKET_COOP_SUBINST_DELTA == 173);
     CHECK(PACKET_COOP_SUBINST_DELTA < PACKET_COOP_TYPE_LIMIT);
     CHECK(sizeof(PacketCoopSubinstCtrl) == 0x40 && sizeof(PacketCoopSubinstDelta) == 0x18);
@@ -1802,10 +1802,11 @@ static void test_lite_mode(void)
     CoopRules e;
     PacketCoopRules pkt;
     char text[160];
-    char desc[600];
+    char desc[1024];
     const uint32_t middle = COOP_RULE_GOLD_SPLIT | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE
         | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE | COOP_RULE_SHARED_QUEST_ITEMS
-        | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES;
+        | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES
+        | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL;
 
     /* default: off, and not in the env string (older strings unchanged) */
     coop_rules_default(&r);
@@ -1894,6 +1895,57 @@ static void test_lite_mode(void)
     CHECK(!coop_middle_lite_mode());
 }
 
+/* After M7: auto-levelling rules (flvl / plvl) and their pure helpers. */
+static void test_autolevel(void)
+{
+    CoopRules r;
+    char text[200];
+    char desc[1024];
+    int xp[4] = { 2100, 450000, 0, 450000 };
+
+    coop_rules_default(&r);
+    CHECK((r.flags & COOP_RULE_FOLLOWER_LEVEL) != 0 && (r.flags & COOP_RULE_PARTY_LEVEL) != 0); /* on by default */
+    CHECK((COOP_RULE_ACTIVE_MASK & (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL))
+        == (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
+    CHECK(coop_rules_parse_env(&r, "flvl=0,plvl=0") == 2);
+    CHECK((r.flags & (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL)) == 0);
+    coop_rules_format_env(&r, text, sizeof(text));
+    CHECK(strstr(text, "flvl=0,plvl=0") != NULL);
+    CHECK(coop_rules_parse_env(&r, "follower_autolevel=1,party_level=1") == 2);
+    CHECK((r.flags & (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL))
+        == (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
+    coop_rules_effective(&r); /* Middle: kept */
+    CHECK((r.flags & (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL))
+        == (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL));
+    coop_rules_parse_env(&r, "flvl=1,plvl=1,lite=1");
+    coop_rules_effective(&r); /* Lite mode: off */
+    CHECK((r.flags & (COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL)) == 0);
+    coop_rules_default(&r);
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strstr(desc, "follower auto-level on, party level on") != NULL);
+    CHECK(strstr(desc, "autosave 10 min") != NULL); /* not cut off */
+    coop_rules_describe(&r, true, desc, sizeof(desc));
+    CHECK(strstr(desc, "автоуровень спутников вкл, общий уровень игроков вкл") != NULL);
+    CHECK(strstr(desc, "автосейв 10 мин") != NULL);
+    CHECK(strlen(desc) < 1000);
+    CHECK(sizeof(CoopRules) == 28);
+
+    /* follower: up to the leader's level, never down, capped below max */
+    CHECK(coop_middle_follower_level_target(5, 35, 51) == 35); /* the late-hired dog */
+    CHECK(coop_middle_follower_level_target(35, 35, 51) == 0);
+    CHECK(coop_middle_follower_level_target(40, 35, 51) == 0); /* higher: left alone */
+    CHECK(coop_middle_follower_level_target(5, 60, 51) == 50);
+    CHECK(coop_middle_follower_level_target(50, 60, 51) == 0);
+    CHECK(coop_middle_follower_level_target(1, 20, 0) == 20); /* no max known */
+    CHECK(coop_middle_follower_level_target(0, 0, 51) == 0);
+    /* party: everybody follows the highest XP */
+    CHECK(coop_middle_party_xp_target(xp, 4) == 450000);
+    CHECK(coop_middle_party_xp_target(xp, 1) == 2100);
+    CHECK(coop_middle_party_xp_target(xp, 0) == -1);
+    CHECK(coop_middle_party_xp_target(NULL, 3) == -1);
+    CHECK(TIG_NET_PROTOCOL == 60);
+}
+
 /* M7 review: the subinst client's timed checkpoint clock. */
 static void test_m7_ckpt_clock(void)
 {
@@ -1954,7 +2006,7 @@ static void test_m7(void)
     CoopRules r;
     CoopSleepState st;
     PacketCoopPartyCtrl c;
-    char line[256];
+    char line[512];
     int i;
 
     /* edge indicator: inside (border included) = false */
@@ -2093,7 +2145,7 @@ static void test_m7(void)
         CHECK(coop_middle_rules()->autosave_min == COOP_RULES_ASAVE_DEFAULT);
         CHECK(!coop_middle_is_paused());
     }
-    CHECK(TIG_NET_PROTOCOL == 59);
+    CHECK(TIG_NET_PROTOCOL >= 59);
 }
 
 static void test_m6_review(void)
@@ -2256,6 +2308,7 @@ int main(void)
     test_m7();
     test_m7_ckpt_clock();
     test_lite_mode();
+    test_autolevel();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
@@ -2265,6 +2318,6 @@ int main(void)
            "M4 rules / quest items / town map fog / dialog routing / followers, "
            "M5 rules / interest / world map travel / unified sleep, "
            "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge, "
-           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, protocol 59)\n");
+           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, Lite mode, auto-levelling, protocol 60)\n");
     return 0;
 }
