@@ -47,13 +47,16 @@ extern "C" {
    The game also reads it for the gates that are not a rule bit (party
    dialog = one at a time, leader nearby; no pause; no /tp /stuck /gather). */
 #define COOP_RULE_LITE_MODE 0x00000800u
+/* After M7 (protocol 60): auto-levelling (host-authoritative). */
+#define COOP_RULE_FOLLOWER_LEVEL 0x00001000u /* key flvl: a follower below its leader PC's level is raised to it */
+#define COOP_RULE_PARTY_LEVEL 0x00002000u /* key plvl: every PC's XP follows the party's highest (late joiners too) */
 
 #define COOP_RULE_M1_MASK (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
 /* Rules that do something (always in the env string / description). */
 #define COOP_RULE_ACTIVE_MASK \
     (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE \
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD \
-        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES)
+        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL)
 /* lite is written to the env string only when it is on (older strings stay the same). */
 #define COOP_RULE_KNOWN_MASK (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE)
 /* What Lite mode keeps: the mode bit and the [Loot] chat feed (a UI line). */
@@ -61,7 +64,7 @@ extern "C" {
 #define COOP_RULE_DEFAULT_FLAGS \
     (COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE | COOP_RULE_DIRECT_TRADE | COOP_RULE_NO_FRIENDLY_FIRE_AOE \
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD \
-        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES)
+        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL)
 
 #define COOP_RULES_HP_MIN 100
 #define COOP_RULES_HP_MAX 300

@@ -65,6 +65,8 @@ static const struct {
     { "ow", "free_overworld", NULL, COOP_RULE_FREE_OVERWORLD },
     { "usleep", "unified_sleep", NULL, COOP_RULE_UNIFIED_SLEEP },
     { "subinst", "solo_instances", "subinstances", COOP_RULE_SUBINSTANCES },
+    { "flvl", "follower_autolevel", NULL, COOP_RULE_FOLLOWER_LEVEL },
+    { "plvl", "party_level", NULL, COOP_RULE_PARTY_LEVEL },
     { "lite", "lite_mode", "coop_lite", COOP_RULE_LITE_MODE },
 };
 
@@ -256,7 +258,8 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
         snprintf(out, sz,
             "Правила: делёж золота %s, лут в чат %s, отдых по запросу %s, обмен %s, пауза клиентов %s, "
             "без огня по своим %s, общие квестовые предметы %s, общие спутники %s, свободная карта мира %s, "
-            "единый сон %s, отдельные локации %s, HP врагов %u%%, опыт %u%%, автосейв %s",
+            "единый сон %s, отдельные локации %s, автоуровень спутников %s, общий уровень игроков %s, "
+            "HP врагов %u%%, опыт %u%%, автосейв %s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
@@ -268,11 +271,14 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
             (s.flags & COOP_RULE_FREE_OVERWORLD) != 0 ? on : off,
             (s.flags & COOP_RULE_UNIFIED_SLEEP) != 0 ? on : off,
             (s.flags & COOP_RULE_SUBINSTANCES) != 0 ? on : off,
+            (s.flags & COOP_RULE_FOLLOWER_LEVEL) != 0 ? on : off,
+            (s.flags & COOP_RULE_PARTY_LEVEL) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, asave);
     } else {
         snprintf(out, sz,
             "Rules: gold split %s, loot feed %s, rest vote %s, trade %s, client pause %s, no friendly fire %s, "
-            "shared quest items %s, shared followers %s, free world map %s, unified sleep %s, solo interiors %s, enemy HP %u%%, XP %u%%, autosave %s",
+            "shared quest items %s, shared followers %s, free world map %s, unified sleep %s, solo interiors %s, "
+            "follower auto-level %s, party level %s, enemy HP %u%%, XP %u%%, autosave %s",
             (s.flags & COOP_RULE_GOLD_SPLIT) != 0 ? on : off,
             (s.flags & COOP_RULE_LOOT_FEED) != 0 ? on : off,
             (s.flags & COOP_RULE_REST_VOTE) != 0 ? on : off,
@@ -284,6 +290,8 @@ void coop_rules_describe(const CoopRules* r, bool ru, char* out, size_t sz)
             (s.flags & COOP_RULE_FREE_OVERWORLD) != 0 ? on : off,
             (s.flags & COOP_RULE_UNIFIED_SLEEP) != 0 ? on : off,
             (s.flags & COOP_RULE_SUBINSTANCES) != 0 ? on : off,
+            (s.flags & COOP_RULE_FOLLOWER_LEVEL) != 0 ? on : off,
+            (s.flags & COOP_RULE_PARTY_LEVEL) != 0 ? on : off,
             (unsigned)s.enemy_hp_pct, (unsigned)s.xp_mult_pct, asave);
     }
 }
