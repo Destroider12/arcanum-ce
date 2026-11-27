@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 59`** on this branch (`coop-middle`, Coop Middle M7; M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 60`** on this branch (`coop-middle`, Coop Middle after M7; M7 was 59, M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -122,12 +122,12 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 | `ARCANUM_COOP_AUTOJOIN` | `1`: join right away with the rejoin token (used by the launcher's Reconnect) |
 | `ARCANUM_COOP_WAIT_HOST` | `0`: turn off the client's automatic waiting for the host |
 | `ARCANUM_COOP_LANG` | `ru`: Russian co-op messages (default English) |
-| `ARCANUM_COOP_RULES` | host session rules (Coop Middle), e.g. `gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,hp=100,xp=100`; see [docs/coop-middle.md](docs/coop-middle.md) |
+| `ARCANUM_COOP_RULES` | host session rules (Coop Middle), e.g. `gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,flvl=1,plvl=1,hp=100,xp=100`; see [docs/coop-middle.md](docs/coop-middle.md) |
 | `ARCANUM_COOP_NO_CHAR_BUNDLE`, `ARCANUM_COOP_NO_OBJ_BLOB`, `ARCANUM_COOP_NO_WORLD_STATE`, `ARCANUM_COOP_WORLD_TRACE` | debugging switches (turn off parts of the sync / add tracing). Not for normal play. |
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 59)
+## Coop Middle (branch `coop-middle`, protocol 60)
 
 Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
@@ -181,6 +181,7 @@ Stage **M7 (final polish)**:
 After M7:
 
 - **Coop Lite mode** (`lite`, launcher checkbox **Coop Lite mode (as release 1.0)**, off by default): one switch that plays the session as the Coop Lite 1.0 release: no free world map (the host drives the party), no solo instances, one party dialog at a time with the leader nearby, no shared quest items / followers, no unified sleep or rest request, no gold split, trade, pause, `/tp` `/stuck` `/gather`, no friendly-fire protection, HP / XP at 100 %. The other rule boxes grey out. What stays: HUD, loot labels and feed, badges, pings, arrows, town map marks, autosave.
+- **Auto-levelling** (both on by default): **Auto-level followers** (`flvl`) raises a follower to its leader's level the vanilla way (e.g. a dog hired at level 35 becomes level 35); **Party level** (`plvl`) keeps every player at the party's highest XP, so when one player levels (even alone in a dungeon) everyone does, and a late joiner gets all the levels at once with free points to spend. Protocol 60.
 - Fixes: a host's random encounter no longer pulls the clients to the host (free world map); a client can talk to NPCs anywhere on the shared map, not only near the host.
 
 Hotkeys: Alt (loot labels), F9 (net HUD), Pause (shared pause), MMB / Alt+RMB (ping), Ctrl+LMB on a teammate or RMB on a portrait (trade), Y / N (rest / sleep). Chat: `/tp`, `/stuck`, `/gather`.
