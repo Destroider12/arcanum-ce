@@ -604,6 +604,21 @@ void update_follower_level(int64_t follower_obj, int old_pc_level, int new_pc_le
     }
 }
 
+/* Coop Middle (rule flvl): as if the leader went from the follower's own
+   level to `level` (update_follower_level then sets exactly `level`). */
+void level_follower_raise_to(int64_t follower_obj, int level)
+{
+    int curr_level;
+
+    if (follower_obj == OBJ_HANDLE_NULL || obj_field_int32_get(follower_obj, OBJ_F_TYPE) != OBJ_TYPE_NPC) {
+        return;
+    }
+    curr_level = stat_base_get(follower_obj, STAT_LEVEL);
+    if (level > curr_level) {
+        update_follower_level(follower_obj, curr_level, level);
+    }
+}
+
 /**
  * Retrieves the auto-leveling scheme for a critter.
  *

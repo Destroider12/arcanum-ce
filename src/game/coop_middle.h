@@ -478,6 +478,12 @@ bool coop_middle_autosave_ready(int autosave_min, unsigned int now_ms, unsigned 
 int coop_middle_autosave_slot(int index);
 /* The index after the newest existing autosave slot number (any other -> 0). */
 int coop_middle_autosave_next_index(int newest_slot_num);
+/* After M7 (rules flvl / plvl). The level a follower is raised to: its
+   leader PC's level, capped below max_level (0 = none); 0 = leave it (it is
+   not below). */
+int coop_middle_follower_level_target(int follower_level, int leader_level, int max_level);
+/* The XP every PC follows: the highest of n (-1 = none). */
+int coop_middle_party_xp_target(const int* xp, int n);
 bool coop_middle_autosave_is_slot(int slot_num);
 
 /* ---- game hooks (no-ops in test stubs) ---- */

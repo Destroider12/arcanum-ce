@@ -1219,6 +1219,34 @@ int coop_middle_autosave_next_index(int newest_slot_num)
         : 0;
 }
 
+/* ---- after M7: auto-levelling (flvl / plvl), pure part ---- */
+
+int coop_middle_follower_level_target(int follower_level, int leader_level, int max_level)
+{
+    int t = leader_level;
+
+    if (max_level > 0 && t >= max_level) {
+        t = max_level - 1; /* update_follower_level's cap */
+    }
+    return t > follower_level && t > 0 ? t : 0;
+}
+
+int coop_middle_party_xp_target(const int* xp, int n)
+{
+    int best = -1;
+    int i;
+
+    if (xp == NULL) {
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (xp[i] > best) {
+            best = xp[i];
+        }
+    }
+    return best;
+}
+
 
 #ifndef COOP_LITE_TEST_STUBS
 
@@ -1254,6 +1282,7 @@ int coop_middle_autosave_next_index(int newest_slot_num)
 #include "game/stat.h"
 #include "game/townmap.h"
 #include "game/gamelib.h"
+#include "game/level.h"
 #include "game/teleport.h"
 #include "tig/debug.h"
 #include "tig/memory.h"
@@ -1336,7 +1365,7 @@ const CoopRules* coop_middle_rules(void)
     if (!coop_mid_host_rules_ready) {
         const char* env = coop_lite_env("ARCANUM_COOP_RULES");
         char text[160];
-        char desc[512];
+        char desc[1024];
         int used = coop_rules_parse_env(&coop_mid_host_rules, env);
 
         coop_rules_effective(&coop_mid_host_rules); /* lite=1: the Coop Lite 1.0 set, also on the wire */
@@ -1460,7 +1489,7 @@ static bool coop_mid_lobby_rules_written;
 static void coop_mid_lobby_rules_write(const CoopRules* r)
 {
     char path[1024];
-    char line[512];
+    char line[1024];
     FILE* f;
 
     if (r == NULL || !coop_paths_join(path, sizeof(path), "lobby_rules.txt")) {
@@ -1479,7 +1508,7 @@ static void coop_mid_lobby_rules_write(const CoopRules* r)
 void coop_middle_handle_rules(PacketCoopRules* pkt)
 {
     char text[160];
-    char line[512];
+    char line[1024];
 
     if (!tig_net_is_active()) {
         return;
@@ -4809,6 +4838,98 @@ static void coop_autosave_gate(CoopAutosaveGate* g)
     g->commit = coop_subinst_host_commit_busy();
 }
 
+/* ---- after M7: auto-levelling (host, once per second) ----
+   plvl: every connected slot PC (dead or parked too) whose XP is below the
+   party's highest gets that XP; stat_base_set runs the vanilla level_recalc,
+   so the levels come with unspent character points (or the PC's own
+   auto-level scheme) and reach the owner in the PC build sync (144).
+   flvl: a follower (object_list_all_followers) below its leader PC's level
+   is raised to it with update_follower_level (its auto-level scheme). A
+   slot inside a solo instance keeps its followers there: skipped until it
+   is back. */
+static bool coop_lvl_have;
+static unsigned int coop_lvl_ms;
+
+static void coop_lvl_host_tick(unsigned int now_ms)
+{
+    int64_t pcs[8];
+    int slots[8];
+    int xps[8];
+    int n = 0;
+    int slot;
+    int i;
+
+    if (!coop_middle_rule_on(COOP_RULE_PARTY_LEVEL) && !coop_middle_rule_on(COOP_RULE_FOLLOWER_LEVEL)) {
+        return;
+    }
+    if (!coop_middle_rate_admit(&coop_lvl_have, &coop_lvl_ms, now_ms, 1000u)) {
+        return;
+    }
+    if (!map_is_valid() || map_is_clearing_objects() || mainmenu_ui_is_active() || gamelib_in_load()) {
+        return;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+
+        if (pc == OBJ_HANDLE_NULL || (slot > 0 && !tig_net_client_is_active(slot))
+            || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC
+            || (obj_field_int32_get(pc, OBJ_F_FLAGS) & OF_DESTROYED) != 0) {
+            continue;
+        }
+        pcs[n] = pc;
+        slots[n] = slot;
+        xps[n] = stat_base_get(pc, STAT_EXPERIENCE_POINTS);
+        n++;
+    }
+    if (n == 0) {
+        return;
+    }
+    if (coop_middle_rule_on(COOP_RULE_PARTY_LEVEL) && n > 1) {
+        int target = coop_middle_party_xp_target(xps, n);
+
+        for (i = 0; i < n; i++) {
+            if (xps[i] < target) {
+                int before = stat_base_get(pcs[i], STAT_LEVEL);
+
+                stat_base_set(pcs[i], STAT_EXPERIENCE_POINTS, target); /* -> level_recalc */
+                tig_debug_printf("CoopMiddle: party level: slot %d XP %d -> %d, level %d -> %d (unspent %d)\n",
+                    slots[i], xps[i], target, before, stat_base_get(pcs[i], STAT_LEVEL),
+                    stat_base_get(pcs[i], STAT_UNSPENT_POINTS));
+            }
+        }
+    }
+    if (coop_middle_rule_on(COOP_RULE_FOLLOWER_LEVEL)) {
+        for (i = 0; i < n; i++) {
+            ObjectList objects;
+            ObjectNode* node;
+            int leader_level;
+
+            if (coop_subinst_slot_inside(slots[i])) {
+                continue;
+            }
+            leader_level = stat_base_get(pcs[i], STAT_LEVEL);
+            object_list_all_followers(pcs[i], &objects);
+            for (node = objects.head; node != NULL; node = node->next) {
+                int64_t f = node->obj;
+                int lvl;
+                int t;
+
+                if (f == OBJ_HANDLE_NULL || obj_field_int32_get(f, OBJ_F_TYPE) != OBJ_TYPE_NPC || critter_is_dead(f)) {
+                    continue;
+                }
+                lvl = stat_base_get(f, STAT_LEVEL);
+                t = coop_middle_follower_level_target(lvl, leader_level, stat_level_max(f, STAT_LEVEL));
+                if (t > 0) {
+                    level_follower_raise_to(f, t);
+                    tig_debug_printf("CoopMiddle: follower level: slot %d follower %d -> %d (unspent %d)\n",
+                        slots[i], lvl, stat_base_get(f, STAT_LEVEL), stat_base_get(f, STAT_UNSPENT_POINTS));
+                }
+            }
+            object_list_destroy(&objects);
+        }
+    }
+}
+
 static void coop_autosave_host_tick(unsigned int now_ms)
 {
     int min = coop_middle_rules()->autosave_min;
@@ -4923,6 +5044,7 @@ static void coop_m7_reset(void)
     memset(&coop_collapse, 0, sizeof(coop_collapse));
     coop_collapse_ms = 0;
     coop_autosave_reset();
+    coop_lvl_have = false; /* after M7: auto-levelling clock */
 }
 
 void coop_middle_tick(unsigned int now_ms)
@@ -4978,6 +5100,7 @@ void coop_middle_tick(unsigned int now_ms)
     coop_sleep_host_tick(now_ms);
     coop_collapse_host_tick(now_ms); /* M7 */
     coop_autosave_host_tick(now_ms);
+    coop_lvl_host_tick(now_ms); /* after M7: flvl / plvl */
 }
 
 #else /* COOP_LITE_TEST_STUBS */
