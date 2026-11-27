@@ -1247,6 +1247,68 @@ int coop_middle_party_xp_target(const int* xp, int n)
     return best;
 }
 
+/* t403u: a host teleport that stays on the same map (stairs / jump point
+   inside a dungeon, a teleport trap or spell) moves only the host's own
+   party in Middle; Coop Lite keeps the Lite 1.0 party carry. */
+bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map)
+{
+    return middle && cur_map > 0 && (dest_map == cur_map || dest_map == -1);
+}
+
+/* t402u: a leader's follower list on a client, rebuilt. have[] is the list
+   as it is (have_ok[i] false = a null, dead or foreign handle), want[] the
+   host's followers of that leader that resolve here. out = the good old
+   entries in order, then the wanted ones not listed yet (no duplicates).
+   Returns the count; *changed tells whether out differs from have. */
+int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int n_have, const int64_t* want,
+    int n_want, int64_t* out, int max, bool* changed)
+{
+    int n = 0;
+    int i;
+    int j;
+    bool diff = false;
+
+    for (i = 0; i < n_have; i++) {
+        bool dup = false;
+
+        if (!have_ok[i] || have[i] == 0) {
+            diff = true;
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            if (out[j] == have[i]) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup || n >= max) {
+            diff = true;
+            continue;
+        }
+        out[n++] = have[i];
+    }
+    for (i = 0; i < n_want; i++) {
+        bool listed = false;
+
+        if (want[i] == 0) {
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            if (out[j] == want[i]) {
+                listed = true;
+                break;
+            }
+        }
+        if (!listed && n < max) {
+            out[n++] = want[i];
+            diff = true;
+        }
+    }
+    if (changed != NULL) {
+        *changed = diff;
+    }
+    return n;
+}
 
 #ifndef COOP_LITE_TEST_STUBS
 
@@ -3389,6 +3451,87 @@ bool coop_middle_overworld_solo_hop(int dest_map)
     return coop_mid_session_host() && coop_middle_overworld_free() && dest_map == map_by_type(MAP_TYPE_START_MAP);
 }
 
+/* t403u: any host hop that stays on its map (Middle only). */
+bool coop_middle_host_solo_hop(int dest_map)
+{
+    if (!coop_mid_session_host() || !map_is_valid()) {
+        return false;
+    }
+    return coop_middle_solo_hop_rule(coop_owt_rule(), map_current_map(), dest_map);
+}
+
+/* t402u (client): every slot PC's follower list = what the host's FOLLOWERS
+   table says. A follower that reached us with its leader field already set
+   (world state, a load) was never added to the PC's list, and a list could
+   keep a null / stale handle (follower left on another map): the party
+   carry of a map change then left the host's followers behind here, and a
+   same-map teleport read the stale handle (crash in sub_4D3D60, t403u).
+   Called inside the FOLLOWERS handler (lock + local suspend held). */
+void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt)
+{
+    int slot;
+
+    if (pkt == NULL || tig_net_is_host()) {
+        return;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        int64_t pc = sub_4A2B60(slot);
+        int64_t have[COOP_FOLLOWERS_MAX];
+        bool ok[COOP_FOLLOWERS_MAX];
+        int64_t want[COOP_FOLLOWERS_MAX];
+        int64_t out[COOP_FOLLOWERS_MAX];
+        int before;
+        int n_have;
+        int n_want = 0;
+        int n;
+        int i;
+        bool changed = false;
+
+        if (pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        before = obj_arrayfield_length_get(pc, OBJ_F_CRITTER_FOLLOWER_IDX);
+        n_have = before;
+        if (n_have > COOP_FOLLOWERS_MAX) {
+            n_have = COOP_FOLLOWERS_MAX;
+            changed = true;
+        }
+        for (i = 0; i < n_have; i++) {
+            int64_t f = OBJ_HANDLE_NULL;
+
+            /* obj_get checks the handle (a freed one reads false). */
+            ok[i] = obj_arrayfield_obj_get(pc, OBJ_F_CRITTER_FOLLOWER_IDX, i, &f) && f != OBJ_HANDLE_NULL
+                && obj_field_int32_get(f, OBJ_F_TYPE) == OBJ_TYPE_NPC
+                && (obj_field_int32_get(f, OBJ_F_FLAGS) & OF_DESTROYED) == 0 && critter_leader_get(f) == pc;
+            have[i] = ok[i] ? f : OBJ_HANDLE_NULL;
+        }
+        for (i = 0; i < pkt->count && i < COOP_FOLLOWERS_MAX; i++) {
+            ObjectID oid;
+            int64_t npc;
+
+            if (pkt->entries[i].leader_slot != slot) {
+                continue;
+            }
+            memcpy(&oid, pkt->entries[i].npc_oid, sizeof(oid));
+            npc = obj_pool_perm_lookup(oid);
+            if (npc != OBJ_HANDLE_NULL && obj_field_int32_get(npc, OBJ_F_TYPE) == OBJ_TYPE_NPC
+                && (obj_field_int32_get(npc, OBJ_F_FLAGS) & OF_DESTROYED) == 0 && critter_leader_get(npc) == pc) {
+                want[n_want++] = npc;
+            }
+        }
+        n = coop_middle_follower_list_plan(have, ok, n_have, want, n_want, out, COOP_FOLLOWERS_MAX, &changed);
+        if (!changed && n == before) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            obj_arrayfield_obj_set(pc, OBJ_F_CRITTER_FOLLOWER_IDX, i, out[i]);
+        }
+        obj_arrayfield_length_set(pc, OBJ_F_CRITTER_FOLLOWER_IDX, n);
+        tig_debug_printf("CoopMiddle: followers: slot %d list repaired (%d listed before, %d now)\n", slot, before, n);
+        ui_follower_refresh();
+    }
+}
+
 bool coop_middle_overworld_freeze_time(void)
 {
     return coop_middle_overworld_free();
@@ -5217,6 +5360,8 @@ void coop_middle_send_app_near(void* data, int size, int packet_type, int64_t lo
 bool coop_middle_overworld_free(void) { return false; }
 bool coop_middle_overworld_solo_hop(int dest_map) { (void)dest_map; return false; }
 bool coop_middle_overworld_freeze_time(void) { return false; }
+bool coop_middle_host_solo_hop(int dest_map) { (void)dest_map; return false; }
+void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt) { (void)pkt; }
 bool coop_middle_overworld_local_step(int64_t loc) { (void)loc; return false; }
 bool coop_middle_owt_client_propose(int64_t dest_loc) { (void)dest_loc; return false; }
 bool coop_middle_owt_client_teleport(int64_t loc, int spell) { (void)loc; (void)spell; return false; }

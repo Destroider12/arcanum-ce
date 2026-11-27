@@ -484,6 +484,11 @@ int coop_middle_autosave_next_index(int newest_slot_num);
 int coop_middle_follower_level_target(int follower_level, int leader_level, int max_level);
 /* The XP every PC follows: the highest of n (-1 = none). */
 int coop_middle_party_xp_target(const int* xp, int n);
+/* t403u (pure): a host hop on its own map is solo in Middle. dest -1 = same map. */
+bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map);
+/* t402u (pure): a client's follower list rebuilt from the host table (see .c). */
+int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int n_have, const int64_t* want,
+    int n_want, int64_t* out, int max, bool* changed);
 bool coop_middle_autosave_is_slot(int slot_num);
 
 /* ---- game hooks (no-ops in test stubs) ---- */
@@ -610,6 +615,11 @@ void coop_middle_send_app_near(void* data, int size, int packet_type, int64_t lo
 bool coop_middle_overworld_free(void); /* rule on, co-op, current map is map 1 */
 /* Host: the local PC's same-map hop on map 1 carries nobody and sends no FOLLOW_HOST. */
 bool coop_middle_overworld_solo_hop(int dest_map);
+/* t403u: host teleport staying on its map: only its PC and followers move
+   (Middle; no carry, no FOLLOW_HOST, no ready check). */
+bool coop_middle_host_solo_hop(int dest_map);
+/* t402u: client: slot PCs' follower lists after a FOLLOWERS table. */
+void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt);
 /* World map step on this machine: true = skip the game time advance. */
 bool coop_middle_overworld_freeze_time(void);
 /* Host's own world map step at loc; true = an encounter fired (close the map). */

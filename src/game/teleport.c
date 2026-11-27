@@ -15,6 +15,7 @@
 #include "game/light.h"
 #include "game/magictech.h"
 #include "game/map.h"
+#include "game/obj_pool.h"
 #include "game/obj_private.h"
 #include "game/object.h"
 #include "game/player.h"
@@ -225,7 +226,8 @@ bool teleport_process(TeleportData* teleport_data)
         object_list_followers(teleport_data->obj, &objects);
         node = objects.head;
         while (node != NULL) {
-            if (critter_is_unconscious(node->obj)) {
+            if (node->obj != OBJ_HANDLE_NULL && obj_handle_is_valid(node->obj) /* t403u */
+                && critter_is_unconscious(node->obj)) {
                 ai_npc_wait(node->obj);
             }
             node = node->next;
@@ -236,9 +238,10 @@ bool teleport_process(TeleportData* teleport_data)
     schedule_teleport_obj_recursively(teleport_data->obj, teleport_data->loc);
 
     /* Coop Middle M5: the host's own hop on map 1 (free world map) carries
-       only its PC and followers and sends no FOLLOW_HOST. */
+       only its PC and followers and sends no FOLLOW_HOST. t403u: in Middle
+       any hop on the host's own map (dungeon stairs / jump points). */
     coop_solo_hop = player_is_local_pc_obj(teleport_data->obj)
-        && coop_middle_overworld_solo_hop(teleport_data->map);
+        && coop_middle_host_solo_hop(teleport_data->map);
 
     /* Coop Lite: the party (other players' PCs, corpses included) travels
        with the local PC — host travel, or a client applying the host's. */
@@ -350,6 +353,14 @@ bool schedule_teleport_obj_recursively(int64_t obj, int64_t loc)
     int inventory_list_fld;
     TeleportObjectNode* node;
 
+    /* t403u: a null / freed handle in a follower or inventory list (a
+       follower left on another map, seen on co-op clients) crashed in
+       sub_4D3D60 later; it is skipped instead. */
+    if (obj == OBJ_HANDLE_NULL || !obj_handle_is_valid(obj)) {
+        tig_debug_printf("Teleport: skipped a missing object handle\n");
+        return true;
+    }
+
     obj_type = obj_field_int32_get(obj, OBJ_F_TYPE);
     flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
 
@@ -368,7 +379,8 @@ bool schedule_teleport_obj_recursively(int64_t obj, int64_t loc)
         object_list_followers(obj, &objects);
         obj_node = objects.head;
         while (obj_node != NULL) {
-            if ((obj_field_int32_get(obj_node->obj, OBJ_F_NPC_FLAGS) & ONF_AI_WAIT_HERE) == 0) {
+            if (obj_node->obj != OBJ_HANDLE_NULL && obj_handle_is_valid(obj_node->obj) /* t403u */
+                && (obj_field_int32_get(obj_node->obj, OBJ_F_NPC_FLAGS) & ONF_AI_WAIT_HERE) == 0) {
                 if (!schedule_teleport_obj_recursively(obj_node->obj, loc)) {
                     object_list_destroy(&objects);
                     return false;
@@ -414,6 +426,9 @@ bool schedule_teleport_obj_recursively(int64_t obj, int64_t loc)
 
         for (index = 0; index < cnt; index++) {
             item_obj = obj_arrayfield_handle_get(obj, inventory_list_fld, index);
+            if (item_obj == OBJ_HANDLE_NULL || !obj_handle_is_valid(item_obj)) {
+                continue; /* t403u */
+            }
             item_loc = obj_field_int64_get(item_obj, OBJ_F_LOCATION);
             if (!schedule_teleport_obj_recursively(item_obj, item_loc)) {
                 return false;

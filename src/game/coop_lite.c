@@ -6094,6 +6094,7 @@ void coop_lite_handle_followers(PacketCoopFollowers* pkt)
             critter_disband(npc, true);
         }
     }
+    coop_middle_client_followers_fix(pkt); /* t402u: leaders' lists match the table */
     tig_net_local_suspend_end();
     multiplayer_unlock();
 
@@ -21042,6 +21043,10 @@ bool coop_lite_host_travel_gate(const TeleportData* td)
         return true;
     }
     if (critter_is_dead(td->obj) || combat_critter_is_combat_mode_active(td->obj)) {
+        return false;
+    }
+    /* t403u: Middle: a hop on the host's own map moves only its party. */
+    if (coop_middle_host_solo_hop(td->map)) {
         return false;
     }
     /* PT77q: a world-map stop / arrival / random encounter (wmap_ui_teleport)
