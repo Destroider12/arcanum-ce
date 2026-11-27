@@ -48,6 +48,8 @@
  * Coop Middle M5: a fourth row - Unified sleep ([rules] unified_sleep,
  * default 1). The free world map has no box since 2026-11-27: always on
  * (ow=1) unless Coop Lite mode.
+ * After M7: Auto-level followers ([rules] follower_autolevel, default 1)
+ * and Party level ([rules] party_level, default 1).
  * Coop Middle M6: a fifth row - Solo interiors/dungeons ([rules]
  * solo_instances, default 1).
  * Coop Middle M7: Auto-save Off / 5 / 10 / 15 / 30 min ([rules]
@@ -120,6 +122,8 @@
 #define IDC_RULE_ASAVE 143 /* Coop Middle M7 */
 #define IDC_LOBBY_RULES 144
 #define IDC_RULE_LITE 145 /* t391u: Coop Lite mode (as release 1.0) */
+#define IDC_RULE_FLVL 146 /* after M7: auto-level followers */
+#define IDC_RULE_PLVL 147 /* after M7: party level (late joiners too) */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -229,6 +233,8 @@ static void rules_enable(bool host)
     EnableWindow(item(IDC_RULE_SFOL), mid);
     EnableWindow(item(IDC_RULE_USLEEP), mid);
     EnableWindow(item(IDC_RULE_SUBINST), mid);
+    EnableWindow(item(IDC_RULE_FLVL), mid);
+    EnableWindow(item(IDC_RULE_PLVL), mid);
     EnableWindow(item(IDC_RULE_ASAVE), host);
 }
 
@@ -391,6 +397,10 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "unified_sleep", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_SUBINST), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "solo_instances", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_FLVL), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "follower_autolevel", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_PLVL), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "party_level", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_LITE), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "lite_mode", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
@@ -424,6 +434,8 @@ static void rules_env(char* out, size_t sz)
         | COOP_RULE_FREE_OVERWORLD /* always on; Coop Lite mode turns it off */
         | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u)
         | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u)
+        | (rule_checked(IDC_RULE_FLVL) ? COOP_RULE_FOLLOWER_LEVEL : 0u)
+        | (rule_checked(IDC_RULE_PLVL) ? COOP_RULE_PARTY_LEVEL : 0u)
         | (rule_checked(IDC_RULE_LITE) ? COOP_RULE_LITE_MODE : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
@@ -455,6 +467,8 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "shared_followers", rule_checked(IDC_RULE_SFOL) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "unified_sleep", rule_checked(IDC_RULE_USLEEP) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "solo_instances", rule_checked(IDC_RULE_SUBINST) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "follower_autolevel", rule_checked(IDC_RULE_FLVL) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "party_level", rule_checked(IDC_RULE_PLVL) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "lite_mode", rule_checked(IDC_RULE_LITE) ? "1" : "0", g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
@@ -703,7 +717,7 @@ static void lobby_send_chat(void)
 }
 
 static void lobby_rules_poll(void);
-static char g_lobby_rules_last[512];
+static char g_lobby_rules_last[1024];
 
 static void lobby_poll(void)
 {
@@ -827,8 +841,8 @@ static void lobby_rules_poll(void)
 {
     char* last = g_lobby_rules_last;
     char path[MAX_PATH];
-    char line[512];
-    wchar_t wline[600];
+    char line[1024];
+    wchar_t wline[1100];
     FILE* f;
 
     lobby_path(path, sizeof(path), "lobby_rules.txt");
@@ -2346,6 +2360,9 @@ static void create_controls(void)
     make("BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 312, 120, 20, IDC_RULE_SFOL);
     /* Coop Middle M5: fourth rules row. */
     make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 334, 130, 20, IDC_RULE_USLEEP);
+    /* after M7: auto-levelling (same row and the free end of the M4 row) */
+    make("BUTTON", "Auto-level followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 334, 208, 20, IDC_RULE_FLVL);
+    make("BUTTON", "Party level", WS_TABSTOP | BS_AUTOCHECKBOX, 344, 312, 86, 20, IDC_RULE_PLVL);
     /* Coop Middle M6: fifth rules row (the output box below got shorter). */
     make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 356, 200, 20, IDC_RULE_SUBINST);
     /* Coop Middle M7: host autosave interval, same row. */
