@@ -23821,6 +23821,12 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
                 continue;
             }
             obj_load_postprocess(item);
+            /* t404u: it came from another map (found inside): dynamic, as the
+               engine's teleport makes carried items. Left static, a host save
+               wrote it as a dif of a base object this map never had and the
+               save could not be loaded (start merchant on ShopMap). */
+            obj_field_int32_set(item, OBJ_F_FLAGS,
+                obj_field_int32_get(item, OBJ_F_FLAGS) | OF_DYNAMIC);
             loc = obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION);
             if (item_check_insert(item, pc, &free_loc) != ITEM_CANNOT_OK) {
                 free_loc = -1;
