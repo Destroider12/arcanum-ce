@@ -1897,6 +1897,60 @@ static void test_lite_mode(void)
 
 /* After M7: auto-levelling rules (flvl / plvl) and their pure helpers. */
 /* t402u / t403u: same-map hops solo in Middle; client follower lists. */
+/* t404u: skipping the mobile.md record of an object the map does not have. */
+static size_t dif_put(uint8_t* b, size_t at, const uint8_t* oid, const uint8_t* body, size_t body_n)
+{
+    int32_t ver = 119;
+    uint32_t m1 = 0x12344321u;
+    uint32_t m2 = 0x23455432u;
+
+    memcpy(b + at, oid, 24); at += 24;
+    memcpy(b + at, &ver, 4); at += 4;
+    memcpy(b + at, &m1, 4); at += 4;
+    memcpy(b + at, oid, 24); at += 24;
+    memcpy(b + at, body, body_n); at += body_n;
+    memcpy(b + at, &m2, 4); at += 4;
+    return at;
+}
+
+static void test_dif_record_len(void)
+{
+    uint8_t buf[512];
+    uint8_t a[24];
+    uint8_t c[24];
+    uint8_t body[40];
+    uint32_t fake = 0x23455432u;
+    size_t n;
+    size_t first;
+
+    memset(a, 0x11, sizeof(a));
+    memset(c, 0x22, sizeof(c));
+    memset(body, 0x5A, sizeof(body));
+    /* the end marker inside the body: not followed by a record, not the end */
+    memcpy(body + 8, &fake, 4);
+
+    /* one record at the end of the file */
+    n = dif_put(buf, 0, a, body, sizeof(body));
+    CHECK(coop_middle_dif_record_len(buf + 24, n - 24, a, 24) == n - 24);
+
+    /* a record followed by another: stops right before the next one */
+    first = n;
+    n = dif_put(buf, first, c, body, 12);
+    CHECK(coop_middle_dif_record_len(buf + 24, n - 24, a, 24) == first - 24);
+    CHECK(coop_middle_dif_record_len(buf + first + 24, n - first - 24, c, 24) == n - first - 24);
+
+    /* wrong id / bad start marker / truncated: 0 (the load fails as before) */
+    CHECK(coop_middle_dif_record_len(buf + 24, n - 24, c, 24) == 0);
+    CHECK(coop_middle_dif_record_len(buf + 24, first - 24 - 1, a, 24) == 0);
+    CHECK(coop_middle_dif_record_len(buf + 24, 10, a, 24) == 0);
+    CHECK(coop_middle_dif_record_len(NULL, 100, a, 24) == 0);
+    buf[24 + 4] ^= 0xFF;
+    CHECK(coop_middle_dif_record_len(buf + 24, n - 24, a, 24) == 0);
+    buf[24 + 4] ^= 0xFF;
+    /* the game hook is a no-op in the stub build */
+    CHECK(!coop_middle_mobile_dif_skip(NULL, a, 24));
+}
+
 static void test_hop_and_followers(void)
 {
     int64_t have[6];
@@ -2362,6 +2416,7 @@ int main(void)
     test_lite_mode();
     test_autolevel();
     test_hop_and_followers();
+    test_dif_record_len();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
