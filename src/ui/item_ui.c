@@ -2,6 +2,7 @@
 
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/item.h"
 #include "game/magictech.h"
@@ -221,6 +222,15 @@ void item_ui_apply(TargetDescriptor* td)
                 && range != -1
                 && (item_flags & OIF_NO_RANGED_USE) == 0)) {
             item_use_on_obj(pc_obj, item_obj, td->obj);
+            item_ui_deactivate();
+            return;
+        }
+
+        /* PT56 co-op: a client PC's use-item goal never ran (client anim
+           goals are gated) and never reached the host: antidotes / healing
+           kits on self or another critter did nothing. The host uses it. */
+        if (coop_lite_client_use_item_intent(pc_obj, item_obj, td->obj)) {
+            tig_debug_printf("CoopLite: item use on target (item cursor) sent to host\n");
             item_ui_deactivate();
             return;
         }

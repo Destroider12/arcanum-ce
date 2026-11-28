@@ -1,5 +1,7 @@
 #include "game/gmovie.h"
 
+#include "crash_handler.h"
+
 #include <stdio.h>
 
 #include "game/gsound.h"
@@ -108,6 +110,7 @@ void gmovie_play_path(const char* path, GameMovieFlags flags, int sound_track)
 
     // Play the movie. This is a blocking call, which will return when movie
     // playback ends.
+    crash_handler_heartbeat_pause(); /* PT79: intro/ending movies run > 15 s */
     tig_movie_play(temp_path, movie_flags, sound_track);
 
     // Resume sound system.

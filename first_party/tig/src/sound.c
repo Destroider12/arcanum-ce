@@ -340,7 +340,25 @@ int tig_sound_acquire_handle(TigSoundType type)
         abort();
     }
 
-    tig_debug_printf("No sound handle available for sound type %d! Current sounds are:\n");
+    {
+        /* CE coop PT63: this dump (~60 lines) fired several times a second
+           when remote NPC footsteps filled the pool - a real frame-time
+           cost (and the format had no argument). At most once per 10 s. */
+        static tig_timestamp_t last_dump_ms;
+        static unsigned int suppressed;
+        tig_timestamp_t now;
+
+        tig_timer_now(&now);
+
+        if (last_dump_ms != 0 && now - last_dump_ms < 10000) {
+            suppressed++;
+            return TIG_SOUND_HANDLE_INVALID;
+        }
+        last_dump_ms = now != 0 ? now : 1;
+        tig_debug_printf("No sound handle available for sound type %d (%u more since the last dump)! Current sounds are:\n",
+            (int)type, suppressed);
+        suppressed = 0;
+    }
     for (index = 0; index < SOUND_HANDLE_MAX; index++) {
         // FIXME: This approach does not respect lower and upper bounds for the
         // requested sound type. Let's say we're out of music handles, it will

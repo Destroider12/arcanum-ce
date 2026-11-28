@@ -94,6 +94,18 @@ static TigFileRepository* tig_file_repositories_head;
 // 0x62B2B0
 static TigFileIgnore* tig_file_ignore_head;
 
+/* Coop Lite PT68: an optional writable overlay directory that always stays on
+   top of the repository list (so every write lands there), plus path prefixes
+   ("Save", "Players") that are private to it: other directory repositories
+   are not searched for them, so a host, a client and single player sharing one
+   game folder never see or touch each other's saves. */
+static TigFileRepository* tig_file_overlay_repo;
+static char tig_file_overlay_prefixes[8][32];
+static int tig_file_overlay_prefix_count;
+
+static void tig_file_overlay_pin(void);
+static bool tig_file_overlay_hides(const TigFileRepository* repo, const char* path);
+
 // 0x52DFE0
 bool tig_file_mkdir_native(const char* path)
 {
@@ -174,8 +186,18 @@ bool tig_file_is_empty_directory_native(const char* path)
 
     tig_file_list_create_native(&list, pattern);
 
-    // Only contains trivia (`.` and `..`).
-    is_empty = list.count <= 2;
+    // Only contains trivia (`.` and `..`). CE: count real entries — native
+    // listings on non-Windows platforms do not report `.`/`..`, so the
+    // original `count <= 2` treated a directory with one or two entries
+    // (e.g. Save\Current holding only `maps`) as empty and never cleared it.
+    is_empty = true;
+    for (unsigned int index = 0; index < list.count; index++) {
+        if (strcmp(list.entries[index].path, ".") != 0
+            && strcmp(list.entries[index].path, "..") != 0) {
+            is_empty = false;
+            break;
+        }
+    }
 
     tig_file_list_destroy(&list);
 
@@ -686,6 +708,9 @@ bool tig_file_repository_remove_native(const char* file_name)
             }
 
             FREE(repo->path);
+            if (repo == tig_file_overlay_repo) {
+                tig_file_overlay_repo = NULL;
+            }
             FREE(repo);
 
             repo = next;
@@ -717,6 +742,9 @@ bool tig_file_repository_remove_all(void)
         }
 
         FREE(curr->path);
+        if (curr == tig_file_overlay_repo) {
+            tig_file_overlay_repo = NULL;
+        }
         FREE(curr);
 
         curr = next;
@@ -862,7 +890,7 @@ bool tig_file_extract_native(const char* filename, char* path)
                 first_directory_repo = repo;
             }
 
-            if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0) {
+            if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0 && !tig_file_overlay_hides(repo, filename)) {
                 // Check if file exists in a directory bundle.
                 compat_join_path(tmp, sizeof(tmp), repo->path, filename);
                 compat_resolve_path(tmp);
@@ -993,7 +1021,7 @@ void tig_file_list_create_native(TigFileList* list, const char* pattern)
                     tig_database_find_close(&database_ffd);
                 }
             } else if ((repo->type & TIG_FILE_REPOSITORY_DIRECTORY) != 0) {
-                if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0) {
+                if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0 && !tig_file_overlay_hides(repo, mutable_pattern)) {
                     compat_join_path(path, sizeof(path), repo->path, mutable_pattern);
 
                     if (tig_find_first_file(path, &directory_ffd)) {
@@ -1093,7 +1121,7 @@ bool tig_file_exists_native(const char* file_name, TigFileInfo* info)
     repo = tig_file_repositories_head;
     while (repo != NULL) {
         if ((repo->type & TIG_FILE_REPOSITORY_DIRECTORY) != 0) {
-            if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0) {
+            if ((ignored & TIG_FILE_IGNORE_DIRECTORY) == 0 && !tig_file_overlay_hides(repo, file_name)) {
                 compat_join_path(path, sizeof(path), repo->path, file_name);
 
                 if (tig_find_first_file(path, &ffd)) {
@@ -1212,7 +1240,7 @@ int tig_file_remove_native(const char* file_name)
 
     repo = tig_file_repositories_head;
     while (repo != NULL) {
-        if ((repo->type & TIG_FILE_PLAIN) != 0) {
+        if ((repo->type & TIG_FILE_PLAIN) != 0 && !tig_file_overlay_hides(repo, file_name)) {
             compat_join_path(path, sizeof(path), repo->path, file_name);
 
             if (SDL_RemovePath(path)) {
@@ -1253,7 +1281,7 @@ int tig_file_rename_native(const char* old_file_name, const char* new_file_name)
 
     repo = tig_file_repositories_head;
     while (repo != NULL) {
-        if ((repo->type & TIG_FILE_PLAIN) != 0) {
+        if ((repo->type & TIG_FILE_PLAIN) != 0 && !tig_file_overlay_hides(repo, old_file_name)) {
             compat_join_path(old_path, sizeof(old_path), repo->path, old_file_name);
             compat_join_path(new_path, sizeof(new_path), repo->path, new_file_name);
 
@@ -1785,7 +1813,7 @@ int tig_file_open_internal_native(const char* path, const char* mode, TigFile* s
             && (ignored & TIG_FILE_PLAIN) == 0) {
             repo = tig_file_repositories_head;
             while (repo != NULL) {
-                if ((repo->type & TIG_FILE_REPOSITORY_DIRECTORY) != 0) {
+                if ((repo->type & TIG_FILE_REPOSITORY_DIRECTORY) != 0 && !tig_file_overlay_hides(repo, path)) {
                     compat_join_path(mutable_path, sizeof(mutable_path), repo->path, path);
                     compat_resolve_path(mutable_path);
 
@@ -2181,7 +2209,84 @@ bool tig_file_repository_add(const char* path)
     compat_windows_path_to_native(native_path);
     compat_resolve_path(native_path);
 
-    return tig_file_repository_add_native(native_path);
+    if (!tig_file_repository_add_native(native_path)) {
+        return false;
+    }
+    tig_file_overlay_pin();
+    return true;
+}
+
+static void tig_file_overlay_pin(void)
+{
+    TigFileRepository* prev;
+    TigFileRepository* curr;
+
+    if (tig_file_overlay_repo == NULL || tig_file_repositories_head == tig_file_overlay_repo) {
+        return;
+    }
+    prev = tig_file_repositories_head;
+    curr = prev != NULL ? prev->next : NULL;
+    while (curr != NULL && curr != tig_file_overlay_repo) {
+        prev = curr;
+        curr = curr->next;
+    }
+    if (curr == NULL) {
+        tig_file_overlay_repo = NULL; /* removed meanwhile */
+        return;
+    }
+    prev->next = curr->next;
+    curr->next = tig_file_repositories_head;
+    tig_file_repositories_head = curr;
+}
+
+static bool tig_file_overlay_hides(const TigFileRepository* repo, const char* path)
+{
+    int index;
+    size_t len;
+
+    if (tig_file_overlay_repo == NULL || repo == tig_file_overlay_repo
+        || (repo->type & TIG_FILE_REPOSITORY_DIRECTORY) == 0 || path == NULL) {
+        return false;
+    }
+    /* PT77q: ".\Save\..." / "./Players\..." must not bypass the overlay. */
+    while (path[0] == '.' && (path[1] == '/' || path[1] == '\\')) {
+        path += 2;
+    }
+    for (index = 0; index < tig_file_overlay_prefix_count; index++) {
+        len = strlen(tig_file_overlay_prefixes[index]);
+        if (SDL_strncasecmp(path, tig_file_overlay_prefixes[index], len) == 0
+            && (path[len] == '\\' || path[len] == '/' || path[len] == '\0')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool tig_file_set_overlay(const char* path, const char* const* private_prefixes, int count)
+{
+    TigFileRepository* repo;
+    int index;
+
+    tig_file_overlay_repo = NULL;
+    tig_file_overlay_prefix_count = 0;
+    if (path == NULL) {
+        return true;
+    }
+    tig_file_mkdir_ex(path); /* parents too; an existing folder is fine */
+    if (!tig_file_repository_add(path)) {
+        return false;
+    }
+    /* repository_add put it on top (new or moved). */
+    repo = tig_file_repositories_head;
+    if (repo == NULL || (repo->type & TIG_FILE_REPOSITORY_DIRECTORY) == 0) {
+        return false;
+    }
+    tig_file_overlay_repo = repo;
+    for (index = 0; index < count && index < 8; index++) {
+        snprintf(tig_file_overlay_prefixes[index], sizeof(tig_file_overlay_prefixes[index]), "%s", private_prefixes[index]);
+        tig_file_overlay_prefix_count++;
+    }
+    return true;
 }
 
 bool tig_file_repository_remove(const char* path)

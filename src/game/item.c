@@ -2,6 +2,7 @@
 
 #include "game/anim.h"
 #include "game/background.h"
+#include "game/coop_lite.h"
 #include "game/critter.h"
 #include "game/description.h"
 #include "game/descriptions.h"
@@ -606,8 +607,50 @@ bool item_transfer(int64_t item_obj, int64_t critter_obj)
     return item_transfer_ex(item_obj, critter_obj, -1);
 }
 
-// 0x461810
+/* Coop Middle: gold that reaches a party PC from the ground, a container,
+   a corpse or a dialog / script reward is reported once (outermost call
+   only) for the host's gold split rule. */
+static int item_coop_gold_depth;
+static bool item_transfer_ex_internal(int64_t item_obj, int64_t critter_obj, int inventory_location);
+static bool item_gold_transfer_internal(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj);
+
 bool item_transfer_ex(int64_t item_obj, int64_t critter_obj, int inventory_location)
+{
+    int64_t from_obj = OBJ_HANDLE_NULL;
+    int qty = 0;
+    bool ok;
+
+    if (item_coop_gold_depth == 0 && item_obj != OBJ_HANDLE_NULL && tig_net_is_active() && tig_net_is_host()
+        && obj_field_int32_get(item_obj, OBJ_F_TYPE) == OBJ_TYPE_GOLD) {
+        qty = obj_field_int32_get(item_obj, OBJ_F_GOLD_QUANTITY);
+        if (!item_parent(item_obj, &from_obj)) {
+            from_obj = OBJ_HANDLE_NULL;
+        }
+    }
+    item_coop_gold_depth++;
+    ok = item_transfer_ex_internal(item_obj, critter_obj, inventory_location);
+    item_coop_gold_depth--;
+    if (ok && qty > 0 && item_coop_gold_depth == 0) {
+        coop_lite_mid_gold_found(from_obj, critter_obj, qty);
+    }
+    return ok;
+}
+
+bool item_gold_transfer(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
+{
+    bool ok;
+
+    item_coop_gold_depth++;
+    ok = item_gold_transfer_internal(from_obj, to_obj, qty, gold_obj);
+    item_coop_gold_depth--;
+    if (ok && qty > 0 && to_obj != OBJ_HANDLE_NULL && item_coop_gold_depth == 0) {
+        coop_lite_mid_gold_found(from_obj, to_obj, qty);
+    }
+    return ok;
+}
+
+// 0x461810
+static bool item_transfer_ex_internal(int64_t item_obj, int64_t critter_obj, int inventory_location)
 {
     int64_t existing_item_obj;
     bool v1;
@@ -723,6 +766,13 @@ bool item_drop_ex(int64_t item_obj, int distance)
 
     item_parent(item_obj, &parent_obj);
 
+    /* PT77z: host / local coop path — merchant stock can only be bought.
+       Clients already cannot drop another parent via Packet26; this closes
+       the barter drop-slot on the host (and any local drop). */
+    if (coop_lite_refuse_merchant_stock_drop(item_obj)) {
+        return false;
+    }
+
     if (object_script_execute(parent_obj, item_obj, OBJ_HANDLE_NULL, SAP_DROP, 0) == 0) {
         return false;
     }
@@ -750,6 +800,10 @@ bool item_drop_ex(int64_t item_obj, int distance)
 
     item_remove(item_obj);
     sub_466E50(item_obj, loc);
+    if (obj_type == OBJ_TYPE_PC) {
+        coop_lite_mark_player_drop(item_obj);
+        coop_lite_host_world_dirty();
+    }
 
     if (obj_type == OBJ_TYPE_NPC) {
         switch (obj_field_int32_get(item_obj, OBJ_F_TYPE)) {
@@ -1422,6 +1476,11 @@ void item_use_on_obj(int64_t source_obj, int64_t item_obj, int64_t target_obj)
         return;
     }
 
+    /* PT44: coop client — the host uses consumables for us. */
+    if (coop_lite_client_use_item_intent(source_obj, item_obj, target_obj)) {
+        return;
+    }
+
     item_parent(item_obj, &parent_obj);
 
     item_type = obj_field_int32_get(item_obj, OBJ_F_TYPE);
@@ -1531,6 +1590,11 @@ void item_use_on_loc(int64_t obj, int64_t item_obj, int64_t target_loc)
     TargetDescriptor td;
 
     if (item_obj == OBJ_HANDLE_NULL) {
+        return;
+    }
+
+    /* PT77g: coop client - the host places trap devices for us. */
+    if (coop_lite_client_use_item_loc_intent(obj, item_obj, target_loc)) {
         return;
     }
 
@@ -1673,6 +1737,23 @@ bool sub_463340(int lock_id, int key_id)
     return lock_id == key_id;
 }
 
+/* PT82: a co-op player's PC (host and clients: the client checks the lock
+   itself before it asks the host to open the door). */
+static bool item_coop_party_pc(int64_t obj)
+{
+    int player;
+
+    if (obj == OBJ_HANDLE_NULL || !tig_net_is_coop_enabled() || !tig_net_is_active()) {
+        return false;
+    }
+    for (player = 0; player < 8; player++) {
+        if (sub_4A2B60(player) == obj) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 0x463370
 bool sub_463370(int64_t obj, int key_id)
 {
@@ -1707,6 +1788,32 @@ bool sub_463370(int64_t obj, int key_id)
 
     if (node != NULL) {
         return true;
+    }
+
+    /* PT82: co-op is one party - a key the guard gave to another player
+       (Isle of Despair gate, Thorvald's house) opens the door for everyone.
+       Vanilla key sharing needs a server option co-op never sets. */
+    if (item_coop_party_pc(leader_obj)) {
+        for (player = 0; player < 8; player++) {
+            party_member_obj = sub_4A2B60(player);
+            if (party_member_obj == OBJ_HANDLE_NULL || party_member_obj == leader_obj) {
+                continue;
+            }
+            if (sub_463240(party_member_obj, key_id)) {
+                tig_debug_printf("Item: co-op key %d found on party slot %d\n", key_id, player);
+                return true;
+            }
+            object_list_all_followers(party_member_obj, &objects);
+            node = objects.head;
+            while (node != NULL && !sub_463240(node->obj, key_id)) {
+                node = node->next;
+            }
+            object_list_destroy(&objects);
+            if (node != NULL) {
+                tig_debug_printf("Item: co-op key %d found with slot %d's follower\n", key_id, player);
+                return true;
+            }
+        }
     }
 
     if (tig_net_is_active()
@@ -1994,6 +2101,12 @@ void sub_463B30(int64_t obj, bool a2)
             item_force_remove(item_obj, obj);
             object_drop(item_obj, loc);
             object_destroy(item_obj);
+
+            /* PT39: item_force_remove can fail without shrinking the list
+               (item not found / stale NUM); step past it, never spin. */
+            if (obj_field_int32_get(obj, inventory_num_fld) >= cnt) {
+                idx++;
+            }
         }
 
         cnt = obj_field_int32_get(obj, inventory_num_fld);
@@ -2082,6 +2195,13 @@ void sub_463E20(int64_t obj)
     int idx;
     int64_t item_obj;
 
+    if (tig_net_is_coop_client() && tig_net_is_locally_suspended()
+        && !coop_lite_client_preshop_active()) { /* PT40: the new-game shop stocks locally */
+        /* PT33: the window's local open-time prep (suspended) used to roll
+           loot here with the client's own RNG; the host sync then deleted
+           it. Only the host generates loot. */
+        return;
+    }
     if (tig_net_is_active()
         && !tig_net_is_host()) {
         sub_4EFBA0(obj);
@@ -2460,7 +2580,7 @@ int64_t item_gold_obj(int64_t obj)
 }
 
 // 0x464830
-bool item_gold_transfer(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
+static bool item_gold_transfer_internal(int64_t from_obj, int64_t to_obj, int qty, int64_t gold_obj)
 {
     int from_qty;
     int to_qty;
@@ -3921,6 +4041,9 @@ void sub_466E50(int64_t obj, int64_t loc)
     }
 
     item_decay(obj, 172800000);
+
+    /* PT77ae: co-op host - nearby clients get the item now. */
+    coop_lite_host_item_landed(obj);
 }
 
 // 0x466EF0
@@ -3931,6 +4054,15 @@ bool sub_466EF0(int64_t obj, int64_t loc)
     int inventory_location;
     int64_t new_container_obj;
     bool rc = false;
+
+    // PT25 co-op: no junk piles. A second item dropped on a tile went into
+    // a pile container the host had just created; clients never learn new
+    // containers or their contents, so the host's drops vanished for them
+    // (and the item already lying there was pruned). Loose items are world
+    // state ground items every client sees.
+    if (tig_net_is_coop_enabled()) {
+        return false;
+    }
 
     object_list_location(loc, OBJ_TM_CONTAINER, &objects);
     node = objects.head;

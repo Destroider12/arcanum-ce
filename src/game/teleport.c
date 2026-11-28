@@ -1,5 +1,7 @@
 #include "game/teleport.h"
 
+#include "game/coop_lite.h"
+
 #include <stdio.h>
 
 #include "game/ai.h"
@@ -103,6 +105,12 @@ void teleport_ping(tig_timestamp_t timestamp)
 
         teleport_pending = false;
 
+        /* PT23: whatever teleport_process did (it can return early), a
+           client's party-carry wait for this travel is over. */
+        if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0) {
+            coop_lite_local_teleport_finished();
+        }
+
         if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0
             && (current_teleport_data.flags & TELEPORT_RENDER_LOCK) != 0) {
             gamelib_renderlock_release();
@@ -113,6 +121,21 @@ void teleport_ping(tig_timestamp_t timestamp)
 // 0x4D3380
 bool teleport_do(TeleportData* teleport_data)
 {
+    /* PT57: a client never changes maps alone: it asks the host instead. */
+    if (coop_lite_client_travel_intercept(teleport_data)) {
+        return false;
+    }
+
+    /* PT64: a client's PC leaving via a jump point / script / portal run on the host. */
+    if (coop_lite_host_remote_travel_intercept(teleport_data)) {
+        return false;
+    }
+
+    /* PT50: host leaving with clients far / busy -> ready check first. */
+    if (coop_lite_host_travel_gate(teleport_data)) {
+        return false;
+    }
+
     if (teleport_pending) {
         if ((current_teleport_data.flags & TELEPORT_IS_LOCAL_PC) != 0) {
             return false;
@@ -210,12 +233,28 @@ bool teleport_process(TeleportData* teleport_data)
 
     schedule_teleport_obj_recursively(teleport_data->obj, teleport_data->loc);
 
+    /* Coop Lite: the party (other players' PCs, corpses included) travels
+       with the local PC — host travel, or a client applying the host's. */
+    {
+        int64_t carry[8];
+        int carry_cnt;
+        int idx;
+
+        carry_cnt = coop_lite_party_carry_list(teleport_data->obj, carry, 8);
+        for (idx = 0; idx < carry_cnt; idx++) {
+            if (!teleport_is_teleporting_obj(carry[idx])) {
+                schedule_teleport_obj_recursively(carry[idx], teleport_data->loc);
+            }
+        }
+    }
+
     if (teleport_is_teleporting_pc) {
         object_flush();
         wallcheck_flush();
     }
 
-    if (teleport_data->map != map && player_is_pc_obj(teleport_data->obj)) {
+    if ((teleport_data->map != map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0)
+        && player_is_pc_obj(teleport_data->obj)) {
         sub_459F50();
         sub_437980();
         timeevent_notify_pc_teleported(teleport_data->map);
@@ -238,8 +277,12 @@ bool teleport_process(TeleportData* teleport_data)
 
         teleport_is_teleporting_pc = false;
 
-        if (teleport_data->map != map) {
-            if (!map_open_in_game(teleport_data->map, false, false)) {
+        if (teleport_data->map != map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0) {
+            /* a3 = true on a forced same-map reload: map_flush would write
+               the stale map state back over the cleared Save\Current copy
+               (map_close still releases sectors and clears objects). */
+            if (!map_open_in_game(teleport_data->map, false,
+                    teleport_data->map == map)) {
                 return false;
             }
 
@@ -271,6 +314,16 @@ bool teleport_process(TeleportData* teleport_data)
         teleport_iso_window_draw();
         tig_window_display();
         gfade_run(&(teleport_data->fade_in));
+    }
+
+    /* Coop Lite: host PC travel forces remote players to the same destination. */
+    if ((teleport_data->flags & TELEPORT_IS_LOCAL_PC) != 0) {
+        coop_lite_after_party_carry(teleport_data->obj, teleport_data->loc);
+        coop_lite_notify_host_teleported(teleport_data->map, teleport_data->loc);
+        /* Client may have queued a follow while still on ShopMap / main menu. */
+        coop_lite_flush_pending_follow();
+        /* Client: host map now loaded — bind PCs from pending SESSION_SYNC. */
+        coop_lite_client_on_teleport_done();
     }
 
     return true;
@@ -336,6 +389,10 @@ bool schedule_teleport_obj_recursively(int64_t obj, int64_t loc)
 
         cnt = obj_field_int32_get(obj, inventory_num_fld);
         inv_size = obj_arrayfield_length_get(obj, inventory_list_fld);
+        if (cnt != inv_size && coop_lite_teleport_inv_fix(obj)) {
+            cnt = obj_field_int32_get(obj, inventory_num_fld);
+            inv_size = obj_arrayfield_length_get(obj, inventory_list_fld);
+        }
         if (cnt != inv_size) {
             tig_debug_printf("Inventory array count does not equal associated num field on teleport.  Array: %d, Field: %d\n",
                 inv_size,
@@ -379,7 +436,7 @@ bool sub_4D39A0(TeleportData* teleport_data)
     TigFile* stream;
 
     curr_map = map_current_map();
-    if (curr_map != teleport_data->map) {
+    if (curr_map != teleport_data->map || (teleport_data->flags & TELEPORT_FORCE_RELOAD) != 0) {
         if (!map_get_name(curr_map, &curr_map_name)) {
             return false;
         }
@@ -419,8 +476,11 @@ bool sub_4D39A0(TeleportData* teleport_data)
             obj_field_int32_set(node->obj, OBJ_F_OFFSET_X, 0);
             obj_field_int32_set(node->obj, OBJ_F_OFFSET_Y, 0);
 
-            snprintf(path, sizeof(path), "%s\\mobile.mdy", dst_map_path);
-            stream = tig_file_fopen(path, "ab");
+            /* PT77aa: if a post-close wipe of this map folder is pending,
+               write the carried PC to a side file so the wipe cannot delete it. */
+            stream = tig_file_fopen(
+                coop_lite_teleport_mobile_mdy_path(dst_map_path, path, sizeof(path)),
+                "ab");
             if (stream == NULL) {
                 return false;
             }

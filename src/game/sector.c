@@ -1,5 +1,7 @@
 #include "game/sector.h"
 
+#include "net/tig_net.h"
+
 #include <inttypes.h>
 #include <stdio.h>
 
@@ -119,6 +121,14 @@ static SectorCacheEntry* sector_cache_entries;
 // 0x6017B4
 static SectorLoadFunc sector_load_func;
 
+/* PT39: set when a co-op client's bad .dif was just removed by a failed load. */
+static bool sector_coop_dif_removed;
+
+/* Set while sector_cache_reset walks every cached sector. sector_lock must
+   not mutate or evict lists mid-walk (heap corruption in
+   sector_light_list_reset on F8 / return-to-menu). */
+static bool sector_cache_resetting;
+
 // 0x6017B8
 static IsoInvalidateRectFunc* sector_iso_window_invalidate_rect;
 
@@ -225,7 +235,11 @@ bool sector_init(GameInitInfo* init_info)
 
     sector_limits_set(0x4000000, 0x4000000);
 
-    if (!sector_cache_init(16)) {
+    /* PT23: coop keeps sectors around every remote PC locked. PT79 (review
+       2.1): 3x3 per remote PC is 63 locked sectors with 8 players, plus the
+       view's own - 64 ran out ("lack of unlocked slots"). 96 leaves room
+       without keeping a much larger LRU of resident objects (engine max 128). */
+    if (!sector_cache_init(tig_net_is_coop_enabled() ? 96 : 16)) {
         return false;
     }
 
@@ -863,6 +877,7 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
     unsigned int index;
     unsigned int oldest = -1;
     DateTime datetime;
+    bool load_ok;
 
     if (in_sector_lock) {
         tig_debug_printf("Warning: recursive sector lock detected\n");
@@ -873,8 +888,24 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
         return false;
     }
 
+    if (sector_cache_resetting) {
+        return false;
+    }
+
     if (!map_is_valid()) {
+        int cached_idx;
+
         tig_debug_printf("ERROR: Attempt to lock a sector when the map is not valid!!!\n");
+        /* Coop Lite PT78a: never LOAD a sector while the map is closing.
+           map_clear_objects deletes every object; deleting one whose sector
+           was not cached loaded that sector of the old map in the middle of
+           the delete loop - fresh objects, "Node already reassigned" in
+           obj_find_remove and heap corruption in sector_cache_reset
+           (client crash 0xC0000374 leaving Crematorium Lev 2). A cached
+           sector is still handed out as before. */
+        if (!sector_cache_find_by_id(id, &cached_idx)) {
+            return false;
+        }
     }
 
     if (SECTOR_X(id) < 0
@@ -948,7 +979,23 @@ bool sector_lock(int64_t id, Sector** sector_ptr)
         cache_entry = &(sector_cache_entries[index]);
         cache_entry->sector.datetime = datetime;
 
-        if (!sector_load_func(id, &(cache_entry->sector))) {
+        sector_coop_dif_removed = false;
+        load_ok = sector_load_func(id, &(cache_entry->sector));
+        if (!load_ok && sector_coop_dif_removed) {
+            /* PT39: the bad .dif is gone; reset the half-loaded sector and
+               read it again from the map right now (no failed lock). */
+            sector_coop_dif_removed = false;
+            sector_cache_evict(&(cache_entry->sector));
+            cache_entry->sector.datetime = datetime;
+            tig_debug_printf("CoopLite: sector %I64u reloaded without its .dif\n", id);
+            load_ok = sector_load_func(id, &(cache_entry->sector));
+        }
+        if (!load_ok) {
+            /* A failed load can leave lights/objects on this unused cache
+               slot; the next lock reuses it and sector_light_list_load
+               appends onto the leftover list. Evict so F8 / map_close is
+               not freeing stale static lights. */
+            sector_cache_evict(&(cache_entry->sector));
             tig_debug_printf("Error: attempt to lock sector %I64u in cache failed due to error in load.  This is bad.  Help.\n", id);
             in_sector_lock = false;
             return false;
@@ -994,12 +1041,14 @@ void sector_cache_reset(void)
 {
     unsigned int index;
 
+    sector_cache_resetting = true;
     for (index = 0; index < sector_cache_size; index++) {
         sector_cache_evict(&(sector_cache_entries[sector_cache_indexes[index]].sector));
         sector_cache_entries[sector_cache_indexes[index]].used = false;
     }
 
     sector_cache_size = 0;
+    sector_cache_resetting = false;
 }
 
 // 0x4D0BC0
@@ -1015,9 +1064,13 @@ void sector_flush(unsigned int flags)
             if ((flags & 0x1) == 0) {
                 sector_cache_evict(&(cache_entry->sector));
                 cache_entry->used = false;
+                // PT56a FIX: was `sector_cache_size - 1` elements: copied
+                // `index` ints past the end of the array (heap overflow once
+                // the cache is full - co-op keeps sectors locked, and the
+                // world map travel stop calls sector_flush(0)).
                 memmove(&(sector_cache_indexes[index]),
                     &(sector_cache_indexes[index + 1]),
-                    sizeof(*sector_cache_indexes) * (sector_cache_size - 1));
+                    sizeof(*sector_cache_indexes) * (sector_cache_size - index - 1));
                 index--;
                 sector_cache_size--;
             }
@@ -1696,6 +1749,16 @@ bool sector_load_game(int64_t id, Sector* sector)
                 tig_debug_printf("Error loading objects with differences from files %s and %s\n", sec_path, dif_path);
                 tig_file_fclose(sec_stream);
                 tig_file_fclose(dif_stream);
+                /* PT30: a truncated .dif retried this load every frame
+                   (hundreds of failed locks, leaked half-loaded objects,
+                   "ran out of animation slots": the FPS collapse). Drop
+                   the unreadable .dif so the next lock loads the clean
+                   .sec. The previous coop-client-only guard was skipped
+                   on some in-session client loads (22 failed locks in
+                   one Tarant revisit, no removal). */
+                tig_debug_printf("CoopLite: bad sector .dif %s removed (sector reloads from the map)\n", dif_path);
+                tig_file_remove(dif_path);
+                sector_coop_dif_removed = true;
                 return false;
             }
         } else {
@@ -1813,7 +1876,6 @@ bool sector_save_editor_internal(Sector* sector, const char* base_path)
     stream = tig_file_fopen(path, "wb");
     if (stream == NULL) {
         tig_debug_printf("Error creating sector data file %s\n", path);
-        tig_file_fclose(stream); // FIXME: Crash! (dereferencing NULL).
         return false;
     }
 
@@ -1981,7 +2043,6 @@ bool sector_save_game(Sector* sector)
     stream = tig_file_fopen(path, "wb");
     if (stream == NULL) {
         tig_debug_printf("Error creating differences file %s\n", path);
-        tig_file_fclose(stream); // FIXME: Crash!
         return false;
     }
 
@@ -2093,6 +2154,17 @@ void sector_validate_game(const char* section)
 {
     if (!obj_validate_system(1)) {
         tig_debug_printf("Object system validate failed in %s\n", section);
+        if (tig_net_is_coop_enabled()) {
+            /* PT54a: co-op never quits on this (the client froze in the quit
+               prompt and was dropped); the bad entries were repaired. */
+            static bool coop_logged;
+
+            if (!coop_logged) {
+                coop_logged = true;
+                tig_debug_printf("CoopLite: validate failed in %s - co-op keeps running (no quit)\n", section);
+            }
+            return;
+        }
         tig_message_post_quit(0);
     }
 }

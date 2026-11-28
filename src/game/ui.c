@@ -181,6 +181,8 @@ void ui_spell_add(int64_t obj, int spell)
 }
 
 // 0x4604A0
+static int ui_maintain_spell_id = -1;
+
 bool ui_spell_maintain_add(int mt_id)
 {
     if (ui_callbacks.spell_maintain_add != NULL) {
@@ -188,6 +190,20 @@ bool ui_spell_maintain_add(int mt_id)
     } else {
         return false;
     }
+}
+
+bool ui_spell_maintain_add_for_spell(int mt_id, int spell_id)
+{
+    ui_maintain_spell_id = spell_id;
+    return ui_spell_maintain_add(mt_id);
+}
+
+int ui_spell_maintain_take_spell(void)
+{
+    int spell_id = ui_maintain_spell_id;
+
+    ui_maintain_spell_id = -1;
+    return spell_id;
 }
 
 // 0x4604C0

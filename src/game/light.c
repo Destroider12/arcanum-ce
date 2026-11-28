@@ -3,6 +3,7 @@
 #include "game/critter.h"
 #include "game/gamelib.h"
 #include "game/object.h"
+#include "game/obj_pool.h"
 #include "game/sector.h"
 #include "game/sector_block_list.h"
 #include "game/tile.h"
@@ -574,7 +575,7 @@ void sub_4D93B0(Light* light)
     light_get_rect_internal(light, &rect);
     light_invalidate_rect(&rect, true);
 
-    if (light->obj != OBJ_HANDLE_NULL) {
+    if (light_obj_is_live(light)) {
         if ((Light*)obj_field_ptr_get(light->obj, OBJ_F_LIGHT_HANDLE) == light) {
             obj_field_ptr_set(light->obj, OBJ_F_LIGHT_HANDLE, 0);
             sub_4D9510(light);
@@ -1403,9 +1404,27 @@ void sub_4DD0A0(int64_t obj, int offset_x, int offset_y)
 }
 
 // 0x4DD110
+bool light_obj_is_live(Light* light)
+{
+    if (light == NULL || light->obj == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if (!obj_handle_is_valid(light->obj)) {
+        /* A sector light list can keep a handle from a previous load or from
+           an object that has already been destroyed. obj_lock does not check
+           this and will crash in obj_arrayfield_* / obj_field_* (BMC exit:
+           map_flush -> sector_light_list_reset -> light_unset_flags_internal). */
+        light->obj = OBJ_HANDLE_NULL;
+        return false;
+    }
+    return true;
+}
+
 bool sub_4DD110(Light* light)
 {
-    return light->obj == OBJ_HANDLE_NULL;
+    /* "Static" means not attached to a live object. A stale handle used to
+       look attached and then crashed when flags were written back. */
+    return !light_obj_is_live(light);
 }
 
 // 0x4DD130
@@ -1438,7 +1457,7 @@ void light_set_flags_internal(Light* light, unsigned int flags)
     light->flags |= flags;
     light->flags |= LF_MODIFIED;
 
-    if (light->obj != OBJ_HANDLE_NULL) {
+    if (light_obj_is_live(light)) {
         if ((light->flags & LF_08000000) != 0) {
             obj_field_int32_set(light->obj, OBJ_F_LIGHT_FLAGS, light->flags);
         } else {
@@ -1489,7 +1508,7 @@ void light_unset_flags_internal(Light* light, unsigned int flags)
     light->flags &= ~flags;
     light->flags |= LF_MODIFIED;
 
-    if (light->obj != OBJ_HANDLE_NULL) {
+    if (light_obj_is_live(light)) {
         if ((light->flags & LF_08000000) != 0) {
             obj_field_int32_set(light->obj, OBJ_F_LIGHT_FLAGS, light->flags);
         } else {
@@ -1607,7 +1626,7 @@ void light_inc_frame(Light* light)
 
         light->flags |= LF_MODIFIED;
 
-        if (light->obj != OBJ_HANDLE_NULL) {
+        if (light_obj_is_live(light)) {
             if ((light->flags & LF_08000000) != 0) {
                 obj_field_int32_set(light->obj, OBJ_F_LIGHT_AID, light->art_id);
             } else {
@@ -1657,7 +1676,7 @@ void light_dec_frame(Light* light)
 
         light->flags |= LF_MODIFIED;
 
-        if (light->obj != OBJ_HANDLE_NULL) {
+        if (light_obj_is_live(light)) {
             if ((light->flags & LF_08000000) != 0) {
                 obj_field_int32_set(light->obj, OBJ_F_LIGHT_AID, light->art_id);
             } else {
@@ -1707,7 +1726,7 @@ void light_cycle_rotation(Light* light)
 
         light->flags |= LF_MODIFIED;
 
-        if (light->obj != OBJ_HANDLE_NULL) {
+        if (light_obj_is_live(light)) {
             if ((light->flags & LF_08000000) != 0) {
                 obj_field_int32_set(light->obj, OBJ_F_LIGHT_AID, light->art_id);
             } else {
@@ -1768,7 +1787,7 @@ void light_set_aid(Light* light, tig_art_id_t art_id)
     light->art_id = art_id;
     light->flags |= LF_MODIFIED;
 
-    if (light->obj != OBJ_HANDLE_NULL) {
+    if (light_obj_is_live(light)) {
         if ((light->flags & LF_08000000) != 0) {
             obj_field_int32_set(light->obj, OBJ_F_LIGHT_AID, art_id);
         } else if ((light->flags & LF_OVERLAY_0) != 0) {
@@ -1805,7 +1824,7 @@ void light_set_custom_color(Light* light, uint8_t r, uint8_t g, uint8_t b)
 
     light->flags |= LF_MODIFIED;
 
-    if (light->obj != OBJ_HANDLE_NULL) {
+    if (light_obj_is_live(light)) {
         light_build_color(r, g, b, &color);
 
         if ((light->flags & LF_08000000) != 0) {
@@ -1847,6 +1866,7 @@ bool light_read(TigFile* stream, Light** light_ptr)
     }
 
     light->obj = serialized.obj;
+    (void)light_obj_is_live(light); /* drop handles that are no longer live */
     light->loc = serialized.loc;
     light->offset_x = serialized.offset_x;
     light->offset_y = serialized.offset_y;
@@ -1871,7 +1891,7 @@ bool light_write(TigFile* stream, Light* light)
     LightSerializedData serialized;
 
     memset(&serialized, 0, sizeof(serialized));
-    serialized.obj = light->obj;
+    serialized.obj = light_obj_is_live(light) ? light->obj : OBJ_HANDLE_NULL;
     serialized.loc = light->loc;
     serialized.offset_x = light->offset_x;
     serialized.offset_y = light->offset_y;
