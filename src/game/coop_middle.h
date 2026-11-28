@@ -82,7 +82,9 @@ extern "C" {
 #define COOP_MID_CHAT_COLLAPSE 11 /* M7: name = player, text = "-" (fell unconscious from fatigue) */
 #define COOP_MID_CHAT_AUTOSAVE 12 /* M7: name = "", text = "N" (AutoSave N written) */
 #define COOP_MID_CHAT_INFO 13 /* M8: name unused, text shown as-is (/who, /rules, /help) */
-#define COOP_MID_CHAT_KIND_MAX 13
+#define COOP_MID_CHAT_PM_FROM 14 /* M9: name = sender, text = body; only the target sees it */
+#define COOP_MID_CHAT_PM_TO 15 /* M9: name = target, text = body; only the sender sees it */
+#define COOP_MID_CHAT_KIND_MAX 15
 
 /* M3 chat commands (pure parse; the host runs them, never relayed). */
 #define COOP_CMD_NONE 0
@@ -93,6 +95,7 @@ extern "C" {
 #define COOP_CMD_WHO 5
 #define COOP_CMD_RULES 6
 #define COOP_CMD_HELP 7
+#define COOP_CMD_WHISPER 8 /* /w or /pm <Name> <text> */
 #define COOP_CMD_COOLDOWN_MS 30000u /* per slot */
 #define COOP_TP_ENEMY_RANGE 20 /* tiles: a hostile NPC focused on you blocks /tp */
 
@@ -105,8 +108,9 @@ extern "C" {
 #define COOP_TP_REFUSE_NOBODY 7 /* /gather: nobody could be moved */
 #define COOP_TP_REFUSE_SELF 8 /* bare /tp from the host */
 #define COOP_TP_REFUSE_BUSY 9 /* in a solo instance */
-#define COOP_TP_REFUSE_NOT_FOUND 10 /* /tp <Name> matched nobody */
-#define COOP_TP_REFUSE_MAX 10
+#define COOP_TP_REFUSE_NOT_FOUND 10 /* /tp or /w <Name> matched nobody */
+#define COOP_TP_REFUSE_AMBIGUOUS 11 /* /w <Name> matched more than one player */
+#define COOP_TP_REFUSE_MAX 11
 
 /* M3 pings: a marked tile, shown to everyone on the same map. */
 #define PACKET_COOP_PING 168
@@ -238,6 +242,8 @@ int coop_middle_scale_xp(int raw_xp, int pct);
 int coop_middle_parse_cmd(const char* text);
 /* M8: also fills name_out for /tp <Name> (original spelling, trimmed). */
 int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap);
+/* M9: also fills msg_out for /w and /pm (original text after the name). */
+int coop_middle_parse_cmd_msg(const char* text, char* name_out, size_t name_cap, char* msg_out, size_t msg_cap);
 /* Case-insensitive prefix among ok[i] names. -1 = none or ambiguous, else index. */
 int coop_middle_name_prefix_slot(const char* prefix, const char* const* names, const bool* ok, int n);
 /* M3: once per interval: true (and *last_ms = now) when nothing was
@@ -447,6 +453,7 @@ const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int l
    (1..168); heal the PC + its followers locally under a fade. b = 0. */
 #define COOP_CTRL_SLEEP_APPLY 11
 #define COOP_CTRL_FOLLOW 12 /* client -> host: a = follow-target slot (0-7) or -1 (off), b = 0 */
+#define COOP_CTRL_LOCAL_FADE 13 /* host -> slot: a = 1 fade out / 0 fade in, b = 0; trains/ships */
 #define COOP_SLEEP_APPLY_MAX_HOURS 168
 /* Slots that get SLEEP_APPLY when a unified sleep runs: living clients
    with a solo-instance lease (never the host, slot 0). */
@@ -512,6 +519,13 @@ bool coop_middle_convoy_eligible(bool free_ow, int map, int leader, int slot, in
 /* M8: host should show the sleep-consent window. */
 bool coop_middle_sleep_consent_needed(bool host, bool usleep, bool rest_vote, bool host_ready, bool rest_prompt,
     bool sleep_round);
+/* M9 Alt labels: fills out (NUL-terminated). Returns the written length (excluding NUL).
+   trap color (245,110,80) beats quest (255,220,90); *rgb is packed 0xRRGGBB, or 0 for default.
+   The name is truncated so [Locked]/[Trap] and the price/weight tag always fit. */
+#define COOP_MID_ALT_TRAP_RGB 0xF56E50
+#define COOP_MID_ALT_QUEST_RGB 0xFFDC5A
+int coop_middle_alt_label_format(char* out, size_t cap, const char* name, bool ru,
+    bool locked, bool trap, bool quest, int price, int weight, unsigned int* rgb);
 /* UI registers these; tests leave them NULL. rest=true is a rest-ask window. */
 typedef void (*CoopMiddleSleepConsentOpenFn)(const char* name, const char* mode, int ready, int total, bool rest);
 void coop_middle_set_sleep_consent(CoopMiddleSleepConsentOpenFn open, void (*close)(void));

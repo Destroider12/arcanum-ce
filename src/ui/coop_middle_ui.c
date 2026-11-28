@@ -394,53 +394,91 @@ static bool coop_mid_label_make(int64_t pc, int64_t obj, CoopMidLabel* l)
     char name[64];
     int type;
     unsigned int flags;
+    bool locked = false;
+    bool trap = false;
+    bool quest = false;
+    int price = 0;
+    int weight = 0;
+    unsigned int rgb = 0;
+    bool is_item;
 
     flags = obj_field_int32_get(obj, OBJ_F_FLAGS);
     if ((flags & (OF_INVENTORY | OF_OFF | OF_DESTROYED | OF_DONTDRAW)) != 0) {
         return false;
     }
     type = obj_field_int32_get(obj, OBJ_F_TYPE);
+    /* Never reveal an undetected trap; only OF_TRAP_SPOTTED / trap_is_spotted. */
+    trap = trap_is_spotted(pc, obj);
+    is_item = type >= OBJ_TYPE_WEAPON && type <= OBJ_TYPE_GENERIC;
     memset(l, 0, sizeof(*l));
     l->obj = obj;
     name[0] = '\0';
-    if (type >= OBJ_TYPE_WEAPON && type <= OBJ_TYPE_GENERIC) {
-        bool notable = (obj_field_int32_get(obj, OBJ_F_ITEM_FLAGS) & (OIF_WONT_SELL | OIF_UBER)) != 0;
-
+    if (is_item) {
+        unsigned int iflags = obj_field_int32_get(obj, OBJ_F_ITEM_FLAGS);
+        quest = (iflags & (OIF_WONT_SELL | OIF_UBER)) != 0
+            || type == OBJ_TYPE_KEY || type == OBJ_TYPE_KEY_RING;
         object_examine(obj, pc, name);
         l->cat = 0;
         if (type == OBJ_TYPE_GOLD) {
-            snprintf(l->text, sizeof(l->text), ru ? "%d золота" : "%d gold", item_gold_get(obj));
+            snprintf(name, sizeof(name), ru ? "%d золота" : "%d gold", item_gold_get(obj));
         } else if (type == OBJ_TYPE_AMMO && obj_field_int32_get(obj, OBJ_F_AMMO_QUANTITY) > 1) {
-            snprintf(l->text, sizeof(l->text), "%d %s", obj_field_int32_get(obj, OBJ_F_AMMO_QUANTITY), name);
-        } else {
-            snprintf(l->text, sizeof(l->text), "%s", name);
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%d %s", obj_field_int32_get(obj, OBJ_F_AMMO_QUANTITY), name);
+            snprintf(name, sizeof(name), "%s", tmp);
+        } else if (type != OBJ_TYPE_GOLD) {
+            price = item_worth(obj);
+            weight = item_weight(obj, OBJ_HANDLE_NULL);
+            if (price < 0) {
+                price = 0;
+            }
+            if (weight < 0) {
+                weight = 0;
+            }
         }
-        coop_mid_label_color(l, type, notable);
+        if (!trap && type == OBJ_TYPE_GENERIC
+            && (obj_field_int32_get(obj, OBJ_F_GENERIC_FLAGS) & OGF_IS_TRAP_DEVICE) != 0) {
+            return false;
+        }
+        coop_mid_label_color(l, type, quest);
     } else if (type == OBJ_TYPE_CONTAINER) {
-        bool locked = object_locked_get(obj);
-
-        if (!locked && obj_field_int32_get(obj, OBJ_F_CONTAINER_INVENTORY_NUM) <= 0
+        locked = object_locked_get(obj);
+        if (!locked && !trap && obj_field_int32_get(obj, OBJ_F_CONTAINER_INVENTORY_NUM) <= 0
             && (obj_field_int32_get(obj, OBJ_F_CONTAINER_FLAGS) & OCOF_INVEN_SPAWN_ONCE) == 0) {
-            return false; /* empty */
+            return false;
         }
         object_examine(obj, pc, name);
         l->cat = 1;
-        if (locked) {
-            snprintf(l->text, sizeof(l->text), ru ? "%s (заперт)" : "%s (locked)", name);
-        } else {
-            snprintf(l->text, sizeof(l->text), "%s", name);
+        coop_mid_label_color(l, type, false);
+    } else if (type == OBJ_TYPE_PORTAL) {
+        locked = object_locked_get(obj);
+        if (!locked && !trap) {
+            return false;
         }
+        object_examine(obj, pc, name);
+        l->cat = 1;
         coop_mid_label_color(l, type, false);
     } else if (type == OBJ_TYPE_NPC && critter_is_dead(obj)) {
         if (obj_field_int32_get(obj, OBJ_F_CRITTER_INVENTORY_NUM) <= 0 && item_gold_get(obj) <= 0) {
-            return false; /* nothing to loot */
+            return false;
         }
         object_examine(obj, pc, name);
         l->cat = 1;
-        snprintf(l->text, sizeof(l->text), "%s", name);
+        coop_mid_label_color(l, type, false);
+    } else if (trap) {
+        object_examine(obj, pc, name);
+        l->cat = 1;
         coop_mid_label_color(l, type, false);
     } else {
         return false;
+    }
+    if (coop_middle_alt_label_format(l->text, sizeof(l->text), name, ru, locked, trap, quest, price, weight, &rgb)
+        <= 0) {
+        return false;
+    }
+    if (rgb != 0) {
+        l->r = (uint8_t)((rgb >> 16) & 0xFF);
+        l->g = (uint8_t)((rgb >> 8) & 0xFF);
+        l->b = (uint8_t)(rgb & 0xFF);
     }
     coop_lite_chat_sanitize(l->text, sizeof(l->text));
     return l->text[0] != '\0';
@@ -478,7 +516,7 @@ static void coop_mid_ui_labels_collect(void)
     loc_rect.x2 = LOCATION_GET_X(loc) + COOP_LABELS_RANGE;
     loc_rect.y1 = LOCATION_GET_Y(loc) - COOP_LABELS_RANGE;
     loc_rect.y2 = LOCATION_GET_Y(loc) + COOP_LABELS_RANGE;
-    object_list_rect(&loc_rect, OBJ_TM_ITEM | OBJ_TM_CONTAINER | OBJ_TM_NPC, &objects);
+    object_list_rect(&loc_rect, OBJ_TM_ITEM | OBJ_TM_CONTAINER | OBJ_TM_NPC | OBJ_TM_PORTAL | OBJ_TM_TRAP, &objects);
     for (node = objects.head; node != NULL && n < COOP_MID_LABEL_CANDIDATES; node = node->next) {
         CoopMidLabel* l = &cand[n];
         long long dp;
@@ -1393,11 +1431,14 @@ static bool coop_mid_ui_ping_here(TigMessage* msg)
 
 #define COOP_MID_CONSENT_W 400
 #define COOP_MID_CONSENT_H 132
-#define COOP_MID_HELP_W 420
-#define COOP_MID_HELP_H 260
+#define COOP_MID_HELP_W 560
+#define COOP_MID_HELP_H 280
 
 static tig_window_handle_t coop_mid_consent_win = TIG_WINDOW_HANDLE_INVALID;
-static tig_window_handle_t coop_mid_help_win = TIG_WINDOW_HANDLE_INVALID;
+static bool coop_mid_help_on;
+static bool coop_mid_help_shown;
+static TigRect coop_mid_help_rect;
+static TigVideoBuffer* coop_mid_help_vb;
 static TigRect coop_mid_agree_rect;
 static TigRect coop_mid_refuse_rect;
 static bool coop_mid_consent_rest;
@@ -1567,84 +1608,173 @@ static void coop_mid_sleep_consent_open(const char* name, const char* mode, int 
 
 void coop_middle_ui_help_close(void)
 {
-    coop_mid_win_destroy(&coop_mid_help_win);
-}
-
-static bool coop_mid_help_filter(TigMessage* msg)
-{
-    if (msg == NULL || msg->type != TIG_MESSAGE_MOUSE) {
-        return false;
+    if (coop_mid_help_shown) {
+        gamelib_invalidate_rect(&coop_mid_help_rect);
+        coop_mid_help_shown = false;
     }
-    return true; /* swallow clicks on the panel */
+    coop_mid_help_on = false;
 }
 
-static const char* coop_mid_help_text(bool ru)
+static void coop_mid_help_write_col(const char* const* lines, int n, int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
-    return ru
-        ? "Клавиши:\n"
-          "  Alt — подписи лута   F9 — сеть   F10 — эта панель\n"
-          "  Pause — пауза   СКМ / Alt+ПКМ — пинг\n"
-          "  Ctrl+ЛКМ / ПКМ по портрету — обмен\n"
-          "  G — следование / караван   Y/N — сон / переход\n"
-          "  F7/F8 — сейв / лоад\n"
-          "Команды:\n"
-          "  /tp [имя]   /gather   /who   /rules   /stuck\n"
-          "Esc или F10 закрывает эту панель."
-        : "Keys:\n"
-          "  Alt loot labels   F9 net HUD   F10 this panel\n"
-          "  Pause pause   MMB / Alt+RMB ping\n"
-          "  Ctrl+LMB / RMB on portrait trade\n"
-          "  G follow / convoy   Y/N sleep / travel\n"
-          "  F7/F8 save / load\n"
-          "Commands:\n"
-          "  /tp [name]   /gather   /who   /rules   /stuck\n"
-          "Esc or F10 closes this panel.";
+    TigRect rect;
+    TigRect dirty;
+    int i;
+
+    tig_font_push(coop_mid_ui_font(r, g, b));
+    for (i = 0; i < n; i++) {
+        rect.x = x;
+        rect.y = y + i * 16;
+        rect.width = COOP_MID_HELP_W / 2 - 16;
+        rect.height = 16;
+        tig_font_write(coop_mid_help_vb, lines[i], &rect, &dirty);
+    }
+    tig_font_pop();
 }
 
-bool coop_middle_ui_help_toggle(void)
+static void coop_mid_help_render(void)
 {
-    TigWindowData wd;
     TigRect r;
-    int w;
-    int h;
-    const char* text;
+    TigRect dirty;
+    bool ru = coop_lite_lang_ru();
+    const char* title = ru ? "Кооп — подсказка" : "Co-op cheat sheet";
+    const char* keys_ru[] = {
+        "Клавиши:",
+        "Alt — лут / замки / ловушки",
+        "F9 — сетевой HUD",
+        "F10 — эта справка",
+        "Pause — общая пауза",
+        "СКМ / Alt+ПКМ — пинг",
+        "Ctrl+ЛКМ / ПКМ по портрету — обмен",
+        "G — следование / караван",
+        "Y / N — сон / переход",
+        "F7 / F8 — сейв / лоад",
+        "Esc или F10 закрывает панель",
+    };
+    const char* cmds_ru[] = {
+        "Команды чата:",
+        "/tp [имя]",
+        "/stuck",
+        "/gather",
+        "/w <имя> <текст>",
+        "/who",
+        "/rules",
+        "/help",
+    };
+    const char* keys_en[] = {
+        "Hotkeys:",
+        "Alt — loot / locks / traps",
+        "F9 — net HUD",
+        "F10 — this help",
+        "Pause — shared pause",
+        "MMB / Alt+RMB — ping",
+        "Ctrl+LMB / RMB on portrait — trade",
+        "G — follow / convoy",
+        "Y / N — sleep / travel",
+        "F7 / F8 — save / load",
+        "Esc or F10 closes this panel",
+    };
+    const char* cmds_en[] = {
+        "Chat commands:",
+        "/tp [name]",
+        "/stuck",
+        "/gather",
+        "/w <name> <text>",
+        "/who",
+        "/rules",
+        "/help",
+    };
+    int w = coop_mid_iso_w > 0 ? coop_mid_iso_w : hrp_iso_window_width_get();
+    int h = coop_mid_iso_h > 0 ? coop_mid_iso_h : hrp_iso_window_height_get();
 
-    if (!coop_mid_ui_inited || !coop_mid_ui_session() || mainmenu_ui_is_active() || textedit_ui_is_focused()) {
-        return false;
-    }
-    if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
-        coop_middle_ui_help_close();
-        return true;
-    }
-    w = hrp_iso_window_width_get();
-    h = hrp_iso_window_height_get();
-    memset(&wd, 0, sizeof(wd));
-    wd.flags = TIG_WINDOW_MESSAGE_FILTER;
-    wd.message_filter = coop_mid_help_filter;
-    wd.background_color = tig_color_make(20, 16, 12);
-    wd.rect.width = COOP_MID_HELP_W;
-    wd.rect.height = COOP_MID_HELP_H;
-    wd.rect.x = w > wd.rect.width ? (w - wd.rect.width) / 2 : 0;
-    wd.rect.y = h > wd.rect.height ? (h - wd.rect.height) / 2 : 0;
-    if (tig_window_create(&wd, &coop_mid_help_win) != TIG_OK) {
-        coop_mid_help_win = TIG_WINDOW_HANDLE_INVALID;
-        return true;
+    if (coop_mid_help_vb == NULL) {
+        coop_mid_help_vb = coop_mid_ui_vb_create(COOP_MID_HELP_W, COOP_MID_HELP_H);
+        if (coop_mid_help_vb == NULL) {
+            return;
+        }
     }
     r.x = 0;
     r.y = 0;
     r.width = COOP_MID_HELP_W;
     r.height = COOP_MID_HELP_H;
-    coop_mid_fill_box(coop_mid_help_win, &r, tig_color_make(20, 16, 12), tig_color_make(180, 145, 80));
-    r.x = 14;
+    tig_video_buffer_fill(coop_mid_help_vb, &r, tig_color_make(20, 16, 12));
+    {
+        tig_color_t frame = tig_color_make(180, 145, 80);
+        TigRect e = r;
+        e.height = 1;
+        tig_video_buffer_fill(coop_mid_help_vb, &e, frame);
+        e.y = r.height - 1;
+        tig_video_buffer_fill(coop_mid_help_vb, &e, frame);
+        e.y = 0;
+        e.width = 1;
+        e.height = r.height;
+        tig_video_buffer_fill(coop_mid_help_vb, &e, frame);
+        e.x = r.width - 1;
+        tig_video_buffer_fill(coop_mid_help_vb, &e, frame);
+    }
+    r.x = 16;
     r.y = 10;
-    r.width = COOP_MID_HELP_W - 28;
-    r.height = 20;
-    coop_mid_win_text(coop_mid_help_win, coop_lite_lang_ru() ? "Кооп — подсказка" : "Co-op cheat sheet", &r, 220, 200, 140);
-    r.y = 32;
-    r.height = COOP_MID_HELP_H - 44;
-    text = coop_mid_help_text(coop_lite_lang_ru());
-    coop_mid_win_text(coop_mid_help_win, text, &r, 220, 210, 190);
+    r.width = COOP_MID_HELP_W - 32;
+    r.height = 18;
+    tig_font_push(coop_mid_ui_font(220, 200, 140));
+    tig_font_write(coop_mid_help_vb, title, &r, &dirty);
+    tig_font_pop();
+    if (ru) {
+        coop_mid_help_write_col(keys_ru, (int)(sizeof(keys_ru) / sizeof(keys_ru[0])), 16, 36, 220, 210, 190);
+        coop_mid_help_write_col(cmds_ru, (int)(sizeof(cmds_ru) / sizeof(cmds_ru[0])), COOP_MID_HELP_W / 2 + 4, 36, 220, 210, 190);
+    } else {
+        coop_mid_help_write_col(keys_en, (int)(sizeof(keys_en) / sizeof(keys_en[0])), 16, 36, 220, 210, 190);
+        coop_mid_help_write_col(cmds_en, (int)(sizeof(cmds_en) / sizeof(cmds_en[0])), COOP_MID_HELP_W / 2 + 4, 36, 220, 210, 190);
+    }
+    coop_mid_help_rect.width = COOP_MID_HELP_W;
+    coop_mid_help_rect.height = COOP_MID_HELP_H;
+    coop_mid_help_rect.x = w > COOP_MID_HELP_W ? (w - COOP_MID_HELP_W) / 2 : 0;
+    coop_mid_help_rect.y = h > COOP_MID_HELP_H ? (h - COOP_MID_HELP_H) / 2 : 0;
+}
+
+static void coop_mid_ui_help_draw(GameDrawInfo* draw_info)
+{
+    if (coop_mid_help_shown && coop_mid_help_vb != NULL) {
+        coop_mid_ui_blit(draw_info, coop_mid_help_vb, &coop_mid_help_rect, 0, 0);
+    }
+}
+
+bool coop_middle_ui_help_toggle(void)
+{
+    if (!coop_mid_ui_inited || !coop_mid_ui_session() || mainmenu_ui_is_active() || textedit_ui_is_focused()) {
+        return false;
+    }
+    if (coop_mid_help_on) {
+        coop_middle_ui_help_close();
+        return true;
+    }
+    coop_mid_help_on = true;
+    coop_mid_help_render();
+    coop_mid_help_shown = coop_mid_help_vb != NULL;
+    if (coop_mid_help_shown) {
+        gamelib_invalidate_rect(&coop_mid_help_rect);
+    }
     return true;
+}
+
+static bool coop_mid_help_hit(const TigMessage* msg)
+{
+    TigWindowData wd;
+    int x;
+    int y;
+
+    if (!coop_mid_help_shown || msg == NULL || msg->type != TIG_MESSAGE_MOUSE) {
+        return false;
+    }
+    x = msg->data.mouse.x;
+    y = msg->data.mouse.y;
+    if (coop_mid_iso_window != TIG_WINDOW_HANDLE_INVALID && tig_window_data(coop_mid_iso_window, &wd) == TIG_OK) {
+        x -= wd.rect.x;
+        y -= wd.rect.y;
+    }
+    return x >= coop_mid_help_rect.x && y >= coop_mid_help_rect.y
+        && x < coop_mid_help_rect.x + coop_mid_help_rect.width
+        && y < coop_mid_help_rect.y + coop_mid_help_rect.height;
 }
 
 static void coop_mid_ui_panels_reset(void)
@@ -1670,7 +1800,7 @@ static void coop_mid_ui_panels_tick(void)
             coop_middle_ui_sleep_consent_close();
         }
     }
-    if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
+    if (coop_mid_help_on) {
         if (!coop_mid_ui_session() || mainmenu_ui_is_active()) {
             coop_middle_ui_help_close();
         }
@@ -1692,7 +1822,7 @@ bool coop_middle_ui_world_event(TigMessage* msg)
             return coop_middle_ui_help_toggle();
         }
         if (msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE) {
-            if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
+            if (coop_mid_help_on) {
                 coop_middle_ui_help_close();
                 return true;
             }
@@ -1711,6 +1841,9 @@ bool coop_middle_ui_world_event(TigMessage* msg)
         return false;
     }
     ev = msg->data.mouse.event;
+    if (coop_mid_help_hit(msg)) {
+        return true; /* clicks on the F10 overlay stay on the panel */
+    }
     alt = tig_kb_is_key_pressed(SDL_SCANCODE_LALT) || tig_kb_is_key_pressed(SDL_SCANCODE_RALT);
     if (ev == TIG_MESSAGE_MOUSE_MIDDLE_BUTTON_UP || (alt && ev == TIG_MESSAGE_MOUSE_RIGHT_BUTTON_UP)) {
         if (coop_mid_ui_ping_here(msg)) {
@@ -1740,6 +1873,7 @@ void coop_middle_ui_draw(GameDrawInfo* draw_info)
     coop_mid_ui_edges_draw(draw_info); /* M7 */
     coop_mid_ui_hud_draw(draw_info);
     coop_mid_ui_banner_draw(draw_info);
+    coop_mid_ui_help_draw(draw_info);
 }
 
 void coop_middle_ui_on_scroll(int dx, int dy)
@@ -1755,6 +1889,13 @@ void coop_middle_ui_on_scroll(int dx, int dy)
     if (coop_mid_hud_shown) {
         gamelib_invalidate_rect(&coop_mid_hud_rect);
         rect = coop_mid_hud_rect;
+        rect.x += dx;
+        rect.y += dy;
+        gamelib_invalidate_rect(&rect);
+    }
+    if (coop_mid_help_shown) {
+        gamelib_invalidate_rect(&coop_mid_help_rect);
+        rect = coop_mid_help_rect;
         rect.x += dx;
         rect.y += dy;
         gamelib_invalidate_rect(&rect);

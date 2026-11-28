@@ -226,6 +226,9 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
         case COOP_TP_REFUSE_NOT_FOUND:
             snprintf(out, sz, ru ? "[Кооп] Игрок не найден." : "[Co-op] No such player.");
             break;
+        case COOP_TP_REFUSE_AMBIGUOUS:
+            snprintf(out, sz, ru ? "[Кооп] Имя неоднозначно: уточните ник." : "[Co-op] Name is ambiguous - be more specific.");
+            break;
         default:
             snprintf(out, sz, ru ? "[Кооп] Команда отклонена." : "[Co-op] Command refused.");
             break;
@@ -260,6 +263,12 @@ void coop_middle_feed_format(int kind, const char* who, const char* what, bool r
         break;
     case COOP_MID_CHAT_INFO:
         snprintf(out, sz, "%s", what);
+        break;
+    case COOP_MID_CHAT_PM_FROM:
+        snprintf(out, sz, ru ? "[ЛС от %s] %s" : "[PM from %s] %s", who, what);
+        break;
+    case COOP_MID_CHAT_PM_TO:
+        snprintf(out, sz, ru ? "[ЛС -> %s] %s" : "[PM -> %s] %s", who, what);
         break;
     default:
         out[0] = '\0';
@@ -321,6 +330,9 @@ bool coop_middle_party_ctrl_valid(const PacketCoopPartyCtrl* pkt)
     }
     if (pkt->op == COOP_CTRL_FOLLOW) { /* M8: a = target slot or -1 (off) */
         return (pkt->a == -1 || (pkt->a >= 0 && pkt->a < 8)) && pkt->b == 0;
+    }
+    if (pkt->op == COOP_CTRL_LOCAL_FADE) { /* M9: a = 1 out / 0 in */
+        return (pkt->a == 0 || pkt->a == 1) && pkt->b == 0;
     }
     return false;
 }
@@ -518,7 +530,21 @@ int coop_middle_scale_xp(int raw_xp, int pct)
     return (int)v;
 }
 
-int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
+static void coop_mid_copy_span(char* out, size_t cap, const char* src, size_t n)
+{
+    size_t k;
+
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    k = n < cap - 1 ? n : cap - 1;
+    if (k > 0 && src != NULL) {
+        memcpy(out, src, k);
+    }
+    out[k] = '\0';
+}
+
+int coop_middle_parse_cmd_msg(const char* text, char* name_out, size_t name_cap, char* msg_out, size_t msg_cap)
 {
     char word[16];
     char arg[32];
@@ -529,6 +555,9 @@ int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
 
     if (name_out != NULL && name_cap > 0) {
         name_out[0] = '\0';
+    }
+    if (msg_out != NULL && msg_cap > 0) {
+        msg_out[0] = '\0';
     }
     if (p == NULL) {
         return COOP_CMD_NONE;
@@ -549,6 +578,25 @@ int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
     word[n] = '\0';
     while (*p == ' ' || *p == '\t') {
         p++;
+    }
+    if (strcmp(word, "w") == 0 || strcmp(word, "pm") == 0) {
+        name_src = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t') {
+            p++;
+        }
+        coop_mid_copy_span(name_out, name_cap, name_src, (size_t)(p - name_src));
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (msg_out != NULL && msg_cap > 0) {
+            size_t k = strlen(p);
+            const char* e = p + k;
+            while (e > p && (e[-1] == ' ' || e[-1] == '\t')) {
+                e--;
+            }
+            coop_mid_copy_span(msg_out, msg_cap, p, (size_t)(e - p));
+        }
+        return COOP_CMD_WHISPER;
     }
     name_src = p;
     while (*p != '\0' && *p != ' ' && *p != '\t') {
@@ -571,11 +619,7 @@ int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
         if (strcmp(arg, "all") == 0) {
             return COOP_CMD_GATHER;
         }
-        if (name_out != NULL && name_cap > 0) {
-            size_t k = m < name_cap - 1 ? m : name_cap - 1;
-            memcpy(name_out, name_src, k);
-            name_out[k] = '\0';
-        }
+        coop_mid_copy_span(name_out, name_cap, name_src, m);
         return COOP_CMD_TP_NAME;
     }
     if (m != 0) {
@@ -597,6 +641,11 @@ int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
         return COOP_CMD_HELP;
     }
     return COOP_CMD_NONE;
+}
+
+int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap)
+{
+    return coop_middle_parse_cmd_msg(text, name_out, name_cap, NULL, 0);
 }
 
 int coop_middle_parse_cmd(const char* text)
@@ -705,6 +754,102 @@ bool coop_middle_sleep_consent_needed(bool host, bool usleep, bool rest_vote, bo
         return true;
     }
     return false;
+}
+
+static size_t coop_mid_utf8_fit(const char* s, size_t max)
+{
+    size_t n = 0;
+
+    if (s == NULL) {
+        return 0;
+    }
+    while (s[n] != '\0' && n < max) {
+        unsigned char c = (unsigned char)s[n];
+        size_t w = 1;
+
+        if ((c & 0x80) == 0) {
+            w = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            w = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            w = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            w = 4;
+        }
+        if (n + w > max) {
+            break;
+        }
+        n += w;
+    }
+    return n;
+}
+
+int coop_middle_alt_label_format(char* out, size_t cap, const char* name, bool ru,
+    bool locked, bool trap, bool quest, int price, int weight, unsigned int* rgb)
+{
+    char tag[64];
+    char core[192];
+    const char* src = name != NULL ? name : "";
+    size_t tag_len;
+    size_t prefix_len;
+    size_t name_room;
+    size_t nlen;
+
+    if (rgb != NULL) {
+        *rgb = 0;
+        if (quest) {
+            *rgb = COOP_MID_ALT_QUEST_RGB;
+        }
+        if (trap) {
+            *rgb = COOP_MID_ALT_TRAP_RGB;
+        }
+    }
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    tag[0] = '\0';
+    if (price > 0 || weight > 0) {
+        if (price > 0 && weight > 0) {
+            snprintf(tag, sizeof(tag), ru ? " (%dз, %dк)" : " (%dg, %dst)", price, weight);
+        } else if (price > 0) {
+            snprintf(tag, sizeof(tag), ru ? " (%dз)" : " (%dg)", price);
+        } else {
+            snprintf(tag, sizeof(tag), ru ? " (%dк)" : " (%dst)", weight);
+        }
+    }
+    if (locked) {
+        strncat(tag, ru ? " [Заперто]" : " [Locked]", sizeof(tag) - strlen(tag) - 1);
+    }
+    if (trap) {
+        strncat(tag, ru ? " [Ловушка]" : " [Trap]", sizeof(tag) - strlen(tag) - 1);
+    }
+    tag_len = strlen(tag);
+    prefix_len = quest ? 4 : 0; /* "[*] " */
+    if (cap <= 1) {
+        return 0;
+    }
+    name_room = cap - 1;
+    if (name_room > prefix_len + tag_len) {
+        name_room -= prefix_len + tag_len;
+    } else {
+        name_room = 0;
+    }
+    nlen = coop_mid_utf8_fit(src, name_room);
+    if (quest) {
+        snprintf(core, sizeof(core), "[*] ");
+    } else {
+        core[0] = '\0';
+    }
+    if (nlen > 0) {
+        size_t used = strlen(core);
+        if (used + nlen < sizeof(core)) {
+            memcpy(core + used, src, nlen);
+            core[used + nlen] = '\0';
+        }
+    }
+    snprintf(out, cap, "%s%s", core, tag);
+    return (int)strlen(out);
 }
 
 bool coop_middle_rate_admit(bool* have_last, unsigned int* last_ms, unsigned int now_ms, unsigned int interval_ms)
@@ -2355,6 +2500,52 @@ bool coop_middle_client_rest_ask(int mode)
     return true;
 }
 
+static void coop_mid_run_local_fade(bool out)
+{
+    FadeData fade;
+
+    memset(&fade, 0, sizeof(fade));
+    fade.flags = out ? 0 : FADE_IN;
+    fade.duration = 1.2f;
+    fade.steps = 32;
+    fade.color = tig_color_make(0, 0, 0);
+    gfade_run(&fade);
+}
+
+/* Fade only the listed slots (bit i). The host fades locally when bit 0 is set. */
+static void coop_mid_fade_slots(unsigned int mask, bool out)
+{
+    PacketCoopPartyCtrl pkt;
+    int s;
+    int depth;
+
+    if (mask == 0 || !coop_mid_session_host()) {
+        return;
+    }
+    if ((mask & 1u) != 0) {
+        coop_mid_run_local_fade(out);
+    }
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type = PACKET_COOP_PARTY_CTRL;
+    pkt.op = COOP_CTRL_LOCAL_FADE;
+    pkt.a = out ? 1 : 0;
+    pkt.b = 0;
+    depth = tig_net_local_suspend_pause();
+    for (s = 1; s < 8; s++) {
+        if ((mask & (1u << s)) != 0 && tig_net_client_is_active(s)) {
+            tig_net_send_app(&pkt, sizeof(pkt), s);
+        }
+    }
+    tig_net_local_suspend_resume(depth);
+}
+
+static void coop_mid_close_dialog(int64_t pc)
+{
+    if (pc != OBJ_HANDLE_NULL) {
+        ui_end_dialog(pc, 0);
+    }
+}
+
 bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
 {
     int slot;
@@ -2378,6 +2569,13 @@ bool coop_middle_handle_party_ctrl(const PacketCoopPartyCtrl* pkt)
             return true;
         }
         coop_follow_target[slot] = pkt->a;
+        return true;
+    }
+    if (pkt != NULL && pkt->op == COOP_CTRL_LOCAL_FADE) {
+        if (tig_net_is_host() || !coop_middle_party_ctrl_valid(pkt)) {
+            return true;
+        }
+        coop_mid_run_local_fade(pkt->a != 0);
         return true;
     }
     if (pkt == NULL || (pkt->op != COOP_CTRL_REST_ASK && pkt->op != COOP_CTRL_REST_REFUSE)) {
@@ -3266,6 +3464,8 @@ static void coop_cmd_who(int to_slot)
             st = "Transit";
         } else if (critter_is_dead(pc)) {
             st = "Dead";
+        } else if (coop_middle_is_paused()) {
+            st = "Paused";
         } else {
             st = "OK";
         }
@@ -3325,14 +3525,81 @@ static void coop_cmd_help(int to_slot)
     bool ru = coop_lite_lang_ru();
 
     coop_cmd_info(to_slot, ru
-        ? "[Кооп] Команды: /tp [имя], /gather, /who, /rules, /stuck. F10 — шпаргалка."
-        : "[Co-op] Commands: /tp [name], /gather, /who, /rules, /stuck. F10 for the cheat sheet.");
+        ? "[Кооп] Команды: /tp [имя], /stuck, /gather, /w <имя> <текст>, /who, /rules, /help. F10 — шпаргалка."
+        : "[Co-op] Commands: /tp [name], /stuck, /gather, /w <name> <text>, /who, /rules, /help. F10 for the cheat sheet.");
+}
+
+static void coop_cmd_whisper(int sender_slot, const char* want, const char* msg)
+{
+    const char* names[8];
+    char name_buf[8][64];
+    bool ok[8];
+    int s;
+    int hit;
+    int hits = 0;
+    char sname[64];
+    char tname[64];
+    int64_t pc;
+
+    if (want == NULL || want[0] == '\0' || msg == NULL || msg[0] == '\0') {
+        coop_cmd_refuse(sender_slot, COOP_TP_REFUSE_NOT_FOUND, 0);
+        return;
+    }
+    for (s = 0; s < 8; s++) {
+        names[s] = "";
+        ok[s] = false;
+        name_buf[s][0] = '\0';
+        if (s > 0 && !tig_net_client_is_active(s)) {
+            continue;
+        }
+        pc = sub_4A2B60(s);
+        if (pc == OBJ_HANDLE_NULL) {
+            continue;
+        }
+        coop_mid_pc_name(s, pc, name_buf[s], sizeof(name_buf[s]));
+        names[s] = name_buf[s];
+        ok[s] = name_buf[s][0] != '\0';
+        if (ok[s]) {
+            /* count unique-prefix / exact later via name_prefix_slot */
+        }
+    }
+    hit = coop_middle_name_prefix_slot(want, names, ok, 8);
+    if (hit < 0) {
+        for (s = 0; s < 8; s++) {
+            const char* nm = names[s];
+            size_t j;
+            size_t plen;
+            if (!ok[s] || nm == NULL) {
+                continue;
+            }
+            plen = strlen(want);
+            for (j = 0; j < plen; j++) {
+                if (nm[j] == '\0' || tolower((unsigned char)nm[j]) != tolower((unsigned char)want[j])) {
+                    break;
+                }
+            }
+            if (j == plen) {
+                hits++;
+            }
+        }
+        coop_cmd_refuse(sender_slot, hits > 1 ? COOP_TP_REFUSE_AMBIGUOUS : COOP_TP_REFUSE_NOT_FOUND, 0);
+        return;
+    }
+    if (hit == sender_slot) {
+        coop_cmd_refuse(sender_slot, COOP_TP_REFUSE_SELF, 0);
+        return;
+    }
+    coop_mid_pc_name(sender_slot, sub_4A2B60(sender_slot), sname, sizeof(sname));
+    coop_mid_pc_name(hit, sub_4A2B60(hit), tname, sizeof(tname));
+    coop_mid_sys_line(COOP_MID_CHAT_PM_FROM, sender_slot, sname, msg, hit, -1);
+    coop_mid_sys_line(COOP_MID_CHAT_PM_TO, sender_slot, tname, msg, sender_slot, -1);
 }
 
 bool coop_middle_try_chat_command(int sender_slot, const char* text)
 {
     char want[32];
-    int cmd = coop_middle_parse_cmd_ex(text, want, sizeof(want));
+    char wmsg[COOP_CHAT_MAX_TEXT];
+    int cmd = coop_middle_parse_cmd_msg(text, want, sizeof(want), wmsg, sizeof(wmsg));
     int64_t host_pc;
     int64_t host_loc;
     int64_t dest_pc;
@@ -3358,6 +3625,10 @@ bool coop_middle_try_chat_command(int sender_slot, const char* text)
     }
     if (cmd == COOP_CMD_HELP) {
         coop_cmd_help(sender_slot);
+        return true;
+    }
+    if (cmd == COOP_CMD_WHISPER) {
+        coop_cmd_whisper(sender_slot, want, wmsg);
         return true;
     }
     host_pc = sub_4A2B60(0);
@@ -4073,20 +4344,51 @@ bool coop_middle_host_client_travel(int slot, int map, int64_t loc, const char* 
     int cur;
 
     (void)via;
-    if (!coop_mid_session_host() || !map_is_valid() || slot <= 0 || slot >= 8) {
+    if (!coop_mid_session_host() || !map_is_valid() || slot < 0 || slot >= 8) {
         return false;
     }
     cur = map_current_map();
     if (coop_middle_solo_hop_rule(coop_middle_free_or_sub(), cur, map)) {
         pc = sub_4A2B60(slot);
         if (pc != OBJ_HANDLE_NULL && loc != 0) {
+            unsigned int mask = 1u << slot;
+            int s;
+
+            coop_mid_close_dialog(pc);
+            for (s = 0; s < 8; s++) {
+                if (s != slot && coop_convoy_leader[s] == slot) {
+                    int64_t other = sub_4A2B60(s);
+                    if (other != OBJ_HANDLE_NULL) {
+                        coop_mid_close_dialog(other);
+                        mask |= 1u << s;
+                    }
+                }
+            }
+            coop_mid_fade_slots(mask, true);
             mid_move_pc_and_followers(slot, pc, loc);
-            tig_debug_printf("CoopMiddle: slot %d same-map hop to %d,%d (t405u)\n", slot,
-                (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+            for (s = 0; s < 8; s++) {
+                if (s != slot && (mask & (1u << s)) != 0) {
+                    int64_t other = sub_4A2B60(s);
+                    if (other != OBJ_HANDLE_NULL) {
+                        mid_move_pc_and_followers(s, other, coop_lite_follow_loc_for_slot(loc, s));
+                    }
+                }
+            }
+            coop_mid_fade_slots(mask, false);
+            tig_debug_printf("CoopMiddle: slot %d same-map passenger hop to %d,%d (M9, convoy mask 0x%x)\n", slot,
+                (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), mask);
         }
         return true;
     }
+    if (slot == 0) {
+        return false;
+    }
     if (coop_subinst_host_travel_ex(slot, map, loc, &why)) {
+        /* DENY_* also returns true; only close the talk if a lease was granted. */
+        if (coop_subinst_slot_inside(slot)) {
+            pc = sub_4A2B60(slot);
+            coop_mid_close_dialog(pc);
+        }
         return true;
     }
     if (coop_middle_rule_on(COOP_RULE_SUBINSTANCES)) {
