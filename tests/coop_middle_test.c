@@ -1951,6 +1951,33 @@ static void test_dif_record_len(void)
     CHECK(!coop_middle_mobile_dif_skip(NULL, a, 24));
 }
 
+static void test_t405u_place_and_limits(void)
+{
+    int64_t saved = 0x100000001;
+    int64_t follow = 0x200000002;
+
+    /* valid saved/merge loc kept in Middle, follow_loc in Lite or when invalid */
+    CHECK(coop_middle_place_loc(true, saved, true, follow) == saved);
+    CHECK(coop_middle_place_loc(false, saved, true, follow) == follow);
+    CHECK(coop_middle_place_loc(true, saved, false, follow) == follow);
+    CHECK(coop_middle_place_loc(true, 0, true, follow) == follow);
+    CHECK(coop_middle_place_loc(false, 0, false, follow) == follow);
+
+    /* t405u CMAP limits and checkpoint dest_loc */
+    CHECK(COOP_SUBINST_MAX_RAW == 4 * 1024 * 1024);
+    CHECK(COOP_SUBINST_MAX_WIRE == 1 * 1024 * 1024);
+    CHECK(COOP_SUBINST_MAX_FILES == 256);
+    CHECK(coop_subinst_commit_dest_loc(true, saved, 0) == saved);
+    CHECK(coop_subinst_commit_dest_loc(true, saved, follow) == saved);
+    CHECK(coop_subinst_commit_dest_loc(false, saved, follow) == follow);
+    CHECK(coop_subinst_commit_dest_loc(false, saved, 0) == 0);
+    /* stubs: no live session, no hop / no keep */
+    CHECK(!coop_middle_host_solo_hop(7));
+    CHECK(!coop_middle_keep_client_place());
+    CHECK(coop_middle_client_keep_loc(saved, follow) == follow);
+    printf("PASS: t405u place loc / CMAP limits / checkpoint dest_loc\n");
+}
+
 static void test_hop_and_followers(void)
 {
     int64_t have[6];
@@ -1960,13 +1987,15 @@ static void test_hop_and_followers(void)
     bool changed = false;
     int n;
 
-    /* Middle: same map (or -1 = same) is solo; a map change is not; Lite never. */
+    /* Middle: same map (or dest <= 0) is solo; a map change is not; Lite never. */
     CHECK(coop_middle_solo_hop_rule(true, 7, 7));
     CHECK(coop_middle_solo_hop_rule(true, 7, -1));
+    CHECK(coop_middle_solo_hop_rule(true, 7, 0));
     CHECK(coop_middle_solo_hop_rule(true, 1, 1));
     CHECK(!coop_middle_solo_hop_rule(true, 7, 8));
     CHECK(!coop_middle_solo_hop_rule(false, 7, 7));
     CHECK(!coop_middle_solo_hop_rule(false, 1, 1));
+    CHECK(!coop_middle_solo_hop_rule(false, 7, 0));
     CHECK(!coop_middle_solo_hop_rule(true, 0, 0));
     CHECK(!coop_middle_solo_hop_rule(true, -1, -1));
     /* the stub (no session) never hops solo */
@@ -2416,6 +2445,7 @@ int main(void)
     test_lite_mode();
     test_autolevel();
     test_hop_and_followers();
+    test_t405u_place_and_limits();
     test_dif_record_len();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
