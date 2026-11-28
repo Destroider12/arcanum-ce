@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 60`** on this branch (`coop-middle`, Coop Middle after M7; M7 was 59, M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 61`** on this branch (`coop-middle`, Coop Middle M8; was 60 after auto-levelling / M7, M7 was 59, M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -127,7 +127,7 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 60)
+## Coop Middle (branch `coop-middle`, protocol 61)
 
 Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
@@ -170,6 +170,15 @@ M5 fixes: the Teleport spell no longer throws the party to the edge of the world
 Stage **M6 (solo instances)**:
 
 - **Solo interiors/dungeons** (on, `subinst`): a client can enter another map alone. The host hands it that map (a CMAP1 archive), the client plays it locally, and story changes, XP and items go back to the host (checkpoints every 45 s and before a host save, a final commit on exit). One player per map; a busy map says "<Name> is already inside <map>. Wait or ask the host for group travel.". Badge **M** on the portrait, an entrance marker on the world map, a chat line.
+
+Stage **M8 (sleep-consent window, personal reputation, full solo-instance commit, dynamic difficulty, convoy UX)**:
+
+- Protocol **61** (not 60): `PacketCoopNpcStats.spell_tech` grew from 16 to 25 (magic colleges + mastery + 8 tech degrees). HEAD was already 60 after auto-levelling, so the wire-size change bumps the protocol again.
+- Host sleep-consent window (PT39 colors, Agree/Refuse, Y/N/Esc) when a client starts unified sleep or a rest request.
+- Personal reputations under Middle (`STORY_SYNC` no longer unions reps; `DELTA_REP` was already per-slot). Party KOS radius 20 tiles when free overworld is on (Lite stays 120).
+- Full PC build commit from a solo-instance blob (stats including alignment, skills, spell_tech, schematics, blessings/curses, fate) plus followers (up to 8), including NPCs hired inside.
+- Optional dynamic difficulty (`dscale` / `dynamic_scale`, bit `0x4000` — `0x800` is already Lite mode): +40% enemy HP and +15% XP per extra living player, clamped 300/250. Lite mode forces it off. Shown in `/rules`, logged when the living count changes.
+- World-map convoy on map 1 (G-follow, 15 tiles, shared marker, land together). `/tp <Name>` (case-insensitive prefix), `/who`, `/rules`, `/help`, F10 cheat sheet. Launcher checkbox **Dynamic difficulty**.
 
 Stage **M7 (final polish)**:
 

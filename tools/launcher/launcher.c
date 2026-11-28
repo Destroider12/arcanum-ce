@@ -124,6 +124,7 @@
 #define IDC_RULE_LITE 145 /* t391u: Coop Lite mode (as release 1.0) */
 #define IDC_RULE_FLVL 146 /* after M7: auto-level followers */
 #define IDC_RULE_PLVL 147 /* after M7: party level (late joiners too) */
+#define IDC_RULE_DSCALE 148 /* M8: dynamic difficulty */
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -235,6 +236,7 @@ static void rules_enable(bool host)
     EnableWindow(item(IDC_RULE_SUBINST), mid);
     EnableWindow(item(IDC_RULE_FLVL), mid);
     EnableWindow(item(IDC_RULE_PLVL), mid);
+    EnableWindow(item(IDC_RULE_DSCALE), mid);
     EnableWindow(item(IDC_RULE_ASAVE), host);
 }
 
@@ -401,6 +403,8 @@ static void load_settings(void)
         GetPrivateProfileIntA("rules", "follower_autolevel", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_PLVL), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "party_level", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(item(IDC_RULE_DSCALE), BM_SETCHECK,
+        GetPrivateProfileIntA("rules", "dynamic_scale", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_LITE), BM_SETCHECK,
         GetPrivateProfileIntA("rules", "lite_mode", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL,
@@ -436,6 +440,7 @@ static void rules_env(char* out, size_t sz)
         | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u)
         | (rule_checked(IDC_RULE_FLVL) ? COOP_RULE_FOLLOWER_LEVEL : 0u)
         | (rule_checked(IDC_RULE_PLVL) ? COOP_RULE_PARTY_LEVEL : 0u)
+        | (rule_checked(IDC_RULE_DSCALE) ? COOP_RULE_DYNAMIC_SCALE : 0u)
         | (rule_checked(IDC_RULE_LITE) ? COOP_RULE_LITE_MODE : 0u);
     r.enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
     r.xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
@@ -469,6 +474,7 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "solo_instances", rule_checked(IDC_RULE_SUBINST) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "follower_autolevel", rule_checked(IDC_RULE_FLVL) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "party_level", rule_checked(IDC_RULE_PLVL) ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("rules", "dynamic_scale", rule_checked(IDC_RULE_DSCALE) ? "1" : "0", g_ini);
     WritePrivateProfileStringA("rules", "lite_mode", rule_checked(IDC_RULE_LITE) ? "1" : "0", g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT));
     WritePrivateProfileStringA("rules", "enemy_hp_pct", buf, g_ini);
@@ -872,8 +878,8 @@ static void lobby_rules_poll(void)
 
 /* Client heights: the panel (update row ends at 550) and the lobby (rules
    line ends at 750). */
-#define LAUNCHER_PANEL_H 558
-#define LAUNCHER_LOBBY_H (714 + 36 + 12)
+#define LAUNCHER_PANEL_H 580
+#define LAUNCHER_LOBBY_H (736 + 36 + 12)
 
 static void launcher_client_size(HWND hwnd, int client_h)
 {
@@ -2382,27 +2388,28 @@ static void create_controls(void)
         SendMessageA(combo, CB_SETCURSEL, 2, 0); /* 10 min */
     }
     /* t391u: one switch for the Coop Lite 1.0 rules (greys the others). */
-    make("BUTTON", "Coop Lite mode (as release 1.0)", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 380, 340, 20, IDC_RULE_LITE);
+    make("BUTTON", "Dynamic difficulty", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 380, 200, 20, IDC_RULE_DSCALE);
+    make("BUTTON", "Coop Lite mode (as release 1.0)", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 402, 340, 20, IDC_RULE_LITE);
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 404, 418, 34, IDC_CHECK_OUT);
-    make("STATIC", "", SS_LEFT, 12, 442, 418, 36, IDC_STATUS);
-    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 484, 100, 30, IDC_START);
-    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 484, 96, 30, IDC_RECONNECT);
-    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 484, 130, 30, IDC_BUGREPORT);
-    make("BUTTON", "Close", WS_TABSTOP, 250, 484, 70, 30, IDC_PANEL_CLOSE);
-    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 528, 196, 20, IDC_UPD_TEXT);
-    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 524, 120, 26, IDC_UPD_CHECK);
-    make("BUTTON", "Update", WS_TABSTOP, 340, 524, 90, 26, IDC_UPD_GO);
+        12, 426, 418, 34, IDC_CHECK_OUT);
+    make("STATIC", "", SS_LEFT, 12, 464, 418, 36, IDC_STATUS);
+    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 506, 100, 30, IDC_START);
+    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 506, 96, 30, IDC_RECONNECT);
+    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 506, 130, 30, IDC_BUGREPORT);
+    make("BUTTON", "Close", WS_TABSTOP, 250, 506, 70, 30, IDC_PANEL_CLOSE);
+    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 550, 196, 20, IDC_UPD_TEXT);
+    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 546, 120, 26, IDC_UPD_CHECK);
+    make("BUTTON", "Update", WS_TABSTOP, 340, 546, 90, 26, IDC_UPD_GO);
     ShowWindow(item(IDC_UPD_GO), SW_HIDE);
-    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 560, 418, 18, IDC_LOBBY_LABEL);
+    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 582, 418, 18, IDC_LOBBY_LABEL);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 580, 200, 100, IDC_PLAYERS);
+        12, 602, 200, 100, IDC_PLAYERS);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        220, 580, 210, 100, IDC_LOBBY_CHAT);
-    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 686, 330, 22, IDC_LOBBY_INPUT);
+        220, 602, 210, 100, IDC_LOBBY_CHAT);
+    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 708, 330, 22, IDC_LOBBY_INPUT);
     SendMessageA(item(IDC_LOBBY_INPUT), EM_LIMITTEXT, 120, 0);
-    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 684, 80, 26, IDC_LOBBY_SEND);
-    make("STATIC", "", SS_LEFT, 12, 714, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
+    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 706, 80, 26, IDC_LOBBY_SEND);
+    make("STATIC", "", SS_LEFT, 12, 736, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
     show_panel(false);
     show_lobby(false);
 }

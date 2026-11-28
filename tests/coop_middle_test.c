@@ -112,7 +112,7 @@ static void test_rules_env(void)
 {
     CoopRules r;
     CoopRules back;
-    char text[128];
+    char text[256];
     char small[8];
     char desc[1024];
     unsigned int mask;
@@ -120,7 +120,7 @@ static void test_rules_env(void)
 
     coop_rules_default(&r);
     coop_rules_format_env(&r, text, sizeof(text));
-    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,flvl=1,plvl=1,hp=100,xp=100,asave=10") == 0);
+    CHECK(strcmp(text, "gold=0,loot=1,rest=1,trade=1,pause=0,ff=1,qitems=1,sfol=1,ow=1,usleep=1,subinst=1,flvl=1,plvl=1,dscale=0,hp=100,xp=100,asave=10") == 0);
 
     /* every flag combination + odd percentages round-trip */
     for (mask = 0; mask <= COOP_RULE_KNOWN_MASK; mask++) {
@@ -372,8 +372,17 @@ static void test_rest_ops(void)
     c.op = COOP_CTRL_TRAVEL_STATE;
     c.a = COOP_TRAVEL_READY;
     CHECK(coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
-    c.op = 12; /* 9 / 10 are the M5 sleep ops, 11 the M7 SLEEP_APPLY */
+    c.op = 12; /* M8 COOP_CTRL_FOLLOW: a = target slot or -1 */
     c.a = 1;
+    c.b = 0;
+    CHECK(coop_middle_party_ctrl_valid(&c));
+    c.a = -1;
+    CHECK(coop_middle_party_ctrl_valid(&c));
+    c.a = 8;
+    CHECK(!coop_middle_party_ctrl_valid(&c));
+    c.op = 13; /* unknown */
+    c.a = 1;
+    c.b = 0;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
     c.op = 0;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
@@ -608,7 +617,7 @@ static void test_labels(void)
 static void test_m3_rules(void)
 {
     CoopRules r;
-    char text[128];
+    char text[256];
     char desc[320];
     int n;
 
@@ -648,7 +657,7 @@ static void test_m3_rules(void)
             r.xp_mult_pct = (uint16_t)xp[i % 4];
             r.flags |= COOP_RULE_CLIENT_PAUSE;
             coop_rules_format_env(&r, text, sizeof(text));
-            CHECK(coop_rules_parse_env(&back, text) == 16);
+            CHECK(coop_rules_parse_env(&back, text) == 17);
             CHECK(coop_rules_equal(&r, &back));
         }
     }
@@ -734,7 +743,7 @@ static void test_m3_cmds(void)
     CHECK(coop_middle_parse_cmd("tp") == COOP_CMD_NONE);
     CHECK(coop_middle_parse_cmd("hello /tp") == COOP_CMD_NONE);
     CHECK(coop_middle_parse_cmd("/unknown") == COOP_CMD_NONE);
-    CHECK(coop_middle_parse_cmd("/tp me") == COOP_CMD_NONE);
+    CHECK(coop_middle_parse_cmd("/tp me") == COOP_CMD_TP_NAME);
     CHECK(coop_middle_parse_cmd("/tp all now") == COOP_CMD_NONE);
     CHECK(coop_middle_parse_cmd("/tpx") == COOP_CMD_NONE);
     CHECK(coop_middle_parse_cmd("/") == COOP_CMD_NONE);
@@ -773,7 +782,7 @@ static void test_m3_cmds(void)
     CHECK(line[0] != '\0');
     coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
     CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
-    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_AUTOSAVE);
+    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_INFO);
 }
 
 /* 13. M3 pings: packet, role, validity, rate limit */
@@ -895,7 +904,7 @@ static void test_m4_rules(void)
     r.flags &= ~(COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "qitems=0") != NULL && strstr(text, "sfol=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 16 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 17 && coop_rules_equal(&r, &back));
     n = coop_rules_parse_env(&r, "shared_quest_items=0,shared_followers=off");
     CHECK(n == 2 && (r.flags & (COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS)) == 0);
     n = coop_rules_parse_env(&r, "qitems=1;sfol=1");
@@ -1029,10 +1038,10 @@ static void test_m4_followers(void)
     CHECK(!coop_middle_follower_access_ok(true, false, false, true, 1)); /* not a party follower */
     CHECK(!coop_middle_follower_access_ok(true, true, true, false, 1)); /* dead */
     CHECK(!coop_middle_follower_access_ok(true, false, true, true, -1));
-    CHECK(sizeof(PacketCoopNpcStats) == 0x120);
+    CHECK(sizeof(PacketCoopNpcStats) == 0x144);
     CHECK(offsetof(PacketCoopNpcStats, basic_skills) == 0xA0 && offsetof(PacketCoopNpcStats, tech_skills) == 0xD0
         && offsetof(PacketCoopNpcStats, spell_tech) == 0xE0);
-    CHECK(COOP_NPC_BASIC_SKILLS == 12 && COOP_NPC_TECH_SKILLS == 4 && COOP_NPC_SPELL_TECH == 16);
+    CHECK(COOP_NPC_BASIC_SKILLS == 12 && COOP_NPC_TECH_SKILLS == 4 && COOP_NPC_SPELL_TECH == 25);
     {
         static PacketCoopNpcStats s;
 
@@ -1070,7 +1079,7 @@ static void test_m5_rules(void)
     r.flags &= ~(COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP);
     coop_rules_format_env(&r, text, sizeof(text));
     CHECK(strstr(text, "ow=0") != NULL && strstr(text, "usleep=0") != NULL); /* off still listed */
-    CHECK(coop_rules_parse_env(&back, text) == 16 && coop_rules_equal(&r, &back));
+    CHECK(coop_rules_parse_env(&back, text) == 17 && coop_rules_equal(&r, &back));
     CHECK(coop_rules_parse_env(&r, "free_overworld=0,unified_sleep=off") == 2);
     CHECK((r.flags & (COOP_RULE_FREE_OVERWORLD | COOP_RULE_UNIFIED_SLEEP)) == 0);
     coop_rules_default(&r);
@@ -2078,7 +2087,7 @@ static void test_autolevel(void)
     CHECK(coop_middle_party_xp_target(xp, 1) == 2100);
     CHECK(coop_middle_party_xp_target(xp, 0) == -1);
     CHECK(coop_middle_party_xp_target(NULL, 3) == -1);
-    CHECK(TIG_NET_PROTOCOL == 60);
+    CHECK(TIG_NET_PROTOCOL == 61);
 }
 
 /* M7 review: the subinst client's timed checkpoint clock. */
@@ -2405,6 +2414,152 @@ static void test_m6_ui(void)
     CHECK((COOP_RULE_DEFAULT_FLAGS & COOP_RULE_SUBINSTANCES) != 0);
 }
 
+
+static void test_m8(void)
+{
+    CoopRules r;
+    char desc[1024];
+    char name[32];
+    int i;
+    int n;
+    uint8_t cmap[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint8_t bundle[4] = { 9, 10, 11, 12 };
+    uint8_t qty[4] = { 0 };
+    uint8_t fol_buf[1024];
+    uint8_t payload[2048];
+    size_t fol_len = 0;
+    size_t pay_len = 0;
+    CoopSubinstFolRec recs[COOP_SUBINST_FOL_MAX];
+    CoopSubinstFolRec out[COOP_SUBINST_FOL_MAX];
+    CoopSubinstSection s_cmap, s_bundle, s_qty, s_fol;
+    const char* names[4];
+    bool ok[4];
+
+    CHECK(TIG_NET_PROTOCOL == 61);
+    CHECK(sizeof(PacketCoopNpcStats) == 0x144);
+    CHECK(COOP_NPC_SPELL_TECH == 25);
+    CHECK(offsetof(PacketCoopNpcStats, spell_tech) == 0xE0);
+    CHECK(COOP_RULE_DYNAMIC_SCALE == 0x00004000u);
+    CHECK(COOP_RULE_LITE_MODE == 0x00000800u); /* dscale must not reuse 0x800 */
+    CHECK((COOP_RULE_ACTIVE_MASK & COOP_RULE_DYNAMIC_SCALE) == COOP_RULE_DYNAMIC_SCALE);
+    CHECK((COOP_RULE_DEFAULT_FLAGS & COOP_RULE_DYNAMIC_SCALE) == 0);
+
+    coop_rules_default(&r);
+    CHECK((r.flags & COOP_RULE_DYNAMIC_SCALE) == 0);
+    CHECK(coop_rules_parse_env(&r, "dscale=1") == 1 && (r.flags & COOP_RULE_DYNAMIC_SCALE) != 0);
+    CHECK(coop_rules_parse_env(&r, "dynamic_scale=0") == 1 && (r.flags & COOP_RULE_DYNAMIC_SCALE) == 0);
+    CHECK(coop_rules_parse_env(&r, "dscale=1,lite=1") == 2);
+    coop_rules_effective(&r);
+    CHECK((r.flags & COOP_RULE_DYNAMIC_SCALE) == 0); /* lite forces it off */
+    coop_rules_parse_env(&r, "dscale=1,lite=0");
+    coop_rules_effective(&r);
+    CHECK((r.flags & COOP_RULE_DYNAMIC_SCALE) != 0);
+    coop_rules_describe(&r, false, desc, sizeof(desc));
+    CHECK(strstr(desc, "dynamic difficulty on") != NULL);
+
+    /* effective HP / XP: 1..8 living, caps, off path */
+    CHECK(coop_middle_effective_hp_pct(100, false, 4) == 100);
+    CHECK(coop_middle_effective_hp_pct(100, true, 1) == 100);
+    CHECK(coop_middle_effective_hp_pct(100, true, 0) == 100);
+    CHECK(coop_middle_effective_hp_pct(100, true, 2) == 140);
+    CHECK(coop_middle_effective_hp_pct(100, true, 3) == 180);
+    CHECK(coop_middle_effective_hp_pct(100, true, 4) == 220);
+    CHECK(coop_middle_effective_hp_pct(100, true, 5) == 260);
+    CHECK(coop_middle_effective_hp_pct(100, true, 6) == 300);
+    CHECK(coop_middle_effective_hp_pct(100, true, 7) == 300);
+    CHECK(coop_middle_effective_hp_pct(100, true, 8) == 300);
+    CHECK(coop_middle_effective_xp_pct(100, false, 8) == 100);
+    CHECK(coop_middle_effective_xp_pct(100, true, 1) == 100);
+    CHECK(coop_middle_effective_xp_pct(100, true, 2) == 115);
+    CHECK(coop_middle_effective_xp_pct(100, true, 3) == 130);
+    CHECK(coop_middle_effective_xp_pct(100, true, 8) == 205);
+    CHECK(coop_middle_effective_xp_pct(200, true, 8) == 250); /* cap */
+
+    CHECK(coop_middle_parse_cmd("/who") == COOP_CMD_WHO);
+    CHECK(coop_middle_parse_cmd("/WHO") == COOP_CMD_WHO);
+    CHECK(coop_middle_parse_cmd("/rules") == COOP_CMD_RULES);
+    CHECK(coop_middle_parse_cmd("/help") == COOP_CMD_HELP);
+    CHECK(coop_middle_parse_cmd_ex("/tp Bob", name, sizeof(name)) == COOP_CMD_TP_NAME);
+    CHECK(strcmp(name, "Bob") == 0);
+    CHECK(coop_middle_parse_cmd_ex("/TP alice", name, sizeof(name)) == COOP_CMD_TP_NAME);
+    CHECK(strcmp(name, "alice") == 0);
+    names[0] = "Alice";
+    names[1] = "Bob";
+    names[2] = "Bobby";
+    names[3] = "Carol";
+    ok[0] = ok[1] = ok[2] = ok[3] = true;
+    CHECK(coop_middle_name_prefix_slot("bob", names, ok, 4) == 1); /* exact Bob over Bobby */
+    CHECK(coop_middle_name_prefix_slot("BO", names, ok, 4) == -1); /* Bob and Bobby */
+    CHECK(coop_middle_name_prefix_slot("car", names, ok, 4) == 3);
+    CHECK(coop_middle_name_prefix_slot("z", names, ok, 4) == -1);
+    ok[1] = false;
+    CHECK(coop_middle_name_prefix_slot("bo", names, ok, 4) == 2);
+
+    CHECK(!coop_middle_convoy_eligible(false, 1, 0, 1, 0, 5, true, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 2, 0, 1, 0, 5, true, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 0, 0, 5, true, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 2, 5, true, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 16, true, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 5, false, false, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 5, true, true, false, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 5, true, false, true, false, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 5, true, false, false, true, false));
+    CHECK(!coop_middle_convoy_eligible(true, 1, 0, 1, 0, 5, true, false, false, false, true));
+    CHECK(coop_middle_convoy_eligible(true, 1, 0, 1, 0, 15, true, false, false, false, false));
+    CHECK(coop_middle_convoy_eligible(true, 1, 0, 1, 0, 0, true, false, false, false, false));
+
+    CHECK(coop_middle_sleep_consent_needed(true, true, false, false, false, true));
+    CHECK(!coop_middle_sleep_consent_needed(true, true, false, true, false, true)); /* host already ready */
+    CHECK(!coop_middle_sleep_consent_needed(false, true, false, false, false, true));
+    CHECK(coop_middle_sleep_consent_needed(true, false, true, false, true, false));
+    CHECK(!coop_middle_sleep_consent_needed(true, false, true, false, false, false));
+
+    /* follower section: 0, 1 and 8 entries, 3-section payload still splits */
+    memset(recs, 0, sizeof(recs));
+    CHECK(coop_subinst_fol_encode(fol_buf, sizeof(fol_buf), &fol_len, recs, 0) && fol_len == 4);
+    CHECK(coop_subinst_fol_decode(fol_buf, fol_len, out, COOP_SUBINST_FOL_MAX, &n) && n == 0);
+    for (i = 0; i < 8; i++) {
+        memset(&recs[i], 0, sizeof(recs[i]));
+        recs[i].oid[0] = (uint8_t)(i + 1);
+        recs[i].hp_damage = 10 + i;
+        recs[i].fatigue_damage = 3;
+        recs[i].flags = (i == 7) ? COOP_SUBINST_FOL_DEAD : 0;
+        recs[i].bundle = bundle;
+        recs[i].bundle_len = sizeof(bundle);
+        recs[i].qty = qty;
+        recs[i].qty_len = sizeof(qty);
+    }
+    CHECK(!coop_subinst_fol_encode(fol_buf, sizeof(fol_buf), &fol_len, recs, 9));
+    CHECK(coop_subinst_fol_encode(fol_buf, sizeof(fol_buf), &fol_len, recs, 8));
+    CHECK(coop_subinst_fol_decode(fol_buf, fol_len, out, 8, &n) && n == 8);
+    CHECK(out[0].oid[0] == 1 && out[0].hp_damage == 10 && out[0].bundle_len == 4);
+    CHECK(out[7].flags == COOP_SUBINST_FOL_DEAD && out[7].fatigue_damage == 3);
+    CHECK(memcmp(out[7].bundle, bundle, 4) == 0);
+    s_cmap.data = cmap;
+    s_cmap.len = sizeof(cmap);
+    s_bundle.data = bundle;
+    s_bundle.len = sizeof(bundle);
+    s_qty.data = qty;
+    s_qty.len = sizeof(qty);
+    s_fol.data = fol_buf;
+    s_fol.len = fol_len;
+    CHECK(coop_subinst_payload_build4(s_cmap, s_bundle, s_qty, s_fol, payload, sizeof(payload), &pay_len));
+    {
+        CoopSubinstSection c2, b2, q2, f2;
+        CHECK(coop_subinst_payload_split4(payload, pay_len, &c2, &b2, &q2, &f2));
+        CHECK(c2.len == sizeof(cmap) && f2.len == fol_len);
+        CHECK(!coop_subinst_payload_split(payload, pay_len, &c2, &b2, &q2)); /* leftover 4th section */
+    }
+    /* old 3-section still splits, including with split4 (empty fol) */
+    CHECK(coop_subinst_payload_build(s_cmap, s_bundle, s_qty, payload, sizeof(payload), &pay_len));
+    {
+        CoopSubinstSection c2, b2, q2, f2;
+        CHECK(coop_subinst_payload_split(payload, pay_len, &c2, &b2, &q2));
+        CHECK(coop_subinst_payload_split4(payload, pay_len, &c2, &b2, &q2, &f2) && f2.len == 0);
+    }
+    printf("PASS: M8 dscale / commands / convoy / consent / follower section / protocol 61\n");
+}
+
 int main(void)
 {
     test_rules_default_sanitize();
@@ -2447,6 +2602,7 @@ int main(void)
     test_hop_and_followers();
     test_t405u_place_and_limits();
     test_dif_record_len();
+    test_m8();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;
@@ -2456,6 +2612,6 @@ int main(void)
            "M4 rules / quest items / town map fog / dialog routing / followers, "
            "M5 rules / interest / world map travel / unified sleep, "
            "M6 CMAP1 archive / payload / chunks / leases / client states / packets 171-173 / M badge, "
-           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, Lite mode, auto-levelling, protocol 60, solo hops, follower lists)\n");
+           "M7 edge arrows / collapse / autosave / asave / SLEEP_APPLY / reset, Lite mode, auto-levelling, protocol 61 / M8, solo hops, follower lists)\n");
     return 0;
 }

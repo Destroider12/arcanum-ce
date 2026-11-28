@@ -1,6 +1,6 @@
 # Coop Middle (release notes M1-M7)
 
-Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit). M7 is the final Middle stage.
+Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit). M8 adds the sleep-consent window, personal reputations, a full solo-instance commit, optional dynamic difficulty, and party UX (convoy, /tp name, /who, F10).
 
 | Line | Branch | Protocol (`TIG_NET_PROTOCOL`) |
 | --- | --- | --- |
@@ -12,7 +12,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Middle M5 | `coop-middle` (up to `d0c4c597`) | 57 |
 | Coop Middle M6 | `coop-middle` (up to `2bd38e3b`) | 58 |
 | Coop Middle M7 | `coop-middle` (up to `3e841364`) | 59 |
-| Coop Middle after M7 (auto-levelling) | `coop-middle` | **60** |
+| Coop Middle after M7 (auto-levelling) | `coop-middle` | 60 |
+| Coop Middle M8 | `coop-middle` | **61** |
 
 Lite and Middle builds (and different Middle stages) refuse each other at the handshake. Every player needs the same build. Single player (no `-coop`) is unchanged: every Middle entry point returns at once outside a co-op session.
 
@@ -47,12 +48,26 @@ The host's launcher builds `ARCANUM_COOP_RULES` (e.g. `gold=0,loot=1,rest=1,trad
 | `subinst` (`solo_instances`, old `subinstances`) | a client may enter an interior / dungeon alone | on | Solo interiors/dungeons (`solo_instances`) | M6 |
 | `flvl` (`follower_autolevel`) | a follower below its leader PC's level is raised to it (vanilla follower leveling, see below) | on | Auto-level followers (`follower_autolevel`) | after M7 |
 | `plvl` (`party_level`) | every player PC's XP is kept at the party maximum, so everyone levels together (late joiners too) | on | Party level (`party_level`) | after M7 |
+| `dscale` (`dynamic_scale`) | extra living players raise effective enemy HP (+40% each) and XP (+15% each), clamped to 300/250. Default off. `0x4000` (not `0x800`, which is Lite mode). Lite mode forces it off. | off | Dynamic difficulty (`dynamic_scale`) | M8 |
 | `hp` (`enemy_hp_pct`) | enemy HP %, 100..300 | 100 | HP % combo (`enemy_hp_pct`) | M3 |
 | `xp` (`xp_mult_pct`) | XP %, 100..250 | 100 | XP % combo (`xp_mult_pct`) | M3 |
 | `asave` (`autosave_min`, `autosave`) | host autosave interval in minutes: 0 = off, else 5..60 (1 -> 5, 999 -> 60) | 10 | Auto-save combo Off / 5 / 10 / 15 / 30 min (`autosave_min`) | M7 |
 | `lite` (`lite_mode`, `coop_lite`) | Coop Lite mode: the session plays as the Coop Lite 1.0 release (see below); written to the env string only when on | off | Coop Lite mode (as release 1.0) (`lite_mode`) | after M7 |
 
-### Auto-levelling (`flvl` 0x1000, `plvl` 0x2000, protocol 60)
+### M8 (protocol 61)
+
+Protocol is **61**, not 60: `PacketCoopNpcStats.spell_tech` grew from 16 to 25 (16 colleges + mastery + 8 tech degrees). The branch was already on 60 after auto-levelling, so the wire-size change required a new protocol number. Host and client must both be M8 builds.
+
+- Host sleep-consent window (`usleep=1` when a client votes and the host is not ready; `rest=1` on `REST_ASK`): centered PT39 `tig_window` (dark 20,16,12 / gold 180,145,80, ~400×132) with Agree (Y) / Refuse (N); Esc refuses. Auto-closes on cancel, disconnect, combat, map change, or the main menu; no `tig_window` leaks.
+- Personal reputations under Middle (`FREE_OVERWORLD` or `SUBINSTANCES`): `STORY_SYNC` still merges quests and rumors, but each slot gets only its own PC's reputation list. `COOP_SUBINST_DELTA_REP` already applied only to the sender's PC. Lite keeps the old union. Party KOS radius in `ai_check_kos_party` is 20 tiles when free overworld is on (Lite 120).
+- Full PC build commit in `coop_lite_host_pc_reconcile` from the char-bundle blob (OID nulled first so `obj_read_mem` cannot steal the host PC): all 28 base stats including alignment, 12+4 skills, 25 spell/tech degrees, schematics (`OBJ_F_PC_SCHEMATICS_FOUND_IDX`), blessings/curses (via `bless_add`/`curse_add` so effects stay in sync), fate (`OBJ_F_PC_FLAGS_FATE` — there is no `OBJ_F_CRITTER_FATE`). Then `coop_lite_host_pc_changed(pc, true)`.
+- Followers in the commit/checkpoint payload (optional 4th section, cap 8): bundle + stacks + HP/fatigue + dead. Existing parked followers are reconciled; NPCs hired inside (unknown OID) are created next to the returned PC and set to follow. A 3-section payload still splits.
+- Dynamic difficulty: `coop_middle_effective_hp_pct` / `xp_pct` wired into enemy damage and XP, counting living connected PCs including those in a solo instance. `/rules` shows the effective percentages; the host logs a change of living count.
+- World-map convoy on map 1: `coop_middle_convoy_eligible`, G-follow target synced with `COOP_CTRL_FOLLOW`, hide `OF_OFF|OF_INVULNERABLE` with followers, shared marker, land together (including the same random encounter) via `coop_lite_follow_loc_for_slot`, clean detach on cancel/disconnect. Lite / no free overworld: off.
+- `/tp <Name>` case-insensitive prefix on the same map (bare `/tp` still goes to the host). `/who`, `/rules`, `/help`. F10 cheat sheet (EN default, RU if `ARCANUM_COOP_LANG=ru`).
+
+### Auto-levelling (`flvl` 0x1000, `plvl` 0x2000, protocol 60, later 61)
+
 
 Host only, `coop_lvl_host_tick` in `coop_middle.c`, once a second (not on the main menu, during a load or a map change). It looks at every connected slot PC (dead and parked ones too).
 
@@ -97,7 +112,7 @@ typedef struct CoopRules {
 } CoopRules;                          /* 28 bytes (unchanged since M1), _Static_assert on size / offsets */
 ```
 
-`coop_rules_sanitize` clamps the numbers, drops unknown flag bits (known: the M1-M6 rule bits and `COOP_RULE_LITE_MODE`), zeroes the reserved fields and fixes `version`. M7 took 2 bytes of the old `reserved[0]` for `autosave_min`, so `sizeof(CoopRules)` and the packet size stayed the same.
+`coop_rules_sanitize` clamps the numbers, drops unknown flag bits (known: the M1-M8 rule bits and `COOP_RULE_LITE_MODE`), zeroes the reserved fields and fixes `version`. M7 took 2 bytes of the old `reserved[0]` for `autosave_min`, so `sizeof(CoopRules)` and the packet size stayed the same.
 
 ## Hotkeys and mouse (co-op only)
 
@@ -558,7 +573,7 @@ CoopMiddle: trade: window auto-closed (solo instance|overworld travel|death|comb
 23. M6 solo instances: `coop_subinst_filename_safe`; CMAP1 pack / unpack round trip for 0 / 1 / 20 files; traversal, duplicate and too many names refused; truncated, oversized raw length, trailing bytes, every flipped byte (zlib / CRC) refused; payload build / split, quantity table; chunk reassembly (order, size, lease id); `coop_subinst_can_lease` (normal / busy / state / own lease); client state machine; validators for 171 / 172 / 173 (direction, sizes, flags, ranges); badge M priority and colour; chat kind 10 EN / RU; rule default on; `TIG_NET_PROTOCOL == 58`. Review: `coop_subinst_des_filter`, the item state table, `coop_subinst_sub_next_plan` and COMMITTING through DENY (no stall in REQUESTED), `coop_subinst_client_stalled`, CANCEL validator, client role / `tig_net_is_coop_client` false under local authority and true again while pumping.
 23. M5 sleep: `coop_middle_sleep_step` for 1..8 players (solo, wait, execute, mode kept, initiator hand-over, dead player not blocking, cleared, refusals), `coop_middle_sleep_minutes` across midnight, `coop_middle_sleep_mode_from_ui`, banner text EN/RU, `SLEEP_VOTE` / `SLEEP_STATE` validity.
 24. M7: `coop_middle_edge_indicator` (inside / on the border = false; top, bottom, left, right and the 4 corners land exactly on the pad border with the right octant; off-axis sweeps stay on the border); `coop_middle_collapse_step` (once per fall, 10 s per slot); chat kinds 11 / 12 EN / RU; `coop_middle_autosave_ready` (pause, combat, dialog, world map, commit, teleport, not in world, interval 0, clock wrap) and the rotation 9690..9694 (never a client slot 9700..9789); rule `asave` (0, 10, 1 -> 5, 999 -> 60, aliases, describe, `sizeof(CoopRules)` unchanged); unified sleep with a solo-instance player (in the consensus, `coop_middle_sleep_apply_mask` flags it for `SLEEP_APPLY`); `SLEEP_APPLY` in `coop_middle_party_ctrl_valid` / `coop_lite_party_ctrl_valid` (1..168, `b` = 0, size); repeated session resets; `TIG_NET_PROTOCOL == 59`.
-25. After M7 auto-levelling (`test_autolevel`): `flvl` / `plvl` on by default, parse + aliases (`follower_autolevel`, `party_level`), format, `coop_rules_effective` (Middle keeps them, `lite=1` clears them), describe EN / RU not cut, `coop_middle_follower_level_target` (raise only, max - 1 cap), `coop_middle_party_xp_target`, `TIG_NET_PROTOCOL == 60`.
+25. After M7 auto-levelling (`test_autolevel`): `flvl` / `plvl` on by default, parse + aliases (`follower_autolevel`, `party_level`), format, `coop_rules_effective` (Middle keeps them, `lite=1` clears them), describe EN / RU not cut, `coop_middle_follower_level_target` (raise only, max - 1 cap), `coop_middle_party_xp_target`, `TIG_NET_PROTOCOL == 61` after M8 (`NpcStats` size).
 26. `test_hop_and_followers`: `coop_middle_solo_hop_rule` (same map / -1 solo in Middle, map change and Lite not), `coop_middle_follower_list_plan` (consistent list unchanged; null, freed and duplicate entries dropped; missing table followers appended; capacity).
 27. `test_dif_record_len` (t404u): record at EOF, record before another, end marker inside the body ignored, wrong id / bad start marker / truncated = 0, the stub hook is a no-op.
 28. t405u: `coop_middle_solo_hop_rule` also treats `dest_map <= 0` as the same map and is off in Lite; `coop_middle_place_loc` (valid saved/merge kept in Middle, `follow_loc` in Lite or when invalid); `COOP_SUBINST_MAX_RAW/WIRE/FILES` (4 MB / 1 MB / 256) and `coop_subinst_commit_dest_loc` (checkpoint keeps the PC tile).
@@ -631,7 +646,7 @@ M6 / M7 hooks:
 | File | Hook |
 | --- | --- |
 | `coop_subinst.h/.c` (new, M6) | solo instances; M7: `coop_subinst_host_lease_mask`, `coop_subinst_host_commit_busy`, `SLEEP_APPLY` in the packet filter, `coop_middle_subinst_local_tick` + pause-frozen checkpoint clock in `coop_subinst_ping` |
-| `tig_net.h` | protocol 59 (M7); 60 (after M7: `flvl` / `plvl`) |
+| `tig_net.h` | protocol 59 (M7); 60 (after M7: `flvl` / `plvl`); 61 (M8: `NpcStats` spell_tech 25, `dscale`) |
 | `teleport.c` | t403u: `coop_middle_host_solo_hop` for the solo hop; null / freed follower and item handles skipped |
 | `map.c` | t404u: `coop_middle_mobile_dif_skip` when a `mobile.md` record names an object the map does not have (co-op only) |
 | `script.c` | t405u: `coop_middle_script_fade_retarget` instead of always redirecting a party PC to the host |
