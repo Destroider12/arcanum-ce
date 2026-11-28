@@ -1252,7 +1252,15 @@ int coop_middle_party_xp_target(const int* xp, int n)
    party in Middle; Coop Lite keeps the Lite 1.0 party carry. */
 bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map)
 {
-    return middle && cur_map > 0 && (dest_map == cur_map || dest_map == -1);
+    return middle && cur_map > 0 && (dest_map == cur_map || dest_map <= 0);
+}
+
+int64_t coop_middle_place_loc(bool middle, int64_t saved_loc, bool saved_ok, int64_t follow_loc)
+{
+    if (middle && saved_ok && saved_loc != 0) {
+        return saved_loc;
+    }
+    return follow_loc;
 }
 
 /* t402u: a leader's follower list on a client, rebuilt. have[] is the list
@@ -3501,13 +3509,155 @@ bool coop_middle_overworld_solo_hop(int dest_map)
     return coop_mid_session_host() && coop_middle_overworld_free() && dest_map == map_by_type(MAP_TYPE_START_MAP);
 }
 
-/* t403u: any host hop that stays on its map (Middle only). */
+bool coop_middle_free_or_sub(void)
+{
+    return tig_net_is_active() && tig_net_is_coop_enabled()
+        && (coop_middle_rule_on(COOP_RULE_FREE_OVERWORLD)
+            || coop_middle_rule_on(COOP_RULE_SUBINSTANCES));
+}
+
+/* t403u/t405u: any host hop that stays on its map (Middle only). */
 bool coop_middle_host_solo_hop(int dest_map)
 {
     if (!coop_mid_session_host() || !map_is_valid()) {
         return false;
     }
-    return coop_middle_solo_hop_rule(coop_owt_rule(), map_current_map(), dest_map);
+    return coop_middle_solo_hop_rule(coop_middle_free_or_sub(), map_current_map(), dest_map);
+}
+
+static void mid_move_pc_and_followers(int slot, int64_t pc, int64_t loc)
+{
+    ObjectList objects;
+    ObjectNode* node;
+
+    if (pc == OBJ_HANDLE_NULL || loc == 0) {
+        return;
+    }
+    coop_lite_mid_move_pc(slot, pc, loc);
+    object_list_all_followers(pc, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        if (node->obj != OBJ_HANDLE_NULL && obj_handle_is_valid(node->obj)) {
+            multiplayer_lock();
+            sub_43E770(node->obj, loc, 0, 0);
+            multiplayer_unlock();
+        }
+    }
+    object_list_destroy(&objects);
+}
+
+static int mid_slot_of(int64_t obj)
+{
+    int slot;
+
+    if (obj == OBJ_HANDLE_NULL) {
+        return -1;
+    }
+    for (slot = 0; slot < 8; slot++) {
+        if (sub_4A2B60(slot) == obj) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+bool coop_middle_host_client_travel(int slot, int map, int64_t loc, const char* via)
+{
+    const char* why = NULL;
+    int64_t pc;
+    int cur;
+
+    (void)via;
+    if (!coop_mid_session_host() || !map_is_valid() || slot <= 0 || slot >= 8) {
+        return false;
+    }
+    cur = map_current_map();
+    if (coop_middle_solo_hop_rule(coop_middle_free_or_sub(), cur, map)) {
+        pc = sub_4A2B60(slot);
+        if (pc != OBJ_HANDLE_NULL && loc != 0) {
+            mid_move_pc_and_followers(slot, pc, loc);
+            tig_debug_printf("CoopMiddle: slot %d same-map hop to %d,%d (t405u)\n", slot,
+                (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc));
+        }
+        return true;
+    }
+    if (coop_subinst_host_travel_ex(slot, map, loc, &why)) {
+        return true;
+    }
+    if (coop_middle_rule_on(COOP_RULE_SUBINSTANCES)) {
+        if (why == NULL) {
+            why = "unknown";
+        }
+        tig_debug_printf("CoopSubinst: fallback to party travel ask (slot %d, cur map %d -> dest map %d): %s\n",
+            slot, cur, map, why);
+    }
+    return false;
+}
+
+void coop_middle_host_prepare_travel(int dest_map)
+{
+    if (!coop_mid_session_host() || !coop_middle_free_or_sub()) {
+        return;
+    }
+    coop_subinst_host_prepare_party_travel(dest_map);
+}
+
+int64_t coop_middle_host_carry_place(int slot, int64_t follow_loc)
+{
+    int64_t merge;
+
+    if (slot <= 0 || !coop_middle_free_or_sub()) {
+        return follow_loc;
+    }
+    merge = coop_subinst_take_merge_loc(slot);
+    if (merge != 0 && coop_lite_loc_in_map(merge)) {
+        tig_debug_printf("CoopMiddle: slot %d merge place %d,%d (t405u)\n", slot,
+            (int)LOCATION_GET_X(merge), (int)LOCATION_GET_Y(merge));
+        return merge;
+    }
+    return follow_loc;
+}
+
+int64_t coop_middle_client_keep_loc(int64_t saved_loc, int64_t follow_loc)
+{
+    bool ok = saved_loc != 0 && map_is_valid() && coop_lite_loc_in_map(saved_loc);
+
+    return coop_middle_place_loc(coop_middle_free_or_sub(), saved_loc, ok, follow_loc);
+}
+
+bool coop_middle_keep_client_place(void)
+{
+    return coop_middle_free_or_sub();
+}
+
+void coop_middle_script_fade_retarget(int64_t* obj)
+{
+    int slot;
+    int64_t pc;
+
+    if (obj == NULL || !coop_mid_session_host()) {
+        return;
+    }
+    slot = coop_lite_script_actor_slot();
+    if (slot <= 0) {
+        slot = mid_slot_of(*obj);
+    }
+    if (slot <= 0) {
+        return;
+    }
+    if (!coop_middle_free_or_sub()) {
+        /* Lite PT79b: a party PC as the target means the whole party goes. */
+        pc = player_get_local_pc_obj();
+        if (pc != OBJ_HANDLE_NULL) {
+            tig_debug_printf("Script: PT79b fade-and-teleport of a party PC - the party travels with the host\n");
+            *obj = pc;
+        }
+        return;
+    }
+    pc = sub_4A2B60(slot);
+    if (pc != OBJ_HANDLE_NULL && *obj != pc) {
+        tig_debug_printf("CoopMiddle: fade-and-teleport keeps slot %d as the actor (t405u)\n", slot);
+        *obj = pc;
+    }
 }
 
 /* t402u (client): every slot PC's follower list = what the host's FOLLOWERS
@@ -5460,6 +5610,28 @@ bool coop_middle_overworld_free(void) { return false; }
 bool coop_middle_overworld_solo_hop(int dest_map) { (void)dest_map; return false; }
 bool coop_middle_overworld_freeze_time(void) { return false; }
 bool coop_middle_host_solo_hop(int dest_map) { (void)dest_map; return false; }
+bool coop_middle_free_or_sub(void) { return false; }
+bool coop_middle_host_client_travel(int slot, int map, int64_t loc, const char* via)
+{
+    (void)slot;
+    (void)map;
+    (void)loc;
+    (void)via;
+    return false;
+}
+void coop_middle_host_prepare_travel(int dest_map) { (void)dest_map; }
+int64_t coop_middle_host_carry_place(int slot, int64_t follow_loc)
+{
+    (void)slot;
+    return follow_loc;
+}
+int64_t coop_middle_client_keep_loc(int64_t saved_loc, int64_t follow_loc)
+{
+    (void)saved_loc;
+    return follow_loc;
+}
+bool coop_middle_keep_client_place(void) { return false; }
+void coop_middle_script_fade_retarget(int64_t* obj) { (void)obj; }
 void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt) { (void)pkt; }
 bool coop_middle_mobile_dif_skip(void* stream, const void* oid, size_t oid_size)
 {

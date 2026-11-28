@@ -484,8 +484,11 @@ int coop_middle_autosave_next_index(int newest_slot_num);
 int coop_middle_follower_level_target(int follower_level, int leader_level, int max_level);
 /* The XP every PC follows: the highest of n (-1 = none). */
 int coop_middle_party_xp_target(const int* xp, int n);
-/* t403u (pure): a host hop on its own map is solo in Middle. dest -1 = same map. */
+/* t403u/t405u (pure): a hop that stays on this map is solo in Middle.
+   dest <= 0 or dest == cur_map counts as the same map. */
 bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map);
+/* t405u (pure): Middle keeps a valid saved/merge loc; Lite or a bad loc uses follow_loc. */
+int64_t coop_middle_place_loc(bool middle, int64_t saved_loc, bool saved_ok, int64_t follow_loc);
 /* t402u (pure): a client's follower list rebuilt from the host table (see .c). */
 int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int n_have, const int64_t* want,
     int n_want, int64_t* out, int max, bool* changed);
@@ -622,6 +625,23 @@ bool coop_middle_overworld_solo_hop(int dest_map);
 /* t403u: host teleport staying on its map: only its PC and followers move
    (Middle; no carry, no FOLLOW_HOST, no ready check). */
 bool coop_middle_host_solo_hop(int dest_map);
+/* t405u: FREE_OVERWORLD or SUBINSTANCES is on in this coop session. */
+bool coop_middle_free_or_sub(void);
+/* t405u: host moves only this client + followers on the current map, or
+   grants/denies a solo instance. True = handled (no Y/N). False = fall
+   through to the party travel ask (a reason is logged when subinst is on). */
+bool coop_middle_host_client_travel(int slot, int map, int64_t loc, const char* via);
+/* t405u: before a party map change, checkpoint+merge a client already on dest_map. */
+void coop_middle_host_prepare_travel(int dest_map);
+/* t405u: after a party carry, use a merge loc when valid, else follow_loc. */
+int64_t coop_middle_host_carry_place(int slot, int64_t follow_loc);
+/* t405u: spawn/rejoin: keep the saved loc in Middle when it is on this map. */
+int64_t coop_middle_client_keep_loc(int64_t saved_loc, int64_t follow_loc);
+/* t405u: SAT_FADE_AND_TELEPORT retarget. Lite: party PCs become the host
+   (PT79b). Middle: a client actor stays the actor (no host redirect). */
+void coop_middle_script_fade_retarget(int64_t* obj);
+/* t405u: true when a client's SESSION_SYNC should keep client_loc (Middle). */
+bool coop_middle_keep_client_place(void);
 /* t402u: client: slot PCs' follower lists after a FOLLOWERS table. */
 void coop_middle_client_followers_fix(const PacketCoopFollowers* pkt);
 /* t404u: map load, co-op only: the dif record of a missing object is skipped
