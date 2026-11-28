@@ -250,6 +250,9 @@ bool teleport_process(TeleportData* teleport_data)
         int carry_cnt;
         int idx;
 
+        if (!coop_solo_hop) {
+            coop_middle_host_prepare_travel(teleport_data->map); /* t405u: merge a client already on dest_map */
+        }
         carry_cnt = coop_solo_hop ? 0 : coop_lite_party_carry_list(teleport_data->obj, carry, 8);
         for (idx = 0; idx < carry_cnt; idx++) {
             if (!teleport_is_teleporting_obj(carry[idx])) {

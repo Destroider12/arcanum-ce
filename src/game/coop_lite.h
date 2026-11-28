@@ -1403,6 +1403,8 @@ bool coop_lite_party_no_fight(int64_t a, int64_t b); /* PT77af */
 bool coop_lite_is_remote_slot_pc(int64_t obj);
 /* PT26: obj is any co-op player's PC (host or client), host side. */
 bool coop_lite_is_party_pc(int64_t obj);
+/* t405u: slot whose door / scenery use is running a script on the host, or -1. */
+int coop_lite_script_actor_slot(void);
 int coop_lite_party_heal_targets(int64_t healer, int64_t* out, int max);
 /* PT25 rest/sleep/wait: clients may not skip time (true = refused, message
    shown); the host's rest fades every client and heals every co-op PC. */

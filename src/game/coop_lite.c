@@ -4604,6 +4604,7 @@ static bool coop_lite_host_spawn_client(int slot)
     int map;
     int owner;
     bool rejoined;
+    bool parked_restored;
 
     if (slot <= 0 || slot >= 8 || !coop_pending_offers[slot].valid) {
         return false;
@@ -4621,6 +4622,7 @@ static bool coop_lite_host_spawn_client(int slot)
         memcpy(&client_oid, coop_pending_offers[slot].oid, sizeof(client_oid));
     }
     rejoined = false;
+    parked_restored = false;
     {
         ObjectID parked_oid;
         int64_t parked;
@@ -4631,11 +4633,12 @@ static bool coop_lite_host_spawn_client(int slot)
                 && obj_field_int32_get(parked, OBJ_F_TYPE) == OBJ_TYPE_PC
                 && (coop_lite_slot_of_obj(parked) < 0 || coop_lite_slot_of_obj(parked) == slot)
                 && (obj_field_int32_get(parked, OBJ_F_FLAGS) & OF_DESTROYED) == 0) {
-                /* The same player is back: their parked PC, next to us. */
+                /* The same player is back: their parked PC. Placement
+                   (follow_loc vs the saved tile) is decided below. */
                 client_oid = parked_oid;
                 object_flags_unset(parked, OF_OFF);
-                sub_43E770(parked, spawn_loc, 0, 0);
                 rejoined = true;
+                parked_restored = true;
                 tig_debug_printf("CoopLite: slot %d rejoined — parked PC restored\n", slot);
             } else {
                 tig_debug_printf("CoopLite: slot %d parked PC is gone (other map?) — fresh PC\n", slot);
@@ -4718,7 +4721,21 @@ static bool coop_lite_host_spawn_client(int slot)
             return false;
         }
     } else {
-        spawn_loc = obj_field_int64_get(client_obj, OBJ_F_LOCATION);
+        int64_t saved_loc = obj_field_int64_get(client_obj, OBJ_F_LOCATION);
+
+        /* t405u: Middle keeps a valid saved tile; Lite is unchanged
+           (a parked rejoin still stands next to the host; any other
+           existing PC stays where the save left it). */
+        if (coop_middle_keep_client_place()) {
+            spawn_loc = coop_middle_client_keep_loc(saved_loc, spawn_loc);
+            if (spawn_loc != saved_loc && spawn_loc != 0) {
+                sub_43E770(client_obj, spawn_loc, 0, 0);
+            }
+        } else if (parked_restored) {
+            sub_43E770(client_obj, spawn_loc, 0, 0);
+        } else {
+            spawn_loc = saved_loc;
+        }
     }
 
     /* A PC parked by a load (or a leave) is back in the world. */
@@ -4906,6 +4923,31 @@ static void coop_lite_client_finish_sync(PacketCoopSessionSync* pkt)
     /* Objects the host created while we were loading. */
     mp_flush_deferred_packet70();
     tig_debug_printf("CoopLite: SESSION_SYNC applied map=%d (after map load)\n", pkt->map);
+
+    /* t405u: Middle keeps client_loc; PT54c only if that tile is blocked
+       or is the host's tile. The sync teleport already used client_loc. */
+    if (coop_middle_keep_client_place() && local_pc != OBJ_HANDLE_NULL && pkt->client_loc != 0) {
+        int64_t own = obj_field_int64_get(local_pc, OBJ_F_LOCATION);
+        int64_t dest = pkt->client_loc;
+
+        if (own != dest) {
+            multiplayer_lock();
+            sub_43E770(local_pc, dest, 0, 0);
+            multiplayer_unlock();
+            own = dest;
+        }
+        if (dest == pkt->host_loc || !coop_lite_loc_is_free_walkable(dest)) {
+            dest = coop_lite_follow_loc_for_slot(pkt->host_loc, sub_529520());
+            if (dest != own && dest != pkt->host_loc) {
+                multiplayer_lock();
+                sub_43E770(local_pc, dest, 0, 0);
+                multiplayer_unlock();
+                tig_debug_printf("CoopLite: PT54c sync loc adjusted off %d,%d to %d,%d\n",
+                    (int)LOCATION_GET_X(own), (int)LOCATION_GET_Y(own),
+                    (int)LOCATION_GET_X(dest), (int)LOCATION_GET_Y(dest));
+            }
+        }
+    }
 
     if ((pkt->flags & COOP_SYNC_F_REJOINED) != 0) {
         /* Rejoin: the host kept our PC. Take its copy (stats, level, XP)
@@ -7316,6 +7358,9 @@ void coop_lite_after_party_carry(int64_t mover, int64_t dest_loc)
             continue;
         }
         loc = slot == 0 ? host_loc : coop_lite_follow_loc_for_slot(host_loc, slot);
+        if (slot > 0) {
+            loc = coop_middle_host_carry_place(slot, loc); /* t405u: merge loc if any */
+        }
         multiplayer_lock();
         sub_43E770(pc, loc, 0, 0);
         if (critter_is_dead(pc)) {
@@ -17913,6 +17958,11 @@ static void coop_lite_client_door_tick(void)
 static uint8_t coop_door_pend[COOP_DOOR_PENDING_MAX][24];
 static int coop_door_pend_cnt;
 static int coop_door_actor_slot = -1; /* set while a client's door intent runs */
+
+int coop_lite_script_actor_slot(void)
+{
+    return coop_door_actor_slot;
+}
 static int coop_door_pend_slot[COOP_DOOR_PENDING_MAX];
 static unsigned int coop_door_flush_ms;
 /* last logged state per door (log once per event, not per frame) */
@@ -21451,17 +21501,32 @@ bool coop_lite_host_remote_travel_intercept(const TeleportData* td)
     if (td == NULL || coop_client_tp_auth > 0 || coop_travel_bypass || coop_lite_applying_follow
         || !tig_net_is_coop_enabled() || !tig_net_is_active() || !tig_net_is_host()
         || td->obj == OBJ_HANDLE_NULL || player_is_local_pc_obj(td->obj)
-        || td->map <= 0 || !map_is_valid() || td->map == map_current_map()) {
+        || !map_is_valid()) {
         return false;
     }
-    slot = coop_lite_slot_of_obj(td->obj);
-    if (slot <= 0 || slot >= 8) {
-        return false;
+    {
+        bool same = td->map <= 0 || td->map == map_current_map();
+
+        /* Lite: a same-map teleport of a remote PC is a normal engine hop
+           of just that object. Middle handles it below (FORCE + keep_sector). */
+        if (same && !coop_middle_free_or_sub()) {
+            return false;
+        }
+        if (!same && td->map <= 0) {
+            return false;
+        }
+        slot = coop_lite_slot_of_obj(td->obj);
+        if (slot <= 0 || slot >= 8) {
+            return false;
+        }
+        if (!same && coop_travel_active) {
+            return true; /* host travel already running: do not start a Y/N */
+        }
+        if (!coop_middle_host_client_travel(slot, td->map, td->loc, "host-side transition")) {
+            coop_treq_host_ask(slot, td->map, td->loc, "host-side transition");
+        }
+        return true; /* never alone */
     }
-    if (!coop_travel_active && !coop_subinst_host_travel(slot, td->map, td->loc)) { /* M6: solo instance? */
-        coop_treq_host_ask(slot, td->map, td->loc, "host-side transition");
-    }
-    return true; /* never alone */
 }
 
 void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
@@ -21475,8 +21540,8 @@ void coop_lite_handle_travel_req(PacketCoopTravelReq* pkt)
         if (pkt->kind != COOP_TREQ_ASK || slot <= 0 || slot >= 8) {
             return;
         }
-        if (coop_subinst_host_travel(slot, pkt->map, pkt->loc)) {
-            return; /* Coop Middle M6: a solo instance (granted or denied) */
+        if (coop_middle_host_client_travel(slot, pkt->map, pkt->loc, "client packet")) {
+            return; /* t405u: same-map hop, or a solo instance granted/denied */
         }
         coop_treq_host_ask(slot, pkt->map, pkt->loc, "client packet");
         return;
@@ -23684,6 +23749,14 @@ bool coop_lite_host_resync_slot(int slot)
     pc = sub_4A2B60(slot);
     if (host_pc == OBJ_HANDLE_NULL || pc == OBJ_HANDLE_NULL || obj_field_int32_get(pc, OBJ_F_TYPE) != OBJ_TYPE_PC) {
         return false;
+    }
+    {
+        int64_t cur = obj_field_int64_get(pc, OBJ_F_LOCATION);
+        int64_t want = coop_middle_host_carry_place(slot, cur);
+
+        if (want != 0 && want != cur) {
+            coop_lite_mid_move_pc(slot, pc, want);
+        }
     }
     coop_lite_keep_sector(slot, obj_field_int64_get(pc, OBJ_F_LOCATION));
     coop_last_pc_pos_valid[slot] = false;

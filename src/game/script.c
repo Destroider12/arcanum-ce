@@ -2517,10 +2517,6 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
             }
 
             teleport_data.obj = script_get_obj(action->op_type[3], action->op_value[3], state);
-            if (coop_host && coop_lite_is_party_pc(teleport_data.obj)) {
-                tig_debug_printf("Script: PT79b fade-and-teleport of a party PC - the party travels with the host\n");
-                teleport_data.obj = player_get_local_pc_obj();
-            }
 
             int map = script_get_value(action->op_type[4], action->op_value[4], state);
             int x = script_get_value(action->op_type[5], action->op_value[5], state);
@@ -2528,6 +2524,11 @@ int script_execute_action(ScriptAction* action, int line, ScriptState* state)
 
             teleport_data.map = map - 4999;
             teleport_data.loc = location_make(x, y);
+            if (coop_host) {
+                /* t405u: Lite still redirects a party PC to the host (PT79b).
+                   Middle keeps the client actor; intercept / subinst handles it. */
+                coop_middle_script_fade_retarget(&teleport_data.obj);
+            }
             teleport_do(&teleport_data);
         }
         return NEXT;
