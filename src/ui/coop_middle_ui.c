@@ -17,6 +17,7 @@
 #include "game/hrp.h"
 #include "game/item.h"
 #include "game/location.h"
+#include "game/map.h"
 #include "game/multiplayer.h"
 #include "game/obj.h"
 #include "game/obj_flags.h"
@@ -126,7 +127,7 @@ bool coop_middle_ui_trade_try(int64_t target, bool from_portrait)
 /* ---- status badges ---- */
 
 #define COOP_MID_BADGE 14
-#define COOP_MID_FONTS 8
+#define COOP_MID_FONTS 16
 
 /* One font per colour (the tf.c font setup; fonts carry their colour). */
 static struct {
@@ -1388,12 +1389,325 @@ static bool coop_mid_ui_ping_here(TigMessage* msg)
     return true;
 }
 
+/* ---- M8: host sleep-consent window and F10 cheat sheet ---- */
+
+#define COOP_MID_CONSENT_W 400
+#define COOP_MID_CONSENT_H 132
+#define COOP_MID_HELP_W 420
+#define COOP_MID_HELP_H 260
+
+static tig_window_handle_t coop_mid_consent_win = TIG_WINDOW_HANDLE_INVALID;
+static tig_window_handle_t coop_mid_help_win = TIG_WINDOW_HANDLE_INVALID;
+static TigRect coop_mid_agree_rect;
+static TigRect coop_mid_refuse_rect;
+static bool coop_mid_consent_rest;
+static int coop_mid_consent_map;
+
+
+static void coop_mid_win_destroy(tig_window_handle_t* win)
+{
+    if (win != NULL && *win != TIG_WINDOW_HANDLE_INVALID) {
+        tig_window_destroy(*win);
+        *win = TIG_WINDOW_HANDLE_INVALID;
+    }
+}
+
+static void coop_mid_fill_box(tig_window_handle_t win, const TigRect* r, tig_color_t fill, tig_color_t frame)
+{
+    TigRect box = *r;
+
+    tig_window_fill(win, &box, fill);
+    tig_window_box(win, &box, frame);
+}
+
+static void coop_mid_win_text(tig_window_handle_t win, const char* text, TigRect* r, uint8_t r8, uint8_t g8, uint8_t b8)
+{
+    tig_font_push(coop_mid_ui_font(r8, g8, b8));
+    tig_window_text_write(win, text, r);
+    tig_font_pop();
+}
+
+static bool coop_mid_pt_in(const TigRect* r, int x, int y)
+{
+    return x >= r->x && y >= r->y && x < r->x + r->width && y < r->y + r->height;
+}
+
+void coop_middle_ui_sleep_consent_close(void)
+{
+    coop_mid_win_destroy(&coop_mid_consent_win);
+}
+
+static bool coop_mid_consent_filter(TigMessage* msg)
+{
+    int x;
+    int y;
+
+    if (msg == NULL || msg->type != TIG_MESSAGE_MOUSE) {
+        return false;
+    }
+    if (msg->data.mouse.event != TIG_MESSAGE_MOUSE_LEFT_BUTTON_DOWN
+        && msg->data.mouse.event != TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP) {
+        return true; /* swallow other clicks on the window */
+    }
+    if (msg->data.mouse.event == TIG_MESSAGE_MOUSE_LEFT_BUTTON_UP) {
+        return true;
+    }
+    {
+        TigWindowData wd;
+
+        x = msg->data.mouse.x;
+        y = msg->data.mouse.y;
+        if (tig_window_data(coop_mid_consent_win, &wd) == TIG_OK) {
+            x -= wd.rect.x;
+            y -= wd.rect.y;
+        }
+    }
+    if (coop_mid_pt_in(&coop_mid_agree_rect, x, y)) {
+        coop_middle_ui_sleep_consent_close();
+        if (coop_mid_consent_rest) {
+            coop_middle_rest_key(true);
+        } else {
+            coop_middle_sleep_key(true);
+        }
+        return true;
+    }
+    if (coop_mid_pt_in(&coop_mid_refuse_rect, x, y)) {
+        coop_middle_ui_sleep_consent_close();
+        if (coop_mid_consent_rest) {
+            coop_middle_rest_key(false);
+        } else {
+            coop_middle_sleep_key(false);
+        }
+        return true;
+    }
+    return true; /* click on the panel, not a button: swallow */
+}
+
+static void coop_mid_sleep_consent_open(const char* name, const char* mode, int ready, int total, bool rest)
+{
+    TigWindowData wd;
+    TigRect r;
+    char title[64];
+    char body[192];
+    char agree[48];
+    char refuse[48];
+    bool ru = coop_lite_lang_ru();
+    int w = hrp_iso_window_width_get();
+    int h = hrp_iso_window_height_get();
+
+    if (!coop_mid_ui_inited || !coop_mid_ui_session() || !tig_net_is_host() || mainmenu_ui_is_active()) {
+        return;
+    }
+    coop_middle_ui_sleep_consent_close();
+    coop_mid_consent_rest = rest;
+    coop_mid_consent_map = map_current_map();
+    memset(&wd, 0, sizeof(wd));
+    wd.flags = TIG_WINDOW_MESSAGE_FILTER;
+    wd.message_filter = coop_mid_consent_filter;
+    wd.background_color = tig_color_make(20, 16, 12);
+    wd.rect.width = COOP_MID_CONSENT_W;
+    wd.rect.height = COOP_MID_CONSENT_H;
+    wd.rect.x = w > wd.rect.width ? (w - wd.rect.width) / 2 : 0;
+    wd.rect.y = h > wd.rect.height ? (h - wd.rect.height) / 2 : 0;
+    if (tig_window_create(&wd, &coop_mid_consent_win) != TIG_OK) {
+        coop_mid_consent_win = TIG_WINDOW_HANDLE_INVALID;
+        tig_debug_printf("CoopMiddle: sleep consent window failed to create\n");
+        return;
+    }
+    r.x = 0;
+    r.y = 0;
+    r.width = COOP_MID_CONSENT_W;
+    r.height = COOP_MID_CONSENT_H;
+    coop_mid_fill_box(coop_mid_consent_win, &r, tig_color_make(20, 16, 12), tig_color_make(180, 145, 80));
+    if (ru) {
+        snprintf(title, sizeof(title), "Запрос на сон");
+        snprintf(body, sizeof(body), "%s предлагает отдохнуть (%s). Готовы: %d/%d",
+            name != NULL && name[0] != '\0' ? name : "?", mode != NULL ? mode : "?", ready, total);
+        snprintf(agree, sizeof(agree), "[ Согласиться (Y) ]");
+        snprintf(refuse, sizeof(refuse), "[ Отказать (N) ]");
+    } else {
+        snprintf(title, sizeof(title), "Sleep Request");
+        snprintf(body, sizeof(body), "%s wants to sleep (%s). Ready: %d/%d",
+            name != NULL && name[0] != '\0' ? name : "?", mode != NULL ? mode : "?", ready, total);
+        snprintf(agree, sizeof(agree), "[ Agree (Y) ]");
+        snprintf(refuse, sizeof(refuse), "[ Refuse (N) ]");
+    }
+    r.x = 12;
+    r.y = 8;
+    r.width = COOP_MID_CONSENT_W - 24;
+    r.height = 20;
+    coop_mid_win_text(coop_mid_consent_win, title, &r, 220, 200, 140);
+    r.y = 32;
+    r.height = 36;
+    coop_mid_win_text(coop_mid_consent_win, body, &r, 220, 210, 190);
+    coop_mid_agree_rect.x = 24;
+    coop_mid_agree_rect.y = 82;
+    coop_mid_agree_rect.width = 170;
+    coop_mid_agree_rect.height = 32;
+    coop_mid_refuse_rect.x = 206;
+    coop_mid_refuse_rect.y = 82;
+    coop_mid_refuse_rect.width = 170;
+    coop_mid_refuse_rect.height = 32;
+    coop_mid_fill_box(coop_mid_consent_win, &coop_mid_agree_rect, tig_color_make(24, 36, 20), tig_color_make(60, 150, 60));
+    coop_mid_fill_box(coop_mid_consent_win, &coop_mid_refuse_rect, tig_color_make(40, 16, 16), tig_color_make(170, 50, 50));
+    r = coop_mid_agree_rect;
+    r.x += 8;
+    r.y += 8;
+    r.width -= 16;
+    r.height -= 12;
+    coop_mid_win_text(coop_mid_consent_win, agree, &r, 180, 230, 160);
+    r = coop_mid_refuse_rect;
+    r.x += 8;
+    r.y += 8;
+    r.width -= 16;
+    r.height -= 12;
+    coop_mid_win_text(coop_mid_consent_win, refuse, &r, 230, 180, 160);
+    tig_debug_printf("CoopMiddle: host sleep-consent window opened (%s)\n", rest ? "rest" : "sleep");
+}
+
+void coop_middle_ui_help_close(void)
+{
+    coop_mid_win_destroy(&coop_mid_help_win);
+}
+
+static bool coop_mid_help_filter(TigMessage* msg)
+{
+    if (msg == NULL || msg->type != TIG_MESSAGE_MOUSE) {
+        return false;
+    }
+    return true; /* swallow clicks on the panel */
+}
+
+static const char* coop_mid_help_text(bool ru)
+{
+    return ru
+        ? "Клавиши:\n"
+          "  Alt — подписи лута   F9 — сеть   F10 — эта панель\n"
+          "  Pause — пауза   СКМ / Alt+ПКМ — пинг\n"
+          "  Ctrl+ЛКМ / ПКМ по портрету — обмен\n"
+          "  G — следование / караван   Y/N — сон / переход\n"
+          "  F7/F8 — сейв / лоад\n"
+          "Команды:\n"
+          "  /tp [имя]   /gather   /who   /rules   /stuck\n"
+          "Esc или F10 закрывает эту панель."
+        : "Keys:\n"
+          "  Alt loot labels   F9 net HUD   F10 this panel\n"
+          "  Pause pause   MMB / Alt+RMB ping\n"
+          "  Ctrl+LMB / RMB on portrait trade\n"
+          "  G follow / convoy   Y/N sleep / travel\n"
+          "  F7/F8 save / load\n"
+          "Commands:\n"
+          "  /tp [name]   /gather   /who   /rules   /stuck\n"
+          "Esc or F10 closes this panel.";
+}
+
+bool coop_middle_ui_help_toggle(void)
+{
+    TigWindowData wd;
+    TigRect r;
+    int w;
+    int h;
+    const char* text;
+
+    if (!coop_mid_ui_inited || !coop_mid_ui_session() || mainmenu_ui_is_active() || textedit_ui_is_focused()) {
+        return false;
+    }
+    if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
+        coop_middle_ui_help_close();
+        return true;
+    }
+    w = hrp_iso_window_width_get();
+    h = hrp_iso_window_height_get();
+    memset(&wd, 0, sizeof(wd));
+    wd.flags = TIG_WINDOW_MESSAGE_FILTER;
+    wd.message_filter = coop_mid_help_filter;
+    wd.background_color = tig_color_make(20, 16, 12);
+    wd.rect.width = COOP_MID_HELP_W;
+    wd.rect.height = COOP_MID_HELP_H;
+    wd.rect.x = w > wd.rect.width ? (w - wd.rect.width) / 2 : 0;
+    wd.rect.y = h > wd.rect.height ? (h - wd.rect.height) / 2 : 0;
+    if (tig_window_create(&wd, &coop_mid_help_win) != TIG_OK) {
+        coop_mid_help_win = TIG_WINDOW_HANDLE_INVALID;
+        return true;
+    }
+    r.x = 0;
+    r.y = 0;
+    r.width = COOP_MID_HELP_W;
+    r.height = COOP_MID_HELP_H;
+    coop_mid_fill_box(coop_mid_help_win, &r, tig_color_make(20, 16, 12), tig_color_make(180, 145, 80));
+    r.x = 14;
+    r.y = 10;
+    r.width = COOP_MID_HELP_W - 28;
+    r.height = 20;
+    coop_mid_win_text(coop_mid_help_win, coop_lite_lang_ru() ? "Кооп — подсказка" : "Co-op cheat sheet", &r, 220, 200, 140);
+    r.y = 32;
+    r.height = COOP_MID_HELP_H - 44;
+    text = coop_mid_help_text(coop_lite_lang_ru());
+    coop_mid_win_text(coop_mid_help_win, text, &r, 220, 210, 190);
+    return true;
+}
+
+static void coop_mid_ui_panels_reset(void)
+{
+    coop_middle_ui_sleep_consent_close();
+    coop_middle_ui_help_close();
+}
+
+static bool coop_mid_host_in_combat_ui(void)
+{
+    int64_t pc = player_get_local_pc_obj();
+
+    return combat_turn_based_is_active()
+        || (pc != OBJ_HANDLE_NULL && combat_critter_is_combat_mode_active(pc));
+}
+
+static void coop_mid_ui_panels_tick(void)
+{
+    if (coop_mid_consent_win != TIG_WINDOW_HANDLE_INVALID) {
+        if (!coop_mid_ui_session() || mainmenu_ui_is_active()
+            || (coop_mid_consent_map != 0 && map_current_map() != coop_mid_consent_map)
+            || coop_mid_host_in_combat_ui()) {
+            coop_middle_ui_sleep_consent_close();
+        }
+    }
+    if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
+        if (!coop_mid_ui_session() || mainmenu_ui_is_active()) {
+            coop_middle_ui_help_close();
+        }
+    }
+}
+
+
 bool coop_middle_ui_world_event(TigMessage* msg)
 {
     TigMessageMouseEvent ev;
     bool alt;
 
-    if (!coop_mid_ui_inited || msg == NULL || msg->type != TIG_MESSAGE_MOUSE || !coop_mid_ui_session()) {
+    if (!coop_mid_ui_inited || msg == NULL || !coop_mid_ui_session()) {
+        return false;
+    }
+    if (msg->type == TIG_MESSAGE_KEYBOARD && !msg->data.keyboard.pressed && !textedit_ui_is_focused()
+        && !mainmenu_ui_is_active()) {
+        if (msg->data.keyboard.scancode == SDL_SCANCODE_F10) {
+            return coop_middle_ui_help_toggle();
+        }
+        if (msg->data.keyboard.scancode == SDL_SCANCODE_ESCAPE) {
+            if (coop_mid_help_win != TIG_WINDOW_HANDLE_INVALID) {
+                coop_middle_ui_help_close();
+                return true;
+            }
+            if (coop_mid_consent_win != TIG_WINDOW_HANDLE_INVALID) {
+                coop_middle_ui_sleep_consent_close();
+                if (coop_mid_consent_rest) {
+                    coop_middle_rest_key(false);
+                } else {
+                    coop_middle_sleep_key(false);
+                }
+                return true;
+            }
+        }
+    }
+    if (msg->type != TIG_MESSAGE_MOUSE) {
         return false;
     }
     ev = msg->data.mouse.event;
@@ -1524,6 +1838,7 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     }
     coop_mid_ui_trade_watch(); /* M7 */
     if (!coop_mid_ui_session()) {
+        coop_mid_ui_panels_reset();
         coop_mid_ui_labels_off();
         coop_mid_ui_hud_tick(now_ms); /* hides it */
         coop_mid_ui_banner_tick();
@@ -1550,12 +1865,14 @@ static void coop_mid_ui_tick(unsigned int now_ms)
     coop_mid_ui_pings_tick(now_ms);
     coop_mid_ui_edges_tick(); /* M7 */
     coop_mid_ui_wmap_tick(now_ms); /* M5 */
+    coop_mid_ui_panels_tick();
 }
 
 bool coop_middle_ui_init(GameInitInfo* init_info)
 {
     coop_mid_ui_set_iso(init_info != NULL ? init_info->iso_window_handle : TIG_WINDOW_HANDLE_INVALID);
     coop_middle_set_ui_tick(coop_mid_ui_tick);
+    coop_middle_set_sleep_consent(coop_mid_sleep_consent_open, coop_middle_ui_sleep_consent_close);
     coop_mid_ui_inited = true;
     return true;
 }
@@ -1563,6 +1880,8 @@ bool coop_middle_ui_init(GameInitInfo* init_info)
 void coop_middle_ui_exit(void)
 {
     coop_middle_set_ui_tick(NULL);
+    coop_middle_set_sleep_consent(NULL, NULL);
+    coop_mid_ui_panels_reset();
     coop_mid_ui_fonts_destroy();
     if (coop_mid_label_vb != NULL) {
         tig_video_buffer_destroy(coop_mid_label_vb);
@@ -1597,6 +1916,7 @@ void coop_middle_ui_exit(void)
 void coop_middle_ui_reset(void)
 {
     coop_middle_trade_local_end();
+    coop_mid_ui_panels_reset();
     if (!coop_mid_ui_inited) {
         /* M7: also called from coop_middle_session_reset; nothing on screen */
         coop_mid_labels_on = false;

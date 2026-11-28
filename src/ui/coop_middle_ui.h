@@ -39,6 +39,11 @@ void coop_middle_ui_on_scroll(int dx, int dy);
 /* F9: net HUD on / off. False outside a co-op session (key goes on). */
 bool coop_middle_ui_hud_toggle(void);
 
+/* M8: F10 cheat sheet. True when the key was handled. */
+bool coop_middle_ui_help_toggle(void);
+void coop_middle_ui_help_close(void);
+void coop_middle_ui_sleep_consent_close(void);
+
 /* M3, first thing in intgame_process_event: MMB up / Alt+RMB on the map
    sends a ping; while paused, world clicks (orders) are refused. True =
    consumed. The pause banner and the pings draw in coop_middle_ui_draw. */
