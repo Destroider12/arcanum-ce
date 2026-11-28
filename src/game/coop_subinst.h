@@ -25,9 +25,9 @@ extern "C" {
  * Wire form: u32 raw_len + compress2(raw, level 6). */
 #define COOP_SUBINST_MAGIC "CMAP"
 #define COOP_SUBINST_HDR 16
-#define COOP_SUBINST_MAX_RAW (2 * 1024 * 1024)
-#define COOP_SUBINST_MAX_WIRE (512 * 1024)
-#define COOP_SUBINST_MAX_FILES 128
+#define COOP_SUBINST_MAX_RAW (4 * 1024 * 1024)
+#define COOP_SUBINST_MAX_WIRE (1 * 1024 * 1024)
+#define COOP_SUBINST_MAX_FILES 256
 #define COOP_SUBINST_NAME_MAX 63
 #define COOP_SUBINST_ZLIB_LEVEL 6
 
@@ -146,6 +146,7 @@ typedef struct CoopSubinstLease {
     int map_id;
     uint32_t lease_id;
     unsigned int last_checkpoint_ms;
+    int64_t last_loc; /* t405u: PC loc from a checkpoint (COMMIT_BEGIN dest_loc) */
 } CoopSubinstLease;
 
 #define COOP_SUBINST_LEASE_OK 0 /* grant */
@@ -207,6 +208,9 @@ bool coop_subinst_ckpt_due(unsigned int* ckpt_ms, unsigned int* ping_ms, unsigne
 #define COOP_SUBINST_NEXT_GRANT 1
 #define COOP_SUBINST_NEXT_BACK 0
 int coop_subinst_sub_next_plan(int lease_rc, bool packed);
+
+/* t405u (pure): a checkpoint carries the PC's current tile in dest_loc. */
+int64_t coop_subinst_commit_dest_loc(bool checkpoint, int64_t pc_loc, int64_t travel_loc);
 
 /* ---- packets (TIG_NET_PROTOCOL 58, unchanged in 59) ---- */
 
@@ -319,6 +323,13 @@ void coop_subinst_handle_chunk(PacketCoopSubinstChunk* pkt);
 void coop_subinst_handle_delta(PacketCoopSubinstDelta* pkt);
 /* Host: a client's trip to another map. True = handled (granted / denied). */
 bool coop_subinst_host_travel(int slot, int map, int64_t loc);
+/* t405u: same, and when it falls back (*why) the reason is set (never a new op). */
+bool coop_subinst_host_travel_ex(int slot, int map, int64_t loc, const char** why);
+/* t405u: host is about to open dest_map. If a client leases it, checkpoint,
+   remember merge loc, end that lease (ABORT). Other leases are left for abort_all. */
+void coop_subinst_host_prepare_party_travel(int dest_map);
+/* t405u: remembered merge loc for slot on the current map, or 0. Consumes it. */
+int64_t coop_subinst_take_merge_loc(int slot);
 /* Client inside: a local map change = commit. True = handled. */
 bool coop_subinst_client_travel(const struct TeleportData* td);
 void coop_subinst_note(int kind, int index, int val); /* client inside: a delta for the host */

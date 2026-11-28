@@ -626,6 +626,12 @@ int coop_subinst_sub_next_plan(int lease_rc, bool packed)
     return lease_rc == COOP_SUBINST_LEASE_OK && packed ? COOP_SUBINST_NEXT_GRANT : COOP_SUBINST_NEXT_BACK;
 }
 
+/* t405u: a checkpoint fills dest_loc with the PC's tile; a final commit keeps the travel dest. */
+int64_t coop_subinst_commit_dest_loc(bool checkpoint, int64_t pc_loc, int64_t travel_loc)
+{
+    return checkpoint ? pc_loc : travel_loc;
+}
+
 bool coop_subinst_ctrl_valid(const PacketCoopSubinstCtrl* pkt, int size, bool from_host)
 {
     if (pkt == NULL || size != (int)sizeof(PacketCoopSubinstCtrl) || pkt->type != PACKET_COOP_SUBINST_CTRL
@@ -720,6 +726,7 @@ bool coop_subinst_delta_valid(const PacketCoopSubinstDelta* pkt, int size)
 #include "game/critter.h"
 #include "game/fate.h"
 #include "game/item.h"
+#include "game/location.h"
 #include "game/map.h"
 #include "game/multiplayer.h"
 #include "game/obj.h"
@@ -773,6 +780,8 @@ static unsigned int si_resync_mask;
 static unsigned int si_resync_since[8];
 static unsigned int si_state_ms;
 static unsigned int si_ckpt_done_mask; /* before save: slots that answered */
+static int64_t si_merge_loc[8]; /* t405u: host entered this slot's leased map */
+static int si_merge_map[8];
 
 /* Client. */
 static int si_cl_state;
@@ -1259,6 +1268,7 @@ static int si_grant_packed(int slot, int map, int64_t loc, bool from_sub, uint8_
     si_leases[slot].map_id = map;
     si_leases[slot].lease_id = si_next_lease;
     si_leases[slot].last_checkpoint_ms = si_now();
+    si_leases[slot].last_loc = loc; /* entry tile until a checkpoint updates it */
     si_ctrl_init(&pkt, COOP_SUBINST_OP_LEASE_GRANT);
     pkt.slot = slot;
     pkt.map_id = map;
@@ -1293,13 +1303,48 @@ static int si_grant(int slot, int map, int64_t loc, bool from_sub)
 
 bool coop_subinst_host_travel(int slot, int map, int64_t loc)
 {
+    return coop_subinst_host_travel_ex(slot, map, loc, NULL);
+}
+
+bool coop_subinst_host_travel_ex(int slot, int map, int64_t loc, const char** why)
+{
     int64_t pc;
     int other = -1;
     int r;
     int reason;
+    int shop;
 
-    if (!si_host() || !si_rule() || slot <= 0 || slot >= 8 || map <= 0 || !map_is_valid()
-        || map == map_by_type(MAP_TYPE_START_MAP)) {
+    if (why != NULL) {
+        *why = NULL;
+    }
+    if (!si_host() || !si_rule()) {
+        if (why != NULL) {
+            *why = "subinstances off";
+        }
+        return false;
+    }
+    if (slot <= 0 || slot >= 8) {
+        if (why != NULL) {
+            *why = "bad slot";
+        }
+        return false;
+    }
+    if (map <= 0) {
+        if (why != NULL) {
+            *why = "bad dest map";
+        }
+        return false;
+    }
+    if (!map_is_valid()) {
+        if (why != NULL) {
+            *why = "map not valid";
+        }
+        return false;
+    }
+    if (map == map_by_type(MAP_TYPE_START_MAP)) {
+        if (why != NULL) {
+            *why = "dest is map 1";
+        }
         return false;
     }
     if (si_leases[slot].active) {
@@ -1307,12 +1352,25 @@ bool coop_subinst_host_travel(int slot, int map, int64_t loc)
     }
     pc = sub_4A2B60(slot);
     if (pc == OBJ_HANDLE_NULL) {
+        if (why != NULL) {
+            *why = "pc null";
+        }
         return false;
     }
-    r = coop_subinst_can_lease(map_current_map(), map, map_by_type(MAP_TYPE_SHOPPING_MAP), slot, si_leases,
+    shop = map_by_type(MAP_TYPE_SHOPPING_MAP);
+    if (shop > 0 && map == shop) {
+        if (why != NULL) {
+            *why = "shop map";
+        }
+        return false;
+    }
+    r = coop_subinst_can_lease(map_current_map(), map, shop, slot, si_leases,
         combat_critter_is_combat_mode_active(pc), critter_is_dead(pc), &other);
     switch (r) {
     case COOP_SUBINST_LEASE_NORMAL:
+        if (why != NULL) {
+            *why = map == map_current_map() ? "same map" : "not a solo instance";
+        }
         return false;
     case COOP_SUBINST_LEASE_DENY_BUSY:
         si_deny(slot, COOP_SUBINST_DENY_BUSY, other, map);
@@ -1326,6 +1384,9 @@ bool coop_subinst_host_travel(int slot, int map, int64_t loc)
     reason = si_grant(slot, map, loc, false);
     if (reason != 0) {
         si_deny(slot, reason, -1, map);
+        if (why != NULL) {
+            *why = "too big (bytes/files)";
+        }
         return false; /* too big: the usual party travel prompt */
     }
     return true;
@@ -1405,8 +1466,12 @@ static void si_host_apply(int slot)
         rx->data = NULL;
         coop_subinst_rx_free(rx);
         si_leases[slot].last_checkpoint_ms = si_now();
+        if (c->dest_loc != 0) {
+            si_leases[slot].last_loc = c->dest_loc; /* t405u: position inside the instance */
+        }
         si_ckpt_done_mask |= 1u << slot;
-        tig_debug_printf("CoopSubinst: slot %d checkpoint of map %d stored\n", slot, lease_map);
+        tig_debug_printf("CoopSubinst: slot %d checkpoint of map %d stored (loc %d,%d)\n", slot, lease_map,
+            (int)LOCATION_GET_X(si_leases[slot].last_loc), (int)LOCATION_GET_Y(si_leases[slot].last_loc));
         return;
     }
     if (pc != OBJ_HANDLE_NULL) {
@@ -1579,6 +1644,63 @@ void coop_subinst_handle_delta(PacketCoopSubinstDelta* pkt)
     default:
         break;
     }
+}
+
+void coop_subinst_host_prepare_party_travel(int dest_map)
+{
+    PacketCoopSubinstCtrl pkt;
+    unsigned int start;
+    int owner;
+    int64_t loc;
+
+    if (!si_host() || !si_rule() || dest_map <= 0 || !map_is_valid() || dest_map == map_current_map()) {
+        return;
+    }
+    owner = coop_subinst_lease_owner(si_leases, dest_map);
+    if (owner <= 0 || owner >= 8 || !si_leases[owner].active) {
+        return;
+    }
+    /* Fresh map files, inventory and last_loc before the host opens dest_map. */
+    if (tig_net_client_is_active(owner)) {
+        si_ckpt_done_mask &= ~(1u << owner);
+        si_ctrl_init(&pkt, COOP_SUBINST_OP_CHECKPOINT_REQ);
+        pkt.slot = owner;
+        pkt.lease_id = si_leases[owner].lease_id;
+        si_send(&pkt, sizeof(pkt), owner);
+        start = si_now();
+        while ((si_ckpt_done_mask & (1u << owner)) == 0
+            && (unsigned int)(si_now() - start) < COOP_SUBINST_SAVE_WAIT_MS) {
+            tig_net_pump();
+            SDL_Delay(5);
+        }
+        tig_debug_printf("CoopSubinst: merge: slot %d checkpoint %s in %u ms\n", owner,
+            (si_ckpt_done_mask & (1u << owner)) != 0 ? "ok" : "timeout",
+            (unsigned int)(si_now() - start));
+    }
+    loc = si_leases[owner].last_loc;
+    si_merge_loc[owner] = loc;
+    si_merge_map[owner] = dest_map;
+    si_ctrl_init(&pkt, COOP_SUBINST_OP_ABORT);
+    pkt.slot = owner;
+    pkt.lease_id = si_leases[owner].lease_id;
+    si_send(&pkt, sizeof(pkt), owner);
+    /* Unpark in place on the old map: the party carry then takes the PC to dest_map. */
+    si_host_release(owner, 0, "host merged into lease");
+    tig_debug_printf("CoopSubinst: merge: slot %d stays at %d,%d on map %d\n", owner,
+        (int)LOCATION_GET_X(loc), (int)LOCATION_GET_Y(loc), dest_map);
+}
+
+int64_t coop_subinst_take_merge_loc(int slot)
+{
+    int64_t loc;
+
+    if (slot <= 0 || slot >= 8 || si_merge_map[slot] != map_current_map()) {
+        return 0;
+    }
+    loc = si_merge_loc[slot];
+    si_merge_loc[slot] = 0;
+    si_merge_map[slot] = 0;
+    return loc;
 }
 
 void coop_subinst_host_abort_all(const char* why)
@@ -1936,7 +2058,8 @@ static bool si_client_commit(int dest_map, int64_t dest_loc, bool checkpoint, bo
     pkt.map_id = si_cl_map;
     pkt.lease_id = si_cl_lease;
     pkt.dest_map = dest_map > 0 ? dest_map : 0;
-    pkt.dest_loc = dest_loc;
+    pkt.dest_loc = coop_subinst_commit_dest_loc(checkpoint,
+        obj_field_int64_get(pc, OBJ_F_LOCATION), dest_loc);
     pkt.is_checkpoint = checkpoint ? 1 : 0;
     pkt.total_bytes = (int)payload_len;
     pkt.total_chunks = coop_subinst_chunk_count(payload_len);
@@ -2299,6 +2422,8 @@ void coop_subinst_session_reset(void)
         si_hid[slot].count = 0;
     }
     memset(si_leases, 0, sizeof(si_leases));
+    memset(si_merge_loc, 0, sizeof(si_merge_loc));
+    memset(si_merge_map, 0, sizeof(si_merge_map));
     memset(si_inside, 0, sizeof(si_inside));
     memset(si_slot_map, 0, sizeof(si_slot_map));
     memset(si_entry_map, 0, sizeof(si_entry_map));
