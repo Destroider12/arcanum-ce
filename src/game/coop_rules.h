@@ -118,6 +118,18 @@ bool coop_rules_equal(const CoopRules* a, const CoopRules* b);
 void coop_rules_effective(CoopRules* r);
 bool coop_rules_is_lite(const CoopRules* r);
 
+/* M9 launcher presets. Lite sets lite=1 (the master switch) so
+   coop_rules_effective keeps only LITE_KEEP_MASK; asave is 0.
+   Hardcore is Middle flags with friendly fire on and enemy HP 150%
+   (dynamic scale stays off — a flat 150% is predictable). */
+#define COOP_PRESET_LITE 0
+#define COOP_PRESET_MIDDLE 1
+#define COOP_PRESET_HARDCORE 2
+#define COOP_PRESET_CUSTOM 3
+
+void coop_rules_apply_preset(CoopRules* r, int preset);
+int coop_rules_detect_preset(const CoopRules* r);
+
 /* Wire check: exact size, type, version >= 1. Direction is the packet
    role table (host -> client only). */
 bool coop_rules_packet_valid(const PacketCoopRules* pkt, int size);

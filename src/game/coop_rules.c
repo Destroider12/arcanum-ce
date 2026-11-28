@@ -346,3 +346,50 @@ void coop_rules_packet_fill(PacketCoopRules* pkt, const CoopRules* r)
     }
     coop_rules_sanitize(&pkt->rules);
 }
+
+void coop_rules_apply_preset(CoopRules* r, int preset)
+{
+    if (r == NULL || preset == COOP_PRESET_CUSTOM) {
+        return;
+    }
+    memset(r, 0, sizeof(*r));
+    r->version = COOP_RULES_VERSION;
+    r->xp_mult_pct = 100;
+    if (preset == COOP_PRESET_LITE) {
+        /* lite=1 is the master switch (effective() strips Middle flags).
+           Loot feed stays: it is in LITE_KEEP_MASK and is Lite 1.0 UI. */
+        r->flags = COOP_RULE_LITE_KEEP_MASK;
+        r->enemy_hp_pct = 100;
+        r->autosave_min = 0;
+    } else if (preset == COOP_PRESET_HARDCORE) {
+        r->flags = COOP_RULE_DEFAULT_FLAGS & ~COOP_RULE_NO_FRIENDLY_FIRE_AOE;
+        r->enemy_hp_pct = 150;
+        r->autosave_min = COOP_RULES_ASAVE_DEFAULT;
+    } else {
+        /* MIDDLE, or an unknown id: Standard Middle. */
+        r->flags = COOP_RULE_DEFAULT_FLAGS;
+        r->enemy_hp_pct = 100;
+        r->autosave_min = COOP_RULES_ASAVE_DEFAULT;
+    }
+    coop_rules_sanitize(r);
+}
+
+int coop_rules_detect_preset(const CoopRules* r)
+{
+    CoopRules have;
+    CoopRules want;
+    int p;
+
+    if (r == NULL) {
+        return COOP_PRESET_CUSTOM;
+    }
+    have = *r;
+    coop_rules_sanitize(&have);
+    for (p = COOP_PRESET_LITE; p <= COOP_PRESET_HARDCORE; p++) {
+        coop_rules_apply_preset(&want, p);
+        if (coop_rules_equal(&have, &want)) {
+            return p;
+        }
+    }
+    return COOP_PRESET_CUSTOM;
+}

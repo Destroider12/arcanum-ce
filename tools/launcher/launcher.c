@@ -125,6 +125,12 @@
 #define IDC_RULE_FLVL 146 /* after M7: auto-level followers */
 #define IDC_RULE_PLVL 147 /* after M7: party level (late joiners too) */
 #define IDC_RULE_DSCALE 148 /* M8: dynamic difficulty */
+#define IDC_MODE 149 /* M9: Lite / Middle / Hardcore / Custom */
+#define IDC_RULES_BTN 150
+#define IDC_DLG_OK 201
+#define IDC_DLG_CANCEL 202
+#define IDC_DLG_LITE 203
+#define IDC_DLG_MIDDLE 204
 #define WM_APP_GAMEEXIT (WM_APP + 3)
 #define IDT_LOBBY 1
 
@@ -217,27 +223,13 @@ static void refresh(void)
 
 /* t391u: Coop Lite mode greys every Middle gameplay rule (the game plays
    the Lite 1.0 set whatever they say); Loot feed and Auto-save stay. */
+static void rules_sync_mode_combo(void);
+
 static void rules_enable(bool host)
 {
-    bool mid = host && SendMessageA(item(IDC_RULE_LITE), BM_GETCHECK, 0, 0) != BST_CHECKED;
-
-    EnableWindow(item(IDC_RULE_LITE), host);
-    EnableWindow(item(IDC_RULE_GOLD), mid);
-    EnableWindow(item(IDC_RULE_LOOT), host);
-    EnableWindow(item(IDC_RULE_REST), mid);
-    EnableWindow(item(IDC_RULE_TRADE), mid);
-    EnableWindow(item(IDC_RULE_PAUSE), mid);
-    EnableWindow(item(IDC_RULE_NOFF), mid);
-    EnableWindow(item(IDC_RULE_HP), mid);
-    EnableWindow(item(IDC_RULE_XP), mid);
-    EnableWindow(item(IDC_RULE_QITEMS), mid);
-    EnableWindow(item(IDC_RULE_SFOL), mid);
-    EnableWindow(item(IDC_RULE_USLEEP), mid);
-    EnableWindow(item(IDC_RULE_SUBINST), mid);
-    EnableWindow(item(IDC_RULE_FLVL), mid);
-    EnableWindow(item(IDC_RULE_PLVL), mid);
-    EnableWindow(item(IDC_RULE_DSCALE), mid);
-    EnableWindow(item(IDC_RULE_ASAVE), host);
+    EnableWindow(item(IDC_MODE), host);
+    EnableWindow(item(IDC_RULES_BTN), host);
+    EnableWindow(item(IDC_RULES_LABEL), host);
 }
 
 static void find_local_ip(void)
@@ -413,6 +405,7 @@ static void load_settings(void)
         rule_pct_index(k_rule_xp, RULE_XP_COUNT, GetPrivateProfileIntA("rules", "xp_mult_pct", 100, g_ini)), 0);
     SendMessageA(item(IDC_RULE_ASAVE), CB_SETCURSEL,
         rule_pct_index(k_rule_asave, RULE_ASAVE_COUNT, GetPrivateProfileIntA("rules", "autosave_min", 10, g_ini)), 0);
+    rules_sync_mode_combo();
 }
 
 static bool rule_checked(int id)
@@ -482,6 +475,15 @@ static void save_settings(void)
     WritePrivateProfileStringA("rules", "xp_mult_pct", buf, g_ini);
     snprintf(buf, sizeof(buf), "%d", rule_pct(IDC_RULE_ASAVE, k_rule_asave, RULE_ASAVE_COUNT));
     WritePrivateProfileStringA("rules", "autosave_min", buf, g_ini);
+    {
+        int p = 0;
+        const char* names[] = { "lite", "middle", "hardcore", "custom" };
+        LRESULT sel = SendMessageA(item(IDC_MODE), CB_GETCURSEL, 0, 0);
+        if (sel >= 0 && sel <= 3) {
+            p = (int)sel;
+        }
+        WritePrivateProfileStringA("rules", "preset", names[p], g_ini);
+    }
 }
 
 static bool file_exists(const char* path)
@@ -878,8 +880,8 @@ static void lobby_rules_poll(void)
 
 /* Client heights: the panel (update row ends at 550) and the lobby (rules
    line ends at 750). */
-#define LAUNCHER_PANEL_H 580
-#define LAUNCHER_LOBBY_H (736 + 36 + 12)
+#define LAUNCHER_PANEL_H 506
+#define LAUNCHER_LOBBY_H (662 + 36 + 12)
 
 static void launcher_client_size(HWND hwnd, int client_h)
 {
@@ -1866,7 +1868,7 @@ static void add_firewall_rule(void)
    Only arcanum-ce.exe next to the launcher is replaced: never coop-host\ /
    coop-client\, the launcher, game data, saves or the ini. */
 #define WM_APP_UPD (WM_APP + 4)
-#define UPD_DEFAULT_URL "https://api.github.com/repos/Destroider12/arcanum-ce/releases"
+#define UPD_DEFAULT_URL "https://api.github.com/repos/Destroider12/arcanum-coop-online/releases"
 
 typedef struct UpdInfo {
     char tag[96];
@@ -2304,6 +2306,325 @@ static void upd_on_msg(WPARAM ready, char* text)
     EnableWindow(item(IDC_UPD_GO), g_upd_ready && g_game == NULL);
 }
 
+
+static void rules_set_check(int id, bool on)
+{
+    SendMessageA(item(id), BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void rules_apply_to_controls(const CoopRules* r)
+{
+    if (r == NULL) {
+        return;
+    }
+    rules_set_check(IDC_RULE_GOLD, (r->flags & COOP_RULE_GOLD_SPLIT) != 0);
+    rules_set_check(IDC_RULE_LOOT, (r->flags & COOP_RULE_LOOT_FEED) != 0);
+    rules_set_check(IDC_RULE_REST, (r->flags & COOP_RULE_REST_VOTE) != 0);
+    rules_set_check(IDC_RULE_TRADE, (r->flags & COOP_RULE_DIRECT_TRADE) != 0);
+    rules_set_check(IDC_RULE_PAUSE, (r->flags & COOP_RULE_CLIENT_PAUSE) != 0);
+    rules_set_check(IDC_RULE_NOFF, (r->flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0);
+    rules_set_check(IDC_RULE_QITEMS, (r->flags & COOP_RULE_SHARED_QUEST_ITEMS) != 0);
+    rules_set_check(IDC_RULE_SFOL, (r->flags & COOP_RULE_SHARED_FOLLOWERS) != 0);
+    rules_set_check(IDC_RULE_USLEEP, (r->flags & COOP_RULE_UNIFIED_SLEEP) != 0);
+    rules_set_check(IDC_RULE_SUBINST, (r->flags & COOP_RULE_SUBINSTANCES) != 0);
+    rules_set_check(IDC_RULE_FLVL, (r->flags & COOP_RULE_FOLLOWER_LEVEL) != 0);
+    rules_set_check(IDC_RULE_PLVL, (r->flags & COOP_RULE_PARTY_LEVEL) != 0);
+    rules_set_check(IDC_RULE_DSCALE, (r->flags & COOP_RULE_DYNAMIC_SCALE) != 0);
+    rules_set_check(IDC_RULE_LITE, (r->flags & COOP_RULE_LITE_MODE) != 0);
+    SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL, rule_pct_index(k_rule_hp, RULE_HP_COUNT, r->enemy_hp_pct), 0);
+    SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL, rule_pct_index(k_rule_xp, RULE_XP_COUNT, r->xp_mult_pct), 0);
+    SendMessageA(item(IDC_RULE_ASAVE), CB_SETCURSEL, rule_pct_index(k_rule_asave, RULE_ASAVE_COUNT, r->autosave_min), 0);
+}
+
+static void rules_collect(CoopRules* r)
+{
+    if (r == NULL) {
+        return;
+    }
+    coop_rules_default(r);
+    r->flags &= ~(COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE);
+    r->flags |= (rule_checked(IDC_RULE_GOLD) ? COOP_RULE_GOLD_SPLIT : 0u)
+        | (rule_checked(IDC_RULE_LOOT) ? COOP_RULE_LOOT_FEED : 0u)
+        | (rule_checked(IDC_RULE_REST) ? COOP_RULE_REST_VOTE : 0u)
+        | (rule_checked(IDC_RULE_TRADE) ? COOP_RULE_DIRECT_TRADE : 0u)
+        | (rule_checked(IDC_RULE_PAUSE) ? COOP_RULE_CLIENT_PAUSE : 0u)
+        | (rule_checked(IDC_RULE_NOFF) ? COOP_RULE_NO_FRIENDLY_FIRE_AOE : 0u)
+        | (rule_checked(IDC_RULE_QITEMS) ? COOP_RULE_SHARED_QUEST_ITEMS : 0u)
+        | (rule_checked(IDC_RULE_SFOL) ? COOP_RULE_SHARED_FOLLOWERS : 0u)
+        | (rule_checked(IDC_RULE_USLEEP) ? COOP_RULE_UNIFIED_SLEEP : 0u)
+        | (rule_checked(IDC_RULE_SUBINST) ? COOP_RULE_SUBINSTANCES : 0u)
+        | (rule_checked(IDC_RULE_FLVL) ? COOP_RULE_FOLLOWER_LEVEL : 0u)
+        | (rule_checked(IDC_RULE_PLVL) ? COOP_RULE_PARTY_LEVEL : 0u)
+        | (rule_checked(IDC_RULE_DSCALE) ? COOP_RULE_DYNAMIC_SCALE : 0u)
+        | (rule_checked(IDC_RULE_LITE) ? COOP_RULE_LITE_MODE : 0u);
+    /* Free world map has no checkbox (always on in Middle). Do not OR it
+       when Lite is on, or detect_preset would miss COOP_PRESET_LITE. */
+    if (!rule_checked(IDC_RULE_LITE)) {
+        r->flags |= COOP_RULE_FREE_OVERWORLD;
+    }
+    r->enemy_hp_pct = (uint16_t)rule_pct(IDC_RULE_HP, k_rule_hp, RULE_HP_COUNT);
+    r->xp_mult_pct = (uint16_t)rule_pct(IDC_RULE_XP, k_rule_xp, RULE_XP_COUNT);
+    r->autosave_min = (uint16_t)rule_pct(IDC_RULE_ASAVE, k_rule_asave, RULE_ASAVE_COUNT);
+    coop_rules_sanitize(r);
+}
+
+static void rules_sync_mode_combo(void)
+{
+    CoopRules r;
+    int p;
+
+    rules_collect(&r);
+    p = coop_rules_detect_preset(&r);
+    SendMessageA(item(IDC_MODE), CB_SETCURSEL, p, 0);
+}
+
+static void rules_apply_mode(int preset)
+{
+    CoopRules r;
+
+    if (preset < COOP_PRESET_LITE || preset > COOP_PRESET_HARDCORE) {
+        return;
+    }
+    coop_rules_apply_preset(&r, preset);
+    rules_apply_to_controls(&r);
+    SendMessageA(item(IDC_MODE), CB_SETCURSEL, preset, 0);
+}
+
+static HWND g_rules_dlg;
+static bool g_rules_ok;
+
+static HWND dlg_make(HWND parent, const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
+{
+    HWND hw = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
+        (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+    SendMessageA(hw, WM_SETFONT, (WPARAM)g_font, TRUE);
+    return hw;
+}
+
+static void dlg_fill_pct(HWND combo, const int* table, int count, const char* fmt, int sel_val)
+{
+    char label[32];
+    int i;
+
+    for (i = 0; i < count; i++) {
+        if (table[i] == 0 && strstr(fmt, "Auto") != NULL) {
+            snprintf(label, sizeof(label), "Auto-save: Off");
+        } else if (strstr(fmt, "Auto") != NULL) {
+            snprintf(label, sizeof(label), "Auto-save: %d min", table[i]);
+        } else {
+            snprintf(label, sizeof(label), fmt, table[i]);
+        }
+        SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
+    }
+    SendMessageA(combo, CB_SETCURSEL, rule_pct_index(table, count, sel_val), 0);
+}
+
+static LRESULT CALLBACK rules_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        int note = HIWORD(wp);
+        if (id == IDC_DLG_OK) {
+            /* Copy dialog controls onto the hidden main-window state. */
+#define DCK(id) rules_set_check(id, SendMessageA(GetDlgItem(hwnd, id), BM_GETCHECK, 0, 0) == BST_CHECKED)
+            DCK(IDC_RULE_GOLD); DCK(IDC_RULE_LOOT); DCK(IDC_RULE_REST); DCK(IDC_RULE_TRADE);
+            DCK(IDC_RULE_PAUSE); DCK(IDC_RULE_NOFF); DCK(IDC_RULE_QITEMS); DCK(IDC_RULE_SFOL);
+            DCK(IDC_RULE_USLEEP); DCK(IDC_RULE_SUBINST); DCK(IDC_RULE_FLVL); DCK(IDC_RULE_PLVL);
+            DCK(IDC_RULE_DSCALE); DCK(IDC_RULE_LITE);
+#undef DCK
+            SendMessageA(item(IDC_RULE_HP), CB_SETCURSEL, SendMessageA(GetDlgItem(hwnd, IDC_RULE_HP), CB_GETCURSEL, 0, 0), 0);
+            SendMessageA(item(IDC_RULE_XP), CB_SETCURSEL, SendMessageA(GetDlgItem(hwnd, IDC_RULE_XP), CB_GETCURSEL, 0, 0), 0);
+            SendMessageA(item(IDC_RULE_ASAVE), CB_SETCURSEL, SendMessageA(GetDlgItem(hwnd, IDC_RULE_ASAVE), CB_GETCURSEL, 0, 0), 0);
+            rules_sync_mode_combo();
+            g_rules_ok = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (id == IDC_DLG_CANCEL || id == IDCANCEL) {
+            g_rules_ok = false;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (id == IDC_DLG_LITE || id == IDC_DLG_MIDDLE) {
+            CoopRules r;
+            coop_rules_apply_preset(&r, id == IDC_DLG_LITE ? COOP_PRESET_LITE : COOP_PRESET_MIDDLE);
+            /* apply onto dialog controls by temporarily swapping GetDlgItem parent via item()?
+               We copy through hidden main controls then reload dialog — simpler: set dialog
+               checkboxes directly here using GetDlgItem(hwnd, ...). */
+            {
+                HWND d = hwnd;
+#define DCHK(id, on) SendMessageA(GetDlgItem(d, id), BM_SETCHECK, (on) ? BST_CHECKED : BST_UNCHECKED, 0)
+                DCHK(IDC_RULE_GOLD, (r.flags & COOP_RULE_GOLD_SPLIT) != 0);
+                DCHK(IDC_RULE_LOOT, (r.flags & COOP_RULE_LOOT_FEED) != 0);
+                DCHK(IDC_RULE_REST, (r.flags & COOP_RULE_REST_VOTE) != 0);
+                DCHK(IDC_RULE_TRADE, (r.flags & COOP_RULE_DIRECT_TRADE) != 0);
+                DCHK(IDC_RULE_PAUSE, (r.flags & COOP_RULE_CLIENT_PAUSE) != 0);
+                DCHK(IDC_RULE_NOFF, (r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) != 0);
+                DCHK(IDC_RULE_QITEMS, (r.flags & COOP_RULE_SHARED_QUEST_ITEMS) != 0);
+                DCHK(IDC_RULE_SFOL, (r.flags & COOP_RULE_SHARED_FOLLOWERS) != 0);
+                DCHK(IDC_RULE_USLEEP, (r.flags & COOP_RULE_UNIFIED_SLEEP) != 0);
+                DCHK(IDC_RULE_SUBINST, (r.flags & COOP_RULE_SUBINSTANCES) != 0);
+                DCHK(IDC_RULE_FLVL, (r.flags & COOP_RULE_FOLLOWER_LEVEL) != 0);
+                DCHK(IDC_RULE_PLVL, (r.flags & COOP_RULE_PARTY_LEVEL) != 0);
+                DCHK(IDC_RULE_DSCALE, (r.flags & COOP_RULE_DYNAMIC_SCALE) != 0);
+                DCHK(IDC_RULE_LITE, (r.flags & COOP_RULE_LITE_MODE) != 0);
+#undef DCHK
+                SendMessageA(GetDlgItem(d, IDC_RULE_HP), CB_SETCURSEL, rule_pct_index(k_rule_hp, RULE_HP_COUNT, r.enemy_hp_pct), 0);
+                SendMessageA(GetDlgItem(d, IDC_RULE_XP), CB_SETCURSEL, rule_pct_index(k_rule_xp, RULE_XP_COUNT, r.xp_mult_pct), 0);
+                SendMessageA(GetDlgItem(d, IDC_RULE_ASAVE), CB_SETCURSEL, rule_pct_index(k_rule_asave, RULE_ASAVE_COUNT, r.autosave_min), 0);
+            }
+            SendMessageA(item(IDC_MODE), CB_SETCURSEL, id == IDC_DLG_LITE ? COOP_PRESET_LITE : COOP_PRESET_MIDDLE, 0);
+            return 0;
+        }
+        if (note == BN_CLICKED || note == CBN_SELCHANGE) {
+            /* Preview the preset on the main Mode combo while the dialog is open. */
+            CoopRules r;
+            /* Collect flags from the dialog controls (item() still targets the main window). */
+            coop_rules_default(&r);
+            r.flags &= ~(COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE);
+#define DCK(id, bit) ((SendMessageA(GetDlgItem(hwnd, id), BM_GETCHECK, 0, 0) == BST_CHECKED) ? (bit) : 0u)
+            r.flags |= DCK(IDC_RULE_GOLD, COOP_RULE_GOLD_SPLIT)
+                | DCK(IDC_RULE_LOOT, COOP_RULE_LOOT_FEED)
+                | DCK(IDC_RULE_REST, COOP_RULE_REST_VOTE)
+                | DCK(IDC_RULE_TRADE, COOP_RULE_DIRECT_TRADE)
+                | DCK(IDC_RULE_PAUSE, COOP_RULE_CLIENT_PAUSE)
+                | DCK(IDC_RULE_NOFF, COOP_RULE_NO_FRIENDLY_FIRE_AOE)
+                | DCK(IDC_RULE_QITEMS, COOP_RULE_SHARED_QUEST_ITEMS)
+                | DCK(IDC_RULE_SFOL, COOP_RULE_SHARED_FOLLOWERS)
+                | DCK(IDC_RULE_USLEEP, COOP_RULE_UNIFIED_SLEEP)
+                | DCK(IDC_RULE_SUBINST, COOP_RULE_SUBINSTANCES)
+                | DCK(IDC_RULE_FLVL, COOP_RULE_FOLLOWER_LEVEL)
+                | DCK(IDC_RULE_PLVL, COOP_RULE_PARTY_LEVEL)
+                | DCK(IDC_RULE_DSCALE, COOP_RULE_DYNAMIC_SCALE)
+                | DCK(IDC_RULE_LITE, COOP_RULE_LITE_MODE);
+#undef DCK
+            if ((r.flags & COOP_RULE_LITE_MODE) == 0) {
+                r.flags |= COOP_RULE_FREE_OVERWORLD;
+            }
+            {
+                LRESULT sel;
+                sel = SendMessageA(GetDlgItem(hwnd, IDC_RULE_HP), CB_GETCURSEL, 0, 0);
+                r.enemy_hp_pct = (uint16_t)(sel >= 0 && sel < RULE_HP_COUNT ? k_rule_hp[sel] : 100);
+                sel = SendMessageA(GetDlgItem(hwnd, IDC_RULE_XP), CB_GETCURSEL, 0, 0);
+                r.xp_mult_pct = (uint16_t)(sel >= 0 && sel < RULE_XP_COUNT ? k_rule_xp[sel] : 100);
+                sel = SendMessageA(GetDlgItem(hwnd, IDC_RULE_ASAVE), CB_GETCURSEL, 0, 0);
+                r.autosave_min = (uint16_t)(sel >= 0 && sel < RULE_ASAVE_COUNT ? k_rule_asave[sel] : 10);
+            }
+            coop_rules_sanitize(&r);
+            SendMessageA(item(IDC_MODE), CB_SETCURSEL, coop_rules_detect_preset(&r), 0);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        g_rules_ok = false;
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_rules_dlg = NULL;
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static bool rules_dialog_run(void)
+{
+    WNDCLASSA wc;
+    HWND dlg;
+    MSG msg;
+    CoopRules before;
+    int mode_before;
+    RECT pr;
+    int x, y;
+
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = rules_dlg_proc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "ArcanumCoopRulesDlg";
+    wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    if (RegisterClassA(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return false;
+    }
+
+    GetWindowRect(g_wnd, &pr);
+    x = pr.left + 20;
+    y = pr.top + 40;
+    g_rules_ok = false;
+    rules_collect(&before);
+    mode_before = (int)SendMessageA(item(IDC_MODE), CB_GETCURSEL, 0, 0);
+    dlg = CreateWindowExA(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, "ArcanumCoopRulesDlg", "Rules",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP, x, y, 520, 430, g_wnd, NULL, GetModuleHandleA(NULL), NULL);
+    if (dlg == NULL) {
+        return false;
+    }
+    g_rules_dlg = dlg;
+    /* Group: World & Co-op */
+    dlg_make(dlg, "BUTTON", "World & Co-op", BS_GROUPBOX, 12, 8, 490, 110, 0);
+    dlg_make(dlg, "BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 28, 200, 20, IDC_RULE_SUBINST);
+    dlg_make(dlg, "BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 240, 28, 130, 20, IDC_RULE_USLEEP);
+    dlg_make(dlg, "BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 380, 28, 100, 20, IDC_RULE_REST);
+    dlg_make(dlg, "BUTTON", "Shared quest items", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 52, 160, 20, IDC_RULE_QITEMS);
+    dlg_make(dlg, "BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 200, 52, 140, 20, IDC_RULE_SFOL);
+    dlg_make(dlg, "STATIC", "Free world map is always on unless Lite is selected.", 0, 24, 76, 460, 20, 0);
+    /* Group: QoL & Combat */
+    dlg_make(dlg, "BUTTON", "QoL & Combat", BS_GROUPBOX, 12, 126, 490, 90, 0);
+    dlg_make(dlg, "BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 146, 100, 20, IDC_RULE_GOLD);
+    dlg_make(dlg, "BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 140, 146, 90, 20, IDC_RULE_LOOT);
+    dlg_make(dlg, "BUTTON", "Direct trade", WS_TABSTOP | BS_AUTOCHECKBOX, 250, 146, 110, 20, IDC_RULE_TRADE);
+    dlg_make(dlg, "BUTTON", "Client pause", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 172, 110, 20, IDC_RULE_PAUSE);
+    dlg_make(dlg, "BUTTON", "No friendly fire", WS_TABSTOP | BS_AUTOCHECKBOX, 140, 172, 130, 20, IDC_RULE_NOFF);
+    /* Group: Difficulty & Saves */
+    dlg_make(dlg, "BUTTON", "Difficulty & Saves", BS_GROUPBOX, 12, 226, 490, 100, 0);
+    {
+        HWND c;
+        c = dlg_make(dlg, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 24, 248, 90, 140, IDC_RULE_HP);
+        dlg_fill_pct(c, k_rule_hp, RULE_HP_COUNT, "HP %d%%", before.enemy_hp_pct);
+        c = dlg_make(dlg, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 124, 248, 90, 140, IDC_RULE_XP);
+        dlg_fill_pct(c, k_rule_xp, RULE_XP_COUNT, "XP %d%%", before.xp_mult_pct);
+        dlg_make(dlg, "BUTTON", "Dynamic difficulty", WS_TABSTOP | BS_AUTOCHECKBOX, 230, 250, 150, 20, IDC_RULE_DSCALE);
+        c = dlg_make(dlg, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 24, 280, 160, 140, IDC_RULE_ASAVE);
+        dlg_fill_pct(c, k_rule_asave, RULE_ASAVE_COUNT, "Auto-save: %d min", before.autosave_min);
+        dlg_make(dlg, "BUTTON", "Auto-level followers", WS_TABSTOP | BS_AUTOCHECKBOX, 200, 282, 160, 20, IDC_RULE_FLVL);
+        dlg_make(dlg, "BUTTON", "Party level", WS_TABSTOP | BS_AUTOCHECKBOX, 370, 282, 110, 20, IDC_RULE_PLVL);
+    }
+    /* Hidden lite flag so reset/detect can see it (not shown as a row). */
+    dlg_make(dlg, "BUTTON", "", BS_AUTOCHECKBOX, 0, 0, 1, 1, IDC_RULE_LITE);
+    ShowWindow(GetDlgItem(dlg, IDC_RULE_LITE), SW_HIDE);
+    dlg_make(dlg, "BUTTON", "Lite", WS_TABSTOP, 12, 340, 70, 28, IDC_DLG_LITE);
+    dlg_make(dlg, "BUTTON", "Middle", WS_TABSTOP, 90, 340, 80, 28, IDC_DLG_MIDDLE);
+    dlg_make(dlg, "BUTTON", "OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 320, 340, 80, 28, IDC_DLG_OK);
+    dlg_make(dlg, "BUTTON", "Cancel", WS_TABSTOP, 410, 340, 80, 28, IDC_DLG_CANCEL);
+    /* Seed dialog controls from the current (hidden) main-window state. */
+    {
+        HWND d = dlg;
+#define DCHK(id) SendMessageA(GetDlgItem(d, id), BM_SETCHECK, rule_checked(id) ? BST_CHECKED : BST_UNCHECKED, 0)
+        DCHK(IDC_RULE_GOLD); DCHK(IDC_RULE_LOOT); DCHK(IDC_RULE_REST); DCHK(IDC_RULE_TRADE);
+        DCHK(IDC_RULE_PAUSE); DCHK(IDC_RULE_NOFF); DCHK(IDC_RULE_QITEMS); DCHK(IDC_RULE_SFOL);
+        DCHK(IDC_RULE_USLEEP); DCHK(IDC_RULE_SUBINST); DCHK(IDC_RULE_FLVL); DCHK(IDC_RULE_PLVL);
+        DCHK(IDC_RULE_DSCALE); DCHK(IDC_RULE_LITE);
+#undef DCHK
+    }
+    ShowWindow(dlg, SW_SHOW);
+    EnableWindow(g_wnd, FALSE);
+    while (g_rules_dlg != NULL && GetMessageA(&msg, NULL, 0, 0)) {
+        if (!IsDialogMessageA(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+    EnableWindow(g_wnd, TRUE);
+    SetForegroundWindow(g_wnd);
+    if (g_rules_ok) {
+        /* Dialog destroyed: we must have copied on OK before DestroyWindow.
+           Re-collect is impossible. Copy happens in WM_COMMAND OK — do it there. */
+    } else {
+        rules_apply_to_controls(&before);
+        SendMessageA(item(IDC_MODE), CB_SETCURSEL, mode_before >= 0 ? mode_before : COOP_PRESET_CUSTOM, 0);
+    }
+    return g_rules_ok;
+}
+
 static HWND make(const char* cls, const char* text, DWORD style, int x, int y, int w, int h, int id)
 {
     HWND h_ = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_wnd,
@@ -2336,47 +2657,47 @@ static void create_controls(void)
     make("BUTTON", "Windowed", WS_TABSTOP | BS_AUTOCHECKBOX, 12, 234, 200, 20, IDC_WINDOWED);
     make("BUTTON", "Check port", WS_TABSTOP, 220, 230, 100, 26, IDC_CHECK);
     make("BUTTON", "Add firewall rule", WS_TABSTOP, 326, 230, 104, 26, IDC_FIREWALL);
-    make("STATIC", "Rules (host):", 0, 12, 264, 76, 20, IDC_RULES_LABEL);
-    make("BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 262, 80, 20, IDC_RULE_GOLD);
-    make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 172, 262, 76, 20, IDC_RULE_LOOT);
-    make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 250, 262, 80, 20, IDC_RULE_REST);
-    make("BUTTON", "Direct trade", WS_TABSTOP | BS_AUTOCHECKBOX, 332, 262, 92, 20, IDC_RULE_TRADE);
-    /* Coop Middle M3: second rules row. */
-    make("BUTTON", "Client pause", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 288, 90, 20, IDC_RULE_PAUSE);
-    make("BUTTON", "No friendly fire", WS_TABSTOP | BS_AUTOCHECKBOX, 182, 288, 108, 20, IDC_RULE_NOFF);
-    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 292, 286, 68, 140, IDC_RULE_HP);
+    make("STATIC", "Mode:", 0, 12, 264, 50, 20, IDC_RULES_LABEL);
+    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 70, 260, 240, 140, IDC_MODE);
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"Coop Lite (Classic)");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"Coop Middle (Standard)");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"Coop Middle (Hardcore)");
+    SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"Custom");
+    SendMessageA(combo, CB_SETCURSEL, 1, 0);
+    make("BUTTON", "Rules...", WS_TABSTOP, 322, 258, 108, 26, IDC_RULES_BTN);
+    /* Hidden rule controls: still the source of truth for load / save / env. */
+    make("BUTTON", "Split gold", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -400, 80, 20, IDC_RULE_GOLD);
+    make("BUTTON", "Loot feed", WS_TABSTOP | BS_AUTOCHECKBOX, 80, -400, 76, 20, IDC_RULE_LOOT);
+    make("BUTTON", "Rest vote", WS_TABSTOP | BS_AUTOCHECKBOX, 160, -400, 80, 20, IDC_RULE_REST);
+    make("BUTTON", "Direct trade", WS_TABSTOP | BS_AUTOCHECKBOX, 240, -400, 92, 20, IDC_RULE_TRADE);
+    make("BUTTON", "Client pause", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -420, 90, 20, IDC_RULE_PAUSE);
+    make("BUTTON", "No friendly fire", WS_TABSTOP | BS_AUTOCHECKBOX, 100, -420, 108, 20, IDC_RULE_NOFF);
+    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, -440, 68, 140, IDC_RULE_HP);
     {
         char label[24];
         int i;
-
         for (i = 0; i < RULE_HP_COUNT; i++) {
             snprintf(label, sizeof(label), "HP %d%%", k_rule_hp[i]);
             SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
         }
         SendMessageA(combo, CB_SETCURSEL, 0, 0);
-        combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 362, 286, 68, 140, IDC_RULE_XP);
+        combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 80, -440, 68, 140, IDC_RULE_XP);
         for (i = 0; i < RULE_XP_COUNT; i++) {
             snprintf(label, sizeof(label), "XP %d%%", k_rule_xp[i]);
             SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
         }
         SendMessageA(combo, CB_SETCURSEL, 0, 0);
     }
-    /* Coop Middle M4: third rules row (the output box below got shorter). */
-    make("BUTTON", "Shared quest items", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 312, 130, 20, IDC_RULE_QITEMS);
-    make("BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 312, 120, 20, IDC_RULE_SFOL);
-    /* Coop Middle M5: fourth rules row. */
-    make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 334, 130, 20, IDC_RULE_USLEEP);
-    /* after M7: auto-levelling (same row and the free end of the M4 row) */
-    make("BUTTON", "Auto-level followers", WS_TABSTOP | BS_AUTOCHECKBOX, 222, 334, 208, 20, IDC_RULE_FLVL);
-    make("BUTTON", "Party level", WS_TABSTOP | BS_AUTOCHECKBOX, 344, 312, 86, 20, IDC_RULE_PLVL);
-    /* Coop Middle M6: fifth rules row (the output box below got shorter). */
-    make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 356, 200, 20, IDC_RULE_SUBINST);
-    /* Coop Middle M7: host autosave interval, same row. */
-    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 292, 354, 138, 140, IDC_RULE_ASAVE);
+    make("BUTTON", "Shared quest items", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -460, 130, 20, IDC_RULE_QITEMS);
+    make("BUTTON", "Shared followers", WS_TABSTOP | BS_AUTOCHECKBOX, 140, -460, 120, 20, IDC_RULE_SFOL);
+    make("BUTTON", "Unified sleep", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -480, 130, 20, IDC_RULE_USLEEP);
+    make("BUTTON", "Auto-level followers", WS_TABSTOP | BS_AUTOCHECKBOX, 140, -480, 208, 20, IDC_RULE_FLVL);
+    make("BUTTON", "Party level", WS_TABSTOP | BS_AUTOCHECKBOX, 280, -460, 86, 20, IDC_RULE_PLVL);
+    make("BUTTON", "Solo interiors/dungeons", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -500, 200, 20, IDC_RULE_SUBINST);
+    combo = make("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 210, -500, 138, 140, IDC_RULE_ASAVE);
     {
         char label[32];
         int i;
-
         for (i = 0; i < RULE_ASAVE_COUNT; i++) {
             if (k_rule_asave[i] == 0) {
                 snprintf(label, sizeof(label), "Auto-save: Off");
@@ -2385,31 +2706,43 @@ static void create_controls(void)
             }
             SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)label);
         }
-        SendMessageA(combo, CB_SETCURSEL, 2, 0); /* 10 min */
+        SendMessageA(combo, CB_SETCURSEL, 2, 0);
     }
-    /* t391u: one switch for the Coop Lite 1.0 rules (greys the others). */
-    make("BUTTON", "Dynamic difficulty", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 380, 200, 20, IDC_RULE_DSCALE);
-    make("BUTTON", "Coop Lite mode (as release 1.0)", WS_TABSTOP | BS_AUTOCHECKBOX, 90, 402, 340, 20, IDC_RULE_LITE);
+    make("BUTTON", "Dynamic difficulty", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -520, 200, 20, IDC_RULE_DSCALE);
+    make("BUTTON", "Coop Lite mode (as release 1.0)", WS_TABSTOP | BS_AUTOCHECKBOX, 0, -540, 340, 20, IDC_RULE_LITE);
+    {
+        static const int hidden[] = {
+            IDC_RULE_GOLD, IDC_RULE_LOOT, IDC_RULE_REST, IDC_RULE_TRADE,
+            IDC_RULE_PAUSE, IDC_RULE_NOFF, IDC_RULE_HP, IDC_RULE_XP,
+            IDC_RULE_QITEMS, IDC_RULE_SFOL, IDC_RULE_USLEEP, IDC_RULE_FLVL,
+            IDC_RULE_PLVL, IDC_RULE_SUBINST, IDC_RULE_ASAVE, IDC_RULE_DSCALE,
+            IDC_RULE_LITE
+        };
+        int i;
+        for (i = 0; i < (int)(sizeof(hidden) / sizeof(hidden[0])); i++) {
+            ShowWindow(item(hidden[i]), SW_HIDE);
+        }
+    }
     make("EDIT", "Press 'Check port' to test whether friends can reach you.", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 426, 418, 34, IDC_CHECK_OUT);
-    make("STATIC", "", SS_LEFT, 12, 464, 418, 36, IDC_STATUS);
-    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 506, 100, 30, IDC_START);
-    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 506, 96, 30, IDC_RECONNECT);
-    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 506, 130, 30, IDC_BUGREPORT);
-    make("BUTTON", "Close", WS_TABSTOP, 250, 506, 70, 30, IDC_PANEL_CLOSE);
-    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 550, 196, 20, IDC_UPD_TEXT);
-    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 546, 120, 26, IDC_UPD_CHECK);
-    make("BUTTON", "Update", WS_TABSTOP, 340, 546, 90, 26, IDC_UPD_GO);
+        12, 294, 418, 88, IDC_CHECK_OUT);
+    make("STATIC", "", SS_LEFT, 12, 390, 418, 32, IDC_STATUS);
+    make("BUTTON", "Start", WS_TABSTOP | BS_DEFPUSHBUTTON, 330, 432, 100, 30, IDC_START);
+    make("BUTTON", "Reconnect", WS_TABSTOP, 12, 432, 96, 30, IDC_RECONNECT);
+    make("BUTTON", "Create bug report", WS_TABSTOP, 114, 432, 130, 30, IDC_BUGREPORT);
+    make("BUTTON", "Close", WS_TABSTOP, 250, 432, 70, 30, IDC_PANEL_CLOSE);
+    make("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, 12, 476, 196, 20, IDC_UPD_TEXT);
+    make("BUTTON", "Check for updates", WS_TABSTOP, 214, 472, 120, 26, IDC_UPD_CHECK);
+    make("BUTTON", "Update", WS_TABSTOP, 340, 472, 90, 26, IDC_UPD_GO);
     ShowWindow(item(IDC_UPD_GO), SW_HIDE);
-    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 582, 418, 18, IDC_LOBBY_LABEL);
+    make("STATIC", "Lobby - players && chat (while the game runs):", 0, 12, 508, 418, 18, IDC_LOBBY_LABEL);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        12, 602, 200, 100, IDC_PLAYERS);
+        12, 528, 200, 100, IDC_PLAYERS);
     make("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        220, 602, 210, 100, IDC_LOBBY_CHAT);
-    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 708, 330, 22, IDC_LOBBY_INPUT);
+        220, 528, 210, 100, IDC_LOBBY_CHAT);
+    make("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 12, 634, 330, 22, IDC_LOBBY_INPUT);
     SendMessageA(item(IDC_LOBBY_INPUT), EM_LIMITTEXT, 120, 0);
-    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 706, 80, 26, IDC_LOBBY_SEND);
-    make("STATIC", "", SS_LEFT, 12, 736, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
+    make("BUTTON", "Send", WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 632, 80, 26, IDC_LOBBY_SEND);
+    make("STATIC", "", SS_LEFT, 12, 662, 418, 36, IDC_LOBBY_RULES); /* M7: rules status line */
     show_panel(false);
     show_lobby(false);
 }
@@ -2467,8 +2800,16 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_JOIN:
             refresh();
             break;
-        case IDC_RULE_LITE:
-            refresh(); /* greys / ungreys the other rules */
+        case IDC_MODE:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                LRESULT sel = SendMessageA(item(IDC_MODE), CB_GETCURSEL, 0, 0);
+                if (sel >= COOP_PRESET_LITE && sel <= COOP_PRESET_HARDCORE) {
+                    rules_apply_mode((int)sel);
+                }
+            }
+            break;
+        case IDC_RULES_BTN:
+            rules_dialog_run();
             break;
         case IDC_CHECK:
             start_check(true);
