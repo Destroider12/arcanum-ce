@@ -1389,6 +1389,23 @@ bool tig_net_client_is_active(int client_id)
     return clients[client_id].active;
 }
 
+int tig_net_client_rtt_ms(int client_id)
+{
+    unsigned int rtt = 0;
+    unsigned int loss = 0;
+
+    if (client_id <= 0 || client_id >= TIG_NET_MAX_PLAYERS || !active || tp == NULL || tp->peer_stats == NULL) {
+        return 0;
+    }
+    if (clients[client_id].peer == NULL || !clients[client_id].active) {
+        return 0;
+    }
+    if (!tp->peer_stats(clients[client_id].peer, &rtt, &loss)) {
+        return 0;
+    }
+    return (int)rtt;
+}
+
 bool tig_net_client_is_waiting(int client_id)
 {
     if (client_id < 0 || client_id >= TIG_NET_MAX_PLAYERS) {

@@ -50,13 +50,15 @@ extern "C" {
 /* After M7 (protocol 60): auto-levelling (host-authoritative). */
 #define COOP_RULE_FOLLOWER_LEVEL 0x00001000u /* key flvl: a follower below its leader PC's level is raised to it */
 #define COOP_RULE_PARTY_LEVEL 0x00002000u /* key plvl: every PC's XP follows the party's highest (late joiners too) */
+/* M8: 0x800 is already COOP_RULE_LITE_MODE. Dynamic difficulty uses the next free bit. */
+#define COOP_RULE_DYNAMIC_SCALE 0x00004000u /* key dscale: extra living players raise enemy HP/XP */
 
 #define COOP_RULE_M1_MASK (COOP_RULE_GOLD_SPLIT | COOP_RULE_LOOT_FEED | COOP_RULE_REST_VOTE)
 /* Rules that do something (always in the env string / description). */
 #define COOP_RULE_ACTIVE_MASK \
     (COOP_RULE_M1_MASK | COOP_RULE_DIRECT_TRADE | COOP_RULE_CLIENT_PAUSE | COOP_RULE_NO_FRIENDLY_FIRE_AOE \
         | COOP_RULE_SHARED_QUEST_ITEMS | COOP_RULE_SHARED_FOLLOWERS | COOP_RULE_FREE_OVERWORLD \
-        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL)
+        | COOP_RULE_UNIFIED_SLEEP | COOP_RULE_SUBINSTANCES | COOP_RULE_FOLLOWER_LEVEL | COOP_RULE_PARTY_LEVEL         | COOP_RULE_DYNAMIC_SCALE)
 /* lite is written to the env string only when it is on (older strings stay the same). */
 #define COOP_RULE_KNOWN_MASK (COOP_RULE_ACTIVE_MASK | COOP_RULE_LITE_MODE)
 /* What Lite mode keeps: the mode bit and the [Loot] chat feed (a UI line). */

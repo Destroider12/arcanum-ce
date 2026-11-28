@@ -31,7 +31,7 @@ extern "C" {
 #define TIG_NET_MAX_PACKET 16384
 /* Co-op wire protocol revision, exchanged in WELCOME / NAME. Bump it when a
    packet layout changes: mismatched builds refuse each other cleanly. */
-#define TIG_NET_PROTOCOL 60 /* Coop Middle after M7 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55, M4 56, M5 57, M6 58, M7 59):
+#define TIG_NET_PROTOCOL 61 /* Coop Middle M8 (NpcStats spell_tech 25; was 60 after autolevel / M7 (Coop Lite 1.0 stays on 52; M1 53, M2 54, M3 55, M4 56, M5 57, M6 58, M7 59):
                                M1 PACKET_COOP_RULES + REST_ASK / REST_REFUSE + loot feed;
                                M2 COOP_BARTER_OPEN_TRADE, COOP_CTRL_SLOT_STATUS, trade chat lines;
                                M3 PACKET_COOP_PING (168), COOP_CTRL_PAUSE, /tp chat lines;
@@ -119,6 +119,7 @@ typedef struct TigNetHudStats {
 bool tig_net_get_hud_stats(TigNetHudStats* out);
 
 bool tig_net_client_is_active(int client_id);
+int tig_net_client_rtt_ms(int client_id); /* 0 = host or unknown (M8 /who) */
 bool tig_net_kick_slot(int slot); /* PT77n: host drops a stale slot now */
 /* Unreliable+sequenced pose traffic on its own channel (review M7). */
 void tig_net_send_pose_all(void* data, int size);
