@@ -81,13 +81,18 @@ extern "C" {
 #define COOP_MID_CHAT_SUBINST 10 /* M6: name = player, text = "1|map" entered / "0|map" left a solo instance */
 #define COOP_MID_CHAT_COLLAPSE 11 /* M7: name = player, text = "-" (fell unconscious from fatigue) */
 #define COOP_MID_CHAT_AUTOSAVE 12 /* M7: name = "", text = "N" (AutoSave N written) */
-#define COOP_MID_CHAT_KIND_MAX 12
+#define COOP_MID_CHAT_INFO 13 /* M8: name unused, text shown as-is (/who, /rules, /help) */
+#define COOP_MID_CHAT_KIND_MAX 13
 
 /* M3 chat commands (pure parse; the host runs them, never relayed). */
 #define COOP_CMD_NONE 0
 #define COOP_CMD_TP 1 /* /tp: a client to the host */
 #define COOP_CMD_STUCK 2 /* /stuck: the same */
 #define COOP_CMD_GATHER 3 /* /gather or /tp all: the host pulls everyone */
+#define COOP_CMD_TP_NAME 4 /* /tp <Name>: prefix match on the same map (M8) */
+#define COOP_CMD_WHO 5
+#define COOP_CMD_RULES 6
+#define COOP_CMD_HELP 7
 #define COOP_CMD_COOLDOWN_MS 30000u /* per slot */
 #define COOP_TP_ENEMY_RANGE 20 /* tiles: a hostile NPC focused on you blocks /tp */
 
@@ -98,8 +103,10 @@ extern "C" {
 #define COOP_TP_REFUSE_COOLDOWN 5 /* + seconds left */
 #define COOP_TP_REFUSE_HOST_ONLY 6 /* /gather from a client */
 #define COOP_TP_REFUSE_NOBODY 7 /* /gather: nobody could be moved */
-#define COOP_TP_REFUSE_SELF 8 /* /tp from the host */
-#define COOP_TP_REFUSE_MAX 8
+#define COOP_TP_REFUSE_SELF 8 /* bare /tp from the host */
+#define COOP_TP_REFUSE_BUSY 9 /* in a solo instance */
+#define COOP_TP_REFUSE_NOT_FOUND 10 /* /tp <Name> matched nobody */
+#define COOP_TP_REFUSE_MAX 10
 
 /* M3 pings: a marked tile, shown to everyone on the same map. */
 #define PACKET_COOP_PING 168
@@ -229,6 +236,10 @@ int coop_middle_scale_xp(int raw_xp, int pct);
 /* M3: "/tp", "/stuck", "/gather", "/tp all" (case-insensitive, spaces
    trimmed) -> COOP_CMD_*; anything else (plain text, "/unknown") -> NONE. */
 int coop_middle_parse_cmd(const char* text);
+/* M8: also fills name_out for /tp <Name> (original spelling, trimmed). */
+int coop_middle_parse_cmd_ex(const char* text, char* name_out, size_t name_cap);
+/* Case-insensitive prefix among ok[i] names. -1 = none or ambiguous, else index. */
+int coop_middle_name_prefix_slot(const char* prefix, const char* const* names, const bool* ok, int n);
 /* M3: once per interval: true (and *last_ms = now) when nothing was
    admitted yet or interval_ms passed. */
 bool coop_middle_rate_admit(bool* have_last, unsigned int* last_ms, unsigned int now_ms, unsigned int interval_ms);
@@ -435,6 +446,7 @@ const char* coop_middle_sleep_banner_text(char* out, size_t sz, int ready, int l
 /* Host -> a client inside a solo instance (M6): the party slept `a` hours
    (1..168); heal the PC + its followers locally under a fade. b = 0. */
 #define COOP_CTRL_SLEEP_APPLY 11
+#define COOP_CTRL_FOLLOW 12 /* client -> host: a = follow-target slot (0-7) or -1 (off), b = 0 */
 #define COOP_SLEEP_APPLY_MAX_HOURS 168
 /* Slots that get SLEEP_APPLY when a unified sleep runs: living clients
    with a solo-instance lease (never the host, slot 0). */
@@ -489,6 +501,21 @@ int coop_middle_party_xp_target(const int* xp, int n);
 bool coop_middle_solo_hop_rule(bool middle, int cur_map, int dest_map);
 /* t405u (pure): Middle keeps a valid saved/merge loc; Lite or a bad loc uses follow_loc. */
 int64_t coop_middle_place_loc(bool middle, int64_t saved_loc, bool saved_ok, int64_t follow_loc);
+/* M8: enemy HP/XP when dynamic difficulty is on (living_count includes solo instances). */
+int coop_middle_effective_hp_pct(int base_hp_pct, bool dynamic, int living_count);
+int coop_middle_effective_xp_pct(int base_xp_pct, bool dynamic, int living_count);
+/* M8 convoy: a living slot on map 1, following the leader, within 15 tiles,
+   not in combat/dialog/subinst/own travel. */
+bool coop_middle_convoy_eligible(bool free_ow, int map, int leader, int slot, int follow_target_slot,
+    int dist_tiles, bool alive, bool in_combat, bool in_dialog, bool in_subinst, bool in_own_travel);
+#define COOP_CONVOY_RANGE 15
+/* M8: host should show the sleep-consent window. */
+bool coop_middle_sleep_consent_needed(bool host, bool usleep, bool rest_vote, bool host_ready, bool rest_prompt,
+    bool sleep_round);
+/* UI registers these; tests leave them NULL. rest=true is a rest-ask window. */
+typedef void (*CoopMiddleSleepConsentOpenFn)(const char* name, const char* mode, int ready, int total, bool rest);
+void coop_middle_set_sleep_consent(CoopMiddleSleepConsentOpenFn open, void (*close)(void));
+void coop_middle_follow_notify(int target_slot); /* -1 = off; host stores the G-follow target */
 /* t402u (pure): a client's follower list rebuilt from the host table (see .c). */
 int coop_middle_follower_list_plan(const int64_t* have, const bool* have_ok, int n_have, const int64_t* want,
     int n_want, int64_t* out, int max, bool* changed);
