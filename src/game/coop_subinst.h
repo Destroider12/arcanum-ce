@@ -76,8 +76,10 @@ int coop_subinst_unpack_buf(const uint8_t* wire, size_t wire_len, uint8_t* raw, 
 #define COOP_SUBINST_MAX_QTY (4 + COOP_SUBINST_MAX_QTY_ITEMS * COOP_SUBINST_QTY_ENTRY)
 /* M8: optional 4th section — followers (bundle + stacks + HP/fatigue + dead). */
 #define COOP_SUBINST_FOL_MAX 8
+#define COOP_SUBINST_MAX_FOLLOWERS COOP_SUBINST_FOL_MAX /* M9 alias */
 #define COOP_SUBINST_FOL_BUNDLE_MAX (64 * 1024)
 #define COOP_SUBINST_FOL_DEAD 0x1u
+#define COOP_SUBINST_FOL_NEW 0x2u /* hired inside the instance; host spawns at final commit */
 #define COOP_SUBINST_OID_SIZE 24
 #define COOP_SUBINST_MAX_FOL_SECTION (4 + COOP_SUBINST_FOL_MAX * (COOP_SUBINST_OID_SIZE + 20 + COOP_SUBINST_FOL_BUNDLE_MAX + COOP_SUBINST_MAX_QTY))
 #define COOP_SUBINST_MAX_PAYLOAD (16 + COOP_SUBINST_MAX_WIRE + COOP_SUBINST_MAX_BUNDLE + COOP_SUBINST_MAX_QTY + COOP_SUBINST_MAX_FOL_SECTION)

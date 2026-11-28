@@ -880,6 +880,7 @@ bool coop_subinst_delta_valid(const PacketCoopSubinstDelta* pkt, int size)
 #include "game/combat.h"
 #include "game/coop_lite.h"
 #include "game/coop_middle.h"
+#include "game/ui.h"
 #include "game/coop_rules.h"
 #include "game/critter.h"
 #include "game/fate.h"
@@ -1578,13 +1579,86 @@ static void si_host_release(int slot, int64_t loc, const char* why)
 }
 
 
-static void si_host_apply_fol(int64_t pc, CoopSubinstSection fol, bool spawn)
+static void si_hid_drop_oid(int slot, ObjectID oid)
+{
+    SiHidden* h;
+    int i;
+
+    if (slot < 0 || slot >= 8) {
+        return;
+    }
+    h = &si_hid[slot];
+    for (i = 1; i < h->count; i++) { /* [0] is the parked PC */
+        if (objid_is_equal(h->oid[i], oid)) {
+            int k;
+            for (k = i; k < h->count - 1; k++) {
+                h->oid[k] = h->oid[k + 1];
+                h->added[k] = h->added[k + 1];
+            }
+            h->count--;
+            return;
+        }
+    }
+}
+
+static bool si_fol_has_oid(const CoopSubinstFolRec* recs, int n, ObjectID oid)
+{
+    int i;
+    ObjectID x;
+
+    for (i = 0; i < n; i++) {
+        memcpy(&x, recs[i].oid, sizeof(x));
+        if (objid_is_equal(x, oid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void si_host_dismiss_missing(int slot, int64_t pc, const CoopSubinstFolRec* recs, int n)
+{
+    ObjectList objects;
+    ObjectNode* node;
+    int64_t drop[COOP_SUBINST_FOL_MAX + 8];
+    int dn = 0;
+    int i;
+
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    object_list_all_followers(pc, &objects);
+    for (node = objects.head; node != NULL; node = node->next) {
+        ObjectID oid;
+        if (node->obj == OBJ_HANDLE_NULL || !obj_handle_is_valid(node->obj)) {
+            continue;
+        }
+        oid = obj_get_id(node->obj);
+        if (!si_fol_has_oid(recs, n, oid) && dn < (int)(sizeof(drop) / sizeof(drop[0]))) {
+            drop[dn++] = node->obj;
+        }
+    }
+    object_list_destroy(&objects);
+    for (i = 0; i < dn; i++) {
+        ObjectID oid = obj_get_id(drop[i]);
+        tig_debug_printf("CoopSubinst: dismissing follower missing from the commit section\n");
+        critter_disband(drop[i], true);
+        si_hid_drop_oid(slot, oid);
+        coop_lite_host_object_destroyed(drop[i]);
+        object_destroy(drop[i]);
+    }
+}
+
+static void si_host_apply_fol(int slot, int64_t pc, CoopSubinstSection fol, bool spawn)
 {
     CoopSubinstFolRec recs[COOP_SUBINST_FOL_MAX];
     int n = 0;
     int i;
 
-    if (pc == OBJ_HANDLE_NULL || fol.data == NULL || fol.len == 0) {
+    if (pc == OBJ_HANDLE_NULL) {
+        return;
+    }
+    /* A missing 4th section (legacy 3-section payload) must not dismiss anyone. */
+    if (fol.data == NULL || fol.len == 0) {
         return;
     }
     if (!coop_subinst_fol_decode(fol.data, fol.len, recs, COOP_SUBINST_FOL_MAX, &n)) {
@@ -1605,6 +1679,7 @@ static void si_host_apply_fol(int64_t pc, CoopSubinstSection fol, bool spawn)
             tig_debug_printf("CoopSubinst: follower %d not committed\n", i);
         }
     }
+    si_host_dismiss_missing(slot, pc, recs, n);
 }
 
 static void si_host_apply(int slot)
@@ -1650,7 +1725,7 @@ static void si_host_apply(int slot)
                 c->fatigue_damage)) {
             tig_debug_printf("CoopSubinst: slot %d checkpoint: character not reconciled\n", slot);
         }
-        si_host_apply_fol(pc, fol, false);
+        si_host_apply_fol(slot, pc, fol, false);
         free(si_ckpt[slot]);
         si_ckpt[slot] = rx->data; /* kept for a disconnect */
         si_ckpt_len[slot] = rx->total;
@@ -1670,7 +1745,7 @@ static void si_host_apply(int slot)
                 c->fatigue_damage)) {
             tig_debug_printf("CoopSubinst: slot %d character not reconciled (kept as it was)\n", slot);
         }
-        si_host_apply_fol(pc, fol, true);
+        si_host_apply_fol(slot, pc, fol, true);
     }
     coop_subinst_rx_free(rx);
     if ((c->flags & COOP_SUBINST_F_DEAD) != 0) {
@@ -2257,19 +2332,21 @@ static bool si_client_commit(int dest_map, int64_t dest_loc, bool checkpoint, bo
             int k;
             int fcnt;
 
-            if (!coop_lite_build_pc_bundle(node->obj, &fol_bundle[fn])
-                || fol_bundle[fn].size > COOP_SUBINST_FOL_BUNDLE_MAX) {
-                coop_char_bundle_free(&fol_bundle[fn]);
-                memset(&fol_bundle[fn], 0, sizeof(fol_bundle[fn]));
-                continue;
-            }
             memset(recs[fn].oid, 0, sizeof(recs[fn].oid));
             memcpy(recs[fn].oid, &oid, sizeof(oid) < sizeof(recs[fn].oid) ? sizeof(oid) : sizeof(recs[fn].oid));
             recs[fn].hp_damage = object_hp_damage_get(node->obj);
             recs[fn].fatigue_damage = critter_fatigue_damage_get(node->obj);
             recs[fn].flags = critter_is_dead(node->obj) ? COOP_SUBINST_FOL_DEAD : 0;
-            recs[fn].bundle = fol_bundle[fn].data;
-            recs[fn].bundle_len = (uint32_t)fol_bundle[fn].size;
+            if (coop_lite_build_pc_bundle(node->obj, &fol_bundle[fn])
+                && fol_bundle[fn].size <= COOP_SUBINST_FOL_BUNDLE_MAX) {
+                recs[fn].bundle = fol_bundle[fn].data;
+                recs[fn].bundle_len = (uint32_t)fol_bundle[fn].size;
+            } else {
+                coop_char_bundle_free(&fol_bundle[fn]);
+                memset(&fol_bundle[fn], 0, sizeof(fol_bundle[fn]));
+                recs[fn].bundle = NULL;
+                recs[fn].bundle_len = 0;
+            }
             fcnt = obj_arrayfield_length_get(node->obj, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
             for (k = 0; k < fcnt && fqn < COOP_SUBINST_MAX_QTY_ITEMS; k++) {
                 int64_t item = obj_arrayfield_handle_get(node->obj, OBJ_F_CRITTER_INVENTORY_LIST_IDX, k);
@@ -2299,7 +2376,9 @@ static bool si_client_commit(int dest_map, int64_t dest_loc, bool checkpoint, bo
         object_list_destroy(&followers);
         s_fol.data = NULL;
         s_fol.len = 0;
-        if (fn > 0 && coop_subinst_fol_encode(fol_sec, sizeof(fol_sec), &fol_len, recs, fn) && fol_len > 0) {
+        /* Always write the section (count 0 included) so the host can dismiss
+           followers that left the party inside the instance. */
+        if (coop_subinst_fol_encode(fol_sec, sizeof(fol_sec), &fol_len, recs, fn) && fol_len > 0) {
             s_fol.data = fol_sec;
             s_fol.len = fol_len;
         }
@@ -2368,6 +2447,9 @@ bool coop_subinst_client_travel(const TeleportData* td)
     }
     if (si_cl_state != COOP_SUBINST_ST_ACTIVE || !si_cl_entered) {
         return true; /* a transfer is running: wait */
+    }
+    if (player_get_local_pc_obj() != OBJ_HANDLE_NULL) {
+        ui_end_dialog(player_get_local_pc_obj(), 0);
     }
     if (si_client_commit(td->map, td->loc, false, false)) {
         coop_lite_mid_notice(coop_lite_lang_ru() ? "Сохраняем локацию и возвращаемся к группе..."

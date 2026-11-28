@@ -1566,6 +1566,7 @@ bool coop_lite_oid_unmap_ok(int64_t mapped, int64_t obj);
 /* PT45: PC -> another player's PC, into their pack: a gift (no roll). */
 bool coop_lite_party_gift(bool source_is_pc, bool target_is_pc, bool from_target);
 void coop_lite_host_pc_changed(int64_t pc, bool stats);
+void coop_lite_host_npc_changed(int64_t npc); /* M9: Packet70 + NPC_POS/NPC_STATS after a subinst spawn */
 /* PT46: loot move at the client's cell failed: retry with host placement. */
 bool coop_lite_loot_retry_auto_slot(bool moved, bool stackable, bool still_at_source);
 /* PT48: drop null/duplicate inventory handles; returns new count. */
