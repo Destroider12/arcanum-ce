@@ -179,6 +179,8 @@ static int64_t coop_lite_host_pc_obj(void)
 #include "game/quest.h"
 #include "game/rumor.h"
 #include "game/reputation.h"
+#include "game/bless.h"
+#include "game/curse.h"
 #include "ui/logbook_ui.h"
 #include "game/random.h"
 #include "game/gfade.h"
@@ -7990,6 +7992,7 @@ void coop_lite_follow_cancel(void)
 {
     if (coop_follow_on) {
         coop_follow_on = false;
+        coop_middle_follow_notify(-1);
         tig_debug_printf("CoopLite: follow: off\n");
     }
 }
@@ -8027,6 +8030,7 @@ bool coop_lite_follow_toggle(void)
         coop_follow_oid = obj_get_id(best);
         coop_follow_on = true;
         coop_follow_ms = 0;
+        coop_middle_follow_notify(coop_lite_slot_of_obj(best));
         tig_debug_printf("CoopLite: follow: on (slot %d's PC, %d tiles)\n", coop_lite_slot_of_obj(best), (int)best_d);
         return true;
     }
@@ -9717,7 +9721,7 @@ COOP_STATIC_ASSERT(COOP_PCB_STATS == STAT_COUNT, "PCB stats");
 COOP_STATIC_ASSERT(COOP_PCB_BASIC == BASIC_SKILL_COUNT, "PCB basic skills");
 COOP_STATIC_ASSERT(COOP_NPC_BASIC_SKILLS == BASIC_SKILL_COUNT, "M4 follower basic skills");
 COOP_STATIC_ASSERT(COOP_NPC_TECH_SKILLS == TECH_SKILL_COUNT, "M4 follower tech skills");
-COOP_STATIC_ASSERT(COOP_NPC_SPELL_TECH == COLLEGE_COUNT, "M4 follower spell colleges");
+COOP_STATIC_ASSERT(COOP_NPC_SPELL_TECH == COLLEGE_COUNT + 1 + TECH_COUNT, "M8 spell colleges + mastery + tech degrees");
 COOP_STATIC_ASSERT(COOP_PCB_TECH == TECH_SKILL_COUNT, "PCB tech skills");
 COOP_STATIC_ASSERT(COOP_PCB_COLLEGES == COLLEGE_COUNT, "PCB colleges");
 COOP_STATIC_ASSERT(COOP_PCB_SPELL_TECH == COLLEGE_COUNT + 1 + TECH_COUNT, "PCB spell/tech");
@@ -10338,6 +10342,12 @@ static void coop_lite_host_story_tick(unsigned int now_ms)
         if (pc != host_pc) {
             coop_story_read_pc(pc, &coop_story_other);
             coop_story_merge(&coop_story_slot, &coop_story_other);
+            /* M8: under Middle, reputations stay personal (quests/rumors stay merged). */
+            if (coop_middle_free_or_sub()) {
+                coop_story_slot.n_rep = coop_story_other.n_rep;
+                memcpy(coop_story_slot.rep, coop_story_other.rep, sizeof(coop_story_slot.rep));
+                memcpy(coop_story_slot.rep_ts, coop_story_other.rep_ts, sizeof(coop_story_slot.rep_ts));
+            }
         }
         size = coop_story_encode(&coop_story_slot, coop_story_txblob, sizeof(coop_story_txblob));
         if (size == 0) {
@@ -23818,6 +23828,155 @@ static bool coop_lite_oid_in_blobs(const CoopBundleBlobs* b, ObjectID oid)
    read in with their OIDs; items on both sides keep our copy, gold / ammo
    take the client's quantity), then the vitals. All blobs are checked
    before anything changes; false = nothing changed. */
+
+static void coop_lite_copy_u32_array(int64_t dst, int64_t src, int fld, int cap)
+{
+    int n = obj_arrayfield_length_get(src, fld);
+    int i;
+
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > cap) {
+        n = cap;
+    }
+    obj_arrayfield_length_set(dst, fld, 0);
+    for (i = 0; i < n; i++) {
+        obj_arrayfield_uint32_set(dst, fld, i, obj_arrayfield_uint32_get(src, fld, i));
+    }
+}
+
+/* M8: copy the returned PC's build (stats, skills, spells/tech, schematics,
+   blessings, curses, fate) off the char bundle. The blob is read with a
+   nulled OID so obj_read_mem cannot steal the host PC's identity. */
+static void coop_lite_host_pc_commit_build(int64_t pc, const uint8_t* blob, int blob_size)
+{
+    uint8_t* tmp;
+    int64_t src = OBJ_HANDLE_NULL;
+    int stats[8];
+    int i;
+    int have[64];
+    int want[64];
+    int have_n;
+    int want_n;
+
+    if (pc == OBJ_HANDLE_NULL || blob == NULL || blob_size <= COOP_BLOB_OID_AT + 24) {
+        return;
+    }
+    tmp = (uint8_t*)MALLOC((size_t)blob_size);
+    if (tmp == NULL) {
+        return;
+    }
+    memcpy(tmp, blob, (size_t)blob_size);
+    memset(tmp + COOP_BLOB_OID_AT, 0, 24);
+    if (!obj_read_mem(tmp, &src) || src == OBJ_HANDLE_NULL) {
+        tig_debug_printf("CoopLite: M8 reconcile: PC build blob not read\n");
+        FREE(tmp);
+        return;
+    }
+    for (i = 0; i < 8; i++) {
+        stats[i] = stat_base_get(src, STAT_STRENGTH + i);
+    }
+    if (!coop_lite_char_plausible(stat_level_get(src, STAT_LEVEL),
+            stat_level_get(src, STAT_EXPERIENCE_POINTS), stats, 8, 0, 0)) {
+        tig_debug_printf("CoopLite: M8 reconcile: PC build refused (implausible stats)\n");
+        obj_deallocate(src);
+        FREE(tmp);
+        return;
+    }
+    tig_net_local_suspend_begin();
+    for (i = 0; i < STAT_COUNT; i++) {
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_STAT_BASE_IDX, i,
+            obj_arrayfield_int32_get(src, OBJ_F_CRITTER_STAT_BASE_IDX, i));
+    }
+    for (i = 0; i < BASIC_SKILL_COUNT; i++) {
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_BASIC_SKILL_IDX, i,
+            obj_arrayfield_int32_get(src, OBJ_F_CRITTER_BASIC_SKILL_IDX, i));
+    }
+    for (i = 0; i < TECH_SKILL_COUNT; i++) {
+        obj_arrayfield_int32_set(pc, OBJ_F_CRITTER_TECH_SKILL_IDX, i,
+            obj_arrayfield_int32_get(src, OBJ_F_CRITTER_TECH_SKILL_IDX, i));
+    }
+    for (i = 0; i < 25; i++) {
+        obj_arrayfield_uint32_set(pc, OBJ_F_CRITTER_SPELL_TECH_IDX, i,
+            obj_arrayfield_uint32_get(src, OBJ_F_CRITTER_SPELL_TECH_IDX, i));
+    }
+    coop_lite_copy_u32_array(pc, src, OBJ_F_PC_SCHEMATICS_FOUND_IDX, 256);
+    /* Blessings / curses: add or drop through the engine so effects stay in sync. */
+    have_n = obj_arrayfield_length_get(pc, OBJ_F_PC_BLESSING_IDX);
+    if (have_n > 64) {
+        have_n = 64;
+    }
+    for (i = 0; i < have_n; i++) {
+        have[i] = (int)obj_arrayfield_uint32_get(pc, OBJ_F_PC_BLESSING_IDX, i);
+    }
+    want_n = obj_arrayfield_length_get(src, OBJ_F_PC_BLESSING_IDX);
+    if (want_n > 64) {
+        want_n = 64;
+    }
+    for (i = 0; i < want_n; i++) {
+        want[i] = (int)obj_arrayfield_uint32_get(src, OBJ_F_PC_BLESSING_IDX, i);
+    }
+    for (i = 0; i < have_n; i++) {
+        int k;
+        bool keep = false;
+
+        for (k = 0; k < want_n; k++) {
+            if (have[i] == want[k]) {
+                keep = true;
+                break;
+            }
+        }
+        if (!keep) {
+            bless_remove(pc, have[i]);
+        }
+    }
+    for (i = 0; i < want_n; i++) {
+        if (!bless_has(pc, want[i])) {
+            bless_add(pc, want[i]);
+        }
+    }
+    have_n = obj_arrayfield_length_get(pc, OBJ_F_PC_CURSE_IDX);
+    if (have_n > 64) {
+        have_n = 64;
+    }
+    for (i = 0; i < have_n; i++) {
+        have[i] = (int)obj_arrayfield_uint32_get(pc, OBJ_F_PC_CURSE_IDX, i);
+    }
+    want_n = obj_arrayfield_length_get(src, OBJ_F_PC_CURSE_IDX);
+    if (want_n > 64) {
+        want_n = 64;
+    }
+    for (i = 0; i < want_n; i++) {
+        want[i] = (int)obj_arrayfield_uint32_get(src, OBJ_F_PC_CURSE_IDX, i);
+    }
+    for (i = 0; i < have_n; i++) {
+        int k;
+        bool keep = false;
+
+        for (k = 0; k < want_n; k++) {
+            if (have[i] == want[k]) {
+                keep = true;
+                break;
+            }
+        }
+        if (!keep) {
+            curse_remove(pc, have[i]);
+        }
+    }
+    for (i = 0; i < want_n; i++) {
+        if (!curse_has(pc, want[i])) {
+            curse_add(pc, want[i]);
+        }
+    }
+    obj_field_int32_set(pc, OBJ_F_PC_FLAGS_FATE, obj_field_int32_get(src, OBJ_F_PC_FLAGS_FATE));
+    tig_net_local_suspend_end();
+    obj_deallocate(src);
+    FREE(tmp);
+    coop_lite_host_pc_changed(pc, true);
+    tig_debug_printf("CoopLite: M8 reconcile: PC build committed (level %d)\n", stat_level_get(pc, STAT_LEVEL));
+}
+
 bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundle_len, const CoopSubinstQty* qty,
     int qty_n, int hp_damage, int fatigue_damage)
 {
@@ -23919,6 +24078,7 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
         }
         coop_lite_inv_list_repair(pc);
         tig_net_local_suspend_end();
+        coop_lite_host_pc_commit_build(pc, blobs.blob[0], (int)blobs.size[0]);
     }
     /* Item state from the client (also for items we already had): amounts,
        wear, charges, mana, and where it sits / what is worn. */
@@ -23997,6 +24157,113 @@ bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundl
     }
     tig_debug_printf("CoopLite: M6 reconcile: %d item(s) in, %d out, %d quantities, hp dmg %d, fatigue dmg %d\n",
         added, removed, qty_n, hp_damage, fatigue_damage);
+    return true;
+}
+
+
+bool coop_lite_host_follower_commit(int64_t leader, const CoopSubinstFolRec* rec, const CoopSubinstQty* qty, int qty_n,
+    bool spawn)
+{
+    ObjectID oid;
+    int64_t npc;
+    ObjectID x;
+    int i;
+
+    if (leader == OBJ_HANDLE_NULL || rec == NULL || !tig_net_is_host()) {
+        return false;
+    }
+    memcpy(&oid, rec->oid, sizeof(oid));
+    npc = obj_pool_perm_lookup(oid);
+    if (npc == OBJ_HANDLE_NULL) {
+        CoopBundleBlobs blobs;
+        int count = 0;
+        int type;
+        int64_t at;
+
+        if (!spawn || rec->bundle == NULL || rec->bundle_len == 0) {
+            return false;
+        }
+        memset(&blobs, 0, sizeof(blobs));
+        if (!coop_char_bundle_parse(rec->bundle, rec->bundle_len, coop_lite_bundle_collect, &blobs, &count, NULL, NULL)
+            || blobs.n < 1 || blobs.n != count) {
+            tig_debug_printf("CoopLite: M8 follower spawn: bundle refused\n");
+            return false;
+        }
+        memcpy(&type, blobs.blob[0] + COOP_BLOB_TYPE_AT, sizeof(type));
+        if (type != OBJ_TYPE_NPC) {
+            tig_debug_printf("CoopLite: M8 follower spawn: blob is not an NPC\n");
+            return false;
+        }
+        tig_net_local_suspend_begin();
+        if (!obj_read_mem((uint8_t*)blobs.blob[0], &npc) || npc == OBJ_HANDLE_NULL) {
+            tig_net_local_suspend_end();
+            tig_debug_printf("CoopLite: M8 follower spawn: NPC blob not read\n");
+            return false;
+        }
+        obj_load_postprocess(npc);
+        obj_field_int32_set(npc, OBJ_F_FLAGS, obj_field_int32_get(npc, OBJ_F_FLAGS) | OF_DYNAMIC);
+        at = coop_lite_follow_loc_for_slot(obj_field_int64_get(leader, OBJ_F_LOCATION), 1);
+        multiplayer_lock();
+        sub_43E770(npc, at, 0, 0);
+        multiplayer_unlock();
+        for (i = 1; i < blobs.n; i++) {
+            int64_t item = OBJ_HANDLE_NULL;
+            int loc;
+            int free_loc = -1;
+
+            memcpy(&x, blobs.blob[i] + COOP_BLOB_OID_AT, sizeof(x));
+            if (x.type == OID_TYPE_NULL || obj_pool_perm_lookup(x) != OBJ_HANDLE_NULL) {
+                continue;
+            }
+            if (!obj_read_mem((uint8_t*)blobs.blob[i], &item) || item == OBJ_HANDLE_NULL) {
+                continue;
+            }
+            obj_load_postprocess(item);
+            obj_field_int32_set(item, OBJ_F_FLAGS, obj_field_int32_get(item, OBJ_F_FLAGS) | OF_DYNAMIC);
+            loc = obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION);
+            if (item_check_insert(item, npc, &free_loc) != ITEM_CANNOT_OK && free_loc != -1) {
+                loc = free_loc;
+            }
+            item_insert(item, npc, loc);
+        }
+        coop_lite_inv_list_repair(npc);
+        critter_follow(npc, leader, true);
+        tig_net_local_suspend_end();
+        tig_debug_printf("CoopLite: M8 follower spawned beside the returned PC\n");
+    }
+    if (npc == OBJ_HANDLE_NULL) {
+        return false;
+    }
+    if ((rec->flags & COOP_SUBINST_FOL_DEAD) != 0) {
+        if (!critter_is_dead(npc)) {
+            critter_kill(npc);
+        }
+    } else if (!critter_is_dead(npc)) {
+        object_hp_damage_set(npc, rec->hp_damage);
+        critter_fatigue_damage_set(npc, rec->fatigue_damage);
+    }
+    tig_net_local_suspend_begin();
+    for (i = 0; qty != NULL && i < qty_n; i++) {
+        int64_t item;
+        int64_t parent = OBJ_HANDLE_NULL;
+        int type;
+
+        memcpy(&x, qty[i].oid, sizeof(x));
+        item = obj_pool_perm_lookup(x);
+        if (item == OBJ_HANDLE_NULL || !item_parent(item, &parent) || parent != npc) {
+            continue;
+        }
+        type = obj_field_int32_get(item, OBJ_F_TYPE);
+        if (type == OBJ_TYPE_GOLD && qty[i].qty >= 0) {
+            obj_field_int32_set(item, OBJ_F_GOLD_QUANTITY, qty[i].qty);
+        } else if (type == OBJ_TYPE_AMMO && qty[i].qty >= 0) {
+            obj_field_int32_set(item, OBJ_F_AMMO_QUANTITY, qty[i].qty);
+        }
+        obj_field_int32_set(item, OBJ_F_HP_DAMAGE, qty[i].hp_damage);
+        obj_field_int32_set(item, OBJ_F_ITEM_SPELL_MANA_STORE, qty[i].charges);
+        obj_field_int32_set(item, OBJ_F_ITEM_MANA_STORE, qty[i].mana);
+    }
+    tig_net_local_suspend_end();
     return true;
 }
 

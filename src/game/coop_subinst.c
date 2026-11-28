@@ -327,6 +327,164 @@ bool coop_subinst_payload_split(const uint8_t* data, size_t len, CoopSubinstSect
         && payload_take(data, len, &pos, COOP_SUBINST_MAX_QTY, qty) && pos == len;
 }
 
+size_t coop_subinst_payload_size4(size_t cmap_len, size_t bundle_len, size_t qty_len, size_t fol_len)
+{
+    return coop_subinst_payload_size(cmap_len, bundle_len, qty_len) + 4 + fol_len;
+}
+
+bool coop_subinst_payload_build4(CoopSubinstSection cmap, CoopSubinstSection bundle, CoopSubinstSection qty,
+    CoopSubinstSection fol, uint8_t* out, size_t out_cap, size_t* out_len)
+{
+    size_t three;
+    size_t need;
+
+    if (fol.len > 0 && fol.data == NULL) {
+        return false;
+    }
+    if (fol.len > COOP_SUBINST_MAX_FOL_SECTION) {
+        return false;
+    }
+    if (!coop_subinst_payload_build(cmap, bundle, qty, out, out_cap, &three)) {
+        return false;
+    }
+    need = three + 4 + fol.len;
+    if (need > out_cap || need > COOP_SUBINST_MAX_PAYLOAD) {
+        return false;
+    }
+    put_u32(out + three, (uint32_t)fol.len);
+    if (fol.len > 0) {
+        memcpy(out + three + 4, fol.data, fol.len);
+    }
+    if (out_len != NULL) {
+        *out_len = need;
+    }
+    return true;
+}
+
+bool coop_subinst_payload_split4(const uint8_t* data, size_t len, CoopSubinstSection* cmap,
+    CoopSubinstSection* bundle, CoopSubinstSection* qty, CoopSubinstSection* fol)
+{
+    size_t pos = 0;
+
+    if (data == NULL || cmap == NULL || bundle == NULL || qty == NULL || fol == NULL || len < 12
+        || len > COOP_SUBINST_MAX_PAYLOAD) {
+        return false;
+    }
+    fol->data = NULL;
+    fol->len = 0;
+    if (!payload_take(data, len, &pos, COOP_SUBINST_MAX_WIRE, cmap) || cmap->len == 0
+        || !payload_take(data, len, &pos, COOP_SUBINST_MAX_BUNDLE, bundle)
+        || !payload_take(data, len, &pos, COOP_SUBINST_MAX_QTY, qty)) {
+        return false;
+    }
+    if (pos == len) {
+        return true;
+    }
+    return payload_take(data, len, &pos, COOP_SUBINST_MAX_FOL_SECTION, fol) && pos == len;
+}
+
+static bool fol_put_bytes(uint8_t* out, size_t cap, size_t* pos, const void* src, size_t n)
+{
+    if (*pos + n > cap) {
+        return false;
+    }
+    if (n > 0 && src != NULL) {
+        memcpy(out + *pos, src, n);
+    }
+    *pos += n;
+    return true;
+}
+
+bool coop_subinst_fol_encode(uint8_t* out, size_t cap, size_t* written, const CoopSubinstFolRec* recs, int n)
+{
+    size_t pos = 0;
+    int i;
+
+    if (out == NULL || written == NULL || n < 0 || n > COOP_SUBINST_FOL_MAX || (n > 0 && recs == NULL)) {
+        return false;
+    }
+    if (cap < 4) {
+        return false;
+    }
+    put_u32(out, (uint32_t)n);
+    pos = 4;
+    for (i = 0; i < n; i++) {
+        const CoopSubinstFolRec* r = &recs[i];
+
+        if (r->bundle_len > COOP_SUBINST_FOL_BUNDLE_MAX || (r->bundle_len > 0 && r->bundle == NULL)
+            || r->qty_len > COOP_SUBINST_MAX_QTY || (r->qty_len > 0 && r->qty == NULL)) {
+            return false;
+        }
+        if (pos + COOP_SUBINST_OID_SIZE + 16 + r->bundle_len + 4 + r->qty_len > cap) {
+            return false;
+        }
+        memcpy(out + pos, r->oid, COOP_SUBINST_OID_SIZE);
+        pos += COOP_SUBINST_OID_SIZE;
+        put_u32(out + pos, (uint32_t)r->hp_damage);
+        put_u32(out + pos + 4, (uint32_t)r->fatigue_damage);
+        put_u32(out + pos + 8, r->flags);
+        put_u32(out + pos + 12, r->bundle_len);
+        pos += 16;
+        if (!fol_put_bytes(out, cap, &pos, r->bundle, r->bundle_len)) {
+            return false;
+        }
+        put_u32(out + pos, r->qty_len);
+        pos += 4;
+        if (!fol_put_bytes(out, cap, &pos, r->qty, r->qty_len)) {
+            return false;
+        }
+    }
+    *written = pos;
+    return true;
+}
+
+bool coop_subinst_fol_decode(const uint8_t* in, size_t len, CoopSubinstFolRec* recs, int recs_cap, int* n)
+{
+    size_t pos = 0;
+    uint32_t count;
+    int i;
+
+    if (in == NULL || recs == NULL || n == NULL || recs_cap < 0 || recs_cap > COOP_SUBINST_FOL_MAX || len < 4) {
+        return false;
+    }
+    count = get_u32(in);
+    if (count > (uint32_t)COOP_SUBINST_FOL_MAX || (int)count > recs_cap) {
+        return false;
+    }
+    pos = 4;
+    for (i = 0; i < (int)count; i++) {
+        CoopSubinstFolRec* r = &recs[i];
+
+        if (pos + COOP_SUBINST_OID_SIZE + 16 > len) {
+            return false;
+        }
+        memcpy(r->oid, in + pos, COOP_SUBINST_OID_SIZE);
+        pos += COOP_SUBINST_OID_SIZE;
+        r->hp_damage = (int32_t)get_u32(in + pos);
+        r->fatigue_damage = (int32_t)get_u32(in + pos + 4);
+        r->flags = get_u32(in + pos + 8);
+        r->bundle_len = get_u32(in + pos + 12);
+        pos += 16;
+        if (r->bundle_len > COOP_SUBINST_FOL_BUNDLE_MAX || pos + r->bundle_len + 4 > len) {
+            return false;
+        }
+        r->bundle = r->bundle_len > 0 ? in + pos : NULL;
+        pos += r->bundle_len;
+        r->qty_len = get_u32(in + pos);
+        pos += 4;
+        if (r->qty_len > COOP_SUBINST_MAX_QTY || pos + r->qty_len > len) {
+            return false;
+        }
+        r->qty = r->qty_len > 0 ? in + pos : NULL;
+        pos += r->qty_len;
+    }
+    if (pos != len) {
+        return false;
+    }
+    *n = (int)count;
+    return true;
+}
+
 size_t coop_subinst_qty_build(const CoopSubinstQty* items, int count, uint8_t* out, size_t out_cap)
 {
     size_t need;
@@ -1419,6 +1577,36 @@ static void si_host_release(int slot, int64_t loc, const char* why)
     tig_debug_printf("CoopSubinst: slot %d released (%s)\n", slot, why);
 }
 
+
+static void si_host_apply_fol(int64_t pc, CoopSubinstSection fol, bool spawn)
+{
+    CoopSubinstFolRec recs[COOP_SUBINST_FOL_MAX];
+    int n = 0;
+    int i;
+
+    if (pc == OBJ_HANDLE_NULL || fol.data == NULL || fol.len == 0) {
+        return;
+    }
+    if (!coop_subinst_fol_decode(fol.data, fol.len, recs, COOP_SUBINST_FOL_MAX, &n)) {
+        tig_debug_printf("CoopSubinst: follower section refused (%u bytes)\n", (unsigned)fol.len);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        static CoopSubinstQty qitems[COOP_SUBINST_MAX_QTY_ITEMS];
+        int qn = 0;
+
+        if (recs[i].qty != NULL && recs[i].qty_len > 0) {
+            qn = coop_subinst_qty_parse(recs[i].qty, recs[i].qty_len, qitems, COOP_SUBINST_MAX_QTY_ITEMS);
+            if (qn < 0) {
+                qn = 0;
+            }
+        }
+        if (!coop_lite_host_follower_commit(pc, &recs[i], qitems, qn, spawn)) {
+            tig_debug_printf("CoopSubinst: follower %d not committed\n", i);
+        }
+    }
+}
+
 static void si_host_apply(int slot)
 {
     PacketCoopSubinstCtrl* c = &si_host_commit[slot];
@@ -1426,6 +1614,7 @@ static void si_host_apply(int slot)
     CoopSubinstSection cmap;
     CoopSubinstSection bundle;
     CoopSubinstSection qty;
+    CoopSubinstSection fol;
     static CoopSubinstQty qty_items[COOP_SUBINST_MAX_QTY_ITEMS];
     int qty_n = 0;
     int64_t pc = sub_4A2B60(slot);
@@ -1434,7 +1623,8 @@ static void si_host_apply(int slot)
     bool final = c->is_checkpoint == 0;
     bool ok;
 
-    ok = coop_subinst_payload_split(rx->data, rx->total, &cmap, &bundle, &qty);
+    memset(&fol, 0, sizeof(fol));
+    ok = coop_subinst_payload_split4(rx->data, rx->total, &cmap, &bundle, &qty, &fol);
     if (ok && qty.len > 0) {
         qty_n = coop_subinst_qty_parse(qty.data, qty.len, qty_items, COOP_SUBINST_MAX_QTY_ITEMS);
         ok = qty_n >= 0;
@@ -1460,6 +1650,7 @@ static void si_host_apply(int slot)
                 c->fatigue_damage)) {
             tig_debug_printf("CoopSubinst: slot %d checkpoint: character not reconciled\n", slot);
         }
+        si_host_apply_fol(pc, fol, false);
         free(si_ckpt[slot]);
         si_ckpt[slot] = rx->data; /* kept for a disconnect */
         si_ckpt_len[slot] = rx->total;
@@ -1479,6 +1670,7 @@ static void si_host_apply(int slot)
                 c->fatigue_damage)) {
             tig_debug_printf("CoopSubinst: slot %d character not reconciled (kept as it was)\n", slot);
         }
+        si_host_apply_fol(pc, fol, true);
     }
     coop_subinst_rx_free(rx);
     if ((c->flags & COOP_SUBINST_F_DEAD) != 0) {
@@ -2044,14 +2236,94 @@ static bool si_client_commit(int dest_map, int64_t dest_loc, bool checkpoint, bo
     s_bundle.len = bundle.size;
     s_qty.data = qty_buf;
     s_qty.len = coop_subinst_qty_build(qty, qty_n, qty_buf, sizeof(qty_buf));
-    payload = (uint8_t*)malloc(coop_subinst_payload_size(s_cmap.len, s_bundle.len, s_qty.len));
-    if (payload == NULL
-        || !coop_subinst_payload_build(s_cmap, s_bundle, s_qty, payload,
-            coop_subinst_payload_size(s_cmap.len, s_bundle.len, s_qty.len), &payload_len)) {
-        free(payload);
-        free(wire);
-        coop_char_bundle_free(&bundle);
-        return false;
+    {
+        ObjectList followers;
+        ObjectNode* node;
+        CoopSubinstFolRec recs[COOP_SUBINST_FOL_MAX];
+        CoopCharBundleBuf fol_bundle[COOP_SUBINST_FOL_MAX];
+        static uint8_t fol_qty[COOP_SUBINST_FOL_MAX][COOP_SUBINST_MAX_QTY];
+        static uint8_t fol_sec[COOP_SUBINST_MAX_FOL_SECTION];
+        size_t fol_len = 0;
+        int fn = 0;
+        CoopSubinstSection s_fol;
+
+        memset(recs, 0, sizeof(recs));
+        memset(fol_bundle, 0, sizeof(fol_bundle));
+        object_list_all_followers(pc, &followers);
+        for (node = followers.head; node != NULL && fn < COOP_SUBINST_FOL_MAX; node = node->next) {
+            ObjectID oid = obj_get_id(node->obj);
+            static CoopSubinstQty fq[COOP_SUBINST_MAX_QTY_ITEMS];
+            int fqn = 0;
+            int k;
+            int fcnt;
+
+            if (!coop_lite_build_pc_bundle(node->obj, &fol_bundle[fn])
+                || fol_bundle[fn].size > COOP_SUBINST_FOL_BUNDLE_MAX) {
+                coop_char_bundle_free(&fol_bundle[fn]);
+                memset(&fol_bundle[fn], 0, sizeof(fol_bundle[fn]));
+                continue;
+            }
+            memset(recs[fn].oid, 0, sizeof(recs[fn].oid));
+            memcpy(recs[fn].oid, &oid, sizeof(oid) < sizeof(recs[fn].oid) ? sizeof(oid) : sizeof(recs[fn].oid));
+            recs[fn].hp_damage = object_hp_damage_get(node->obj);
+            recs[fn].fatigue_damage = critter_fatigue_damage_get(node->obj);
+            recs[fn].flags = critter_is_dead(node->obj) ? COOP_SUBINST_FOL_DEAD : 0;
+            recs[fn].bundle = fol_bundle[fn].data;
+            recs[fn].bundle_len = (uint32_t)fol_bundle[fn].size;
+            fcnt = obj_arrayfield_length_get(node->obj, OBJ_F_CRITTER_INVENTORY_LIST_IDX);
+            for (k = 0; k < fcnt && fqn < COOP_SUBINST_MAX_QTY_ITEMS; k++) {
+                int64_t item = obj_arrayfield_handle_get(node->obj, OBJ_F_CRITTER_INVENTORY_LIST_IDX, k);
+                ObjectID ioid;
+                int type;
+
+                if (item == OBJ_HANDLE_NULL || !obj_type_is_item(obj_field_int32_get(item, OBJ_F_TYPE))) {
+                    continue;
+                }
+                type = obj_field_int32_get(item, OBJ_F_TYPE);
+                ioid = obj_get_id(item);
+                memset(&fq[fqn], 0, sizeof(fq[fqn]));
+                memcpy(fq[fqn].oid, &ioid, sizeof(fq[fqn].oid));
+                fq[fqn].qty = type == OBJ_TYPE_GOLD ? obj_field_int32_get(item, OBJ_F_GOLD_QUANTITY)
+                    : type == OBJ_TYPE_AMMO         ? obj_field_int32_get(item, OBJ_F_AMMO_QUANTITY)
+                                                    : COOP_SUBINST_QTY_NONE;
+                fq[fqn].hp_damage = obj_field_int32_get(item, OBJ_F_HP_DAMAGE);
+                fq[fqn].charges = obj_field_int32_get(item, OBJ_F_ITEM_SPELL_MANA_STORE);
+                fq[fqn].mana = obj_field_int32_get(item, OBJ_F_ITEM_MANA_STORE);
+                fq[fqn].inv_loc = obj_field_int32_get(item, OBJ_F_ITEM_INV_LOCATION);
+                fqn++;
+            }
+            recs[fn].qty_len = (uint32_t)coop_subinst_qty_build(fq, fqn, fol_qty[fn], sizeof(fol_qty[fn]));
+            recs[fn].qty = recs[fn].qty_len > 0 ? fol_qty[fn] : NULL;
+            fn++;
+        }
+        object_list_destroy(&followers);
+        s_fol.data = NULL;
+        s_fol.len = 0;
+        if (fn > 0 && coop_subinst_fol_encode(fol_sec, sizeof(fol_sec), &fol_len, recs, fn) && fol_len > 0) {
+            s_fol.data = fol_sec;
+            s_fol.len = fol_len;
+        }
+        payload = (uint8_t*)malloc(coop_subinst_payload_size4(s_cmap.len, s_bundle.len, s_qty.len, s_fol.len));
+        if (payload == NULL
+            || !coop_subinst_payload_build4(s_cmap, s_bundle, s_qty, s_fol, payload,
+                coop_subinst_payload_size4(s_cmap.len, s_bundle.len, s_qty.len, s_fol.len), &payload_len)) {
+            int fi;
+
+            free(payload);
+            free(wire);
+            coop_char_bundle_free(&bundle);
+            for (fi = 0; fi < fn; fi++) {
+                coop_char_bundle_free(&fol_bundle[fi]);
+            }
+            return false;
+        }
+        {
+            int fi;
+
+            for (fi = 0; fi < fn; fi++) {
+                coop_char_bundle_free(&fol_bundle[fi]);
+            }
+        }
     }
     si_ctrl_init(&pkt, COOP_SUBINST_OP_COMMIT_BEGIN);
     pkt.slot = sub_529520();

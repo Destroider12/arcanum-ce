@@ -74,7 +74,13 @@ int coop_subinst_unpack_buf(const uint8_t* wire, size_t wire_len, uint8_t* raw, 
 #define COOP_SUBINST_QTY_NONE (-1) /* quantity of an item that has none (not gold / ammo) */
 #define COOP_SUBINST_ITEM_VAL_MAX 1000000
 #define COOP_SUBINST_MAX_QTY (4 + COOP_SUBINST_MAX_QTY_ITEMS * COOP_SUBINST_QTY_ENTRY)
-#define COOP_SUBINST_MAX_PAYLOAD (12 + COOP_SUBINST_MAX_WIRE + COOP_SUBINST_MAX_BUNDLE + COOP_SUBINST_MAX_QTY)
+/* M8: optional 4th section — followers (bundle + stacks + HP/fatigue + dead). */
+#define COOP_SUBINST_FOL_MAX 8
+#define COOP_SUBINST_FOL_BUNDLE_MAX (64 * 1024)
+#define COOP_SUBINST_FOL_DEAD 0x1u
+#define COOP_SUBINST_OID_SIZE 24
+#define COOP_SUBINST_MAX_FOL_SECTION (4 + COOP_SUBINST_FOL_MAX * (COOP_SUBINST_OID_SIZE + 20 + COOP_SUBINST_FOL_BUNDLE_MAX + COOP_SUBINST_MAX_QTY))
+#define COOP_SUBINST_MAX_PAYLOAD (16 + COOP_SUBINST_MAX_WIRE + COOP_SUBINST_MAX_BUNDLE + COOP_SUBINST_MAX_QTY + COOP_SUBINST_MAX_FOL_SECTION)
 
 typedef struct CoopSubinstSection {
     const uint8_t* data;
@@ -86,6 +92,25 @@ bool coop_subinst_payload_build(CoopSubinstSection cmap, CoopSubinstSection bund
     uint8_t* out, size_t out_cap, size_t* out_len);
 bool coop_subinst_payload_split(const uint8_t* data, size_t len, CoopSubinstSection* cmap,
     CoopSubinstSection* bundle, CoopSubinstSection* qty);
+size_t coop_subinst_payload_size4(size_t cmap_len, size_t bundle_len, size_t qty_len, size_t fol_len);
+bool coop_subinst_payload_build4(CoopSubinstSection cmap, CoopSubinstSection bundle, CoopSubinstSection qty,
+    CoopSubinstSection fol, uint8_t* out, size_t out_cap, size_t* out_len);
+bool coop_subinst_payload_split4(const uint8_t* data, size_t len, CoopSubinstSection* cmap,
+    CoopSubinstSection* bundle, CoopSubinstSection* qty, CoopSubinstSection* fol);
+
+typedef struct CoopSubinstFolRec {
+    uint8_t oid[COOP_SUBINST_OID_SIZE];
+    int32_t hp_damage;
+    int32_t fatigue_damage;
+    uint32_t flags;
+    uint32_t bundle_len;
+    const uint8_t* bundle;
+    uint32_t qty_len;
+    const uint8_t* qty;
+} CoopSubinstFolRec;
+
+bool coop_subinst_fol_encode(uint8_t* out, size_t cap, size_t* written, const CoopSubinstFolRec* recs, int n);
+bool coop_subinst_fol_decode(const uint8_t* in, size_t len, CoopSubinstFolRec* recs, int recs_cap, int* n);
 
 /* Item state table (every item the PC carries): u32 count, count x { u8
    oid[24], i32 qty (gold / ammo, else -1), i32 hp_damage, i32 charges
@@ -354,6 +379,9 @@ bool coop_lite_client_subinst_teleport(int map, int64_t loc);
 bool coop_lite_host_resync_slot(int slot);
 bool coop_lite_host_pc_reconcile(int64_t pc, const uint8_t* bundle, size_t bundle_len, const CoopSubinstQty* qty,
     int qty_n, int hp_damage, int fatigue_damage);
+/* M8: one follower from a commit/checkpoint section (spawn=true on final commit). */
+bool coop_lite_host_follower_commit(int64_t leader, const CoopSubinstFolRec* rec, const CoopSubinstQty* qty, int qty_n,
+    bool spawn);
 #else
 static inline bool coop_subinst_client_active(void) { return false; }
 static inline bool coop_subinst_slot_inside(int slot) { (void)slot; return false; }

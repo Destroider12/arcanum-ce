@@ -704,7 +704,7 @@ void coop_lite_area_session_reset(void); /* PT79 */
 #define COOP_NPC_STATS_COUNT 28 /* STAT_COUNT */
 #define COOP_NPC_BASIC_SKILLS 12 /* BASIC_SKILL_COUNT */
 #define COOP_NPC_TECH_SKILLS 4 /* TECH_SKILL_COUNT */
-#define COOP_NPC_SPELL_TECH 16 /* COLLEGE_COUNT: spell college levels (M4 spec) */
+#define COOP_NPC_SPELL_TECH 25 /* 16 colleges + mastery + 8 tech degrees (M8, protocol 61) */
 typedef struct PacketCoopNpcStats {
     /* 0000 */ int type;
     /* 0004 */ int reserved;
@@ -723,7 +723,7 @@ typedef struct PacketCoopNpcStats {
 COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, basic_skills) == 0xA0, "PacketCoopNpcStats.basic_skills");
 COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, tech_skills) == 0xD0, "PacketCoopNpcStats.tech_skills");
 COOP_STATIC_ASSERT(offsetof(PacketCoopNpcStats, spell_tech) == 0xE0, "PacketCoopNpcStats.spell_tech");
-COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0x120, "PacketCoopNpcStats size");
+COOP_STATIC_ASSERT(sizeof(PacketCoopNpcStats) == 0x144, "PacketCoopNpcStats size");
 bool coop_lite_npc_stats_valid(const PacketCoopNpcStats* pkt, int size);
 void coop_lite_handle_npc_stats(PacketCoopNpcStats* pkt);
 

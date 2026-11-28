@@ -4,6 +4,7 @@
 #include "game/anim_private.h"
 #include "game/combat.h"
 #include "game/coop_lite.h"
+#include "game/coop_middle.h"
 #include "game/critter.h"
 #include "game/descriptions.h"
 #include "game/dialog.h"
@@ -3502,7 +3503,7 @@ static int ai_check_kos_party(int64_t source_obj, int64_t target_obj)
 
         if (pc == OBJ_HANDLE_NULL || pc == target_obj || critter_is_dead(pc)
             || (obj_field_int32_get(pc, OBJ_F_FLAGS) & OF_OFF) != 0
-            || object_dist(source_obj, pc) > 120) {
+            || object_dist(source_obj, pc) > (coop_middle_rule_on(COOP_RULE_FREE_OVERWORLD) ? 20 : 120)) {
             continue;
         }
         other = ai_check_kos(source_obj, pc);
