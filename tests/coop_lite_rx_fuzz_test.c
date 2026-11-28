@@ -179,7 +179,7 @@ static const int k_types[] = {
     PACKET_COOP_SUBINST_CTRL, PACKET_COOP_SUBINST_CHUNK, PACKET_COOP_SUBINST_DELTA,
 };
 static const int k_mid_ops[] = { COOP_CTRL_REST_ASK, COOP_CTRL_REST_REFUSE, COOP_CTRL_SLOT_STATUS, COOP_CTRL_PAUSE,
-    COOP_CTRL_SLEEP_VOTE, COOP_CTRL_SLEEP_STATE, COOP_CTRL_SLEEP_APPLY };
+    COOP_CTRL_SLEEP_VOTE, COOP_CTRL_SLEEP_STATE, COOP_CTRL_SLEEP_APPLY, COOP_CTRL_FOLLOW, COOP_CTRL_LOCAL_FADE };
 #define NTYPES ((int)(sizeof(k_types) / sizeof(k_types[0])))
 
 /* Random packet: valid type, size around the type's minimum (truncated,

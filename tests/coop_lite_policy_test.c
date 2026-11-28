@@ -2548,7 +2548,7 @@ int main(int argc, char** argv)
             fprintf(stderr, "PT50 party ctrl / travel ready rules wrong\n");
             return 1;
         }
-        c.op = 13; /* 12 is M8 COOP_CTRL_FOLLOW */
+        c.op = 14; /* 12 is M8 COOP_CTRL_FOLLOW, 13 is M9 COOP_CTRL_LOCAL_FADE */
         if (coop_lite_party_ctrl_valid(&c, 16)) {
             fprintf(stderr, "PT50 bad op accepted\n");
             return 1;

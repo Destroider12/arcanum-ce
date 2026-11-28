@@ -380,7 +380,7 @@ static void test_rest_ops(void)
     CHECK(coop_middle_party_ctrl_valid(&c));
     c.a = 8;
     CHECK(!coop_middle_party_ctrl_valid(&c));
-    c.op = 13; /* unknown */
+    c.op = 14; /* unknown (13 is M9 COOP_CTRL_LOCAL_FADE) */
     c.a = 1;
     c.b = 0;
     CHECK(!coop_lite_party_ctrl_valid(&c, (int)sizeof(c)));
@@ -782,7 +782,7 @@ static void test_m3_cmds(void)
     CHECK(line[0] != '\0');
     coop_middle_feed_format(COOP_MID_CHAT_PAUSE_DROP, "Bob", "-", false, line, sizeof(line));
     CHECK(strstr(line, "Bob") != NULL && strstr(line, "pause") != NULL);
-    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_INFO);
+    CHECK(COOP_MID_CHAT_PAUSE_DROP == 8 && COOP_MID_CHAT_KIND_MAX == COOP_MID_CHAT_PM_TO);
 }
 
 /* 13. M3 pings: packet, role, validity, rate limit */
@@ -2087,7 +2087,7 @@ static void test_autolevel(void)
     CHECK(coop_middle_party_xp_target(xp, 1) == 2100);
     CHECK(coop_middle_party_xp_target(xp, 0) == -1);
     CHECK(coop_middle_party_xp_target(NULL, 3) == -1);
-    CHECK(TIG_NET_PROTOCOL == 61);
+    CHECK(TIG_NET_PROTOCOL == 62);
 }
 
 /* M7 review: the subinst client's timed checkpoint clock. */
@@ -2435,7 +2435,7 @@ static void test_m8(void)
     const char* names[4];
     bool ok[4];
 
-    CHECK(TIG_NET_PROTOCOL == 61);
+    CHECK(TIG_NET_PROTOCOL == 62);
     CHECK(sizeof(PacketCoopNpcStats) == 0x144);
     CHECK(COOP_NPC_SPELL_TECH == 25);
     CHECK(offsetof(PacketCoopNpcStats, spell_tech) == 0xE0);
@@ -2557,7 +2557,124 @@ static void test_m8(void)
         CHECK(coop_subinst_payload_split(payload, pay_len, &c2, &b2, &q2));
         CHECK(coop_subinst_payload_split4(payload, pay_len, &c2, &b2, &q2, &f2) && f2.len == 0);
     }
-    printf("PASS: M8 dscale / commands / convoy / consent / follower section / protocol 61\n");
+    printf("PASS: M8 dscale / commands / convoy / consent / follower section / protocol 62\n");
+}
+
+
+static void test_m9(void)
+{
+    CoopRules r, d;
+    char buf[128];
+    char name[32];
+    char msg[64];
+    char longn[80];
+    unsigned int rgb;
+    uint8_t fol_buf[256];
+    size_t fol_len = 0;
+    CoopSubinstFolRec recs[COOP_SUBINST_MAX_FOLLOWERS];
+    CoopSubinstFolRec out[COOP_SUBINST_MAX_FOLLOWERS];
+    int n;
+
+    CHECK(TIG_NET_PROTOCOL == 62);
+    CHECK(sizeof(PacketCoopNpcStats) == 0x144);
+    CHECK(COOP_NPC_SPELL_TECH == 25);
+    CHECK(COOP_MID_CHAT_KIND_MAX == 15);
+    CHECK(COOP_CTRL_LOCAL_FADE == 13);
+    CHECK(COOP_CMD_WHISPER == 8);
+    CHECK(COOP_SUBINST_MAX_FOLLOWERS == 8);
+    CHECK(COOP_SUBINST_FOL_NEW == 0x2u);
+
+    /* presets: round-trip of the three named sets; any deviation is Custom */
+    coop_rules_apply_preset(&r, COOP_PRESET_LITE);
+    CHECK(coop_rules_detect_preset(&r) == COOP_PRESET_LITE);
+    CHECK((r.flags & COOP_RULE_LITE_MODE) != 0);
+    CHECK((r.flags & ~COOP_RULE_LITE_KEEP_MASK) == 0);
+    CHECK(r.enemy_hp_pct == 100 && r.xp_mult_pct == 100 && r.autosave_min == 0);
+
+    coop_rules_apply_preset(&r, COOP_PRESET_MIDDLE);
+    CHECK(coop_rules_detect_preset(&r) == COOP_PRESET_MIDDLE);
+    CHECK(r.flags == COOP_RULE_DEFAULT_FLAGS);
+    CHECK(r.autosave_min == 10 && r.enemy_hp_pct == 100 && r.xp_mult_pct == 100);
+
+    coop_rules_apply_preset(&r, COOP_PRESET_HARDCORE);
+    CHECK(coop_rules_detect_preset(&r) == COOP_PRESET_HARDCORE);
+    CHECK((r.flags & COOP_RULE_NO_FRIENDLY_FIRE_AOE) == 0);
+    CHECK((r.flags & COOP_RULE_LITE_MODE) == 0);
+    CHECK((r.flags & COOP_RULE_DYNAMIC_SCALE) == 0);
+    CHECK(r.enemy_hp_pct == 150 && r.xp_mult_pct == 100 && r.autosave_min == 10);
+
+    d = r;
+    coop_rules_apply_preset(&d, COOP_PRESET_CUSTOM);
+    CHECK(coop_rules_equal(&d, &r)); /* CUSTOM is a no-op */
+    r.enemy_hp_pct = 200;
+    CHECK(coop_rules_detect_preset(&r) == COOP_PRESET_CUSTOM);
+    coop_rules_apply_preset(&r, COOP_PRESET_MIDDLE);
+    r.flags &= ~COOP_RULE_REST_VOTE;
+    CHECK(coop_rules_detect_preset(&r) == COOP_PRESET_CUSTOM);
+
+    /* followers: NEW flag; truncated / count>8 rejected with no leftover n */
+    memset(recs, 0, sizeof(recs));
+    recs[0].oid[0] = 9;
+    recs[0].flags = COOP_SUBINST_FOL_NEW;
+    recs[0].hp_damage = 4;
+    CHECK(coop_subinst_fol_encode(fol_buf, sizeof(fol_buf), &fol_len, recs, 1));
+    n = 99;
+    CHECK(coop_subinst_fol_decode(fol_buf, fol_len, out, COOP_SUBINST_MAX_FOLLOWERS, &n) && n == 1);
+    CHECK(out[0].flags == COOP_SUBINST_FOL_NEW && out[0].hp_damage == 4 && out[0].oid[0] == 9);
+    CHECK(!coop_subinst_fol_decode(fol_buf, fol_len - 1, out, COOP_SUBINST_MAX_FOLLOWERS, &n));
+    CHECK(!coop_subinst_fol_decode(fol_buf, 3, out, COOP_SUBINST_MAX_FOLLOWERS, &n));
+    fol_buf[0] = 9;
+    fol_buf[1] = 0;
+    fol_buf[2] = 0;
+    fol_buf[3] = 0;
+    CHECK(!coop_subinst_fol_decode(fol_buf, 4, out, COOP_SUBINST_MAX_FOLLOWERS, &n));
+
+    /* Alt labels EN/RU, colors, truncation so the tag still fits */
+    rgb = 1;
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Chest", false, true, false, false, 0, 0, &rgb) > 0);
+    CHECK(strstr(buf, "[Locked]") != NULL && rgb == 0);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Chest", true, true, false, false, 0, 0, &rgb) > 0);
+    CHECK(strstr(buf, "[Заперто]") != NULL);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Door", false, false, true, false, 0, 0, &rgb) > 0);
+    CHECK(strstr(buf, "[Trap]") != NULL && rgb == COOP_MID_ALT_TRAP_RGB);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Door", true, false, true, false, 0, 0, &rgb) > 0);
+    CHECK(strstr(buf, "[Ловушка]") != NULL);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Key", false, false, false, true, 0, 0, &rgb) > 0);
+    CHECK(strncmp(buf, "[*] ", 4) == 0 && rgb == COOP_MID_ALT_QUEST_RGB);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Sword", false, false, false, false, 120, 5, &rgb) > 0);
+    CHECK(strstr(buf, "(120g, 5st)") != NULL);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Sword", true, false, false, false, 120, 5, &rgb) > 0);
+    CHECK(strstr(buf, "(120з, 5к)") != NULL);
+    CHECK(coop_middle_alt_label_format(buf, sizeof(buf), "Box", false, true, true, true, 0, 0, &rgb) > 0);
+    CHECK(rgb == COOP_MID_ALT_TRAP_RGB);
+    CHECK(strstr(buf, "[*]") != NULL && strstr(buf, "[Locked]") != NULL && strstr(buf, "[Trap]") != NULL);
+    memset(longn, 'A', 70);
+    longn[70] = '\0';
+    CHECK(coop_middle_alt_label_format(buf, 40, longn, false, false, false, false, 120, 5, &rgb) > 0);
+    CHECK(strstr(buf, "(120g, 5st)") != NULL);
+    CHECK(strlen(buf) < 40);
+    CHECK(coop_middle_alt_label_format(NULL, 10, "x", false, false, false, false, 0, 0, NULL) == 0);
+
+    CHECK(coop_middle_parse_cmd("/stuck") == COOP_CMD_STUCK);
+    CHECK(coop_middle_parse_cmd_ex("/tp Bob", name, sizeof(name)) == COOP_CMD_TP_NAME);
+    CHECK(strcmp(name, "Bob") == 0);
+    CHECK(coop_middle_parse_cmd("/gather") == COOP_CMD_GATHER);
+    CHECK(coop_middle_parse_cmd_msg("/w Bob hi there", name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_WHISPER);
+    CHECK(strcmp(name, "Bob") == 0 && strcmp(msg, "hi there") == 0);
+    CHECK(coop_middle_parse_cmd_msg("/pm Alice test", name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_WHISPER);
+    CHECK(strcmp(name, "Alice") == 0 && strcmp(msg, "test") == 0);
+    CHECK(coop_middle_parse_cmd_msg("/W  carol  привет  ", name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_WHISPER);
+    CHECK(strcmp(name, "carol") == 0 && strcmp(msg, "привет") == 0);
+    CHECK(coop_middle_parse_cmd_msg("/w", name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_WHISPER);
+    CHECK(name[0] == '\0' && msg[0] == '\0');
+    CHECK(coop_middle_parse_cmd_msg("/w Bob", name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_WHISPER);
+    CHECK(strcmp(name, "Bob") == 0 && msg[0] == '\0');
+    CHECK(coop_middle_parse_cmd("/who") == COOP_CMD_WHO);
+    CHECK(coop_middle_parse_cmd("/rules") == COOP_CMD_RULES);
+    CHECK(coop_middle_parse_cmd("/help") == COOP_CMD_HELP);
+    CHECK(coop_middle_parse_cmd_msg(NULL, name, sizeof(name), msg, sizeof(msg)) == COOP_CMD_NONE);
+
+    printf("PASS: M9 presets / fol NEW / alt labels / /w / protocol 62\n");
 }
 
 int main(void)
@@ -2603,6 +2720,7 @@ int main(void)
     test_t405u_place_and_limits();
     test_dif_record_len();
     test_m8();
+    test_m9();
     if (g_fail != 0) {
         fprintf(stderr, "coop_middle_test: %d check(s) failed\n", g_fail);
         return 1;

@@ -1,6 +1,6 @@
-# Coop Middle (release notes M1-M7)
+# Coop Middle (release notes M1-M9)
 
-Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit). M8 adds the sleep-consent window, personal reputations, a full solo-instance commit, optional dynamic difficulty, and party UX (convoy, /tp name, /who, F10).
+Coop Middle is the development line after the **Coop Lite 1.0** release. It lives on branch `coop-middle`, which starts from `74a7076f` (tag `coop-lite-v1.0`). Coop Lite itself is maintained separately on branch `coop-lite` (same commit). M8 added the sleep-consent window, personal reputations, a full solo-instance commit, optional dynamic difficulty, and party UX. M9 completes the solo-instance follower commit, adds independent trains and ships, extended Alt/chat/F10 UX, and launcher presets (protocol 62).
 
 | Line | Branch | Protocol (`TIG_NET_PROTOCOL`) |
 | --- | --- | --- |
@@ -13,7 +13,8 @@ Coop Middle is the development line after the **Coop Lite 1.0** release. It live
 | Coop Middle M6 | `coop-middle` (up to `2bd38e3b`) | 58 |
 | Coop Middle M7 | `coop-middle` (up to `3e841364`) | 59 |
 | Coop Middle after M7 (auto-levelling) | `coop-middle` | 60 |
-| Coop Middle M8 | `coop-middle` | **61** |
+| Coop Middle M8 | `coop-middle` | 61 |
+| Coop Middle M9 | `coop-middle` | **62** |
 
 Lite and Middle builds (and different Middle stages) refuse each other at the handshake. Every player needs the same build. Single player (no `-coop`) is unchanged: every Middle entry point returns at once outside a co-op session.
 
@@ -53,6 +54,18 @@ The host's launcher builds `ARCANUM_COOP_RULES` (e.g. `gold=0,loot=1,rest=1,trad
 | `xp` (`xp_mult_pct`) | XP %, 100..250 | 100 | XP % combo (`xp_mult_pct`) | M3 |
 | `asave` (`autosave_min`, `autosave`) | host autosave interval in minutes: 0 = off, else 5..60 (1 -> 5, 999 -> 60) | 10 | Auto-save combo Off / 5 / 10 / 15 / 30 min (`autosave_min`) | M7 |
 | `lite` (`lite_mode`, `coop_lite`) | Coop Lite mode: the session plays as the Coop Lite 1.0 release (see below); written to the env string only when on | off | Coop Lite mode (as release 1.0) (`lite_mode`) | after M7 |
+
+### M9 (protocol 62)
+
+Protocol is **62** (M8 was 61). There is no new packet type: the bump keeps M9 hosts and clients together after `COOP_CTRL_LOCAL_FADE` (PARTY_CTRL op 13), whisper chat kinds 14/15, and the completed follower-commit rules. Host and client must both be M9 builds.
+
+- Solo-instance commit (extends the M8 4th `followers` section, max 8, format unchanged): parked followers also receive item mana store / damage / equip slots (already in the qty table), base stats and level from the bundle, and `critter_kill` when `FOL_DEAD` is set. A follower whose OID is missing on the host is spawned next to the returned PC (`sub_43E770`, `obj_load_postprocess`, `critter_follow`) and announced through NPC_POS / NPC_STATS (`coop_lite_host_npc_changed`). The client always encodes the followers section, including `count = 0`; a missing 4th section (legacy 3-section payload) is still valid and does **not** dismiss anyone. A decoded empty section dismisses parked followers that are no longer in the list (`critter_disband`, drop from `si_hid`, destroy the host duplicate). `COOP_SUBINST_FOL_NEW` is accepted on the wire; the host treats `obj_pool_perm_lookup == NULL` as a spawn (the client has no host pool). The PC blob is still read with the OID nulled first. Personal reputations (`OBJ_F_PC_REPUTATION_IDX`) stay per-slot. There is no `OBJ_F_CRITTER_FACTION_IDX` and no `OBJ_F_CRITTER_FATE` (fate is `OBJ_F_PC_FLAGS_FATE`).
+- Dialog / altar `SAT_FADE_AND_TELEPORT` from inside a solo instance on the client already ran locally (net is suspended, `tig_net_is_active()` is false) and is intercepted by `coop_subinst_client_travel`; M9 closes the talk (`ui_end_dialog`) before the commit so the viewer and `gfade` stay consistent on sub→sub or return.
+- Trains and ships: ticket payment, aptitude checks and the fade-teleport already run on the talking slot (`coop_middle_script_fade_retarget` / `coop_lite_script_actor_slot`). Same-map hops (for example Tarant–Ashbury on map 1) move only that passenger, their personal followers and convoy followers, with `COOP_CTRL_LOCAL_FADE` for those slots, no `GameTime` jump and no `FOLLOW_HOST`. The host as a passenger is intercepted the same way (otherwise `TELEPORT_TIME` would advance the clock). Another map goes through `coop_subinst_host_travel`; a map that cannot be leased falls back to the usual denial or party vote. The passenger's dialog is closed before the hop (and after a successful lease). Train movies / `TELEPORT_SOUND` may be skipped when the intercept returns true before `teleport_process`.
+- Alt labels (`coop_middle_alt_label_format`, tested): locked containers and locked doors (`OBJ_TYPE_PORTAL` + `OPF_LOCKED` / `object_locked_get`), **detected** traps only (`trap_is_spotted`, `OF_TRAP_SPOTTED` — undetected traps are never labelled). Suffixes `[Locked]` / `[Заперто]`, `[Trap]` / `[Ловушка]` with colour (245,110,80); quest/unique/keys get `[*]` and (255,220,90); a compact price/weight tag; the name is truncated so the tag still fits. EN/RU via `ARCANUM_COOP_LANG`.
+- Chat: `coop_middle_parse_cmd_ex` is extended by `coop_middle_parse_cmd_msg`. `/w` and `/pm` (`COOP_CMD_WHISPER`) are routed only to the target (`[PM from <Sender>]` / `[ЛС от <Sender>]`) with a confirmation only to the sender (`[PM -> <Target>]` / `[ЛС -> <Target>]`), never broadcast, UTF-8 safe. Not found, ambiguous (`COOP_TP_REFUSE_AMBIGUOUS`) or empty name/text is a system refusal to the sender only. `/who` includes Paused; `/help` lists `/w`; `/stuck` is unchanged.
+- F10: rewritten as the same `TigVideoBuffer` overlay pass as the F9 HUD (no extra `tig_window`). Two columns, including `/w` and `/stuck`. Closes on F10, Esc, the main menu or a session reset; clicks on the panel are swallowed; scroll invalidates it.
+- Launcher presets (`CoopRulePreset`): Lite sets `lite=1` (the master switch) plus `LITE_KEEP_MASK`, HP/XP 100, `asave = 0` — otherwise `coop_rules_effective` would force the free world map on. Hardcore is Middle flags with `COOP_RULE_NO_FRIENDLY_FIRE_AOE` cleared and enemy HP 150% (dynamic scale stays off: a flat 150% is predictable). Custom is any other combination; `coop_rules_apply_preset(..., CUSTOM)` is a no-op; detect is a sanitize + equal round-trip. The Host main window replaces the rule rows with **Mode:** and **Rules...**. The modal has group boxes World & Co-op, QoL & Combat, Difficulty & Saves, OK/Cancel, and reset Lite/Middle; the Mode combo follows `coop_rules_detect_preset`. Optional ini key `preset` (`lite` / `middle` / `hardcore` / `custom`); existing `[rules]` keys still load. The port-check output is taller.
 
 ### M8 (protocol 61)
 
@@ -573,12 +586,14 @@ CoopMiddle: trade: window auto-closed (solo instance|overworld travel|death|comb
 23. M6 solo instances: `coop_subinst_filename_safe`; CMAP1 pack / unpack round trip for 0 / 1 / 20 files; traversal, duplicate and too many names refused; truncated, oversized raw length, trailing bytes, every flipped byte (zlib / CRC) refused; payload build / split, quantity table; chunk reassembly (order, size, lease id); `coop_subinst_can_lease` (normal / busy / state / own lease); client state machine; validators for 171 / 172 / 173 (direction, sizes, flags, ranges); badge M priority and colour; chat kind 10 EN / RU; rule default on; `TIG_NET_PROTOCOL == 58`. Review: `coop_subinst_des_filter`, the item state table, `coop_subinst_sub_next_plan` and COMMITTING through DENY (no stall in REQUESTED), `coop_subinst_client_stalled`, CANCEL validator, client role / `tig_net_is_coop_client` false under local authority and true again while pumping.
 23. M5 sleep: `coop_middle_sleep_step` for 1..8 players (solo, wait, execute, mode kept, initiator hand-over, dead player not blocking, cleared, refusals), `coop_middle_sleep_minutes` across midnight, `coop_middle_sleep_mode_from_ui`, banner text EN/RU, `SLEEP_VOTE` / `SLEEP_STATE` validity.
 24. M7: `coop_middle_edge_indicator` (inside / on the border = false; top, bottom, left, right and the 4 corners land exactly on the pad border with the right octant; off-axis sweeps stay on the border); `coop_middle_collapse_step` (once per fall, 10 s per slot); chat kinds 11 / 12 EN / RU; `coop_middle_autosave_ready` (pause, combat, dialog, world map, commit, teleport, not in world, interval 0, clock wrap) and the rotation 9690..9694 (never a client slot 9700..9789); rule `asave` (0, 10, 1 -> 5, 999 -> 60, aliases, describe, `sizeof(CoopRules)` unchanged); unified sleep with a solo-instance player (in the consensus, `coop_middle_sleep_apply_mask` flags it for `SLEEP_APPLY`); `SLEEP_APPLY` in `coop_middle_party_ctrl_valid` / `coop_lite_party_ctrl_valid` (1..168, `b` = 0, size); repeated session resets; `TIG_NET_PROTOCOL == 59`.
-25. After M7 auto-levelling (`test_autolevel`): `flvl` / `plvl` on by default, parse + aliases (`follower_autolevel`, `party_level`), format, `coop_rules_effective` (Middle keeps them, `lite=1` clears them), describe EN / RU not cut, `coop_middle_follower_level_target` (raise only, max - 1 cap), `coop_middle_party_xp_target`, `TIG_NET_PROTOCOL == 61` after M8 (`NpcStats` size).
+25. After M7 auto-levelling (`test_autolevel`): `flvl` / `plvl` on by default, parse + aliases (`follower_autolevel`, `party_level`), format, `coop_rules_effective` (Middle keeps them, `lite=1` clears them), describe EN / RU not cut, `coop_middle_follower_level_target` (raise only, max - 1 cap), `coop_middle_party_xp_target`, `TIG_NET_PROTOCOL == 61` after M8 (`NpcStats` size); M9 `test_m9` requires `== 62`.
 26. `test_hop_and_followers`: `coop_middle_solo_hop_rule` (same map / -1 solo in Middle, map change and Lite not), `coop_middle_follower_list_plan` (consistent list unchanged; null, freed and duplicate entries dropped; missing table followers appended; capacity).
 27. `test_dif_record_len` (t404u): record at EOF, record before another, end marker inside the body ignored, wrong id / bad start marker / truncated = 0, the stub hook is a no-op.
 28. t405u: `coop_middle_solo_hop_rule` also treats `dest_map <= 0` as the same map and is off in Lite; `coop_middle_place_loc` (valid saved/merge kept in Middle, `follow_loc` in Lite or when invalid); `COOP_SUBINST_MAX_RAW/WIRE/FILES` (4 MB / 1 MB / 256) and `coop_subinst_commit_dest_loc` (checkpoint keeps the PC tile).
+29. M9 (`test_m9`): `coop_rules_apply_preset` / `coop_rules_detect_preset` round-trip for Lite / Middle / Hardcore (Lite zeros every Middle flag and sets `lite=1`, `asave = 0`; Hardcore is FF on and HP 150, dscale off); any deviation is Custom; apply(CUSTOM) is a no-op. Follower section: `FOL_NEW` round-trip, truncated buffers and count > 8 refused. `coop_middle_alt_label_format` (`[Locked]` / `[Заперто]`, `[Trap]` / `[Ловушка]`, `[*]`, price/weight, EN/RU, long-name truncation, trap colour beats quest). `coop_middle_parse_cmd_msg` (`/tp`, `/tp Bob`, `/stuck`, `/gather`, `/w Bob hi there`, `/pm Alice test`, Cyrillic body, incomplete `/w` and `/w Bob` do not crash, `/who` / `/rules` / `/help`). `PacketCoopNpcStats` stays 0x144 with `spell_tech[25]`; `TIG_NET_PROTOCOL == 62`; `COOP_CTRL_LOCAL_FADE` is 13 (unknown-op tests use 14); `COOP_MID_CHAT_KIND_MAX == 15`.
 
-Fuzz (`coop_lite_fuzz8`, `coop_lite_rx_fuzz`; M7): packet types 167-173 and the Middle PARTY_CTRL ops (REST_ASK / REFUSE, SLOT_STATUS, PAUSE, SLEEP_VOTE / STATE / APPLY) through the validators; `SUBINST_CTRL` with ABORT and CANCEL in both directions (ABORT is only valid from the host, CANCEL only from a client); chunk reassembly with random chunks. `COOP_RX_FUZZ_SECONDS` sets the transport phase length, `COOP_FUZZ8_SEED` varies the fuzz8 stream for soaks.
+
+Fuzz (`coop_lite_fuzz8`, `coop_lite_rx_fuzz`; M7, updated in M9): packet types 167-173 and the Middle PARTY_CTRL ops (REST_ASK / REFUSE, SLOT_STATUS, PAUSE, SLEEP_VOTE / STATE / APPLY, FOLLOW, LOCAL_FADE) through the validators; `SUBINST_CTRL` with ABORT and CANCEL in both directions (ABORT is only valid from the host, CANCEL only from a client); chunk reassembly with random chunks. `COOP_RX_FUZZ_SECONDS` sets the transport phase length, `COOP_FUZZ8_SEED` varies the fuzz8 stream for soaks.
 
 ## Architecture and hooks
 
@@ -646,7 +661,7 @@ M6 / M7 hooks:
 | File | Hook |
 | --- | --- |
 | `coop_subinst.h/.c` (new, M6) | solo instances; M7: `coop_subinst_host_lease_mask`, `coop_subinst_host_commit_busy`, `SLEEP_APPLY` in the packet filter, `coop_middle_subinst_local_tick` + pause-frozen checkpoint clock in `coop_subinst_ping` |
-| `tig_net.h` | protocol 59 (M7); 60 (after M7: `flvl` / `plvl`); 61 (M8: `NpcStats` spell_tech 25, `dscale`) |
+| `tig_net.h` | protocol 59 (M7); 60 (after M7: `flvl` / `plvl`); 61 (M8: `NpcStats` spell_tech 25, `dscale`); 62 (M9: trains/ships local fade, whisper, completed follower commit, launcher presets) |
 | `teleport.c` | t403u: `coop_middle_host_solo_hop` for the solo hop; null / freed follower and item handles skipped |
 | `map.c` | t404u: `coop_middle_mobile_dif_skip` when a `mobile.md` record names an object the map does not have (co-op only) |
 | `script.c` | t405u: `coop_middle_script_fade_retarget` instead of always redirecting a party PC to the host |
@@ -655,7 +670,7 @@ M6 / M7 hooks:
 | `gamelib.c` | M6: `coop_subinst_host_before_save`; M7: `coop_middle_note_save` (only a successful save restarts the autosave interval) |
 | `wmap_ui.c` | M7: dead teammate square red on the town map |
 | `coop_middle_ui.c` | M7: arrow plates, trade auto-close watch, town map refresh on badge change |
-| `tools/launcher/launcher.c` | M7: Auto-save combo, lobby rules line; after M7: Auto-level followers, Party level |
+| `tools/launcher/launcher.c` | M7: Auto-save combo, lobby rules line; after M7: Auto-level followers, Party level; M9: Mode combo + Rules... dialog, presets, optional ini `preset`, update URL `Destroider12/arcanum-coop-online` |
 
 ## Known limits / risks
 

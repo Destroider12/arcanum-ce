@@ -2843,7 +2843,7 @@ the same PC. The launcher keeps using those folders only when they exist.
 ```
 [update]
 enabled=1
-releases_url=https://api.github.com/repos/Destroider12/arcanum-ce/releases
+releases_url=https://api.github.com/repos/Destroider12/arcanum-coop-online/releases
 tag_prefix=coop-lite-
 ```
 

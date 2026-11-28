@@ -1,4 +1,4 @@
-# Arcanum Coop Lite (on Arcanum Community Edition)
+# Arcanum COOP & Arcanum Online (on Arcanum Community Edition)
 
 [Русская версия](README.ru.md) · [Design & dev log](docs/coop-lite.md) · [Coop Middle](docs/coop-middle.md) · [License](LICENSE.md)
 
@@ -37,7 +37,7 @@ Main code: `src/game/coop_lite.c/.h` (co-op game logic), `src/net/` (`tig_net.c`
 - **Host-authoritative.** The host runs the only real simulation: game time, AI, combat, scripts, loot, and saves.
 - **Clients send intents** (move, attack, cast, use item, inventory changes, dialog choices, travel requests, and so on). The host checks them (bounds, ownership, range, rate limits), applies them, and **broadcasts** the result.
 - Clients don't advance game time on their own. They apply what the host sends.
-- **Protocol version: `TIG_NET_PROTOCOL 61`** on this branch (`coop-middle`, Coop Middle M8; was 60 after auto-levelling / M7, M7 was 59, M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
+- **Protocol version: `TIG_NET_PROTOCOL 62`** on this branch (`coop-middle`, Coop Middle M9; was 61 after M8, 60 after auto-levelling / M7, M7 was 59, M1 was 53, M2 54, M3 55, M4 56, M5 57, M6 58); Coop Lite 1.0 (tag `coop-lite-v1.0`, branch `coop-lite`) stays on **52**, so Lite and Middle builds refuse each other (`src/net/tig_net.h`). Host and client must run the same build. A client with a different protocol is refused at handshake (HELLO/WELCOME).
 - **Trust model:** this is built for a group of friends, not public servers. The checks stop desyncs, stale packets and mismatched builds from damaging the host's world. They don't stop a deliberately patched client. **Don't expose a host to strangers.**
 
 ### What gets synced
@@ -127,7 +127,7 @@ Command line: `arcanum-ce.exe -coop -host <port>` or `-coop -join <ip:port | Ste
 
 Developer switches `ARCANUM_DEV_*` only work with `ARCANUM_DEV=1`. `ARCANUM_LOG_FILE` sets the log file.
 
-## Coop Middle (branch `coop-middle`, protocol 61)
+## Coop Middle (branch `coop-middle`, protocol 62)
 
 Coop Middle is the next development line on top of the Coop Lite 1.0 release (`74a7076f`, tag `coop-lite-v1.0`). Coop Lite is maintained separately on branch `coop-lite` (protocol 52). All Middle code lives in its own files (`src/game/coop_rules.*`, `src/game/coop_middle.*`, `src/ui/coop_middle_ui.*`). Lite files only get small hook calls, so Lite fixes merge cleanly.
 
@@ -170,6 +170,14 @@ M5 fixes: the Teleport spell no longer throws the party to the edge of the world
 Stage **M6 (solo instances)**:
 
 - **Solo interiors/dungeons** (on, `subinst`): a client can enter another map alone. The host hands it that map (a CMAP1 archive), the client plays it locally, and story changes, XP and items go back to the host (checkpoints every 45 s and before a host save, a final commit on exit). One player per map; a busy map says "<Name> is already inside <map>. Wait or ask the host for group travel.". Badge **M** on the portrait, an entrance marker on the world map, a chat line.
+
+Stage **M9 (full solo-instance commit, trains and ships, extended UX, launcher presets)**:
+
+- Protocol **62**. Host and client must both be M9 builds. M8 already carried a full PC build commit, the followers payload section (max 8), `spell_tech[25]`, `/tp <Name>`, `/who`, `/rules`, `/help` and an F10 sheet; M9 extends those without new packet types.
+- Solo-instance commit: parked followers also get item mana/damage/equip slots, base stats/level, and `critter_kill` if they died inside. Followers hired inside spawn on the host (`obj_load_postprocess`, `critter_follow`, NPC_POS / NPC_STATS). Followers dismissed inside are unlinked and the host duplicate is removed. Personal reputations stay per-slot (PCs have no `OBJ_F_CRITTER_FACTION_IDX`; standing is `OBJ_F_PC_REPUTATION_IDX`). A dialog or altar `SAT_FADE_AND_TELEPORT` on a subinst client goes through `coop_subinst_client_travel` (commit + travel, including sub→sub), and the talk is closed first.
+- Trains and ships (dialog with the conductor/captain, when Free world map / Solo instances is on): ticket payment, aptitude checks and `SAT_FADE_AND_TELEPORT` run on the talking slot's PC, not `host_pc`. Same-map destination moves only that passenger, their followers and convoy followers, with a local fade (`COOP_CTRL_LOCAL_FADE`), no global time jump and no `FOLLOW_HOST`. Another map uses `coop_subinst_host_travel`; if the map cannot be leased, the usual denial or vote. The passenger's dialog is closed before the teleport.
+- Alt labels also cover locked containers, locked doors (`OPF_LOCKED`) and **detected** traps only (`trap_is_spotted` / `OF_TRAP_SPOTTED` — undetected traps stay hidden). Tags: `[Locked]`, `[Trap]` (245,110,80), quest/unique `[*]` (255,220,90), optional price/weight, EN/RU via `ARCANUM_COOP_LANG`. Chat: `/w` / `/pm <Name> <text>` is sent only to the target, with a confirmation only to the sender (never broadcast; UTF-8 safe; not-found / ambiguous refusals). `/who` includes Paused; `/help` lists `/w`; `/stuck` remains an alias of `/tp`. F10 is the same overlay pass as the F9 HUD (two columns, including `/w` and `/stuck`).
+- Launcher presets in `coop_rules`: **Coop Lite (Classic)** (sets `lite=1`, the master switch, plus `LITE_KEEP_MASK`, HP/XP 100, autosave off), **Coop Middle (Standard)** (default Middle flags, autosave 10), **Coop Middle (Hardcore)** (Middle flags, friendly fire on, enemy HP 150%, dynamic difficulty off), **Custom**. The main Host window is one row: **Mode:** combo + **Rules...**. The modal groups World & Co-op, QoL & Combat, Difficulty & Saves, with OK/Cancel and reset to Lite/Middle; the Mode combo flips to Custom when the boxes no longer match a preset. Optional ini key `preset`; existing `[rules]` keys still load. The port-check output is taller. The repo is `Destroider12/arcanum-coop-online` (the launcher update check uses that name).
 
 Stage **M8 (sleep-consent window, personal reputation, full solo-instance commit, dynamic difficulty, convoy UX)**:
 
